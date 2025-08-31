@@ -16,12 +16,10 @@ struct Caller {
 
 struct SipLineConfig {
     int line_id;
-    std::string extension;
     std::string username;
     std::string password;
     std::string server_ip;
     int server_port;
-    std::string display_name;
     bool enabled;
     std::string status;
 };
@@ -42,9 +40,8 @@ public:
     // Session management removed
 
     // SIP line management
-    int create_sip_line(const std::string& extension, const std::string& username,
-                       const std::string& password, const std::string& server_ip,
-                       int server_port, const std::string& display_name);
+    int create_sip_line(const std::string& username, const std::string& password,
+                       const std::string& server_ip, int server_port);
     std::vector<SipLineConfig> get_all_sip_lines();
     bool update_sip_line_status(int line_id, const std::string& status);
     bool toggle_sip_line(int line_id);

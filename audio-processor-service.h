@@ -26,7 +26,7 @@ public:
     bool is_running() const { return running_.load(); }
 
     // Sleep/Wake mechanism
-    void activate_for_call();   // Wake up processor for incoming call
+    void activate_for_call(const std::string& call_id = "");   // Wake up processor for incoming call
     void deactivate_after_call(); // Put processor to sleep after call ends
     bool is_active() const { return active_.load(); }
     
@@ -83,6 +83,20 @@ private:
     // Connection to SIP client (session management removed)
     std::function<void(const std::vector<uint8_t>&)> sip_client_callback_;
 
+    // TCP socket management
+    int outgoing_tcp_socket_;  // For sending audio to external services
+    int incoming_tcp_socket_;  // For receiving audio from external services
+    int outgoing_tcp_port_;    // Port for outgoing connections (calculated from call_id)
+    int incoming_tcp_port_;    // Port for incoming connections (calculated from call_id)
+    std::atomic<bool> outgoing_connected_;
+    std::atomic<bool> incoming_connected_;
+    std::string current_call_id_;
+    std::mutex tcp_mutex_;
+
+    // TCP connection threads
+    std::thread outgoing_tcp_thread_;
+    std::thread incoming_tcp_thread_;
+
     // Audio processing buffers (session management removed)
     std::unique_ptr<AudioChunkBuffer> incoming_audio_buffer_;
     std::unique_ptr<RTPPacketBuffer> outgoing_audio_buffer_;
@@ -93,15 +107,27 @@ private:
     bool check_sip_client_connection();
     std::string simulate_whisper_transcription(const std::vector<float>& audio_samples);
 
-    // Clean output connector methods
+    // TCP connection methods
     bool has_external_peer_connected() const;
     void forward_to_external_service(const std::vector<float>& audio_samples);
+
+    // TCP socket management
+    bool setup_outgoing_tcp_socket(const std::string& call_id);
+    bool setup_incoming_tcp_socket(const std::string& call_id);
+    void handle_outgoing_tcp_connection();
+    void handle_incoming_tcp_connection();
+    void send_tcp_hello(int socket_fd, const std::string& call_id);
+    void send_tcp_audio_chunk(int socket_fd, const std::vector<float>& audio_samples);
+    void send_tcp_bye(int socket_fd);
+
+    // Port calculation from call_id (direct numeric conversion)
+    int calculate_outgoing_port(const std::string& call_id);
+    int calculate_incoming_port(const std::string& call_id);
 
     // Audio buffer processing (session management removed)
     void process_buffered_audio();
     void process_outgoing_buffer();
-    std::vector<float> convert_g711_ulaw_to_float(const std::vector<uint8_t>& data);
-    std::vector<float> convert_g711_alaw_to_float(const std::vector<uint8_t>& data);
+    // Removed: G.711 conversion functions - using shared functions from SimpleAudioProcessor
     std::vector<uint8_t> convert_float_to_g711_ulaw(const std::vector<float>& samples);
 };
 

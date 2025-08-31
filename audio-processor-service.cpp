@@ -3,6 +3,13 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <thread>
+#include <string>
+#include <stdexcept>
 
 // ServiceAudioInterface Implementation
 AudioProcessorService::ServiceAudioInterface::ServiceAudioInterface(AudioProcessorService* service)
@@ -25,11 +32,13 @@ void AudioProcessorService::ServiceAudioInterface::on_audio_chunk_ready(const st
 // AudioProcessorService Implementation
 AudioProcessorService::AudioProcessorService()
     : running_(false), active_(false), service_port_(8083), database_(nullptr),
-      total_packets_processed_(0) {
-    
+      total_packets_processed_(0), outgoing_tcp_socket_(-1), incoming_tcp_socket_(-1),
+      outgoing_tcp_port_(-1), incoming_tcp_port_(-1),
+      outgoing_connected_(false), incoming_connected_(false) {
+
     // Create audio interface
     audio_interface_ = std::make_unique<ServiceAudioInterface>(this);
-    
+
     // Create simple audio processor
     audio_processor_ = std::make_unique<SimpleAudioProcessor>(audio_interface_.get());
 
@@ -61,20 +70,44 @@ bool AudioProcessorService::start(int port) {
     active_.store(false); // Start in sleeping state
 
     std::cout << "😴 Audio Processor Service started (SLEEPING) on port " << port << std::endl;
-    std::cout << "📡 Clean output connector ready" << std::endl;
+    std::cout << "📡 TCP sockets will be created dynamically based on call_id" << std::endl;
 
     return true;
 }
 
 void AudioProcessorService::stop() {
     if (!running_.load()) return;
-    
+
     running_.store(false);
-    
+
+    // Close TCP sockets
+    {
+        std::lock_guard<std::mutex> lock(tcp_mutex_);
+        if (outgoing_tcp_socket_ >= 0) {
+            send_tcp_bye(outgoing_tcp_socket_);
+            close(outgoing_tcp_socket_);
+            outgoing_tcp_socket_ = -1;
+        }
+        if (incoming_tcp_socket_ >= 0) {
+            close(incoming_tcp_socket_);
+            incoming_tcp_socket_ = -1;
+        }
+        outgoing_connected_.store(false);
+        incoming_connected_.store(false);
+    }
+
+    // Join TCP threads
+    if (outgoing_tcp_thread_.joinable()) {
+        outgoing_tcp_thread_.join();
+    }
+    if (incoming_tcp_thread_.joinable()) {
+        incoming_tcp_thread_.join();
+    }
+
     if (audio_processor_) {
         audio_processor_->stop();
     }
-    
+
     std::cout << "🛑 Audio Processor Service stopped" << std::endl;
 }
 
@@ -91,11 +124,11 @@ void AudioProcessorService::process_audio(const RTPAudioPacket& packet) {
         // Decode RTP packet to audio samples
         std::vector<float> audio_samples;
 
-        // Simple RTP decoding
+        // Use shared G.711 conversion from SimpleAudioProcessor
         if (packet.payload_type == 0) { // G.711 μ-law
-            audio_samples = convert_g711_ulaw_to_float(packet.audio_data);
+            audio_samples = SimpleAudioProcessor::convert_g711_ulaw_static(packet.audio_data);
         } else if (packet.payload_type == 8) { // G.711 A-law
-            audio_samples = convert_g711_alaw_to_float(packet.audio_data);
+            audio_samples = SimpleAudioProcessor::convert_g711_alaw_static(packet.audio_data);
         } else {
             return; // Unsupported codec
         }
@@ -210,19 +243,31 @@ void AudioProcessorService::set_database(Database* database) {
     }
 }
 
-void AudioProcessorService::activate_for_call() {
+void AudioProcessorService::activate_for_call(const std::string& call_id) {
     if (!running_.load()) return;
 
     if (!active_.load()) {
         std::cout << "🚀 ACTIVATING Audio Processor - Call incoming!" << std::endl;
 
-        // Clean output connector ready - no background services needed
-        std::cout << "🔗 Clean output connector activated - ready for external peer" << std::endl;
+        // Store call_id for TCP connections
+        {
+            std::lock_guard<std::mutex> lock(tcp_mutex_);
+            current_call_id_ = call_id;
+        }
 
-        // No background connectors needed - clean output connector only
+        // Setup TCP sockets with call_id-based ports
+        if (!setup_outgoing_tcp_socket(call_id)) {
+            std::cout << "❌ Failed to setup outgoing TCP socket for call " << call_id << std::endl;
+            return;
+        }
+
+        if (!setup_incoming_tcp_socket(call_id)) {
+            std::cout << "❌ Failed to setup incoming TCP socket for call " << call_id << std::endl;
+            return;
+        }
 
         active_.store(true);
-        std::cout << "✅ Audio Processor ACTIVE - Processing threads started" << std::endl;
+        std::cout << "✅ Audio Processor ACTIVE - TCP sockets ready for call " << call_id << std::endl;
     }
 }
 
@@ -230,13 +275,40 @@ void AudioProcessorService::deactivate_after_call() {
     if (active_.load()) {
         std::cout << "😴 DEACTIVATING Audio Processor - Call ended" << std::endl;
 
-        // Clean output connector deactivated
-        std::cout << "🔗 Clean output connector deactivated" << std::endl;
+        // Send BYE and close TCP connections
+        {
+            std::lock_guard<std::mutex> lock(tcp_mutex_);
 
-        // No background connectors to stop
+            // Close outgoing TCP connection
+            if (outgoing_connected_.load() && outgoing_tcp_socket_ >= 0) {
+                send_tcp_bye(outgoing_tcp_socket_);
+                close(outgoing_tcp_socket_);
+                outgoing_tcp_socket_ = -1;
+                outgoing_connected_.store(false);
+                std::cout << "🔌 Outgoing TCP connection closed (port " << outgoing_tcp_port_ << ")" << std::endl;
+            }
+
+            // Close incoming TCP connection and stop thread
+            if (incoming_tcp_socket_ >= 0) {
+                close(incoming_tcp_socket_);
+                incoming_tcp_socket_ = -1;
+                incoming_connected_.store(false);
+                std::cout << "🔌 Incoming TCP connection closed (port " << incoming_tcp_port_ << ")" << std::endl;
+            }
+
+            // Join incoming thread if it exists
+            if (incoming_tcp_thread_.joinable()) {
+                incoming_tcp_thread_.join();
+            }
+
+            // Reset ports
+            outgoing_tcp_port_ = -1;
+            incoming_tcp_port_ = -1;
+            current_call_id_.clear();
+        }
 
         active_.store(false);
-        std::cout << "💤 Audio Processor SLEEPING - Processing threads stopped" << std::endl;
+        std::cout << "💤 Audio Processor SLEEPING - TCP sockets closed, ready for next call" << std::endl;
     }
 }
 
@@ -285,79 +357,9 @@ void AudioProcessorService::process_outgoing_buffer() {
 
 // cleanup_session_buffers method removed - no per-session buffers
 
-std::vector<float> AudioProcessorService::convert_g711_ulaw_to_float(const std::vector<uint8_t>& data) {
-    std::vector<float> result;
-    result.reserve(data.size());
+// Removed: convert_g711_ulaw_to_float - using shared function from SimpleAudioProcessor
 
-    // G.711 μ-law to linear PCM conversion
-    static const int16_t ulaw_table[256] = {
-        -32124,-31100,-30076,-29052,-28028,-27004,-25980,-24956,
-        -23932,-22908,-21884,-20860,-19836,-18812,-17788,-16764,
-        -15996,-15484,-14972,-14460,-13948,-13436,-12924,-12412,
-        -11900,-11388,-10876,-10364, -9852, -9340, -8828, -8316,
-         -7932, -7676, -7420, -7164, -6908, -6652, -6396, -6140,
-         -5884, -5628, -5372, -5116, -4860, -4604, -4348, -4092,
-         -3900, -3772, -3644, -3516, -3388, -3260, -3132, -3004,
-         -2876, -2748, -2620, -2492, -2364, -2236, -2108, -1980,
-         -1884, -1820, -1756, -1692, -1628, -1564, -1500, -1436,
-         -1372, -1308, -1244, -1180, -1116, -1052,  -988,  -924,
-          -876,  -844,  -812,  -780,  -748,  -716,  -684,  -652,
-          -620,  -588,  -556,  -524,  -492,  -460,  -428,  -396,
-          -372,  -356,  -340,  -324,  -308,  -292,  -276,  -260,
-          -244,  -228,  -212,  -196,  -180,  -164,  -148,  -132,
-          -120,  -112,  -104,   -96,   -88,   -80,   -72,   -64,
-           -56,   -48,   -40,   -32,   -24,   -16,    -8,     0,
-         32124, 31100, 30076, 29052, 28028, 27004, 25980, 24956,
-         23932, 22908, 21884, 20860, 19836, 18812, 17788, 16764,
-         15996, 15484, 14972, 14460, 13948, 13436, 12924, 12412,
-         11900, 11388, 10876, 10364,  9852,  9340,  8828,  8316,
-          7932,  7676,  7420,  7164,  6908,  6652,  6396,  6140,
-          5884,  5628,  5372,  5116,  4860,  4604,  4348,  4092,
-          3900,  3772,  3644,  3516,  3388,  3260,  3132,  3004,
-          2876,  2748,  2620,  2492,  2364,  2236,  2108,  1980,
-          1884,  1820,  1756,  1692,  1628,  1564,  1500,  1436,
-          1372,  1308,  1244,  1180,  1116,  1052,   988,   924,
-           876,   844,   812,   780,   748,   716,   684,   652,
-           620,   588,   556,   524,   492,   460,   428,   396,
-           372,   356,   340,   324,   308,   292,   276,   260,
-           244,   228,   212,   196,   180,   164,   148,   132,
-           120,   112,   104,    96,    88,    80,    72,    64,
-            56,    48,    40,    32,    24,    16,     8,     0
-    };
-
-    for (uint8_t byte : data) {
-        int16_t sample = ulaw_table[byte];
-        result.push_back(static_cast<float>(sample) / 32768.0f);
-    }
-
-    return result;
-}
-
-std::vector<float> AudioProcessorService::convert_g711_alaw_to_float(const std::vector<uint8_t>& data) {
-    std::vector<float> result;
-    result.reserve(data.size());
-
-    // G.711 A-law to linear PCM conversion (simplified)
-    for (uint8_t byte : data) {
-        // A-law decoding (simplified implementation)
-        int16_t sample = 0;
-        uint8_t sign = byte & 0x80;
-        uint8_t exponent = (byte & 0x70) >> 4;
-        uint8_t mantissa = byte & 0x0F;
-
-        if (exponent == 0) {
-            sample = mantissa << 4;
-        } else {
-            sample = ((mantissa | 0x10) << (exponent + 3));
-        }
-
-        if (sign) sample = -sample;
-
-        result.push_back(static_cast<float>(sample) / 32768.0f);
-    }
-
-    return result;
-}
+// Removed: convert_g711_alaw_to_float - using shared function from SimpleAudioProcessor
 
 std::vector<uint8_t> AudioProcessorService::convert_float_to_g711_ulaw(const std::vector<float>& samples) {
     std::vector<uint8_t> result;
@@ -391,20 +393,266 @@ std::vector<uint8_t> AudioProcessorService::convert_float_to_g711_ulaw(const std
     return result;
 }
 
-// Clean Output Connector Implementation
+// TCP Socket Implementation
+bool AudioProcessorService::setup_outgoing_tcp_socket(const std::string& call_id) {
+    outgoing_tcp_socket_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (outgoing_tcp_socket_ < 0) {
+        std::cout << "❌ Failed to create outgoing TCP socket" << std::endl;
+        return false;
+    }
+
+    // Set socket options
+    int opt = 1;
+    setsockopt(outgoing_tcp_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    outgoing_tcp_port_ = calculate_outgoing_port(call_id);
+    std::cout << "✅ Outgoing TCP socket created for call " << call_id << " (will connect on demand to port " << outgoing_tcp_port_ << ")" << std::endl;
+    return true;
+}
+
+bool AudioProcessorService::setup_incoming_tcp_socket(const std::string& call_id) {
+    incoming_tcp_socket_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (incoming_tcp_socket_ < 0) {
+        std::cout << "❌ Failed to create incoming TCP socket" << std::endl;
+        return false;
+    }
+
+    // Set socket options
+    int opt = 1;
+    setsockopt(incoming_tcp_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    incoming_tcp_port_ = calculate_incoming_port(call_id);
+
+    // Bind to listen for incoming connections
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(incoming_tcp_port_);
+
+    if (bind(incoming_tcp_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cout << "❌ Failed to bind incoming TCP socket to port " << incoming_tcp_port_ << std::endl;
+        close(incoming_tcp_socket_);
+        incoming_tcp_socket_ = -1;
+        return false;
+    }
+
+    if (listen(incoming_tcp_socket_, 1) < 0) {
+        std::cout << "❌ Failed to listen on incoming TCP socket" << std::endl;
+        close(incoming_tcp_socket_);
+        incoming_tcp_socket_ = -1;
+        return false;
+    }
+
+    // Start incoming connection handler thread
+    incoming_tcp_thread_ = std::thread(&AudioProcessorService::handle_incoming_tcp_connection, this);
+
+    std::cout << "✅ Incoming TCP socket listening on port " << incoming_tcp_port_ << " for call " << call_id << std::endl;
+    return true;
+}
+
+void AudioProcessorService::send_tcp_hello(int socket_fd, const std::string& call_id) {
+    if (socket_fd < 0) return;
+
+    uint32_t length = htonl(call_id.length());
+
+    // Send length prefix
+    if (send(socket_fd, &length, 4, 0) != 4) {
+        std::cout << "❌ Failed to send TCP HELLO length" << std::endl;
+        return;
+    }
+
+    // Send call_id
+    if (send(socket_fd, call_id.c_str(), call_id.length(), 0) != (ssize_t)call_id.length()) {
+        std::cout << "❌ Failed to send TCP HELLO call_id" << std::endl;
+        return;
+    }
+
+    std::cout << "📡 TCP HELLO sent: " << call_id << std::endl;
+}
+
+void AudioProcessorService::send_tcp_audio_chunk(int socket_fd, const std::vector<float>& audio_samples) {
+    if (socket_fd < 0 || audio_samples.empty()) return;
+
+    // Convert to bytes for transmission
+    size_t data_size = audio_samples.size() * sizeof(float);
+    uint32_t length = htonl(data_size);
+
+    // Send length prefix
+    if (send(socket_fd, &length, 4, 0) != 4) {
+        std::cout << "❌ Failed to send TCP audio chunk length" << std::endl;
+        return;
+    }
+
+    // Send audio data
+    if (send(socket_fd, audio_samples.data(), data_size, 0) != (ssize_t)data_size) {
+        std::cout << "❌ Failed to send TCP audio chunk data" << std::endl;
+        return;
+    }
+
+    std::cout << "📤 TCP audio chunk sent: " << audio_samples.size() << " samples" << std::endl;
+}
+
+void AudioProcessorService::send_tcp_bye(int socket_fd) {
+    if (socket_fd < 0) return;
+
+    uint32_t bye_marker = 0xFFFFFFFF;
+
+    if (send(socket_fd, &bye_marker, 4, 0) != 4) {
+        std::cout << "❌ Failed to send TCP BYE" << std::endl;
+        return;
+    }
+
+    std::cout << "📡 TCP BYE sent" << std::endl;
+}
+
+void AudioProcessorService::handle_outgoing_tcp_connection() {
+    // This method handles connecting to external services when needed
+    // Called when we have audio to send and no connection exists
+    std::cout << "🔌 Outgoing TCP connection handler ready" << std::endl;
+}
+
+void AudioProcessorService::handle_incoming_tcp_connection() {
+    std::cout << "👂 Incoming TCP connection handler started on port " << incoming_tcp_port_ << std::endl;
+
+    while (running_.load()) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+
+        // Accept incoming connection (blocking)
+        int client_socket = accept(incoming_tcp_socket_, (struct sockaddr*)&client_addr, &client_len);
+
+        if (client_socket < 0) {
+            if (running_.load()) {
+                std::cout << "❌ Failed to accept incoming TCP connection" << std::endl;
+            }
+            continue;
+        }
+
+        std::cout << "🔗 Incoming TCP connection accepted" << std::endl;
+        incoming_connected_.store(true);
+
+        // Handle this connection in a separate thread
+        std::thread([this, client_socket]() {
+            char buffer[4096];
+
+            // Read HELLO message first
+            uint32_t length;
+            if (recv(client_socket, &length, 4, 0) == 4) {
+                length = ntohl(length);
+                if (length > 0 && length < 1000) {
+                    std::vector<char> call_id_buffer(length + 1);
+                    if (recv(client_socket, call_id_buffer.data(), length, 0) == (ssize_t)length) {
+                        call_id_buffer[length] = '\0';
+                        current_call_id_ = std::string(call_id_buffer.data());
+                        std::cout << "📡 TCP HELLO received for call: " << current_call_id_ << std::endl;
+                    }
+                }
+            }
+
+            // Process incoming audio data
+            while (running_.load() && incoming_connected_.load()) {
+                uint32_t chunk_length;
+                ssize_t received = recv(client_socket, &chunk_length, 4, 0);
+
+                if (received != 4) break;
+
+                chunk_length = ntohl(chunk_length);
+
+                // Check for BYE message
+                if (chunk_length == 0xFFFFFFFF) {
+                    std::cout << "📡 TCP BYE received" << std::endl;
+                    break;
+                }
+
+                if (chunk_length > 0 && chunk_length < 1000000) { // Reasonable limit
+                    std::vector<uint8_t> audio_data(chunk_length);
+                    if (recv(client_socket, audio_data.data(), chunk_length, 0) == (ssize_t)chunk_length) {
+                        // Convert to G.711 and send to SIP client
+                        if (sip_client_callback_) {
+                            sip_client_callback_(audio_data);
+                            std::cout << "📤 TCP audio forwarded to SIP client: " << chunk_length << " bytes" << std::endl;
+                        }
+                    }
+                }
+            }
+
+            close(client_socket);
+            incoming_connected_.store(false);
+            std::cout << "🔌 Incoming TCP connection closed" << std::endl;
+        }).detach();
+    }
+
+    std::cout << "👂 Incoming TCP connection handler stopped" << std::endl;
+}
+
+// Port calculation from call_id (direct numeric conversion)
+int AudioProcessorService::calculate_outgoing_port(const std::string& call_id) {
+    if (call_id.empty()) return 9001; // Fallback
+
+    // Convert call_id to integer and add to base port
+    int call_id_num = 0;
+    try {
+        call_id_num = std::stoi(call_id);
+    } catch (const std::exception&) {
+        // If call_id is not numeric, use fallback
+        call_id_num = 0;
+    }
+
+    int port = 9001 + call_id_num;
+    std::cout << "🔢 Outgoing port for call " << call_id << ": " << port << " (9001 + " << call_id_num << ")" << std::endl;
+    return port;
+}
+
+int AudioProcessorService::calculate_incoming_port(const std::string& call_id) {
+    if (call_id.empty()) return 9002; // Fallback
+
+    // Convert call_id to integer and add to base port
+    int call_id_num = 0;
+    try {
+        call_id_num = std::stoi(call_id);
+    } catch (const std::exception&) {
+        // If call_id is not numeric, use fallback
+        call_id_num = 0;
+    }
+
+    int port = 9002 + call_id_num;
+    std::cout << "🔢 Incoming port for call " << call_id << ": " << port << " (9002 + " << call_id_num << ")" << std::endl;
+    return port;
+}
+
+// TCP Output Connector Implementation
 bool AudioProcessorService::has_external_peer_connected() const {
-    // Check if external AI service peer is connected
-    // For now, always return false - no peer connected
-    return false;
+    return outgoing_connected_.load();
 }
 
 void AudioProcessorService::forward_to_external_service(const std::vector<float>& audio_samples) {
-    // Forward audio to external AI service when peer is connected
-    // This is where external AI service integration would happen
-    std::cout << "🔗 Forwarding " << audio_samples.size() << " samples to external AI service" << std::endl;
+    std::lock_guard<std::mutex> lock(tcp_mutex_);
 
-    // TODO: Implement actual forwarding to external AI service
-    // Example: HTTP POST to external service, WebSocket, TCP, etc.
+    // Try to connect if not connected
+    if (!outgoing_connected_.load() && outgoing_tcp_socket_ >= 0) {
+        struct sockaddr_in server_addr;
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = inet_addr("127.0.0.1"); // localhost for now
+        server_addr.sin_port = htons(outgoing_tcp_port_);
+
+        if (connect(outgoing_tcp_socket_, (struct sockaddr*)&server_addr, sizeof(server_addr)) == 0) {
+            outgoing_connected_.store(true);
+            std::cout << "🔗 Connected to external service on port " << outgoing_tcp_port_ << std::endl;
+
+            // Send HELLO with current call_id
+            if (!current_call_id_.empty()) {
+                send_tcp_hello(outgoing_tcp_socket_, current_call_id_);
+            }
+        } else {
+            std::cout << "⚠️ Failed to connect to external service on port " << outgoing_tcp_port_ << std::endl;
+            return;
+        }
+    }
+
+    // Send audio chunk if connected
+    if (outgoing_connected_.load()) {
+        send_tcp_audio_chunk(outgoing_tcp_socket_, audio_samples);
+    }
 }
 
 // Factory Implementation

@@ -17,16 +17,16 @@ struct RTPAudioPacket {
         : payload_type(pt), audio_data(data), timestamp(ts), sequence_number(seq) {}
 };
 
-// Session parameters for audio processing
+// Call parameters for audio processing (sessionless)
 struct AudioSessionParams {
-    std::string session_id;               // Database session ID
+    std::string call_id;                  // SIP Call-ID (not session_id)
     std::string caller_phone;             // Caller phone number
     int line_id;                          // SIP line ID
-    
+
     AudioSessionParams() : line_id(-1) {}
-    
-    AudioSessionParams(const std::string& sid, const std::string& phone, int lid)
-        : session_id(sid), caller_phone(phone), line_id(lid) {}
+
+    AudioSessionParams(const std::string& cid, const std::string& phone, int lid)
+        : call_id(cid), caller_phone(phone), line_id(lid) {}
 };
 
 // Simple audio processor interface - can be swapped out easily
@@ -39,12 +39,12 @@ public:
     virtual void stop() = 0;
     virtual bool is_running() const = 0;
     
-    // Session management
+    // Call management (sessionless)
     virtual void start_session(const AudioSessionParams& params) = 0;
-    virtual void end_session(const std::string& session_id) = 0;
-    
-    // Audio processing - main method
-    virtual void process_audio(const std::string& session_id, const RTPAudioPacket& packet) = 0;
+    virtual void end_session(const std::string& call_id) = 0;
+
+    // Audio processing - main method (sessionless)
+    virtual void process_audio(const std::string& call_id, const RTPAudioPacket& packet) = 0;
     
     // Configuration
     virtual void set_whisper_endpoint(const std::string& endpoint) = 0;

@@ -19,8 +19,8 @@ public:
     bool is_running() const override { return running_.load(); }
     
     void start_session(const AudioSessionParams& params) override;
-    void end_session(const std::string& session_id) override;
-    void process_audio(const std::string& session_id, const RTPAudioPacket& packet) override;
+    void end_session(const std::string& call_id) override;
+    void process_audio(const std::string& call_id, const RTPAudioPacket& packet) override;
     
     void set_whisper_endpoint(const std::string& endpoint) override { whisper_endpoint_ = endpoint; }
     std::string get_processor_name() const override { return "SimpleAudioProcessor"; }
@@ -30,29 +30,22 @@ public:
     void set_vad_threshold(float threshold) { vad_threshold_ = threshold; }
     void set_silence_timeout_ms(int ms) { silence_timeout_ms_ = ms; }
     void set_database(Database* database) { database_ = database; }
-    
+
+    // Static versions for shared use
+    static std::vector<float> convert_g711_ulaw_static(const std::vector<uint8_t>& data);
+    static std::vector<float> convert_g711_alaw_static(const std::vector<uint8_t>& data);
+
 private:
-    // Session state - minimal data
-    struct SessionState {
-        std::string session_id;
-        std::vector<float> audio_buffer;
-        std::chrono::steady_clock::time_point last_speech_time;
-        std::chrono::steady_clock::time_point chunk_start_time;
-        bool has_speech;
-        int sample_rate;
-        
-        SessionState(const std::string& id) 
-            : session_id(id), has_speech(false), sample_rate(16000),
-              last_speech_time(std::chrono::steady_clock::now()),
-              chunk_start_time(std::chrono::steady_clock::now()) {}
-    };
-    
     SipAudioInterface* sip_interface_;
     std::atomic<bool> running_;
-    
-    // Session management
-    std::unordered_map<std::string, SessionState> sessions_;
-    std::mutex sessions_mutex_;
+
+    // Sessionless audio processing
+    std::vector<float> global_audio_buffer_;
+    std::mutex audio_buffer_mutex_;
+    std::chrono::steady_clock::time_point last_speech_time_;
+    std::chrono::steady_clock::time_point chunk_start_time_;
+    bool has_speech_;
+    int sample_rate_;
     
     // Configuration
     std::string whisper_endpoint_;
@@ -72,6 +65,9 @@ private:
     std::vector<float> convert_g711_alaw(const std::vector<uint8_t>& data);
     std::vector<float> convert_pcm16(const std::vector<uint8_t>& data);
 
+    // Audio chunk processing
+    void send_audio_chunk_sessionless();
+
     // DTMF handling (RFC 4733)
     void handle_dtmf_event(const RTPAudioPacket& packet);
     
@@ -79,9 +75,8 @@ private:
     bool has_speech(const std::vector<float>& samples);
     float calculate_energy(const std::vector<float>& samples);
     
-    // Chunk management
-    bool should_send_chunk(const SessionState& session);
-    void send_audio_chunk(const std::string& session_id, SessionState& session);
+    // Chunk management (sessionless)
+    bool should_send_chunk_sessionless();
     std::vector<float> prepare_whisper_chunk(const std::vector<float>& audio);
 
     // Advanced chunking with system speed
@@ -104,8 +99,8 @@ public:
     bool is_running() const override { return running_.load(); }
     
     void start_session(const AudioSessionParams& params) override;
-    void end_session(const std::string& session_id) override;
-    void process_audio(const std::string& session_id, const RTPAudioPacket& packet) override;
+    void end_session(const std::string& call_id) override;
+    void process_audio(const std::string& call_id, const RTPAudioPacket& packet) override;
     
     void set_whisper_endpoint(const std::string& endpoint) override { whisper_endpoint_ = endpoint; }
     std::string get_processor_name() const override { return "DebugAudioProcessor"; }
@@ -123,14 +118,14 @@ private:
     bool log_audio_stats_;
     bool save_audio_files_;
     
-    // Statistics
-    std::unordered_map<std::string, size_t> session_packet_counts_;
-    std::unordered_map<std::string, size_t> session_audio_bytes_;
+    // Statistics (sessionless)
+    std::unordered_map<std::string, size_t> call_packet_counts_;
+    std::unordered_map<std::string, size_t> call_audio_bytes_;
     std::mutex stats_mutex_;
-    
-    void log_packet_info(const std::string& session_id, const RTPAudioPacket& packet);
-    void log_session_stats(const std::string& session_id);
-    void save_audio_chunk(const std::string& session_id, const std::vector<float>& audio);
+
+    void log_packet_info(const std::string& call_id, const RTPAudioPacket& packet);
+    void log_call_stats(const std::string& call_id);
+    void save_audio_chunk(const std::string& call_id, const std::vector<float>& audio);
 };
 
 // Fast lookup tables for G.711 decoding

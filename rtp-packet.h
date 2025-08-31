@@ -325,14 +325,4 @@ namespace RTPCodec {
     }
 }
 
-// Internal session tracking (NEVER transmitted over network)
-struct InternalSessionData {
-    std::string session_id;                    // Internal tracking only
-    std::string caller_phone;                  // Internal tracking only
-    int line_id;                              // Internal tracking only
-    std::chrono::steady_clock::time_point created_time;
-    std::chrono::steady_clock::time_point last_activity;
-    
-    // This data is NEVER included in RTP packets
-    // It's only used for internal session management
-};
+// Removed: InternalSessionData - using sessionless architecture

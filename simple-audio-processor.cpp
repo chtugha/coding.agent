@@ -72,9 +72,12 @@ const std::vector<float>& G711Tables::get_alaw_table() {
 // SimpleAudioProcessor Implementation
 SimpleAudioProcessor::SimpleAudioProcessor(SipAudioInterface* sip_interface)
     : sip_interface_(sip_interface), running_(false),
-      chunk_duration_ms_(3000), vad_threshold_(0.01f), silence_timeout_ms_(500), database_(nullptr) {
-    
+      chunk_duration_ms_(3000), vad_threshold_(0.01f), silence_timeout_ms_(500), database_(nullptr),
+      has_speech_(false), sample_rate_(16000) {
+
     G711Tables::initialize_tables(); // Initialize lookup tables
+    last_speech_time_ = std::chrono::steady_clock::now();
+    chunk_start_time_ = std::chrono::steady_clock::now();
 }
 
 SimpleAudioProcessor::~SimpleAudioProcessor() {
@@ -91,80 +94,70 @@ bool SimpleAudioProcessor::start() {
 
 void SimpleAudioProcessor::stop() {
     if (!running_.load()) return;
-    
+
     running_.store(false);
-    
-    // Clear all sessions
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    sessions_.clear();
-    
+
+    // Clear global audio buffer (sessionless)
+    std::lock_guard<std::mutex> lock(audio_buffer_mutex_);
+    global_audio_buffer_.clear();
+
     std::cout << "🛑 SimpleAudioProcessor stopped" << std::endl;
 }
 
 void SimpleAudioProcessor::start_session(const AudioSessionParams& params) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    
-    sessions_.emplace(params.session_id, SessionState(params.session_id));
-    
-    std::cout << "🎵 Audio session started: " << params.session_id 
-              << " (line " << params.line_id << ", caller: " << params.caller_phone << ")" << std::endl;
+    // Sessionless: No-op, just log for compatibility
+    std::cout << "🎵 Audio processor ready (sessionless mode)"
+              << " (line " << params.line_id << ", caller: " << params.caller_phone << ", call: " << params.call_id << ")" << std::endl;
 }
 
-void SimpleAudioProcessor::end_session(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    
-    // Send any remaining audio before ending
-    auto it = sessions_.find(session_id);
-    if (it != sessions_.end() && !it->second.audio_buffer.empty()) {
-        send_audio_chunk(session_id, it->second);
+void SimpleAudioProcessor::end_session(const std::string& call_id) {
+    // Sessionless: Send any remaining audio before ending
+    std::lock_guard<std::mutex> lock(audio_buffer_mutex_);
+    if (!global_audio_buffer_.empty()) {
+        send_audio_chunk_sessionless();
     }
-    
-    sessions_.erase(session_id);
-    std::cout << "🔚 Audio session ended: " << session_id << std::endl;
+
+    std::cout << "🔚 Audio processor cleanup (sessionless mode) for call: " << call_id << std::endl;
 }
 
-void SimpleAudioProcessor::process_audio(const std::string& session_id, const RTPAudioPacket& packet) {
+void SimpleAudioProcessor::process_audio(const std::string& call_id, const RTPAudioPacket& packet) {
     if (!running_.load()) return;
-    
+
     // Fast audio decoding
     std::vector<float> audio_samples = decode_rtp_audio(packet);
     if (audio_samples.empty()) return;
-    
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) return;
-    
-    SessionState& session = it->second;
-    
-    // Append audio to buffer
-    session.audio_buffer.insert(session.audio_buffer.end(), audio_samples.begin(), audio_samples.end());
+
+    std::lock_guard<std::mutex> lock(audio_buffer_mutex_);
+
+    // Append audio to global buffer (sessionless)
+    global_audio_buffer_.insert(global_audio_buffer_.end(), audio_samples.begin(), audio_samples.end());
 
     // Fast VAD check
     if (has_speech(audio_samples)) {
-        session.has_speech = true;
-        session.last_speech_time = std::chrono::steady_clock::now();
+        has_speech_ = true;
+        last_speech_time_ = std::chrono::steady_clock::now();
     }
 
     // Use dynamic chunking based on system speed
     int system_speed = get_system_speed_from_database();
 
     // Create chunks using system speed
-    auto chunks = create_chunks_from_pcm(session.audio_buffer, system_speed);
+    auto chunks = create_chunks_from_pcm(global_audio_buffer_, system_speed);
 
     // Send each chunk
     for (const auto& chunk : chunks) {
         if (sip_interface_) {
-            sip_interface_->send_to_whisper(session_id, chunk);
-            sip_interface_->on_audio_chunk_ready(session_id, chunk.size());
+            sip_interface_->send_to_whisper(call_id, chunk);
+            sip_interface_->on_audio_chunk_ready(call_id, chunk.size());
         }
-        std::cout << "📤 Sent dynamic chunk: " << chunk.size() << " samples (speed=" << system_speed << ") for session " << session_id << std::endl;
+        std::cout << "📤 Sent dynamic chunk: " << chunk.size() << " samples (speed=" << system_speed << ") for call: " << call_id << std::endl;
     }
 
     // Clear processed audio from buffer
     if (!chunks.empty()) {
-        session.audio_buffer.clear();
-        session.has_speech = false;
-        session.chunk_start_time = std::chrono::steady_clock::now();
+        global_audio_buffer_.clear();
+        has_speech_ = false;
+        chunk_start_time_ = std::chrono::steady_clock::now();
     }
 }
 
@@ -233,6 +226,35 @@ std::vector<float> SimpleAudioProcessor::convert_pcm16(const std::vector<uint8_t
     return samples;
 }
 
+// Static versions for shared use
+std::vector<float> SimpleAudioProcessor::convert_g711_ulaw_static(const std::vector<uint8_t>& data) {
+    const auto& table = G711Tables::get_ulaw_table();
+    std::vector<float> samples;
+    samples.reserve(data.size() * 2);
+
+    for (uint8_t byte : data) {
+        float sample = table[byte];
+        samples.push_back(sample);
+        samples.push_back(sample); // Upsample to 16kHz
+    }
+
+    return samples;
+}
+
+std::vector<float> SimpleAudioProcessor::convert_g711_alaw_static(const std::vector<uint8_t>& data) {
+    const auto& table = G711Tables::get_alaw_table();
+    std::vector<float> samples;
+    samples.reserve(data.size() * 2);
+
+    for (uint8_t byte : data) {
+        float sample = table[byte];
+        samples.push_back(sample);
+        samples.push_back(sample); // Upsample to 16kHz
+    }
+
+    return samples;
+}
+
 bool SimpleAudioProcessor::has_speech(const std::vector<float>& samples) {
     return calculate_energy(samples) > vad_threshold_;
 }
@@ -248,34 +270,36 @@ float SimpleAudioProcessor::calculate_energy(const std::vector<float>& samples) 
     return std::sqrt(sum / samples.size());
 }
 
-bool SimpleAudioProcessor::should_send_chunk(const SessionState& session) {
-    if (!session.has_speech || session.audio_buffer.empty()) return false;
-    
+bool SimpleAudioProcessor::should_send_chunk_sessionless() {
+    if (!has_speech_ || global_audio_buffer_.empty()) return false;
+
     auto now = std::chrono::steady_clock::now();
-    auto chunk_duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - session.chunk_start_time).count();
-    auto silence_duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - session.last_speech_time).count();
-    
+    auto chunk_duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - chunk_start_time_).count();
+    auto silence_duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_speech_time_).count();
+
     return (chunk_duration >= chunk_duration_ms_) || (silence_duration >= silence_timeout_ms_);
 }
 
-void SimpleAudioProcessor::send_audio_chunk(const std::string& session_id, SessionState& session) {
-    if (session.audio_buffer.empty()) return;
-    
+// Legacy method removed - using sessionless version only
+
+void SimpleAudioProcessor::send_audio_chunk_sessionless() {
+    if (global_audio_buffer_.empty()) return;
+
     // Prepare chunk for Whisper (16kHz, proper size)
-    std::vector<float> whisper_chunk = prepare_whisper_chunk(session.audio_buffer);
-    
+    std::vector<float> whisper_chunk = prepare_whisper_chunk(global_audio_buffer_);
+
     // Send to SIP interface
     if (sip_interface_) {
-        sip_interface_->send_to_whisper(session_id, whisper_chunk);
-        sip_interface_->on_audio_chunk_ready(session_id, whisper_chunk.size());
+        sip_interface_->send_to_whisper("sessionless", whisper_chunk);
+        sip_interface_->on_audio_chunk_ready("sessionless", whisper_chunk.size());
     }
-    
-    // Reset session buffer
-    session.audio_buffer.clear();
-    session.has_speech = false;
-    session.chunk_start_time = std::chrono::steady_clock::now();
-    
-    std::cout << "📤 Sent audio chunk: " << whisper_chunk.size() << " samples for session " << session_id << std::endl;
+
+    // Reset global buffer
+    global_audio_buffer_.clear();
+    has_speech_ = false;
+    chunk_start_time_ = std::chrono::steady_clock::now();
+
+    std::cout << "📤 Sent audio chunk: " << whisper_chunk.size() << " samples (sessionless)" << std::endl;
 }
 
 std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(const std::vector<float>& pcm_data, int system_speed) {
@@ -422,7 +446,7 @@ void SimpleAudioProcessor::handle_dtmf_event(const RTPAudioPacket& packet) {
     uint16_t duration = (packet.audio_data[2] << 8) | packet.audio_data[3];
 
     bool end_of_event = (flags_volume & 0x80) != 0;
-    bool reserved = (flags_volume & 0x40) != 0;
+    // bool reserved = (flags_volume & 0x40) != 0;  // Reserved bit, not used
     uint8_t volume = flags_volume & 0x3F;
 
     // Convert event number to DTMF character

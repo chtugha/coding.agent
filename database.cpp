@@ -57,17 +57,15 @@ bool Database::create_tables() {
     const char* sip_lines_sql = R"(
         CREATE TABLE IF NOT EXISTS sip_lines (
             line_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            extension TEXT NOT NULL,
             username TEXT NOT NULL,
             password TEXT,
             server_ip TEXT NOT NULL,
             server_port INTEGER NOT NULL DEFAULT 5060,
-            display_name TEXT,
             enabled BOOLEAN DEFAULT 0,
             status TEXT DEFAULT 'disconnected',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE INDEX IF NOT EXISTS idx_extension ON sip_lines(extension);
+        CREATE INDEX IF NOT EXISTS idx_username ON sip_lines(username);
     )";
 
     // Create system configuration table
@@ -207,12 +205,11 @@ std::string Database::get_current_timestamp() {
 }
 
 // SIP Line Management
-int Database::create_sip_line(const std::string& extension, const std::string& username,
-                             const std::string& password, const std::string& server_ip,
-                             int server_port, const std::string& display_name) {
+int Database::create_sip_line(const std::string& username, const std::string& password,
+                             const std::string& server_ip, int server_port) {
     const char* sql = R"(
-        INSERT INTO sip_lines (extension, username, password, server_ip, server_port, display_name)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO sip_lines (username, password, server_ip, server_port)
+        VALUES (?, ?, ?, ?)
     )";
 
     sqlite3_stmt* stmt;
@@ -222,12 +219,10 @@ int Database::create_sip_line(const std::string& extension, const std::string& u
         return -1;
     }
 
-    sqlite3_bind_text(stmt, 1, extension.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, password.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, server_ip.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 5, server_port);
-    sqlite3_bind_text(stmt, 6, display_name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, password.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, server_ip.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, server_port);
 
     rc = sqlite3_step(stmt);
     int line_id = -1;
@@ -245,8 +240,7 @@ std::vector<SipLineConfig> Database::get_all_sip_lines() {
     std::vector<SipLineConfig> lines;
 
     const char* sql = R"(
-        SELECT line_id, extension, username, password, server_ip, server_port,
-               display_name, enabled, status
+        SELECT line_id, username, password, server_ip, server_port, enabled, status
         FROM sip_lines
         ORDER BY line_id
     )";
@@ -261,21 +255,16 @@ std::vector<SipLineConfig> Database::get_all_sip_lines() {
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         SipLineConfig line;
         line.line_id = sqlite3_column_int(stmt, 0);
-        line.extension = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        line.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        line.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
 
-        const char* password = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        const char* password = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
         line.password = password ? password : "";
 
-        line.server_ip = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-        line.server_port = sqlite3_column_int(stmt, 5);
+        line.server_ip = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        line.server_port = sqlite3_column_int(stmt, 4);
+        line.enabled = sqlite3_column_int(stmt, 5) != 0;
 
-        const char* display_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-        line.display_name = display_name ? display_name : "";
-
-        line.enabled = sqlite3_column_int(stmt, 7) != 0;
-
-        const char* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        const char* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
         line.status = status ? status : "disconnected";
 
         lines.push_back(line);

@@ -11,17 +11,14 @@
 #include "jitter-buffer.h"
 #include "rtp-packet.h"
 
-// Forward declaration
-class WhisperService;
-
 // Direct interface for routing chunks to Whisper service (no HTTP overhead)
 class WhisperConnector {
 public:
     WhisperConnector();
     ~WhisperConnector();
 
-    // Connection management - now uses direct service reference
-    bool start(WhisperService* whisper_service);
+    // Connection management
+    bool start();
     void stop();
     bool is_connected() const { return connected_.load(); }
 
@@ -40,7 +37,6 @@ private:
 
     std::atomic<bool> running_;
     std::atomic<bool> connected_;
-    WhisperService* whisper_service_;  // Direct reference instead of HTTP endpoint
 
     // Background processing
     std::thread worker_thread_;

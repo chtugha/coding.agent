@@ -297,16 +297,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                             <input type="password" id="password" name="password" placeholder="SIP password">
                         </div>
                     </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="extension">Extension:</label>
-                            <input type="text" id="extension" name="extension" placeholder="e.g. 1002">
-                        </div>
-                        <div class="form-group">
-                            <label for="displayName">Display Name:</label>
-                            <input type="text" id="displayName" name="displayName" placeholder="AI Assistant Line">
-                        </div>
-                    </div>
+
                     <button type="button" class="refresh-btn" onclick="addSipLine()">Add SIP Line</button>
                 </form>
             </div>
@@ -373,11 +364,9 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             const serverPort = document.getElementById('serverPort').value;
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
-            const extension = document.getElementById('extension').value;
-            const displayName = document.getElementById('displayName').value;
 
             console.log('Form values:', {
-                serverIp, serverPort, username, password, extension, displayName
+                serverIp, serverPort, username, password
             });
 
             if (!username) {
@@ -389,9 +378,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 server_ip: serverIp || '192.168.1.100',
                 server_port: parseInt(serverPort) || 5060,
                 username: username,
-                password: password,
-                extension: extension || username,
-                display_name: displayName || `AI Assistant ${username}`
+                password: password
             };
 
             console.log('Sending data:', sipLineData);
@@ -413,8 +400,6 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 // Clear form
                 document.getElementById('username').value = '';
                 document.getElementById('password').value = '';
-                document.getElementById('extension').value = '';
-                document.getElementById('displayName').value = '';
                 // Refresh list
                 loadSipLines();
             })
@@ -464,11 +449,10 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 const hasPassword = line.password && line.password.length > 0;
                 html += `
                     <div class="status-item">
-                        <h4>Line ${line.line_id}: ${line.extension}</h4>
+                        <h4>Line ${line.line_id}: ${line.username}</h4>
                         <p><strong>Server:</strong> ${line.server_ip}:${line.server_port}</p>
                         <p><strong>Username:</strong> ${line.username}</p>
                         <p><strong>Password:</strong> ${hasPassword ? '●●●●●●' : 'Not set'}</p>
-                        <p><strong>Display:</strong> ${line.display_name}</p>
                         <div class="${statusClass}">● ${line.status}</div>
                         <div style="margin-top: 10px;">
                             <button onclick="toggleSipLine(${line.line_id})" class="refresh-btn" style="font-size: 12px; margin-right: 5px;">
@@ -672,12 +656,10 @@ HttpResponse SimpleHttpServer::api_sip_lines(const HttpRequest& request) {
 
         json << "{"
              << "\"line_id\":" << line.line_id << ","
-             << "\"extension\":\"" << line.extension << "\","
              << "\"username\":\"" << line.username << "\","
              << "\"password\":\"" << line.password << "\","
              << "\"server_ip\":\"" << line.server_ip << "\","
              << "\"server_port\":" << line.server_port << ","
-             << "\"display_name\":\"" << line.display_name << "\","
              << "\"enabled\":" << (line.enabled ? "true" : "false") << ","
              << "\"status\":\"" << line.status << "\""
              << "}";
@@ -705,8 +687,6 @@ HttpResponse SimpleHttpServer::api_sip_lines_post(const HttpRequest& request) {
     int server_port = 5060;
     std::string username = "";
     std::string password = "";
-    std::string extension = "";
-    std::string display_name = "";
 
     std::cout << "POST body: " << request.body << std::endl;
 
@@ -747,8 +727,6 @@ HttpResponse SimpleHttpServer::api_sip_lines_post(const HttpRequest& request) {
         server_ip = extract_json_string("server_ip");
         username = extract_json_string("username");
         password = extract_json_string("password");
-        extension = extract_json_string("extension");
-        display_name = extract_json_string("display_name");
 
         int port = extract_json_number("server_port");
         if (port > 0) server_port = port;
@@ -759,16 +737,10 @@ HttpResponse SimpleHttpServer::api_sip_lines_post(const HttpRequest& request) {
         std::cout << "  server_port: " << server_port << std::endl;
         std::cout << "  username: '" << username << "'" << std::endl;
         std::cout << "  password: '" << password << "'" << std::endl;
-        std::cout << "  extension: '" << extension << "'" << std::endl;
-        std::cout << "  display_name: '" << display_name << "'" << std::endl;
     }
 
     // Create new SIP line in database
-    std::string final_extension = extension.empty() ? username : extension;
-    std::string final_display_name = display_name.empty() ? ("AI Assistant " + username) : display_name;
-
-    int line_id = database_->create_sip_line(final_extension, username, password,
-                                           server_ip, server_port, final_display_name);
+    int line_id = database_->create_sip_line(username, password, server_ip, server_port);
 
     if (line_id > 0) {
         response.status_code = 201;
@@ -847,7 +819,7 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
         for (const auto& line : lines) {
             if (line.line_id == line_id) {
                 line_enabled = line.enabled;
-                line_info = "Line " + std::to_string(line.line_id) + " (" + line.extension + " @ " + line.server_ip + ":" + std::to_string(line.server_port) + ")";
+                line_info = "Line " + std::to_string(line.line_id) + " (" + line.username + " @ " + line.server_ip + ":" + std::to_string(line.server_port) + ")";
                 break;
             }
         }
@@ -857,7 +829,8 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
             std::cout << "🚀 Starting SIP client for enabled " << line_info << std::endl;
 
             // Start SIP client in background with specific line ID
-            std::string command = "/Users/whisper/Documents/augment-projects/clean-repo/whisper-sip-client --line-id " + std::to_string(line_id) + " &";
+            // Use relative path to call SIP client from same directory as HTTP server
+            std::string command = "./whisper-sip-client --line-id " + std::to_string(line_id) + " &";
             int result = system(command.c_str());
 
             if (result == 0) {
@@ -872,8 +845,14 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
             std::cout << "🛑 SIP line disabled: " << line_info << std::endl;
 
             // Kill any existing SIP client processes for this line
-            std::string kill_command = "pkill -f 'whisper-sip-client.*--line-id " + std::to_string(line_id) + "'";
-            system(kill_command.c_str());
+            std::cout << "🛑 Sending SIGTERM to SIP client processes..." << std::endl;
+            std::string kill_command = "pkill -TERM -f 'whisper-sip-client.*--line-id " + std::to_string(line_id) + "'";
+            int kill_result = system(kill_command.c_str());
+            std::cout << "🛑 Kill command result: " << kill_result << std::endl;
+
+            // Give the process time to shut down gracefully
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::cout << "🛑 SIP client shutdown complete" << std::endl;
 
             response.body = R"({"success": true, "message": "SIP line disabled and client stopped"})";
         }

@@ -1,30 +1,28 @@
 #include "whisper-connector.h"
-#include "whisper-service.h"
 #include <iostream>
 #include <chrono>
 
 // HTTP helper functions removed - using direct interface now
 
 // WhisperConnector Implementation - Direct Interface
-WhisperConnector::WhisperConnector() : running_(false), connected_(false), whisper_service_(nullptr) {}
+WhisperConnector::WhisperConnector() : running_(false), connected_(false) {}
 
 WhisperConnector::~WhisperConnector() {
     stop();
 }
 
-bool WhisperConnector::start(WhisperService* whisper_service) {
+bool WhisperConnector::start() {
     if (running_.load()) return true;
 
-    whisper_service_ = whisper_service;
     running_.store(true);
 
-    // Check initial connection status
-    connected_.store(whisper_service_ && whisper_service_->is_model_loaded());
+    // Set connected to true (no external service dependency)
+    connected_.store(true);
 
     // Start background worker
     worker_thread_ = std::thread(&WhisperConnector::worker_loop, this);
 
-    std::cout << "🔗 WhisperConnector started with direct interface" << std::endl;
+    std::cout << "🔗 WhisperConnector started (stub mode)" << std::endl;
     std::cout << "📊 Initial connection status: " << (connected_.load() ? "connected" : "disconnected") << std::endl;
     return true;
 }
@@ -55,29 +53,16 @@ void WhisperConnector::send_chunk(const std::string& session_id, const std::vect
 }
 
 std::string WhisperConnector::transcribe_chunk(const std::string& session_id, const std::vector<float>& audio_chunk) {
-    if (!connected_.load() || !whisper_service_) {
+    if (!connected_.load()) {
         std::cout << "⚠️  Whisper service not connected" << std::endl;
         return "";
     }
 
     std::cout << "📤 Transcribing " << audio_chunk.size() << " samples for session: " << session_id << std::endl;
 
-    // Direct function call - no HTTP overhead!
-    try {
-        std::string transcription = whisper_service_->transcribe_chunk(session_id, audio_chunk);
-
-        if (!transcription.empty()) {
-            std::cout << "✅ Whisper transcription received: \"" << transcription << "\"" << std::endl;
-            return transcription;
-        } else {
-            std::cout << "⚠️  Empty transcription received" << std::endl;
-            return "";
-        }
-    } catch (const std::exception& e) {
-        std::cout << "❌ Whisper transcription failed: " << e.what() << std::endl;
-        connected_.store(false);  // Mark as disconnected on error
-        return "";
-    }
+    // Stub implementation - return empty transcription
+    std::cout << "🔇 Stub mode: returning empty transcription" << std::endl;
+    return "";
 }
 
 void WhisperConnector::worker_loop() {
@@ -103,8 +88,8 @@ void WhisperConnector::worker_loop() {
 // Direct interface methods - no HTTP overhead
 
 bool WhisperConnector::check_whisper_connection() {
-    // Direct connection check - no HTTP needed
-    return whisper_service_ && whisper_service_->is_model_loaded();
+    // Stub implementation - always return true
+    return true;
 }
 
 void WhisperConnector::update_connection_status() {
