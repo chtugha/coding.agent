@@ -12,7 +12,17 @@ struct Caller {
     std::string last_call;
 };
 
-// CallSession struct removed - no session management
+struct Call {
+    int id;
+    std::string call_id;
+    int caller_id;
+    int line_id;
+    std::string phone_number;  // For quick lookup
+    std::string start_time;
+    std::string end_time;
+    std::string transcription; // Accumulated whisper output
+    std::string status;        // 'active', 'ended', 'missed'
+};
 
 struct SipLineConfig {
     int line_id;
@@ -36,7 +46,13 @@ public:
     int get_or_create_caller(const std::string& phone_number);
     bool update_caller_last_call(int caller_id);
     std::vector<Caller> get_all_callers();
-    
+
+    // Call management
+    bool create_call(const std::string& call_id, int caller_id, int line_id, const std::string& phone_number);
+    bool end_call(const std::string& call_id);
+    bool append_transcription(const std::string& call_id, const std::string& text);
+    Call get_call(const std::string& call_id);
+
     // Session management removed
 
     // SIP line management

@@ -1,0 +1,51 @@
+# Build directories
+build/
+whisper-cpp/build/
+
+# Models (too large for git)
+models/
+*.bin
+*.mlmodelc/
+
+# Compiled binaries
+whisper-service-local
+whisper-sip-client
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+*.tmp
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Object files
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# Temporary download directory
+/tmp/whisper-cpp-*

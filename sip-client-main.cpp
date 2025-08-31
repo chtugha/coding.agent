@@ -980,6 +980,11 @@ void SimpleSipClient::handle_bye(const std::string& message, const struct sockad
         }
     }
 
+    // End call in database
+    if (database_) {
+        database_->end_call(call_id);
+    }
+
     // Deactivate audio processor (sessionless)
     int line_id = (specific_line_id_ != -1) ? specific_line_id_ : 1;
     {
@@ -1198,8 +1203,15 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
     }
     std::cout << "✅ Caller ID: " << caller_id << std::endl;
 
-    // Step 2: Activate audio processor for this line (no session needed)
+    // Step 2: Create call record in database
     int line_id = (specific_line_id_ != -1) ? specific_line_id_ : 1;
+    if (!database_->create_call(call_id, caller_id, line_id, caller_number)) {
+        std::cerr << "❌ Failed to create call record for: " << call_id << std::endl;
+        return;
+    }
+    std::cout << "📞 Call record created in database: " << call_id << std::endl;
+
+    // Step 3: Activate audio processor for this line (no session needed)
     std::cout << "🎵 ACTIVATING audio processor for line " << line_id << " (sessionless)" << std::endl;
 
     // No session registration needed - direct audio processor activation

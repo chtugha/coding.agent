@@ -1,5 +1,6 @@
 #include "audio-processor-service.h"
 #include "simple-audio-processor.h"
+#include "service-advertisement.h"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -42,6 +43,9 @@ AudioProcessorService::AudioProcessorService()
     // Create simple audio processor
     audio_processor_ = std::make_unique<SimpleAudioProcessor>(audio_interface_.get());
 
+    // Create service advertiser
+    service_advertiser_ = std::make_unique<ServiceAdvertiser>();
+
     // Connect database to processor for system speed configuration
     if (database_) {
         auto simple_processor = dynamic_cast<SimpleAudioProcessor*>(audio_processor_.get());
@@ -66,11 +70,18 @@ bool AudioProcessorService::start(int port) {
         return false;
     }
 
+    // Start service advertiser
+    if (!service_advertiser_->start(13000)) {
+        std::cout << "❌ Failed to start service advertiser" << std::endl;
+        return false;
+    }
+
     running_.store(true);
     active_.store(false); // Start in sleeping state
 
     std::cout << "😴 Audio Processor Service started (SLEEPING) on port " << port << std::endl;
     std::cout << "📡 TCP sockets will be created dynamically based on call_id" << std::endl;
+    std::cout << "📢 Service advertiser running on port 13000" << std::endl;
 
     return true;
 }
@@ -79,6 +90,11 @@ void AudioProcessorService::stop() {
     if (!running_.load()) return;
 
     running_.store(false);
+
+    // Stop service advertiser
+    if (service_advertiser_) {
+        service_advertiser_->stop();
+    }
 
     // Close TCP sockets
     {
@@ -266,8 +282,13 @@ void AudioProcessorService::activate_for_call(const std::string& call_id) {
             return;
         }
 
+        // Advertise outgoing audio stream for external services
+        if (service_advertiser_) {
+            service_advertiser_->advertise_stream(call_id, outgoing_tcp_port_, "pcm_float");
+        }
+
         active_.store(true);
-        std::cout << "✅ Audio Processor ACTIVE - TCP sockets ready for call " << call_id << std::endl;
+        std::cout << "✅ Audio Processor ACTIVE - TCP sockets ready and advertised for call " << call_id << std::endl;
     }
 }
 
@@ -301,6 +322,11 @@ void AudioProcessorService::deactivate_after_call() {
                 incoming_tcp_thread_.join();
             }
 
+            // Remove stream advertisement
+            if (service_advertiser_ && !current_call_id_.empty()) {
+                service_advertiser_->remove_stream_advertisement(current_call_id_);
+            }
+
             // Reset ports
             outgoing_tcp_port_ = -1;
             incoming_tcp_port_ = -1;
@@ -308,7 +334,7 @@ void AudioProcessorService::deactivate_after_call() {
         }
 
         active_.store(false);
-        std::cout << "💤 Audio Processor SLEEPING - TCP sockets closed, ready for next call" << std::endl;
+        std::cout << "💤 Audio Processor SLEEPING - TCP sockets closed, advertisement removed" << std::endl;
     }
 }
 

@@ -4,6 +4,7 @@
 #include "simple-audio-processor.h"
 #include "database.h"
 #include "jitter-buffer.h"
+#include "service-advertisement.h"
 #include <memory>
 #include <string>
 #include <atomic>
@@ -96,6 +97,9 @@ private:
     // TCP connection threads
     std::thread outgoing_tcp_thread_;
     std::thread incoming_tcp_thread_;
+
+    // Service advertisement for external services
+    std::unique_ptr<ServiceAdvertiser> service_advertiser_;
 
     // Audio processing buffers (session management removed)
     std::unique_ptr<AudioChunkBuffer> incoming_audio_buffer_;

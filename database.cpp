@@ -43,12 +43,34 @@ bool Database::create_tables() {
         CREATE INDEX IF NOT EXISTS idx_phone_number ON callers(phone_number);
     )";
     
-    // call_sessions table removed - will be redesigned later
+    const char* calls_sql = R"(
+        CREATE TABLE IF NOT EXISTS calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_id TEXT UNIQUE NOT NULL,
+            caller_id INTEGER,
+            line_id INTEGER,
+            phone_number TEXT,
+            start_time TEXT NOT NULL,
+            end_time TEXT,
+            transcription TEXT DEFAULT '',
+            status TEXT DEFAULT 'active',
+            FOREIGN KEY (caller_id) REFERENCES callers(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_call_id ON calls(call_id);
+        CREATE INDEX IF NOT EXISTS idx_caller_id ON calls(caller_id);
+    )";
 
     char* err_msg = nullptr;
     int rc = sqlite3_exec(db_, callers_sql, nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
-        std::cerr << "SQL error: " << err_msg << std::endl;
+        std::cerr << "SQL error creating callers table: " << err_msg << std::endl;
+        sqlite3_free(err_msg);
+        return false;
+    }
+
+    rc = sqlite3_exec(db_, calls_sql, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        std::cerr << "SQL error creating calls table: " << err_msg << std::endl;
         sqlite3_free(err_msg);
         return false;
     }
@@ -389,6 +411,110 @@ std::vector<Caller> Database::get_all_callers() {
     }
     sqlite3_finalize(stmt);
     return callers;
+}
+
+// Call Management Implementation
+bool Database::create_call(const std::string& call_id, int caller_id, int line_id, const std::string& phone_number) {
+    const char* sql = "INSERT INTO calls (call_id, caller_id, line_id, phone_number, start_time, status) VALUES (?, ?, ?, ?, ?, 'active')";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        std::string timestamp = get_current_timestamp();
+        sqlite3_bind_text(stmt, 1, call_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, caller_id);
+        sqlite3_bind_int(stmt, 3, line_id);
+        sqlite3_bind_text(stmt, 4, phone_number.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 5, timestamp.c_str(), -1, SQLITE_STATIC);
+
+        bool success = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+
+        if (success) {
+            std::cout << "📞 Call record created: " << call_id << " (caller: " << phone_number << ")" << std::endl;
+        }
+
+        return success;
+    }
+
+    sqlite3_finalize(stmt);
+    return false;
+}
+
+bool Database::end_call(const std::string& call_id) {
+    const char* sql = "UPDATE calls SET end_time = ?, status = 'ended' WHERE call_id = ?";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        std::string timestamp = get_current_timestamp();
+        sqlite3_bind_text(stmt, 1, timestamp.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, call_id.c_str(), -1, SQLITE_STATIC);
+
+        bool success = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+
+        if (success) {
+            std::cout << "📞 Call ended: " << call_id << std::endl;
+        }
+
+        return success;
+    }
+
+    sqlite3_finalize(stmt);
+    return false;
+}
+
+bool Database::append_transcription(const std::string& call_id, const std::string& text) {
+    const char* sql = "UPDATE calls SET transcription = transcription || ? WHERE call_id = ?";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        std::string text_with_space = " " + text; // Add space before appending
+        sqlite3_bind_text(stmt, 1, text_with_space.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, call_id.c_str(), -1, SQLITE_STATIC);
+
+        bool success = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+
+        if (success) {
+            std::cout << "📝 Transcription appended to call " << call_id << ": " << text << std::endl;
+        }
+
+        return success;
+    }
+
+    sqlite3_finalize(stmt);
+    return false;
+}
+
+Call Database::get_call(const std::string& call_id) {
+    Call call;
+    const char* sql = "SELECT id, call_id, caller_id, line_id, phone_number, start_time, end_time, transcription, status FROM calls WHERE call_id = ?";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, call_id.c_str(), -1, SQLITE_STATIC);
+
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            call.id = sqlite3_column_int(stmt, 0);
+            call.call_id = (char*)sqlite3_column_text(stmt, 1);
+            call.caller_id = sqlite3_column_int(stmt, 2);
+            call.line_id = sqlite3_column_int(stmt, 3);
+            call.phone_number = (char*)sqlite3_column_text(stmt, 4);
+            call.start_time = (char*)sqlite3_column_text(stmt, 5);
+
+            const char* end_time = (char*)sqlite3_column_text(stmt, 6);
+            call.end_time = end_time ? end_time : "";
+
+            const char* transcription = (char*)sqlite3_column_text(stmt, 7);
+            call.transcription = transcription ? transcription : "";
+
+            call.status = (char*)sqlite3_column_text(stmt, 8);
+        }
+
+        sqlite3_finalize(stmt);
+    }
+
+    return call;
 }
 
 // get_caller_sessions method removed
