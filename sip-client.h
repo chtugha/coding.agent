@@ -112,9 +112,7 @@ public:
     ~SipClientManager();
     
     // Initialize with shared AI resources
-    bool init(struct whisper_context* whisper_ctx, 
-              struct llama_context* llama_ctx,
-              const whisper_params& params);
+    bool init();
     
     // Client management
     bool add_client(const SipClientConfig& config);

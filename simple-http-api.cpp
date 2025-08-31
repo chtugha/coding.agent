@@ -1,6 +1,5 @@
 #include "simple-http-api.h"
 #include "database.h"
-#include "whisper-service.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -572,7 +571,6 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
             return api_sip_lines_toggle(request, line_id);
         }
     } else if (request.path == "/api/sip-lines") {
-        std::cout << "Matched sip-lines endpoint" << std::endl;
         if (request.method == "GET") {
             return api_sip_lines(request);
         } else if (request.method == "POST") {
@@ -859,7 +857,7 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
             std::cout << "🚀 Starting SIP client for enabled " << line_info << std::endl;
 
             // Start SIP client in background with specific line ID
-            std::string command = "/Users/whisper/Documents/augment-projects/github\\ versionierung/whisper.cpp/build/bin/whisper-sip-client --line-id " + std::to_string(line_id) + " &";
+            std::string command = "/Users/whisper/Documents/augment-projects/clean-repo/whisper-sip-client --line-id " + std::to_string(line_id) + " &";
             int result = system(command.c_str());
 
             if (result == 0) {

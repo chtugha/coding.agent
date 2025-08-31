@@ -2,7 +2,6 @@
 
 #include "audio-processor-interface.h"
 #include "simple-audio-processor.h"
-#include "whisper-connector.h"
 #include "database.h"
 #include "jitter-buffer.h"
 #include <memory>
@@ -12,8 +11,7 @@
 #include <functional>
 #include <unordered_map>
 
-// Forward declarations
-class WhisperService;
+// Forward declarations removed - no WhisperService dependency
 
 // Standalone Audio Processor Service
 // Runs independently, SIP client connects to it via interface
@@ -34,8 +32,7 @@ public:
     
     // Configuration
     void set_database(Database* database);
-    void set_whisper_endpoint(const std::string& endpoint) { whisper_endpoint_ = endpoint; }
-    void set_whisper_service(WhisperService* whisper_service) { whisper_service_ = whisper_service; }
+    // Whisper service methods removed - clean output connector only
     
     // Audio processing interface for SIP clients (session management removed)
     void process_audio(const RTPAudioPacket& packet);
@@ -59,9 +56,9 @@ private:
     public:
         ServiceAudioInterface(AudioProcessorService* service);
         
-        void send_to_whisper(const std::vector<float>& audio_samples) override;
-        void on_audio_processing_error(const std::string& error) override;
-        void on_audio_chunk_ready(size_t chunk_size_samples) override;
+        void send_to_whisper(const std::string& session_id, const std::vector<float>& audio_samples) override;
+        void on_audio_processing_error(const std::string& session_id, const std::string& error) override;
+        void on_audio_chunk_ready(const std::string& session_id, size_t chunk_size_samples) override;
         
     private:
         AudioProcessorService* service_;
@@ -70,9 +67,7 @@ private:
     std::unique_ptr<AudioProcessor> audio_processor_;
     std::unique_ptr<ServiceAudioInterface> audio_interface_;
 
-    // Background connectors
-    std::unique_ptr<WhisperConnector> whisper_connector_;
-    std::unique_ptr<PiperConnector> piper_connector_;
+    // Background connectors removed - clean output connector only
 
     // Service state
     std::atomic<bool> running_;
@@ -81,9 +76,7 @@ private:
     
     // Configuration
     Database* database_;
-    std::string whisper_endpoint_;
-    WhisperService* whisper_service_;  // Direct reference for zero-overhead access
-    
+
     // Statistics
     std::atomic<size_t> total_packets_processed_;
 
@@ -99,6 +92,10 @@ private:
     void handle_whisper_transcription(const std::vector<float>& audio_samples);
     bool check_sip_client_connection();
     std::string simulate_whisper_transcription(const std::vector<float>& audio_samples);
+
+    // Clean output connector methods
+    bool has_external_peer_connected() const;
+    void forward_to_external_service(const std::vector<float>& audio_samples);
 
     // Audio buffer processing (session management removed)
     void process_buffered_audio();

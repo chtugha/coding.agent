@@ -146,7 +146,7 @@ void SipClient::sip_worker() {
                 std::string call_id = "test_call_" + std::to_string(std::time(nullptr));
                 std::string caller = "+1234567890";
                 
-                handle_incoming_call(call_id, caller);
+                // handle_incoming_call removed - no session management
                 last_test_call = now;
             }
         }
@@ -174,33 +174,7 @@ void SipClient::audio_worker() {
 
 // Audio processing methods removed - session management eliminated
 
-std::vector<float> SipClient::generate_tts_audio(const std::string& text) {
-    // This would need access to the shared TTS manager
-    // For now, generate simple placeholder audio
-    printf("TTS: %s\n", text.c_str());
-
-    // Generate simple beep pattern for each word
-    std::vector<float> audio;
-    std::istringstream words(text);
-    std::string word;
-
-    while (words >> word) {
-        // Generate a short beep for each word
-        int beep_samples = 8000; // 0.5 seconds at 16kHz
-        for (int i = 0; i < beep_samples; ++i) {
-            float t = static_cast<float>(i) / 16000.0f;
-            float beep = 0.2f * std::sin(2.0f * M_PI * 800.0f * t) * std::exp(-t * 5.0f);
-            audio.push_back(beep);
-        }
-
-        // Add silence between words
-        for (int i = 0; i < 4000; ++i) {
-            audio.push_back(0.0f);
-        }
-    }
-
-    return audio;
-}
+// generate_tts_audio method removed - no TTS processing in SIP client
 
 // SipClientManager implementation
 SipClientManager::SipClientManager() {

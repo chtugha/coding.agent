@@ -8,24 +8,23 @@
 AudioProcessorService::ServiceAudioInterface::ServiceAudioInterface(AudioProcessorService* service)
     : service_(service) {}
 
-void AudioProcessorService::ServiceAudioInterface::send_to_whisper(const std::vector<float>& audio_samples) {
+void AudioProcessorService::ServiceAudioInterface::send_to_whisper(const std::string& session_id, const std::vector<float>& audio_samples) {
     if (service_) {
         service_->handle_whisper_transcription(audio_samples);
     }
 }
 
-void AudioProcessorService::ServiceAudioInterface::on_audio_processing_error(const std::string& error) {
+void AudioProcessorService::ServiceAudioInterface::on_audio_processing_error(const std::string& session_id, const std::string& error) {
     std::cout << "❌ Audio processing error: " << error << std::endl;
 }
 
-void AudioProcessorService::ServiceAudioInterface::on_audio_chunk_ready(size_t chunk_size_samples) {
+void AudioProcessorService::ServiceAudioInterface::on_audio_chunk_ready(const std::string& session_id, size_t chunk_size_samples) {
     std::cout << "✅ Audio chunk ready: " << chunk_size_samples << " samples" << std::endl;
 }
 
 // AudioProcessorService Implementation
 AudioProcessorService::AudioProcessorService()
     : running_(false), active_(false), service_port_(8083), database_(nullptr),
-      whisper_endpoint_("http://localhost:8082"), whisper_service_(nullptr),
       total_packets_processed_(0) {
     
     // Create audio interface
@@ -62,7 +61,7 @@ bool AudioProcessorService::start(int port) {
     active_.store(false); // Start in sleeping state
 
     std::cout << "😴 Audio Processor Service started (SLEEPING) on port " << port << std::endl;
-    std::cout << "📡 Whisper endpoint: " << whisper_endpoint_ << std::endl;
+    std::cout << "📡 Clean output connector ready" << std::endl;
 
     return true;
 }
@@ -118,16 +117,15 @@ void AudioProcessorService::process_audio(const RTPAudioPacket& packet) {
 }
 
 void AudioProcessorService::handle_whisper_transcription(const std::vector<float>& audio_samples) {
-    std::cout << "📤 Sending " << audio_samples.size() << " samples to Whisper" << std::endl;
+    std::cout << "📤 Clean output connector: " << audio_samples.size() << " samples ready" << std::endl;
 
-    // Connect to actual Whisper service if available
-    if (whisper_connector_ && whisper_connector_->is_connected()) {
-        std::string transcription = whisper_connector_->transcribe_chunk(audio_samples);
-        if (!transcription.empty()) {
-            std::cout << "✅ Whisper transcription: \"" << transcription << "\"" << std::endl;
-        }
+    // Clean output connector - drops packets until a peer connects
+    if (has_external_peer_connected()) {
+        // Forward to external AI service when peer is connected
+        forward_to_external_service(audio_samples);
+        std::cout << "✅ Audio forwarded to external AI service" << std::endl;
     } else {
-        std::cout << "⚠️  Whisper service not connected, dropping audio chunk" << std::endl;
+        std::cout << "⚠️  No external peer connected, dropping audio chunk" << std::endl;
     }
 }
 
@@ -152,9 +150,9 @@ std::string AudioProcessorService::simulate_whisper_transcription(const std::vec
 AudioProcessorService::ServiceStatus AudioProcessorService::get_status() const {
     ServiceStatus status;
     status.is_running = running_.load();
-    status.active_sessions = active_sessions_.load();
+    // No session management - active_sessions field removed
     status.total_packets_processed = total_packets_processed_.load();
-    status.whisper_endpoint = whisper_endpoint_;
+    status.whisper_endpoint = "clean-output-connector";
     
     if (audio_processor_) {
         status.processor_type = audio_processor_->get_processor_name();
@@ -196,7 +194,7 @@ bool AudioProcessorService::check_sip_client_connection() {
     return sip_client_callback_ != nullptr;
 }
 
-void AudioProcessorService::set_sip_client_callback(std::function<void(const std::string&, const std::vector<uint8_t>&)> callback) {
+void AudioProcessorService::set_sip_client_callback(std::function<void(const std::vector<uint8_t>&)> callback) {
     sip_client_callback_ = callback;
 }
 
@@ -218,22 +216,10 @@ void AudioProcessorService::activate_for_call() {
     if (!active_.load()) {
         std::cout << "🚀 ACTIVATING Audio Processor - Call incoming!" << std::endl;
 
-        // Start background connectors
-        if (!whisper_connector_) {
-            whisper_connector_ = std::make_unique<WhisperConnector>();
-            if (whisper_service_) {
-                whisper_connector_->start(whisper_service_);
-                std::cout << "🔗 WhisperConnector using direct interface" << std::endl;
-            } else {
-                std::cout << "⚠️  No WhisperService available - audio will be dropped" << std::endl;
-            }
-        }
+        // Clean output connector ready - no background services needed
+        std::cout << "🔗 Clean output connector activated - ready for external peer" << std::endl;
 
-        if (!piper_connector_) {
-            piper_connector_ = std::make_unique<PiperConnector>();
-            piper_connector_->start();
-            piper_connector_->set_sip_client_callback(sip_client_callback_);
-        }
+        // No background connectors needed - clean output connector only
 
         active_.store(true);
         std::cout << "✅ Audio Processor ACTIVE - Processing threads started" << std::endl;
@@ -244,16 +230,10 @@ void AudioProcessorService::deactivate_after_call() {
     if (active_.load()) {
         std::cout << "😴 DEACTIVATING Audio Processor - Call ended" << std::endl;
 
-        // Stop background connectors to free resources
-        if (whisper_connector_) {
-            whisper_connector_->stop();
-            whisper_connector_.reset();
-        }
+        // Clean output connector deactivated
+        std::cout << "🔗 Clean output connector deactivated" << std::endl;
 
-        if (piper_connector_) {
-            piper_connector_->stop();
-            piper_connector_.reset();
-        }
+        // No background connectors to stop
 
         active_.store(false);
         std::cout << "💤 Audio Processor SLEEPING - Processing threads stopped" << std::endl;
@@ -276,9 +256,9 @@ void AudioProcessorService::process_buffered_audio() {
         // Convert float samples back to G.711 for compatibility
         packet.audio_data = convert_float_to_g711_ulaw(chunk_data.samples);
 
-        // Process through existing audio processor
+        // Process through existing audio processor (no session management)
         if (audio_processor_) {
-            audio_processor_->process_audio(packet);
+            audio_processor_->process_audio("default", packet);  // Use default session ID
         }
     }
 }
@@ -409,6 +389,22 @@ std::vector<uint8_t> AudioProcessorService::convert_float_to_g711_ulaw(const std
     }
 
     return result;
+}
+
+// Clean Output Connector Implementation
+bool AudioProcessorService::has_external_peer_connected() const {
+    // Check if external AI service peer is connected
+    // For now, always return false - no peer connected
+    return false;
+}
+
+void AudioProcessorService::forward_to_external_service(const std::vector<float>& audio_samples) {
+    // Forward audio to external AI service when peer is connected
+    // This is where external AI service integration would happen
+    std::cout << "🔗 Forwarding " << audio_samples.size() << " samples to external AI service" << std::endl;
+
+    // TODO: Implement actual forwarding to external AI service
+    // Example: HTTP POST to external service, WebSocket, TCP, etc.
 }
 
 // Factory Implementation
