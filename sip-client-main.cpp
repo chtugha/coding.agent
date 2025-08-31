@@ -167,6 +167,10 @@ private:
     std::map<int, std::chrono::steady_clock::time_point> last_registration_; // line_id -> last_reg_time
     std::mutex registration_mutex_;
 
+    // Status update tracking to avoid spam
+    std::map<int, std::string> last_status_; // line_id -> last_status
+    std::mutex status_mutex_;
+
     // Active calls
     std::map<std::string, SipCallSession> active_calls_;
     std::mutex calls_mutex_;
@@ -1586,8 +1590,17 @@ bool SimpleSipClient::test_sip_connection(const SipLineConfig& line) {
 }
 
 void SimpleSipClient::update_line_status(int line_id, const std::string& status) {
+    // Check if status actually changed to avoid spam
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        if (last_status_[line_id] == status) {
+            return; // Status hasn't changed, skip update
+        }
+        last_status_[line_id] = status;
+    }
+
     if (database_->update_sip_line_status(line_id, status)) {
-        std::cout << "📊 Updated line " << line_id << " status to: " << status << std::endl;
+        std::cout << "📊 Line " << line_id << " status: " << status << std::endl;
     } else {
         std::cerr << "❌ Failed to update status for line " << line_id << std::endl;
     }
@@ -1612,6 +1625,19 @@ void SimpleSipClient::connection_monitor_loop() {
     // Wait a moment for SIP listener to be ready
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
+    // Initialize all line statuses on startup
+    load_sip_lines_from_database(false);
+    {
+        std::lock_guard<std::mutex> lock(sip_lines_mutex_);
+        for (const auto& line : sip_lines_) {
+            if (!line.enabled) {
+                update_line_status(line.line_id, "disabled");
+            } else {
+                update_line_status(line.line_id, "disconnected");
+            }
+        }
+    }
+
     while (running_) {
         // Reload SIP lines from database (in case they were updated via web interface)
         load_sip_lines_from_database(false); // Silent reload
@@ -1626,13 +1652,11 @@ void SimpleSipClient::connection_monitor_loop() {
                 }
 
                 if (!line.enabled) {
-                    // Update disabled lines to disconnected status
-                    if (line.status != "disabled") {
-                        update_line_status(line.line_id, "disabled");
-                        // Mark as not registered
-                        std::lock_guard<std::mutex> reg_lock(registration_mutex_);
-                        line_registered_[line.line_id] = false;
-                    }
+                    // Always update disabled lines to disabled status
+                    update_line_status(line.line_id, "disabled");
+                    // Mark as not registered
+                    std::lock_guard<std::mutex> reg_lock(registration_mutex_);
+                    line_registered_[line.line_id] = false;
                     continue;
                 }
 
@@ -1673,7 +1697,8 @@ void SimpleSipClient::connection_monitor_loop() {
                         std::cout << "❌ SIP line " << line.line_id << " registration failed" << std::endl;
                     }
                 } else {
-                    // Already registered and doesn't need refresh
+                    // Already registered and doesn't need refresh - ensure status is "connected"
+                    update_line_status(line.line_id, "connected");
                     std::cout << "✅ SIP line " << line.line_id << " already registered (keeping alive)" << std::endl;
                 }
             }

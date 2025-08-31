@@ -411,7 +411,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         // Auto-refresh every 5 seconds
         setInterval(refreshStatus, 5000);
-        setInterval(loadSipLines, 10000); // Refresh SIP lines every 10 seconds
+        setInterval(loadSipLines, 3000); // Refresh SIP lines every 3 seconds for better status updates
 
         async function loadSipLines() {
             try {
@@ -434,16 +434,23 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             sipLines.forEach(line => {
                 // Status color based on actual connection status, not enabled/disabled
                 let statusClass = 'status-offline'; // default
+                let statusText = line.status || 'unknown';
+
                 if (line.status === 'connected') {
                     statusClass = 'status-online';
+                    statusText = 'Connected';
                 } else if (line.status === 'connecting') {
                     statusClass = 'status-warning';
+                    statusText = 'Connecting...';
                 } else if (line.status === 'error') {
                     statusClass = 'status-error';
+                    statusText = 'Connection Error';
                 } else if (line.status === 'disabled') {
                     statusClass = 'status-disabled';
+                    statusText = 'Disabled';
                 } else {
-                    statusClass = 'status-offline'; // disconnected, unknown, etc.
+                    statusClass = 'status-offline';
+                    statusText = 'Disconnected';
                 }
 
                 const hasPassword = line.password && line.password.length > 0;
@@ -453,7 +460,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                         <p><strong>Server:</strong> ${line.server_ip}:${line.server_port}</p>
                         <p><strong>Username:</strong> ${line.username}</p>
                         <p><strong>Password:</strong> ${hasPassword ? '●●●●●●' : 'Not set'}</p>
-                        <div class="${statusClass}">● ${line.status}</div>
+                        <div class="${statusClass}">● ${statusText}</div>
                         <div style="margin-top: 10px;">
                             <button onclick="toggleSipLine(${line.line_id})" class="refresh-btn" style="font-size: 12px; margin-right: 5px;">
                                 ${line.enabled ? 'Disable' : 'Enable'}
