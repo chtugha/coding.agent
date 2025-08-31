@@ -69,6 +69,14 @@ public:
     int get_system_speed(); // 1-5 scale (1=slow, 5=fast)
     bool set_system_speed(int speed);
 
+    // Whisper service management
+    bool get_whisper_service_enabled();
+    bool set_whisper_service_enabled(bool enabled);
+    std::string get_whisper_model_path();
+    bool set_whisper_model_path(const std::string& model_path);
+    std::string get_whisper_service_status(); // "running", "stopped", "error"
+    bool set_whisper_service_status(const std::string& status);
+
 private:
     sqlite3* db_;
     bool create_tables();

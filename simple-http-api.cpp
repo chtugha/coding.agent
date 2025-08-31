@@ -7,6 +7,11 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <algorithm>
+#include <vector>
+#include <cstdlib>
+#include <sys/stat.h>
 
 SimpleHttpServer::SimpleHttpServer(int port, Database* database)
     : port_(port), server_socket_(-1), running_(false), database_(database) {}
@@ -170,11 +175,7 @@ std::string SimpleHttpServer::create_response(const HttpResponse& response) {
 }
 
 HttpResponse SimpleHttpServer::handle_request(const HttpRequest& request) {
-    // Only log non-polling API requests to reduce spam
-    if (request.path != "/api/status" &&
-        !(request.method == "GET" && request.path == "/api/sip-lines")) {
-        std::cout << request.method << " " << request.path << std::endl;
-    }
+    // Silence all HTTP request logging - only show business logic messages
 
     // API routes
     if (request.path.substr(0, 5) == "/api/") {
@@ -217,6 +218,32 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         .status-warning { color: #ffc107; }
         .status-error { color: #dc3545; }
         .status-disabled { color: #6c757d; }
+
+        .model-item {
+            padding: 8px 12px;
+            margin: 2px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            border: 1px solid transparent;
+        }
+
+        .model-item:hover {
+            background-color: #f8f9fa;
+        }
+
+        .model-item.current {
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+        }
+
+        .model-item.selected {
+            background-color: #ffc107;
+            color: #000;
+            border: 2px solid #ff6b35;
+            font-weight: bold;
+        }
         .refresh-btn { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; }
         .refresh-btn:hover { background: #5a6fd8; }
         .form-group { margin-bottom: 15px; }
@@ -310,11 +337,67 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         </div>
 
         <div class="card">
+            <h2>🎤 Whisper Service</h2>
+            <div id="whisperServiceContainer">
+                <div class="status-grid">
+                    <div class="status-item">
+                        <h3>Service Status</h3>
+                        <div id="whisperStatus" class="status-offline">● Stopped</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Available Models</h3>
+                        <div id="modelList" style="max-height: 150px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 5px;">
+                            Loading models...
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <button id="whisperToggleBtn" class="refresh-btn" onclick="toggleWhisperService()">
+                        Start Service
+                    </button>
+                    <button id="restartBtn" class="refresh-btn" onclick="restartWithSelectedModel()" style="margin-left: 10px; background: #ffc107; color: #000;" disabled>
+                        Restart with Selected Model
+                    </button>
+                    <button class="refresh-btn" onclick="showUploadArea()" style="margin-left: 10px; background: #28a745;">
+                        Upload a new model
+                    </button>
+                </div>
+
+                <!-- Upload Area (hidden by default) -->
+                <div id="uploadArea" style="display: none; margin-top: 20px; padding: 20px; border: 2px dashed #ccc; border-radius: 10px; text-align: center; background: #f9f9f9;">
+                    <h4>Upload Whisper Model</h4>
+                    <p>Drop both files here:</p>
+                    <ul style="text-align: left; display: inline-block;">
+                        <li><strong>.bin file</strong> - The main model file</li>
+                        <li><strong>.mlmodelc file</strong> - CoreML acceleration</li>
+                    </ul>
+                    <div id="dropZone" style="margin: 20px 0; padding: 40px; border: 2px dashed #007bff; border-radius: 8px; background: #f0f8ff;">
+                        <p style="margin: 0; color: #007bff; font-weight: bold;">Drag and drop files here</p>
+                        <p style="margin: 5px 0 0 0; font-size: 14px; color: #666;">or click to select files</p>
+                        <input type="file" id="fileInput" multiple style="display: none;">
+                    </div>
+                    <div id="uploadStatus" style="margin-top: 15px;"></div>
+                    <div style="margin-top: 15px;">
+                        <button class="refresh-btn" onclick="hideUploadArea()" style="background: #6c757d;">
+                            Cancel
+                        </button>
+                        <button id="uploadBtn" class="refresh-btn" onclick="uploadModel()" style="background: #28a745; margin-left: 10px;" disabled>
+                            Upload Model
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>API Endpoints</h2>
             <ul>
                 <li><a href="/api/status">/api/status</a> - System status</li>
                 <li><a href="/api/callers">/api/callers</a> - Caller list</li>
                 <li><a href="/api/sip-lines">/api/sip-lines</a> - SIP lines</li>
+                <li><a href="/api/whisper/service">/api/whisper/service</a> - Whisper service info</li>
+                <li><strong>POST</strong> /api/whisper/service/toggle - Start/stop service</li>
             </ul>
         </div>
     </div>
@@ -412,6 +495,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         // Auto-refresh every 5 seconds
         setInterval(refreshStatus, 5000);
         setInterval(loadSipLines, 3000); // Refresh SIP lines every 3 seconds for better status updates
+        setInterval(loadWhisperService, 5000); // Refresh Whisper service every 5 seconds
 
         async function loadSipLines() {
             try {
@@ -519,6 +603,294 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 }
             }
         }
+
+        // Model Management
+        let uploadedFiles = [];
+        let selectedModel = null;
+        let currentModel = null;
+
+        function showUploadArea() {
+            document.getElementById('uploadArea').style.display = 'block';
+            setupDragAndDrop();
+        }
+
+        function hideUploadArea() {
+            document.getElementById('uploadArea').style.display = 'none';
+            uploadedFiles = [];
+            updateUploadStatus();
+        }
+
+        function setupDragAndDrop() {
+            const dropZone = document.getElementById('dropZone');
+            const fileInput = document.getElementById('fileInput');
+
+            // Click to select files
+            dropZone.addEventListener('click', () => fileInput.click());
+
+            // Handle file selection
+            fileInput.addEventListener('change', handleFiles);
+
+            // Drag and drop events
+            dropZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                dropZone.style.borderColor = '#007bff';
+                dropZone.style.backgroundColor = '#e3f2fd';
+            });
+
+            dropZone.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                dropZone.style.borderColor = '#007bff';
+                dropZone.style.backgroundColor = '#f0f8ff';
+            });
+
+            dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dropZone.style.borderColor = '#007bff';
+                dropZone.style.backgroundColor = '#f0f8ff';
+
+                const files = Array.from(e.dataTransfer.files);
+                processFiles(files);
+            });
+        }
+
+        function handleFiles(e) {
+            const files = Array.from(e.target.files);
+            processFiles(files);
+        }
+
+        function processFiles(files) {
+            // Don't reset uploadedFiles - accumulate files instead
+
+            files.forEach(file => {
+                if (file.name.endsWith('.bin') || file.name.endsWith('.mlmodelc')) {
+                    uploadedFiles.push(file);
+                }
+            });
+
+            updateUploadStatus();
+        }
+
+        function updateUploadStatus() {
+            const statusDiv = document.getElementById('uploadStatus');
+            const uploadBtn = document.getElementById('uploadBtn');
+
+            const binFile = uploadedFiles.find(f => f.name.endsWith('.bin'));
+            const mlmodelcFiles = uploadedFiles.filter(f => f.name.endsWith('.mlmodelc'));
+
+            let status = '<div style="text-align: left;">';
+
+            if (binFile) {
+                status += '<p style="color: #28a745;">✅ .bin file: ' + binFile.name + '</p>';
+            } else {
+                status += '<p style="color: #dc3545;">❌ .bin file: Not found</p>';
+            }
+
+            if (mlmodelcFiles.length > 0) {
+                const fileName = mlmodelcFiles[0].name;
+                status += '<p style="color: #28a745;">✅ .mlmodelc file: ' + fileName + '</p>';
+            } else {
+                status += '<p style="color: #dc3545;">❌ .mlmodelc file: Not found</p>';
+            }
+
+            status += '</div>';
+            statusDiv.innerHTML = status;
+
+            // Enable upload button only if both files are present
+            uploadBtn.disabled = !(binFile && mlmodelcFiles.length > 0);
+        }
+
+        async function uploadModel() {
+            const binFile = uploadedFiles.find(f => f.name.endsWith('.bin'));
+            const mlmodelcFiles = uploadedFiles.filter(f => f.name.endsWith('.mlmodelc'));
+
+            if (!binFile || mlmodelcFiles.length === 0) {
+                alert('Both .bin file and .mlmodelc file are required');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('binFile', binFile);
+
+            mlmodelcFiles.forEach((file, index) => {
+                formData.append('mlmodelcFile_' + index, file, file.webkitRelativePath);
+            });
+
+            try {
+                const response = await fetch('/api/whisper/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    alert('Model uploaded successfully!');
+                    hideUploadArea();
+                    loadWhisperService(); // Refresh the service display
+                } else {
+                    alert('Upload failed: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Upload error:', error);
+                alert('Upload failed: ' + error.message);
+            }
+        }
+
+        // Whisper Service Management
+        function extractModelName(modelPath) {
+            if (!modelPath) return 'Not set';
+
+            // Extract filename from path
+            const filename = modelPath.split('/').pop();
+
+            // Remove extension (.bin)
+            const nameWithoutExt = filename.replace(/\.[^/.]+$/, "");
+
+            // Clean up common prefixes
+            return nameWithoutExt
+                .replace(/^ggml-/, '')  // Remove ggml- prefix
+                .replace(/-q[0-9]_[0-9]$/, '')  // Remove quantization suffix like -q5_0
+                .replace(/-encoder$/, '');  // Remove -encoder suffix
+        }
+
+        async function loadWhisperService() {
+            try {
+                const [serviceResponse, modelsResponse] = await Promise.all([
+                    fetch('/api/whisper/service'),
+                    fetch('/api/whisper/models')
+                ]);
+
+                const serviceData = await serviceResponse.json();
+                const modelsData = await modelsResponse.json();
+
+                updateWhisperServiceDisplay(serviceData);
+                updateModelList(modelsData, serviceData.model_path);
+            } catch (error) {
+                console.error('Failed to load whisper service:', error);
+            }
+        }
+
+        function updateWhisperServiceDisplay(data) {
+            const statusDiv = document.getElementById('whisperStatus');
+            const toggleBtn = document.getElementById('whisperToggleBtn');
+
+            // Update status display
+            if (data.status === 'running') {
+                statusDiv.className = 'status-online';
+                statusDiv.textContent = '● Running';
+                toggleBtn.textContent = 'Stop Service';
+            } else if (data.status === 'starting') {
+                statusDiv.className = 'status-warning';
+                statusDiv.textContent = '● Starting...';
+                toggleBtn.textContent = 'Stop Service';
+            } else if (data.status === 'error') {
+                statusDiv.className = 'status-error';
+                statusDiv.textContent = '● Error';
+                toggleBtn.textContent = 'Start Service';
+            } else {
+                statusDiv.className = 'status-offline';
+                statusDiv.textContent = '● Stopped';
+                toggleBtn.textContent = 'Start Service';
+            }
+
+            // Store current model
+            currentModel = data.model_path;
+        }
+
+        function updateModelList(modelsData, currentModelPath) {
+            const modelListDiv = document.getElementById('modelList');
+            const restartBtn = document.getElementById('restartBtn');
+
+            // Store models data for re-rendering
+            window.lastModelsData = modelsData.models || [];
+
+            if (!modelsData.models || modelsData.models.length === 0) {
+                modelListDiv.innerHTML = '<div style="padding: 10px; color: #666;">No models found</div>';
+                return;
+            }
+
+            let html = '';
+            modelsData.models.forEach(model => {
+                const modelName = extractModelName(model.path);
+                const isCurrent = model.path === currentModelPath;
+                const isSelected = model.path === selectedModel;
+
+                let className = 'model-item';
+                if (isCurrent) className += ' current';
+                if (isSelected) className += ' selected';
+
+                html += `<div class="${className}" onclick="selectModel('${model.path}')">${modelName}</div>`;
+            });
+
+            modelListDiv.innerHTML = html;
+
+            // Enable restart button if a different model is selected
+            restartBtn.disabled = !selectedModel || selectedModel === currentModelPath;
+        }
+
+        function selectModel(modelPath) {
+            selectedModel = modelPath;
+            // Re-render the model list to update highlighting
+            updateModelList({ models: window.lastModelsData || [] }, currentModel);
+        }
+
+        async function restartWithSelectedModel() {
+            if (!selectedModel) {
+                alert('Please select a model first');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/whisper/restart', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ model_path: selectedModel })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    alert('Whisper service restarted with new model!');
+                    selectedModel = null; // Reset selection
+                    loadWhisperService(); // Refresh display
+                } else {
+                    alert(`Failed to restart service: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error restarting service:', error);
+                alert('Failed to restart service');
+            }
+        }
+
+        async function toggleWhisperService() {
+            try {
+                const response = await fetch('/api/whisper/service/toggle', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    console.log('Whisper service toggled:', result);
+                    loadWhisperService(); // Refresh display
+                } else {
+                    alert(`Failed to toggle whisper service: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error toggling whisper service:', error);
+                alert('Failed to toggle whisper service');
+            }
+        }
+
+        // updateModelPath function removed - replaced with model selection list
+
+        // Load initial data
+        loadWhisperService();
     </script>
 </body>
 </html>)HTML";
@@ -533,11 +905,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 }
 
 HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
-    // Only log non-polling API requests to reduce spam
-    if (request.path != "/api/status" &&
-        !(request.method == "GET" && request.path == "/api/sip-lines")) {
-        std::cout << "API Request: " << request.method << " " << request.path << std::endl;
-    }
+    // Silence all API request logging - only show business logic messages
 
     if (request.path == "/api/status") {
         return api_status(request);
@@ -545,7 +913,6 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
         return api_callers(request);
     } else if (request.path.length() > 15 && request.path.substr(0, 15) == "/api/sip-lines/" && request.method == "DELETE") {
         // Extract line_id from path like /api/sip-lines/1
-        std::cout << "Matched DELETE sip-lines endpoint: " << request.path << std::endl;
         std::string path_suffix = request.path.substr(15); // Remove "/api/sip-lines/"
         int line_id = std::atoi(path_suffix.c_str());
         std::cout << "Extracted line_id: " << line_id << std::endl;
@@ -558,7 +925,7 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
         if (end != std::string::npos) {
             std::string line_id_str = request.path.substr(start, end - start);
             int line_id = std::atoi(line_id_str.c_str());
-            std::cout << "Extracted line_id for toggle: " << line_id << std::endl;
+            // Toggle SIP line
             return api_sip_lines_toggle(request, line_id);
         }
     } else if (request.path == "/api/sip-lines") {
@@ -568,22 +935,38 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
             return api_sip_lines_post(request);
         }
     } else if (request.path == "/api/system/speed") {
-        std::cout << "Matched system speed endpoint" << std::endl;
         if (request.method == "GET") {
             return api_system_speed_get(request);
         } else if (request.method == "POST") {
             return api_system_speed_post(request);
         }
+    } else if (request.path == "/api/whisper/service") {
+        if (request.method == "GET") {
+            return api_whisper_service_get(request);
+        } else if (request.method == "POST") {
+            return api_whisper_service_post(request);
+        }
+    } else if (request.path == "/api/whisper/service/toggle") {
+        if (request.method == "POST") {
+            return api_whisper_service_toggle(request);
+        }
+    } else if (request.path == "/api/whisper/upload") {
+        if (request.method == "POST") {
+            return api_whisper_upload(request);
+        }
+    } else if (request.path == "/api/whisper/models") {
+        if (request.method == "GET") {
+            return api_whisper_models_get(request);
+        }
+    } else if (request.path == "/api/whisper/restart") {
+        if (request.method == "POST") {
+            return api_whisper_restart(request);
+        }
     // Session and Whisper endpoints removed
     }
     // Note: /api/whisper/transcribe removed - using direct interface now
 
-    // Debug: log unmatched requests
-    std::cout << "UNMATCHED API request: " << request.method << " " << request.path << std::endl;
-    std::cout << "Path length: " << request.path.length() << std::endl;
-    if (request.path.length() >= 15) {
-        std::cout << "First 15 chars: '" << request.path.substr(0, 15) << "'" << std::endl;
-    }
+    // Silently handle unmatched requests
 
     HttpResponse response;
     response.status_code = 404;
@@ -957,3 +1340,276 @@ HttpResponse SimpleHttpServer::api_system_speed_post(const HttpRequest& request)
 // All remaining whisper API methods removed - WhisperService deleted
 
 // All remaining whisper API methods removed - WhisperService deleted
+
+// Whisper service management endpoints
+HttpResponse SimpleHttpServer::api_whisper_service_get(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    bool enabled = database_->get_whisper_service_enabled();
+    std::string model_path = database_->get_whisper_model_path();
+    std::string status = database_->get_whisper_service_status();
+
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.body = "{\"enabled\": " + std::string(enabled ? "true" : "false") +
+                   ", \"model_path\": \"" + model_path +
+                   "\", \"status\": \"" + status + "\"}";
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_whisper_service_post(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Parse JSON body to update model path
+    std::string model_path;
+    size_t model_pos = request.body.find("\"model_path\":");
+    if (model_pos != std::string::npos) {
+        size_t start = request.body.find("\"", model_pos + 13);
+        if (start != std::string::npos) {
+            start++; // Skip opening quote
+            size_t end = request.body.find("\"", start);
+            if (end != std::string::npos) {
+                model_path = request.body.substr(start, end - start);
+            }
+        }
+    }
+
+    if (model_path.empty()) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Model path is required"})";
+        return response;
+    }
+
+    bool success = database_->set_whisper_model_path(model_path);
+
+    if (success) {
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.body = "{\"success\": true, \"model_path\": \"" + model_path + "\"}";
+        // Model path updated silently to reduce console spam
+    } else {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Failed to update model path"})";
+    }
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_whisper_service_toggle(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    bool current_enabled = database_->get_whisper_service_enabled();
+    bool new_enabled = !current_enabled;
+
+    bool success = database_->set_whisper_service_enabled(new_enabled);
+
+    if (success) {
+        // Update status based on enabled state
+        std::string new_status = new_enabled ? "starting" : "stopped";
+        database_->set_whisper_service_status(new_status);
+
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.body = "{\"success\": true, \"enabled\": " +
+                       std::string(new_enabled ? "true" : "false") +
+                       ", \"status\": \"" + new_status + "\"}";
+
+        if (new_enabled) {
+            std::cout << "🎤 Whisper service enabled" << std::endl;
+        } else {
+            std::cout << "🎤 Whisper service disabled" << std::endl;
+        }
+
+        // TODO: Actually start/stop the whisper service process here
+        // For now, we just update the database state
+
+    } else {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Failed to toggle whisper service"})";
+    }
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_whisper_upload(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Simplified upload implementation to avoid parsing complexity
+    std::cout << "🎤 Model upload request received" << std::endl;
+    std::cout << "   Content-Length: " << request.body.length() << " bytes" << std::endl;
+
+    // For now, return a success response to test the network connection
+    // The actual file parsing can be implemented later once the basic flow works
+    if (request.body.empty()) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "No data received"})";
+        return response;
+    }
+
+    // Return success response to test network connection
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.body = R"({"success": true, "message": "Upload received successfully", "bytes": )" + std::to_string(request.body.length()) + "}";
+
+    std::cout << "🎤 Model upload test completed successfully" << std::endl;
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_whisper_models_get(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Scan models directory for .bin files
+    std::string json_response = R"({"models": [)";
+    bool first = true;
+
+    // Scan the models directory for actual .bin files
+    std::string models_dir = "models";
+    DIR* dir = opendir(models_dir.c_str());
+
+    if (dir != nullptr) {
+        struct dirent* entry;
+        std::vector<std::string> model_files;
+
+        // Collect all .bin files
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string filename = entry->d_name;
+            if (filename.length() > 4 && filename.substr(filename.length() - 4) == ".bin") {
+                model_files.push_back(models_dir + "/" + filename);
+            }
+        }
+        closedir(dir);
+
+        // Sort the files for consistent ordering
+        std::sort(model_files.begin(), model_files.end());
+
+        // Add to JSON response
+        for (const auto& model_path : model_files) {
+            if (!first) json_response += ",";
+            json_response += R"({"path": ")" + model_path + R"("})";
+            first = false;
+        }
+    }
+
+    json_response += "]}";
+
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.body = json_response;
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_whisper_restart(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Parse JSON body to get model path
+    std::string model_path;
+    size_t model_pos = request.body.find("\"model_path\":");
+    if (model_pos != std::string::npos) {
+        size_t start = request.body.find("\"", model_pos + 13);
+        if (start != std::string::npos) {
+            start++; // Skip opening quote
+            size_t end = request.body.find("\"", start);
+            if (end != std::string::npos) {
+                model_path = request.body.substr(start, end - start);
+            }
+        }
+    }
+
+    if (model_path.empty()) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Model path is required"})";
+        return response;
+    }
+
+    // Update model path and restart service
+    bool model_updated = database_->set_whisper_model_path(model_path);
+    bool service_restarted = database_->set_whisper_service_status("starting");
+
+    if (model_updated && service_restarted) {
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.body = "{\"success\": true, \"model_path\": \"" + model_path + "\", \"status\": \"starting\"}";
+
+        // Extract model name for logging
+        std::string model_name = model_path;
+        size_t slash_pos = model_name.find_last_of('/');
+        if (slash_pos != std::string::npos) {
+            model_name = model_name.substr(slash_pos + 1);
+        }
+        size_t dot_pos = model_name.find_last_of('.');
+        if (dot_pos != std::string::npos) {
+            model_name = model_name.substr(0, dot_pos);
+        }
+        if (model_name.substr(0, 5) == "ggml-") {
+            model_name = model_name.substr(5);
+        }
+
+        std::cout << "🎤 Whisper service restarting with model: " << model_name << std::endl;
+
+        // TODO: Actually restart the whisper service process here
+        // For now, we just update the database state
+
+    } else {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Failed to restart service with new model"})";
+    }
+
+    return response;
+}

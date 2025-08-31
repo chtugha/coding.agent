@@ -98,6 +98,9 @@ bool Database::create_tables() {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('system_speed', '3');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('whisper_service_enabled', 'false');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('whisper_model_path', 'models/ggml-small.en.bin');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('whisper_service_status', 'stopped');
     )";
 
     rc = sqlite3_exec(db_, sip_lines_sql, nullptr, nullptr, &err_msg);
@@ -518,3 +521,98 @@ Call Database::get_call(const std::string& call_id) {
 }
 
 // get_caller_sessions method removed
+
+// Whisper service management methods
+bool Database::get_whisper_service_enabled() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'whisper_service_enabled'";
+    sqlite3_stmt* stmt;
+    bool enabled = false;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* value = (char*)sqlite3_column_text(stmt, 0);
+            enabled = (value && std::string(value) == "true");
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return enabled;
+}
+
+bool Database::set_whisper_service_enabled(bool enabled) {
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('whisper_service_enabled', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, enabled ? "true" : "false", -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_whisper_model_path() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'whisper_model_path'";
+    sqlite3_stmt* stmt;
+    std::string model_path = "models/ggml-small.en.bin"; // default
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* value = (char*)sqlite3_column_text(stmt, 0);
+            if (value) {
+                model_path = value;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return model_path;
+}
+
+bool Database::set_whisper_model_path(const std::string& model_path) {
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('whisper_model_path', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_whisper_service_status() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'whisper_service_status'";
+    sqlite3_stmt* stmt;
+    std::string status = "stopped"; // default
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* value = (char*)sqlite3_column_text(stmt, 0);
+            if (value) {
+                status = value;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return status;
+}
+
+bool Database::set_whisper_service_status(const std::string& status) {
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('whisper_service_status', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}

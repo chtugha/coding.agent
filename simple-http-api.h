@@ -70,6 +70,14 @@ private:
     // System configuration endpoints
     HttpResponse api_system_speed_get(const HttpRequest& request);
     HttpResponse api_system_speed_post(const HttpRequest& request);
+
+    // Whisper service endpoints
+    HttpResponse api_whisper_service_get(const HttpRequest& request);
+    HttpResponse api_whisper_service_post(const HttpRequest& request);
+    HttpResponse api_whisper_service_toggle(const HttpRequest& request);
+    HttpResponse api_whisper_upload(const HttpRequest& request);
+    HttpResponse api_whisper_models_get(const HttpRequest& request);
+    HttpResponse api_whisper_restart(const HttpRequest& request);
     
     std::string get_mime_type(const std::string& extension);
 
