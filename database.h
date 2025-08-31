@@ -1,0 +1,64 @@
+#pragma once
+
+#include <string>
+#include <memory>
+#include <vector>
+#include <sqlite3.h>
+
+struct Caller {
+    int id;
+    std::string phone_number;
+    std::string created_at;
+    std::string last_call;
+};
+
+// CallSession struct removed - no session management
+
+struct SipLineConfig {
+    int line_id;
+    std::string extension;
+    std::string username;
+    std::string password;
+    std::string server_ip;
+    int server_port;
+    std::string display_name;
+    bool enabled;
+    std::string status;
+};
+
+class Database {
+public:
+    Database();
+    ~Database();
+    
+    bool init(const std::string& db_path = "whisper_talk.db");
+    void close();
+    
+    // Caller management
+    int get_or_create_caller(const std::string& phone_number);
+    bool update_caller_last_call(int caller_id);
+    std::vector<Caller> get_all_callers();
+    
+    // Session management removed
+
+    // SIP line management
+    int create_sip_line(const std::string& extension, const std::string& username,
+                       const std::string& password, const std::string& server_ip,
+                       int server_port, const std::string& display_name);
+    std::vector<SipLineConfig> get_all_sip_lines();
+    bool update_sip_line_status(int line_id, const std::string& status);
+    bool toggle_sip_line(int line_id);
+    bool delete_sip_line(int line_id);
+    SipLineConfig get_sip_line(int line_id);
+    // get_caller_sessions removed
+
+    // System configuration
+    int get_system_speed(); // 1-5 scale (1=slow, 5=fast)
+    bool set_system_speed(int speed);
+
+private:
+    sqlite3* db_;
+    bool create_tables();
+    std::string generate_uuid();
+    std::string get_current_timestamp();
+};
