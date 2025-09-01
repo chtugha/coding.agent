@@ -12,6 +12,53 @@
 #include <vector>
 #include <cstdlib>
 #include <sys/stat.h>
+#include <ctime>
+#include <atomic>
+#include <mutex>
+#include <map>
+#include <chrono>
+#include <thread>
+#include <sys/wait.h>
+
+// Chunked upload tracking for large files
+struct ChunkedUpload {
+    std::string filename;
+    size_t total_size;
+    size_t received_size;
+    std::ofstream file_stream;
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point last_activity;
+
+    ChunkedUpload(const std::string& fname, size_t size)
+        : filename(fname), total_size(size), received_size(0),
+          last_activity(std::chrono::steady_clock::now()) {}
+};
+
+// Global upload tracking with cleanup
+static std::map<std::string, std::unique_ptr<ChunkedUpload>> active_uploads;
+static std::mutex uploads_mutex;
+static std::atomic<bool> cleanup_running{false};
+
+// Cleanup function for abandoned uploads
+void cleanup_abandoned_uploads() {
+    std::lock_guard<std::mutex> lock(uploads_mutex);
+    auto now = std::chrono::steady_clock::now();
+
+    for (auto it = active_uploads.begin(); it != active_uploads.end();) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(now - it->second->last_activity);
+        if (elapsed.count() > 30) { // 30 minutes timeout
+            std::cout << "🎤 Cleaning up abandoned upload: " << it->second->filename << std::endl;
+            if (it->second->file_stream.is_open()) {
+                it->second->file_stream.close();
+            }
+            std::string filepath = "models/" + it->second->filename;
+            std::remove(filepath.c_str());
+            it = active_uploads.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
 
 SimpleHttpServer::SimpleHttpServer(int port, Database* database)
     : port_(port), server_socket_(-1), running_(false), database_(database) {}
@@ -85,48 +132,199 @@ void SimpleHttpServer::server_loop() {
 }
 
 void SimpleHttpServer::handle_client(int client_socket) {
-    char buffer[4096];
-    ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-    
-    if (bytes_read <= 0) {
-        close(client_socket);
-        return;
+    // Set socket timeout
+    struct timeval timeout;
+    timeout.tv_sec = 300; // 5 minutes for large uploads
+    timeout.tv_usec = 0;
+    setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    try {
+        // Use larger buffer for reading request
+        char buffer[65536]; // 64KB buffer
+        ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+
+        if (bytes_read <= 0) {
+            close(client_socket);
+            return;
+        }
+
+        buffer[bytes_read] = '\0';
+        std::string raw_request(buffer, bytes_read); // Use binary-safe constructor
+
+        // For large uploads, we need to read more data if Content-Length indicates it
+        std::string content_length_header = "Content-Length: ";
+        size_t cl_pos = raw_request.find(content_length_header);
+        if (cl_pos != std::string::npos) {
+            size_t cl_start = cl_pos + content_length_header.length();
+            size_t cl_end = raw_request.find("\r\n", cl_start);
+            if (cl_end != std::string::npos) {
+                std::string cl_str = raw_request.substr(cl_start, cl_end - cl_start);
+                size_t content_length = std::stoull(cl_str);
+
+                // Find where headers end
+                size_t headers_end = raw_request.find("\r\n\r\n");
+                if (headers_end != std::string::npos) {
+                    size_t body_start = headers_end + 4;
+                    size_t current_body_size = bytes_read - body_start;
+
+                    // Read remaining body if needed
+                    while (current_body_size < content_length) {
+                        size_t to_read = std::min(content_length - current_body_size, sizeof(buffer) - 1);
+                        ssize_t more_bytes = recv(client_socket, buffer, to_read, 0);
+
+                        if (more_bytes <= 0) break;
+
+                        raw_request.append(buffer, more_bytes);
+                        current_body_size += more_bytes;
+                    }
+                }
+            }
+        }
+
+        HttpRequest request = parse_request(raw_request);
+        HttpResponse response = handle_request(request);
+        std::string response_str = create_response(response);
+
+        send(client_socket, response_str.c_str(), response_str.length(), 0);
+    } catch (const std::exception& e) {
+        std::cerr << "Client handling error: " << e.what() << std::endl;
+        // Send error response
+        std::string error_response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+        send(client_socket, error_response.c_str(), error_response.length(), 0);
     }
-    
-    buffer[bytes_read] = '\0';
-    std::string raw_request(buffer);
-    
-    HttpRequest request = parse_request(raw_request);
-    HttpResponse response = handle_request(request);
-    std::string response_str = create_response(response);
-    
-    send(client_socket, response_str.c_str(), response_str.length(), 0);
+
     close(client_socket);
+}
+
+HttpRequest SimpleHttpServer::parse_request_streaming(int client_socket) {
+    HttpRequest request;
+    std::string headers_buffer;
+    char buffer[8192]; // Increased buffer size
+
+    // Read headers first
+    while (true) {
+        ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_read <= 0) {
+            throw std::runtime_error("Failed to read request headers");
+        }
+
+        buffer[bytes_read] = '\0';
+        headers_buffer += buffer;
+
+        // Check if we have complete headers (double CRLF)
+        size_t headers_end = headers_buffer.find("\r\n\r\n");
+        if (headers_end != std::string::npos) {
+            // Parse headers
+            std::string headers_only = headers_buffer.substr(0, headers_end);
+            std::istringstream stream(headers_only);
+            std::string line;
+
+            // Parse request line
+            if (std::getline(stream, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                std::istringstream request_line(line);
+                request_line >> request.method >> request.path;
+
+                // Parse query parameters
+                size_t query_pos = request.path.find('?');
+                if (query_pos != std::string::npos) {
+                    std::string query = request.path.substr(query_pos + 1);
+                    request.path = request.path.substr(0, query_pos);
+
+                    // Simple query parsing
+                    size_t pos = 0;
+                    while (pos < query.length()) {
+                        size_t eq_pos = query.find('=', pos);
+                        size_t amp_pos = query.find('&', pos);
+                        if (amp_pos == std::string::npos) amp_pos = query.length();
+
+                        if (eq_pos != std::string::npos && eq_pos < amp_pos) {
+                            std::string key = query.substr(pos, eq_pos - pos);
+                            std::string value = query.substr(eq_pos + 1, amp_pos - eq_pos - 1);
+                            request.query_params[key] = value;
+                        }
+                        pos = amp_pos + 1;
+                    }
+                }
+            }
+
+            // Parse headers
+            while (std::getline(stream, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) break;
+
+                size_t colon_pos = line.find(':');
+                if (colon_pos != std::string::npos) {
+                    std::string key = line.substr(0, colon_pos);
+                    std::string value = line.substr(colon_pos + 1);
+                    // Trim whitespace
+                    value.erase(0, value.find_first_not_of(" \t"));
+                    value.erase(value.find_last_not_of(" \t") + 1);
+                    request.headers[key] = value;
+                }
+            }
+
+            // Handle body if Content-Length is specified
+            auto content_length_it = request.headers.find("Content-Length");
+            if (content_length_it != request.headers.end()) {
+                size_t content_length = std::stoull(content_length_it->second);
+
+                // Get any body data already read
+                size_t body_start = headers_end + 4;
+                if (body_start < headers_buffer.length()) {
+                    request.body = headers_buffer.substr(body_start);
+                }
+
+                // Read remaining body data
+                while (request.body.length() < content_length) {
+                    size_t remaining = content_length - request.body.length();
+                    size_t to_read = std::min(remaining, sizeof(buffer) - 1);
+
+                    ssize_t bytes_read = recv(client_socket, buffer, to_read, 0);
+                    if (bytes_read <= 0) {
+                        std::cout << "❌ Failed to read body: bytes_read=" << bytes_read
+                                  << ", remaining=" << remaining << ", errno=" << errno << std::endl;
+                        throw std::runtime_error("Failed to read request body");
+                    }
+
+                    request.body.append(buffer, bytes_read);
+                    std::cout << "📥 Read " << bytes_read << " bytes, total body: " << request.body.length()
+                              << "/" << content_length << std::endl;
+                }
+            }
+
+            break;
+        }
+    }
+
+    return request;
 }
 
 HttpRequest SimpleHttpServer::parse_request(const std::string& raw_request) {
     HttpRequest request;
     std::istringstream stream(raw_request);
     std::string line;
-    
+
     // Parse request line
     if (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         std::istringstream request_line(line);
         request_line >> request.method >> request.path;
-        
+
         // Parse query parameters
         size_t query_pos = request.path.find('?');
         if (query_pos != std::string::npos) {
             std::string query = request.path.substr(query_pos + 1);
             request.path = request.path.substr(0, query_pos);
-            
+
             // Simple query parsing
             size_t pos = 0;
             while (pos < query.length()) {
                 size_t eq_pos = query.find('=', pos);
                 size_t amp_pos = query.find('&', pos);
                 if (amp_pos == std::string::npos) amp_pos = query.length();
-                
+
                 if (eq_pos != std::string::npos && eq_pos < amp_pos) {
                     std::string key = query.substr(pos, eq_pos - pos);
                     std::string value = query.substr(eq_pos + 1, amp_pos - eq_pos - 1);
@@ -136,26 +334,29 @@ HttpRequest SimpleHttpServer::parse_request(const std::string& raw_request) {
             }
         }
     }
-    
+
     // Parse headers
     while (std::getline(stream, line) && line != "\r") {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) break;
+
         size_t colon_pos = line.find(':');
         if (colon_pos != std::string::npos) {
             std::string key = line.substr(0, colon_pos);
-            std::string value = line.substr(colon_pos + 2);
-            if (!value.empty() && value.back() == '\r') {
-                value.pop_back();
-            }
+            std::string value = line.substr(colon_pos + 1);
+            // Trim whitespace
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
             request.headers[key] = value;
         }
     }
-    
-    // Parse body (if any)
-    std::string body_line;
-    while (std::getline(stream, body_line)) {
-        request.body += body_line + "\n";
+
+    // Parse body (binary safe)
+    size_t headers_end = raw_request.find("\r\n\r\n");
+    if (headers_end != std::string::npos) {
+        request.body = raw_request.substr(headers_end + 4);
     }
-    
+
     return request;
 }
 
@@ -378,8 +579,17 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                         <input type="file" id="fileInput" multiple style="display: none;">
                     </div>
                     <div id="uploadStatus" style="margin-top: 15px;"></div>
+                    <div id="progressContainer" style="margin-top: 15px; display: none;">
+                        <div style="background: #f0f0f0; border-radius: 10px; overflow: hidden; margin-bottom: 10px;">
+                            <div id="progressBar" style="height: 20px; background: #007bff; width: 0%; transition: width 0.3s ease;"></div>
+                        </div>
+                        <div id="progressText" style="font-size: 14px; color: #666;">Preparing upload...</div>
+                    </div>
                     <div style="margin-top: 15px;">
-                        <button class="refresh-btn" onclick="hideUploadArea()" style="background: #6c757d;">
+                        <button class="refresh-btn" onclick="clearUploadFiles()" style="background: #6c757d;">
+                            Clear Files
+                        </button>
+                        <button class="refresh-btn" onclick="hideUploadArea()" style="background: #dc3545; margin-left: 10px;">
                             Cancel
                         </button>
                         <button id="uploadBtn" class="refresh-btn" onclick="uploadModel()" style="background: #28a745; margin-left: 10px;" disabled>
@@ -614,10 +824,32 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             setupDragAndDrop();
         }
 
+        function clearUploadFiles() {
+            uploadedFiles = [];
+            updateUploadStatus();
+            hideProgressBar();
+        }
+
         function hideUploadArea() {
             document.getElementById('uploadArea').style.display = 'none';
             uploadedFiles = [];
             updateUploadStatus();
+            hideProgressBar();
+        }
+
+        function showProgressBar() {
+            document.getElementById('progressContainer').style.display = 'block';
+        }
+
+        function hideProgressBar() {
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('progressBar').style.width = '0%';
+            document.getElementById('progressText').textContent = 'Preparing upload...';
+        }
+
+        function updateProgress(percentage, text) {
+            document.getElementById('progressBar').style.width = percentage + '%';
+            document.getElementById('progressText').textContent = text || `${Math.round(percentage)}% complete`;
         }
 
         function setupDragAndDrop() {
@@ -662,7 +894,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             // Don't reset uploadedFiles - accumulate files instead
 
             files.forEach(file => {
-                if (file.name.endsWith('.bin') || file.name.endsWith('.mlmodelc')) {
+                if (file.name.endsWith('.bin') || file.name.endsWith('.mlmodelc') || file.name.endsWith('.mlmodelc.zip')) {
                     uploadedFiles.push(file);
                 }
             });
@@ -675,7 +907,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             const uploadBtn = document.getElementById('uploadBtn');
 
             const binFile = uploadedFiles.find(f => f.name.endsWith('.bin'));
-            const mlmodelcFiles = uploadedFiles.filter(f => f.name.endsWith('.mlmodelc'));
+            const mlmodelcFiles = uploadedFiles.filter(f => f.name.endsWith('.mlmodelc') || f.name.endsWith('.mlmodelc.zip'));
 
             let status = '<div style="text-align: left;">';
 
@@ -701,38 +933,107 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         async function uploadModel() {
             const binFile = uploadedFiles.find(f => f.name.endsWith('.bin'));
-            const mlmodelcFiles = uploadedFiles.filter(f => f.name.endsWith('.mlmodelc'));
+            const mlmodelcFiles = uploadedFiles.filter(f => f.name.endsWith('.mlmodelc') || f.name.endsWith('.mlmodelc.zip'));
 
             if (!binFile || mlmodelcFiles.length === 0) {
-                alert('Both .bin file and .mlmodelc file are required');
+                alert('Both .bin file and .mlmodelc/.mlmodelc.zip file are required');
                 return;
             }
 
-            const formData = new FormData();
-            formData.append('binFile', binFile);
-
-            mlmodelcFiles.forEach((file, index) => {
-                formData.append('mlmodelcFile_' + index, file, file.webkitRelativePath);
-            });
+            const uploadBtn = document.getElementById('uploadBtn');
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = 'Preparing upload...';
+            showProgressBar();
 
             try {
-                const response = await fetch('/api/whisper/upload', {
-                    method: 'POST',
-                    body: formData
-                });
+                const allFiles = [binFile, ...mlmodelcFiles];
 
-                const result = await response.json();
+                for (let i = 0; i < allFiles.length; i++) {
+                    const file = allFiles[i];
+                    const fileProgress = (i / allFiles.length) * 100;
 
-                if (response.ok) {
-                    alert('Model uploaded successfully!');
-                    hideUploadArea();
-                    loadWhisperService(); // Refresh the service display
-                } else {
-                    alert('Upload failed: ' + result.error);
+                    uploadBtn.textContent = `Uploading ${file.name} (${i + 1}/${allFiles.length})...`;
+                    updateProgress(fileProgress, `Uploading ${file.name} (${i + 1}/${allFiles.length})`);
+
+                    await uploadFileChunked(file, (progress) => {
+                        const totalProgress = fileProgress + (progress / allFiles.length);
+                        updateProgress(totalProgress, `Uploading ${file.name}: ${Math.round(progress)}%`);
+                        uploadBtn.textContent = `Uploading ${file.name}: ${Math.round(progress)}%`;
+                    });
                 }
+
+                updateProgress(100, 'Upload completed successfully!');
+                uploadBtn.textContent = 'Upload Complete!';
+
+                setTimeout(() => {
+                    alert('All files uploaded successfully!');
+                    hideUploadArea();
+                    loadWhisperService();
+                }, 1000);
+
             } catch (error) {
                 console.error('Upload error:', error);
                 alert('Upload failed: ' + error.message);
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Upload Model';
+                hideProgressBar();
+            }
+        }
+
+        async function uploadFileChunked(file, progressCallback) {
+            const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+            for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                const start = chunkIndex * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+
+                const contentRange = `bytes ${start}-${end - 1}/${file.size}`;
+
+                let retries = 0;
+                const maxRetries = 3;
+                let success = false;
+
+                while (retries < maxRetries && !success) {
+                    try {
+                        const response = await fetch('/api/whisper/upload', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/octet-stream',
+                                'Content-Range': contentRange,
+                                'X-File-Name': file.name,
+                                'X-File-Size': file.size.toString()
+                            },
+                            body: chunk
+                        });
+
+                        const result = await response.json();
+
+                        if (!response.ok) {
+                            throw new Error(result.error || 'Upload failed');
+                        }
+
+                        if (progressCallback && result.progress !== undefined) {
+                            progressCallback(result.progress);
+                        }
+
+                        success = true;
+
+                        // If this was the final chunk, we're done
+                        if (response.status === 200) {
+                            return; // Upload completed
+                        }
+
+                    } catch (error) {
+                        retries++;
+                        if (retries >= maxRetries) {
+                            throw new Error(`Chunk ${chunkIndex + 1} failed after ${maxRetries} retries: ${error.message}`);
+                        }
+                        // Exponential backoff
+                        await new Promise(resolve => setTimeout(resolve, Math.pow(2, retries) * 1000));
+                    }
+                }
             }
         }
 
@@ -915,6 +1216,17 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
         // Extract line_id from path like /api/sip-lines/1
         std::string path_suffix = request.path.substr(15); // Remove "/api/sip-lines/"
         int line_id = std::atoi(path_suffix.c_str());
+
+        // Validate line_id
+        if (line_id <= 0) {
+            HttpResponse error_response;
+            error_response.status_code = 400;
+            error_response.status_text = "Bad Request";
+            error_response.body = R"({"error": "Invalid line ID"})";
+            error_response.headers["Content-Type"] = "application/json";
+            return error_response;
+        }
+
         std::cout << "Extracted line_id: " << line_id << std::endl;
         return api_sip_lines_delete(request, line_id);
     } else if (request.path.find("/api/sip-lines/") == 0 && request.path.find("/toggle") != std::string::npos && request.method == "PUT") {
@@ -925,6 +1237,17 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
         if (end != std::string::npos) {
             std::string line_id_str = request.path.substr(start, end - start);
             int line_id = std::atoi(line_id_str.c_str());
+
+            // Validate line_id
+            if (line_id <= 0) {
+                HttpResponse error_response;
+                error_response.status_code = 400;
+                error_response.status_text = "Bad Request";
+                error_response.body = R"({"error": "Invalid line ID"})";
+                error_response.headers["Content-Type"] = "application/json";
+                return error_response;
+            }
+
             // Toggle SIP line
             return api_sip_lines_toggle(request, line_id);
         }
@@ -980,18 +1303,33 @@ HttpResponse SimpleHttpServer::api_status(const HttpRequest& request) {
     HttpResponse response;
     response.status_code = 200;
     response.status_text = "OK";
-    response.body = R"({
-        "status": "online",
-        "modules": {
-            "http_server": "online",
-            "database": "online",
-            "sip_client": "offline",
-            "whisper": "offline",
-            "llama": "offline",
-            "piper": "offline"
-        }
-    })";
     response.headers["Content-Type"] = "application/json";
+
+    // Check actual module status
+    std::string db_status = database_ ? "online" : "offline";
+
+    // Check if whisper service is running
+    std::string whisper_status = "offline";
+    if (database_) {
+        std::string status = database_->get_whisper_service_status();
+        whisper_status = (status == "running") ? "online" : "offline";
+    }
+
+    // Check SIP client processes
+    std::string sip_status = "offline";
+    int sip_result = system("pgrep -f whisper-sip-client > /dev/null 2>&1");
+    if (sip_result == 0) {
+        sip_status = "online";
+    }
+
+    response.body = "{\"status\": \"online\", \"modules\": {" +
+                   std::string("\"http_server\": \"online\", ") +
+                   "\"database\": \"" + db_status + "\", " +
+                   "\"sip_client\": \"" + sip_status + "\", " +
+                   "\"whisper\": \"" + whisper_status + "\", " +
+                   "\"llama\": \"offline\", " +
+                   "\"piper\": \"offline\"}}";
+
     return response;
 }
 
@@ -1129,6 +1467,29 @@ HttpResponse SimpleHttpServer::api_sip_lines_post(const HttpRequest& request) {
         std::cout << "  password: '" << password << "'" << std::endl;
     }
 
+    // Validate required parameters
+    if (username.empty()) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Username is required"})";
+        return response;
+    }
+
+    if (password.empty()) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Password is required"})";
+        return response;
+    }
+
+    // Validate server_port range
+    if (server_port < 1 || server_port > 65535) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = "{\"error\": \"Invalid server port (must be 1-65535)\"}";
+        return response;
+    }
+
     // Create new SIP line in database
     int line_id = database_->create_sip_line(username, password, server_ip, server_port);
 
@@ -1223,11 +1584,12 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
             std::string command = "./whisper-sip-client --line-id " + std::to_string(line_id) + " &";
             int result = system(command.c_str());
 
-            if (result == 0) {
+            // system() returns -1 on error, or the exit status of the command
+            if (result != -1 && WIFEXITED(result) && WEXITSTATUS(result) == 0) {
                 std::cout << "✅ SIP client started successfully for " << line_info << std::endl;
                 response.body = R"({"success": true, "message": "SIP line enabled and client started"})";
             } else {
-                std::cout << "⚠️ SIP client start failed for " << line_info << std::endl;
+                std::cout << "⚠️ SIP client start failed for " << line_info << " (result: " << result << ")" << std::endl;
                 response.body = R"({"success": true, "message": "SIP line enabled but client start failed"})";
             }
         } else {
@@ -1462,6 +1824,8 @@ HttpResponse SimpleHttpServer::api_whisper_service_toggle(const HttpRequest& req
 HttpResponse SimpleHttpServer::api_whisper_upload(const HttpRequest& request) {
     HttpResponse response;
     response.headers["Content-Type"] = "application/json";
+    response.headers["Access-Control-Allow-Origin"] = "*";
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Content-Range, X-File-Name, X-File-Size";
 
     if (!database_) {
         response.status_code = 500;
@@ -1470,27 +1834,74 @@ HttpResponse SimpleHttpServer::api_whisper_upload(const HttpRequest& request) {
         return response;
     }
 
-    // Simplified upload implementation to avoid parsing complexity
-    std::cout << "🎤 Model upload request received" << std::endl;
-    std::cout << "   Content-Length: " << request.body.length() << " bytes" << std::endl;
+    // Create models directory if it doesn't exist
+    system("mkdir -p models");
 
-    // For now, return a success response to test the network connection
-    // The actual file parsing can be implemented later once the basic flow works
-    if (request.body.empty()) {
+    // Handle chunked upload using Content-Range header
+    std::string content_range = request.headers.count("Content-Range") ? request.headers.at("Content-Range") : "";
+    std::string filename = request.headers.count("X-File-Name") ? request.headers.at("X-File-Name") : "";
+    std::string file_size_str = request.headers.count("X-File-Size") ? request.headers.at("X-File-Size") : "";
+
+    if (filename.empty()) {
         response.status_code = 400;
         response.status_text = "Bad Request";
-        response.body = R"({"error": "No data received"})";
+        response.body = R"({"error": "Missing X-File-Name header"})";
         return response;
     }
 
-    // Return success response to test network connection
-    response.status_code = 200;
-    response.status_text = "OK";
-    response.body = R"({"success": true, "message": "Upload received successfully", "bytes": )" + std::to_string(request.body.length()) + "}";
+    // Validate filename for security
+    if (filename.find("..") != std::string::npos ||
+        filename.find("/") != std::string::npos ||
+        filename.find("\\") != std::string::npos) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Invalid filename"})";
+        return response;
+    }
 
-    std::cout << "🎤 Model upload test completed successfully" << std::endl;
+    // Validate file type
+    bool is_bin = filename.length() >= 4 && filename.substr(filename.length() - 4) == ".bin";
+    bool is_mlmodelc = filename.length() >= 9 && filename.substr(filename.length() - 9) == ".mlmodelc";
+    bool is_mlmodelc_zip = filename.length() >= 13 && filename.substr(filename.length() - 13) == ".mlmodelc.zip";
 
-    return response;
+    if (!is_bin && !is_mlmodelc && !is_mlmodelc_zip) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Invalid file type. Only .bin, .mlmodelc, and .mlmodelc.zip files are allowed"})";
+        return response;
+    }
+
+    size_t total_file_size = 0;
+    if (!file_size_str.empty()) {
+        try {
+            total_file_size = std::stoull(file_size_str);
+        } catch (const std::exception& e) {
+            response.status_code = 400;
+            response.status_text = "Bad Request";
+            response.body = R"({"error": "Invalid file size"})";
+            return response;
+        }
+    }
+
+    // Validate file size (min 1KB, max 50GB)
+    if (total_file_size > 0) {
+        if (total_file_size < 1024) {
+            response.status_code = 400;
+            response.status_text = "Bad Request";
+            response.body = "{\"error\": \"File too small (minimum 1KB)\"}";
+            return response;
+        }
+        if (total_file_size > 50ULL * 1024 * 1024 * 1024) {
+            response.status_code = 413;
+            response.status_text = "Payload Too Large";
+            response.body = "{\"error\": \"File too large (maximum 50GB)\"}";
+            return response;
+        }
+    }
+
+    std::cout << "🎤 Chunked upload: " << filename << " (" << request.body.length() << " bytes)" << std::endl;
+
+    return handle_chunked_upload(request, filename, total_file_size, content_range);
 }
 
 HttpResponse SimpleHttpServer::api_whisper_models_get(const HttpRequest& request) {
@@ -1534,6 +1945,11 @@ HttpResponse SimpleHttpServer::api_whisper_models_get(const HttpRequest& request
             json_response += R"({"path": ")" + model_path + R"("})";
             first = false;
         }
+    } else {
+        // Directory doesn't exist or can't be opened
+        std::cout << "⚠️ Models directory not accessible: " << models_dir << std::endl;
+        // Create directory if it doesn't exist
+        system("mkdir -p models");
     }
 
     json_response += "]}";
@@ -1602,13 +2018,245 @@ HttpResponse SimpleHttpServer::api_whisper_restart(const HttpRequest& request) {
 
         std::cout << "🎤 Whisper service restarting with model: " << model_name << std::endl;
 
-        // TODO: Actually restart the whisper service process here
-        // For now, we just update the database state
+        // Validate model file exists
+        struct stat file_stat;
+        if (stat(model_path.c_str(), &file_stat) != 0) {
+            response.status_code = 404;
+            response.status_text = "Not Found";
+            response.body = R"({"error": "Model file not found"})";
+            return response;
+        }
+
+        // Kill existing whisper service processes
+        std::cout << "🎤 Stopping existing whisper service..." << std::endl;
+        system("pkill -TERM -f whisper-service");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+        // Start new whisper service with selected model
+        std::string start_command = "./whisper-service --model \"" + model_path + "\" &";
+        int start_result = system(start_command.c_str());
+
+        if (start_result == 0) {
+            std::cout << "✅ Whisper service started with model: " << model_name << std::endl;
+            database_->set_whisper_service_status("running");
+        } else {
+            std::cout << "❌ Failed to start whisper service" << std::endl;
+            database_->set_whisper_service_status("error");
+            response.status_code = 500;
+            response.status_text = "Internal Server Error";
+            response.body = R"({"error": "Failed to start whisper service"})";
+            return response;
+        }
 
     } else {
         response.status_code = 500;
         response.status_text = "Internal Server Error";
         response.body = R"({"error": "Failed to restart service with new model"})";
+    }
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request, const std::string& filename, size_t total_size, const std::string& content_range) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+    response.headers["Access-Control-Allow-Origin"] = "*";
+
+    // Disable cleanup thread for now to avoid race conditions
+    // TODO: Re-enable cleanup with proper synchronization
+
+    // Validate max concurrent uploads (limit to 10)
+    {
+        std::lock_guard<std::mutex> lock(uploads_mutex);
+        if (active_uploads.size() >= 10) {
+            response.status_code = 429;
+            response.status_text = "Too Many Requests";
+            response.body = R"({"error": "Too many concurrent uploads"})";
+            return response;
+        }
+    }
+
+    // Parse Content-Range header: "bytes start-end/total" or "bytes start-end/*"
+    size_t range_start = 0, range_end = 0;
+    bool is_final_chunk = false;
+
+    if (!content_range.empty()) {
+        // Parse "bytes 0-1023/2048" format
+        size_t bytes_pos = content_range.find("bytes ");
+        if (bytes_pos == std::string::npos) {
+            response.status_code = 400;
+            response.status_text = "Bad Request";
+            response.body = R"({"error": "Invalid Content-Range format"})";
+            return response;
+        }
+
+        size_t dash_pos = content_range.find("-", bytes_pos + 6);
+        size_t slash_pos = content_range.find("/", dash_pos);
+
+        if (dash_pos == std::string::npos || slash_pos == std::string::npos ||
+            dash_pos <= bytes_pos + 6 || slash_pos <= dash_pos + 1) {
+            response.status_code = 400;
+            response.status_text = "Bad Request";
+            response.body = R"({"error": "Malformed Content-Range header"})";
+            return response;
+        }
+
+        try {
+            std::string start_str = content_range.substr(bytes_pos + 6, dash_pos - bytes_pos - 6);
+            std::string end_str = content_range.substr(dash_pos + 1, slash_pos - dash_pos - 1);
+            std::string total_str = content_range.substr(slash_pos + 1);
+
+            // Trim whitespace
+            start_str.erase(0, start_str.find_first_not_of(" \t"));
+            end_str.erase(0, end_str.find_first_not_of(" \t"));
+            total_str.erase(0, total_str.find_first_not_of(" \t"));
+
+            range_start = std::stoull(start_str);
+            range_end = std::stoull(end_str);
+
+            if (total_str != "*") {
+                total_size = std::stoull(total_str);
+            }
+
+            // Validate range
+            if (range_start > range_end) {
+                response.status_code = 400;
+                response.status_text = "Bad Request";
+                response.body = R"({"error": "Invalid range: start > end"})";
+                return response;
+            }
+
+        } catch (const std::exception& e) {
+            response.status_code = 400;
+            response.status_text = "Bad Request";
+            response.body = R"({"error": "Invalid Content-Range values"})";
+            return response;
+        }
+    }
+
+    // Validate chunk size matches request body
+    size_t expected_chunk_size = range_end - range_start + 1;
+    if (expected_chunk_size != request.body.length()) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Chunk size mismatch"})";
+        return response;
+    }
+
+    // Validate chunk size limits (max 10MB per chunk)
+    if (request.body.length() > 10 * 1024 * 1024) {
+        response.status_code = 413;
+        response.status_text = "Payload Too Large";
+        response.body = "{\"error\": \"Chunk too large (max 10MB)\"}";
+        return response;
+    }
+
+    // Use filename as key - each file upload is tracked separately
+    std::string upload_key = filename;
+
+    std::lock_guard<std::mutex> global_lock(uploads_mutex);
+    auto it = active_uploads.find(upload_key);
+
+    // First chunk - create new upload
+    if (it == active_uploads.end()) {
+        if (range_start != 0) {
+            response.status_code = 400;
+            response.status_text = "Bad Request";
+            response.body = R"({"error": "First chunk must start at byte 0"})";
+            return response;
+        }
+
+        auto upload = std::make_unique<ChunkedUpload>(filename, total_size);
+        std::string filepath = "models/" + filename;
+
+        // Check if file already exists and warn
+        struct stat file_stat;
+        if (stat(filepath.c_str(), &file_stat) == 0) {
+            std::cout << "🎤 Warning: Overwriting existing file: " << filename << std::endl;
+        }
+
+        upload->file_stream.open(filepath, std::ios::binary | std::ios::trunc);
+        if (!upload->file_stream.is_open()) {
+            response.status_code = 500;
+            response.status_text = "Internal Server Error";
+            response.body = R"({"error": "Failed to create file"})";
+            return response;
+        }
+
+        active_uploads[upload_key] = std::move(upload);
+        it = active_uploads.find(upload_key);
+        std::cout << "🎤 Started chunked upload: " << filename << " (total: " << total_size << " bytes)" << std::endl;
+    }
+
+    // Get upload reference (already have global lock)
+    auto& upload = active_uploads[upload_key];
+    std::lock_guard<std::mutex> upload_lock(upload->mutex);
+
+    // Validate chunk sequence
+    if (range_start != upload->received_size) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Chunk out of sequence"})";
+        return response;
+    }
+
+    // Write chunk to file
+    upload->file_stream.write(request.body.c_str(), request.body.length());
+    if (!upload->file_stream.good()) {
+        upload->file_stream.close();
+
+        // Clean up failed upload (already have global lock)
+        active_uploads.erase(upload_key);
+
+        std::string filepath = "models/" + filename;
+        std::remove(filepath.c_str());
+
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Failed to write chunk"})";
+        return response;
+    }
+
+    upload->received_size += request.body.length();
+    upload->last_activity = std::chrono::steady_clock::now();
+
+    // Check if upload is complete
+    is_final_chunk = (upload->received_size >= upload->total_size) ||
+                     (range_end + 1 >= total_size && total_size > 0);
+
+    if (is_final_chunk) {
+        upload->file_stream.close();
+        std::cout << "🎤 Completed chunked upload: " << filename << " (" << upload->received_size << " bytes)" << std::endl;
+
+        // Validate final file size
+        if (total_size > 0 && upload->received_size != total_size) {
+            std::string filepath = "models/" + filename;
+            std::remove(filepath.c_str());
+
+            // Clean up incomplete upload (already have global lock)
+            active_uploads.erase(upload_key);
+
+            response.status_code = 400;
+            response.status_text = "Bad Request";
+            response.body = R"({"error": "Incomplete upload"})";
+            return response;
+        }
+
+        // Clean up completed upload (already have global lock)
+        active_uploads.erase(upload_key);
+
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.body = R"({"success": true, "message": "Upload completed", "filename": ")" + filename + R"("})";
+    } else {
+        // Partial content response
+        response.status_code = 206;
+        response.status_text = "Partial Content";
+        response.headers["Range"] = "bytes=0-" + std::to_string(upload->received_size - 1);
+
+        double progress = total_size > 0 ? (double)upload->received_size / total_size * 100.0 : 0.0;
+        response.body = R"({"success": true, "progress": )" + std::to_string(progress) +
+                       R"(, "received": )" + std::to_string(upload->received_size) + "}";
     }
 
     return response;
