@@ -2190,7 +2190,12 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
 
     // Get upload reference (already have global lock)
     auto& upload = active_uploads[upload_key];
-    std::lock_guard<std::mutex> upload_lock(upload->mutex);
+
+    // Scope the upload lock to avoid use-after-free when erasing
+    bool upload_completed = false;
+    size_t final_received_size = 0;
+    {
+        std::lock_guard<std::mutex> upload_lock(upload->mutex);
 
     // Validate chunk sequence
     if (range_start != upload->received_size) {
@@ -2200,11 +2205,35 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
         return response;
     }
 
-    // Write chunk to file
-    upload->file_stream.write(request.body.c_str(), request.body.length());
-    if (!upload->file_stream.good()) {
-        upload->file_stream.close();
+        // Write chunk to file
+        upload->file_stream.write(request.body.c_str(), request.body.length());
+        if (!upload->file_stream.good()) {
+            upload->file_stream.close();
 
+            // Mark for cleanup - will be done outside lock scope
+            upload_completed = true; // Use this flag to indicate failure cleanup needed
+            final_received_size = 0; // Use 0 to indicate failure
+        } else {
+            // Update progress
+            upload->received_size += request.body.length();
+            upload->last_activity = std::chrono::steady_clock::now();
+
+            // Check if upload is complete
+            upload_completed = (upload->received_size >= upload->total_size) ||
+                              (range_end + 1 >= total_size && total_size > 0);
+
+            if (upload_completed) {
+                upload->file_stream.close();
+                final_received_size = upload->received_size;
+            } else {
+                // Store values for partial response before leaving lock scope
+                final_received_size = upload->received_size;
+            }
+        }
+    } // upload_lock destructor runs here - SAFE because upload object still exists
+
+    // Handle file write failure outside lock scope
+    if (upload_completed && final_received_size == 0) {
         // Clean up failed upload (already have global lock)
         active_uploads.erase(upload_key);
 
@@ -2217,19 +2246,14 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
         return response;
     }
 
-    upload->received_size += request.body.length();
-    upload->last_activity = std::chrono::steady_clock::now();
 
-    // Check if upload is complete
-    is_final_chunk = (upload->received_size >= upload->total_size) ||
-                     (range_end + 1 >= total_size && total_size > 0);
 
-    if (is_final_chunk) {
-        upload->file_stream.close();
-        std::cout << "🎤 Completed chunked upload: " << filename << " (" << upload->received_size << " bytes)" << std::endl;
+    // Handle completion outside the upload lock scope
+    if (upload_completed) {
+        std::cout << "🎤 Completed chunked upload: " << filename << " (" << final_received_size << " bytes)" << std::endl;
 
         // Validate final file size
-        if (total_size > 0 && upload->received_size != total_size) {
+        if (total_size > 0 && final_received_size != total_size) {
             std::string filepath = "models/" + filename;
             std::remove(filepath.c_str());
 
@@ -2242,21 +2266,22 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
             return response;
         }
 
-        // Clean up completed upload (already have global lock)
+        // Clean up completed upload (already have global lock) - NOW SAFE
         active_uploads.erase(upload_key);
 
         response.status_code = 200;
         response.status_text = "OK";
         response.body = R"({"success": true, "message": "Upload completed", "filename": ")" + filename + R"("})";
+        return response;
     } else {
-        // Partial content response
+        // Partial content response (using stored values, not accessing upload object)
         response.status_code = 206;
         response.status_text = "Partial Content";
-        response.headers["Range"] = "bytes=0-" + std::to_string(upload->received_size - 1);
+        response.headers["Range"] = "bytes=0-" + std::to_string(final_received_size - 1);
 
-        double progress = total_size > 0 ? (double)upload->received_size / total_size * 100.0 : 0.0;
+        double progress = total_size > 0 ? (double)final_received_size / total_size * 100.0 : 0.0;
         response.body = R"({"success": true, "progress": )" + std::to_string(progress) +
-                       R"(, "received": )" + std::to_string(upload->received_size) + "}";
+                       R"(, "received": )" + std::to_string(final_received_size) + "}";
     }
 
     return response;
