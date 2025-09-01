@@ -568,15 +568,19 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 <!-- Upload Area (hidden by default) -->
                 <div id="uploadArea" style="display: none; margin-top: 20px; padding: 20px; border: 2px dashed #ccc; border-radius: 10px; text-align: center; background: #f9f9f9;">
                     <h4>Upload Whisper Model</h4>
-                    <p>Drop both files here:</p>
+                    <p>Upload both files:</p>
                     <ul style="text-align: left; display: inline-block;">
                         <li><strong>.bin file</strong> - The main model file</li>
-                        <li><strong>.mlmodelc file</strong> - CoreML acceleration</li>
+                        <li><strong>.mlmodelc file/folder</strong> - CoreML acceleration (can be a directory)</li>
                     </ul>
+                    <p style="font-size: 12px; color: #666; margin: 10px 0;">
+                        <strong>Note:</strong> Click the drop zone to choose between selecting files or folders.
+                    </p>
                     <div id="dropZone" style="margin: 20px 0; padding: 40px; border: 2px dashed #007bff; border-radius: 8px; background: #f0f8ff;">
                         <p style="margin: 0; color: #007bff; font-weight: bold;">Drag and drop files here</p>
                         <p style="margin: 5px 0 0 0; font-size: 14px; color: #666;">or click to select files</p>
                         <input type="file" id="fileInput" multiple style="display: none;">
+                        <input type="file" id="directoryInput" webkitdirectory style="display: none;">
                     </div>
                     <div id="uploadStatus" style="margin-top: 15px;"></div>
                     <div id="progressContainer" style="margin-top: 15px; display: none;">
@@ -612,9 +616,10 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         </div>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script>
-        // Cache buster: v2.0 - Force browser to reload JavaScript
-        console.log('JavaScript loaded - version 2.0');
+        // Cache buster: v3.0 - Force browser to reload JavaScript with JSZip support
+        console.log('JavaScript loaded - version 3.0 with JSZip support');
 
         async function refreshStatus() {
             try {
@@ -855,12 +860,21 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         function setupDragAndDrop() {
             const dropZone = document.getElementById('dropZone');
             const fileInput = document.getElementById('fileInput');
+            const directoryInput = document.getElementById('directoryInput');
 
-            // Click to select files
-            dropZone.addEventListener('click', () => fileInput.click());
+            // Click to select files - show options
+            dropZone.addEventListener('click', () => {
+                const choice = confirm('Select FILES (.bin) or FOLDERS (.mlmodelc)?\n\nOK = Files\nCancel = Folders');
+                if (choice) {
+                    fileInput.click();
+                } else {
+                    directoryInput.click();
+                }
+            });
 
             // Handle file selection
             fileInput.addEventListener('change', handleFiles);
+            directoryInput.addEventListener('change', handleFiles);
 
             // Drag and drop events
             dropZone.addEventListener('dragover', (e) => {
@@ -894,7 +908,42 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             // Don't reset uploadedFiles - accumulate files instead
 
             files.forEach(file => {
-                if (file.name.endsWith('.bin') || file.name.endsWith('.mlmodelc') || file.name.endsWith('.mlmodelc.zip')) {
+                console.log('🔍 Processing file:', file.name, 'webkitRelativePath:', file.webkitRelativePath);
+
+                // Handle individual files
+                if (file.name.endsWith('.bin') || file.name.endsWith('.mlmodelc.zip')) {
+                    uploadedFiles.push(file);
+                }
+
+                // Handle .mlmodelc directory contents - look for the main model file
+                if (file.webkitRelativePath && file.webkitRelativePath.includes('.mlmodelc/')) {
+                    // This is a file inside a .mlmodelc directory
+                    const dirName = file.webkitRelativePath.split('/')[0];
+                    if (dirName.endsWith('.mlmodelc')) {
+                        // Create a virtual file representing the .mlmodelc directory
+                        const existingMlmodelc = uploadedFiles.find(f => f.name === dirName);
+                        if (!existingMlmodelc) {
+                            // Create a virtual file object for the .mlmodelc directory
+                            const virtualFile = {
+                                name: dirName,
+                                size: 0, // We'll calculate this
+                                type: 'directory/mlmodelc',
+                                files: [] // Store all files in the directory
+                            };
+                            uploadedFiles.push(virtualFile);
+                        }
+
+                        // Add this file to the directory's file list
+                        const mlmodelcFile = uploadedFiles.find(f => f.name === dirName);
+                        if (mlmodelcFile && mlmodelcFile.files) {
+                            mlmodelcFile.files.push(file);
+                            mlmodelcFile.size += file.size;
+                        }
+                    }
+                }
+
+                // Handle direct .mlmodelc files (if they exist as single files)
+                if (file.name.endsWith('.mlmodelc') && !file.webkitRelativePath) {
                     uploadedFiles.push(file);
                 }
             });
@@ -907,19 +956,25 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             const uploadBtn = document.getElementById('uploadBtn');
 
             const binFile = uploadedFiles.find(f => f.name.endsWith('.bin'));
-            const mlmodelcFiles = uploadedFiles.filter(f => f.name.endsWith('.mlmodelc') || f.name.endsWith('.mlmodelc.zip'));
+            const mlmodelcFiles = uploadedFiles.filter(f =>
+                f.name.endsWith('.mlmodelc') ||
+                f.name.endsWith('.mlmodelc.zip') ||
+                (f.type === 'directory/mlmodelc')
+            );
 
             let status = '<div style="text-align: left;">';
 
             if (binFile) {
-                status += '<p style="color: #28a745;">✅ .bin file: ' + binFile.name + '</p>';
+                status += '<p style="color: #28a745;">✅ .bin file: ' + binFile.name + ' (' + (binFile.size / 1024 / 1024).toFixed(1) + ' MB)</p>';
             } else {
                 status += '<p style="color: #dc3545;">❌ .bin file: Not found</p>';
             }
 
             if (mlmodelcFiles.length > 0) {
-                const fileName = mlmodelcFiles[0].name;
-                status += '<p style="color: #28a745;">✅ .mlmodelc file: ' + fileName + '</p>';
+                const file = mlmodelcFiles[0];
+                const sizeText = file.size > 0 ? ' (' + (file.size / 1024 / 1024).toFixed(1) + ' MB)' : '';
+                const typeText = file.type === 'directory/mlmodelc' ? ' (directory)' : '';
+                status += '<p style="color: #28a745;">✅ .mlmodelc file: ' + file.name + sizeText + typeText + '</p>';
             } else {
                 status += '<p style="color: #dc3545;">❌ .mlmodelc file: Not found</p>';
             }
@@ -933,7 +988,18 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         async function uploadModel() {
             const binFile = uploadedFiles.find(f => f.name.endsWith('.bin'));
-            const mlmodelcFiles = uploadedFiles.filter(f => f.name.endsWith('.mlmodelc') || f.name.endsWith('.mlmodelc.zip'));
+            const mlmodelcFiles = uploadedFiles.filter(f =>
+                f.name.endsWith('.mlmodelc') ||
+                f.name.endsWith('.mlmodelc.zip') ||
+                (f.type === 'directory/mlmodelc')
+            );
+
+            console.log('🔍 Upload Debug:', {
+                totalFiles: uploadedFiles.length,
+                binFile: binFile ? binFile.name : 'NONE',
+                mlmodelcFiles: mlmodelcFiles.map(f => ({ name: f.name, type: f.type, size: f.size })),
+                allFileNames: uploadedFiles.map(f => ({ name: f.name, type: f.type }))
+            });
 
             if (!binFile || mlmodelcFiles.length === 0) {
                 alert('Both .bin file and .mlmodelc/.mlmodelc.zip file are required');
@@ -947,19 +1013,62 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
             try {
                 const allFiles = [binFile, ...mlmodelcFiles];
+                console.log('🚀 Starting upload of', allFiles.length, 'files:', allFiles.map(f => ({ name: f.name, type: f.type })));
 
                 for (let i = 0; i < allFiles.length; i++) {
                     const file = allFiles[i];
                     const fileProgress = (i / allFiles.length) * 100;
 
-                    uploadBtn.textContent = `Uploading ${file.name} (${i + 1}/${allFiles.length})...`;
-                    updateProgress(fileProgress, `Uploading ${file.name} (${i + 1}/${allFiles.length})`);
+                    if (file.type === 'directory/mlmodelc') {
+                        // Create a zip file from the .mlmodelc directory
+                        console.log(`📤 Starting directory zip ${i + 1}/${allFiles.length}: ${file.name} (${file.files.length} files)`);
+                        uploadBtn.textContent = `Zipping ${file.name} directory (${i + 1}/${allFiles.length})...`;
+                        updateProgress(fileProgress, `Zipping ${file.name} directory (${i + 1}/${allFiles.length})`);
 
-                    await uploadFileChunked(file, (progress) => {
-                        const totalProgress = fileProgress + (progress / allFiles.length);
-                        updateProgress(totalProgress, `Uploading ${file.name}: ${Math.round(progress)}%`);
-                        uploadBtn.textContent = `Uploading ${file.name}: ${Math.round(progress)}%`;
-                    });
+                        // Create zip file using JSZip
+                        const zip = new JSZip();
+
+                        // Add all files to the zip
+                        for (let j = 0; j < file.files.length; j++) {
+                            const subFile = file.files[j];
+                            const relativePath = subFile.webkitRelativePath.split('/').slice(1).join('/'); // Remove directory name
+                            console.log(`📦 Adding to zip: ${relativePath}`);
+
+                            const fileData = await subFile.arrayBuffer();
+                            zip.file(relativePath, fileData);
+                        }
+
+                        // Generate zip blob
+                        console.log(`📦 Generating zip for ${file.name}...`);
+                        const zipBlob = await zip.generateAsync({
+                            type: 'blob',
+                            compression: 'DEFLATE',
+                            compressionOptions: { level: 6 }
+                        });
+
+                        // Create a new file object for the zip
+                        const zipFile = new File([zipBlob], file.name + '.zip', { type: 'application/zip' });
+
+                        console.log(`📤 Uploading zipped directory: ${zipFile.name} (${zipFile.size} bytes)`);
+                        await uploadFileChunked(zipFile, (progress) => {
+                            const totalProgress = fileProgress + (progress / allFiles.length);
+                            updateProgress(totalProgress, `Uploading ${file.name}.zip: ${Math.round(progress)}%`);
+                            uploadBtn.textContent = `Uploading ${file.name}.zip: ${Math.round(progress)}%`;
+                        });
+                    } else {
+                        // Upload single file
+                        console.log(`📤 Starting upload ${i + 1}/${allFiles.length}: ${file.name} (${file.size} bytes)`);
+                        uploadBtn.textContent = `Uploading ${file.name} (${i + 1}/${allFiles.length})...`;
+                        updateProgress(fileProgress, `Uploading ${file.name} (${i + 1}/${allFiles.length})`);
+
+                        await uploadFileChunked(file, (progress) => {
+                            const totalProgress = fileProgress + (progress / allFiles.length);
+                            updateProgress(totalProgress, `Uploading ${file.name}: ${Math.round(progress)}%`);
+                            uploadBtn.textContent = `Uploading ${file.name}: ${Math.round(progress)}%`;
+                        });
+                    }
+
+                    console.log(`✅ Completed upload ${i + 1}/${allFiles.length}: ${file.name}`);
                 }
 
                 updateProgress(100, 'Upload completed successfully!');
@@ -2152,7 +2261,20 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
     }
 
     // Use filename as key - each file upload is tracked separately
+    // Sanitize the filename to prevent memory issues
     std::string upload_key = filename;
+
+    // Replace any problematic characters
+    for (char& c : upload_key) {
+        if (c == ' ' || c == '.' || c == '-') {
+            c = '_';
+        }
+    }
+
+    // Limit key length to prevent memory issues
+    if (upload_key.length() > 100) {
+        upload_key = upload_key.substr(0, 100);
+    }
 
     std::lock_guard<std::mutex> global_lock(uploads_mutex);
     auto it = active_uploads.find(upload_key);
@@ -2189,7 +2311,14 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
     }
 
     // Get upload reference (already have global lock)
-    auto& upload = active_uploads[upload_key];
+    auto it_check = active_uploads.find(upload_key);
+    if (it_check == active_uploads.end()) {
+        response.status_code = 404;
+        response.status_text = "Not Found";
+        response.body = R"({"error": "Upload session not found"})";
+        return response;
+    }
+    auto& upload = it_check->second;
 
     // Scope the upload lock to avoid use-after-free when erasing
     bool upload_completed = false;
@@ -2269,9 +2398,39 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
         // Clean up completed upload (already have global lock) - NOW SAFE
         active_uploads.erase(upload_key);
 
+        // Handle .mlmodelc.zip files - extract them after upload
+        if (filename.length() >= 13 && filename.substr(filename.length() - 13) == ".mlmodelc.zip") {
+            std::string zip_path = "models/" + filename;
+            std::string extract_dir = "models/" + filename.substr(0, filename.length() - 4); // Remove .zip extension
+
+            std::cout << "🎤 Extracting .mlmodelc.zip: " << filename << " to " << extract_dir << std::endl;
+
+            // Create extraction directory
+            std::string mkdir_cmd = "mkdir -p \"" + extract_dir + "\"";
+            system(mkdir_cmd.c_str());
+
+            // Extract zip file using unzip command
+            std::string unzip_cmd = "cd models && unzip -o \"" + filename + "\" -d \"" + filename.substr(0, filename.length() - 4) + "\"";
+            int unzip_result = system(unzip_cmd.c_str());
+
+            if (unzip_result == 0) {
+                std::cout << "✅ Successfully extracted " << filename << std::endl;
+
+                // Optionally remove the zip file after extraction
+                std::remove(zip_path.c_str());
+                std::cout << "🗑️ Removed zip file: " << filename << std::endl;
+
+                response.body = R"({"success": true, "message": "Upload completed and extracted", "filename": ")" + filename.substr(0, filename.length() - 4) + R"("})";
+            } else {
+                std::cout << "❌ Failed to extract " << filename << " (exit code: " << unzip_result << ")" << std::endl;
+                response.body = R"({"success": true, "message": "Upload completed but extraction failed", "filename": ")" + filename + R"("})";
+            }
+        } else {
+            response.body = R"({"success": true, "message": "Upload completed", "filename": ")" + filename + R"("})";
+        }
+
         response.status_code = 200;
         response.status_text = "OK";
-        response.body = R"({"success": true, "message": "Upload completed", "filename": ")" + filename + R"("})";
         return response;
     } else {
         // Partial content response (using stored values, not accessing upload object)
