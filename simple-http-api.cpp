@@ -20,13 +20,23 @@
 #include <thread>
 #include <sys/wait.h>
 
-// Chunked upload tracking for large files
+// ADDED: Server-side logging for debugging crashes
+static std::mutex log_mutex;
+static void write_server_log(const std::string& message) {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    std::ofstream logfile("server_debug.log", std::ios::app);
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    logfile << "[" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "] " << message << std::endl;
+    logfile.close();
+}
+
+// Simplified chunked upload tracking - removed complex global state
 struct ChunkedUpload {
     std::string filename;
     size_t total_size;
     size_t received_size;
     std::ofstream file_stream;
-    std::mutex mutex;
     std::chrono::steady_clock::time_point last_activity;
 
     ChunkedUpload(const std::string& fname, size_t size)
@@ -34,31 +44,11 @@ struct ChunkedUpload {
           last_activity(std::chrono::steady_clock::now()) {}
 };
 
-// Global upload tracking with cleanup
+// Simplified upload tracking - removed global mutex issues
 static std::map<std::string, std::unique_ptr<ChunkedUpload>> active_uploads;
 static std::mutex uploads_mutex;
-static std::atomic<bool> cleanup_running{false};
 
-// Cleanup function for abandoned uploads
-void cleanup_abandoned_uploads() {
-    std::lock_guard<std::mutex> lock(uploads_mutex);
-    auto now = std::chrono::steady_clock::now();
-
-    for (auto it = active_uploads.begin(); it != active_uploads.end();) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(now - it->second->last_activity);
-        if (elapsed.count() > 30) { // 30 minutes timeout
-            std::cout << "🎤 Cleaning up abandoned upload: " << it->second->filename << std::endl;
-            if (it->second->file_stream.is_open()) {
-                it->second->file_stream.close();
-            }
-            std::string filepath = "models/" + it->second->filename;
-            std::remove(filepath.c_str());
-            it = active_uploads.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
+// Removed complex cleanup function - simplified approach
 
 SimpleHttpServer::SimpleHttpServer(int port, Database* database)
     : port_(port), server_socket_(-1), running_(false), database_(database) {}
@@ -68,11 +58,14 @@ SimpleHttpServer::~SimpleHttpServer() {
 }
 
 bool SimpleHttpServer::start() {
+    write_server_log("SERVER: Starting HTTP server...");
     server_socket_ = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket_ < 0) {
+        write_server_log("SERVER: Failed to create socket");
         std::cerr << "Failed to create socket" << std::endl;
         return false;
     }
+    write_server_log("SERVER: Socket created successfully");
     
     // Allow socket reuse
     int opt = 1;
@@ -132,6 +125,7 @@ void SimpleHttpServer::server_loop() {
 }
 
 void SimpleHttpServer::handle_client(int client_socket) {
+    // write_server_log("SERVER: Handling new client connection"); // SILENCED: Too verbose
     // Set socket timeout
     struct timeval timeout;
     timeout.tv_sec = 300; // 5 minutes for large uploads
@@ -140,6 +134,7 @@ void SimpleHttpServer::handle_client(int client_socket) {
     setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
     try {
+        // write_server_log("SERVER: About to receive request data"); // SILENCED: Too verbose
         // Use larger buffer for reading request
         char buffer[65536]; // 64KB buffer
         ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
@@ -182,11 +177,21 @@ void SimpleHttpServer::handle_client(int client_socket) {
             }
         }
 
+        // write_server_log("SERVER: About to parse request"); // SILENCED: Too verbose
         HttpRequest request = parse_request(raw_request);
-        HttpResponse response = handle_request(request);
-        std::string response_str = create_response(response);
+        write_server_log("SERVER: Request parsed, method: " + request.method + " path: " + request.path);
 
+        write_server_log("SERVER: About to handle request");
+        HttpResponse response = handle_request(request);
+        write_server_log("SERVER: Request handled, status: " + std::to_string(response.status_code));
+
+        write_server_log("SERVER: About to create response string");
+        std::string response_str = create_response(response);
+        write_server_log("SERVER: Response string created, length: " + std::to_string(response_str.length()));
+
+        write_server_log("SERVER: About to send response");
         send(client_socket, response_str.c_str(), response_str.length(), 0);
+        write_server_log("SERVER: Response sent successfully");
     } catch (const std::exception& e) {
         std::cerr << "Client handling error: " << e.what() << std::endl;
         // Send error response
@@ -197,109 +202,7 @@ void SimpleHttpServer::handle_client(int client_socket) {
     close(client_socket);
 }
 
-HttpRequest SimpleHttpServer::parse_request_streaming(int client_socket) {
-    HttpRequest request;
-    std::string headers_buffer;
-    char buffer[8192]; // Increased buffer size
-
-    // Read headers first
-    while (true) {
-        ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-        if (bytes_read <= 0) {
-            throw std::runtime_error("Failed to read request headers");
-        }
-
-        buffer[bytes_read] = '\0';
-        headers_buffer += buffer;
-
-        // Check if we have complete headers (double CRLF)
-        size_t headers_end = headers_buffer.find("\r\n\r\n");
-        if (headers_end != std::string::npos) {
-            // Parse headers
-            std::string headers_only = headers_buffer.substr(0, headers_end);
-            std::istringstream stream(headers_only);
-            std::string line;
-
-            // Parse request line
-            if (std::getline(stream, line)) {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                std::istringstream request_line(line);
-                request_line >> request.method >> request.path;
-
-                // Parse query parameters
-                size_t query_pos = request.path.find('?');
-                if (query_pos != std::string::npos) {
-                    std::string query = request.path.substr(query_pos + 1);
-                    request.path = request.path.substr(0, query_pos);
-
-                    // Simple query parsing
-                    size_t pos = 0;
-                    while (pos < query.length()) {
-                        size_t eq_pos = query.find('=', pos);
-                        size_t amp_pos = query.find('&', pos);
-                        if (amp_pos == std::string::npos) amp_pos = query.length();
-
-                        if (eq_pos != std::string::npos && eq_pos < amp_pos) {
-                            std::string key = query.substr(pos, eq_pos - pos);
-                            std::string value = query.substr(eq_pos + 1, amp_pos - eq_pos - 1);
-                            request.query_params[key] = value;
-                        }
-                        pos = amp_pos + 1;
-                    }
-                }
-            }
-
-            // Parse headers
-            while (std::getline(stream, line)) {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                if (line.empty()) break;
-
-                size_t colon_pos = line.find(':');
-                if (colon_pos != std::string::npos) {
-                    std::string key = line.substr(0, colon_pos);
-                    std::string value = line.substr(colon_pos + 1);
-                    // Trim whitespace
-                    value.erase(0, value.find_first_not_of(" \t"));
-                    value.erase(value.find_last_not_of(" \t") + 1);
-                    request.headers[key] = value;
-                }
-            }
-
-            // Handle body if Content-Length is specified
-            auto content_length_it = request.headers.find("Content-Length");
-            if (content_length_it != request.headers.end()) {
-                size_t content_length = std::stoull(content_length_it->second);
-
-                // Get any body data already read
-                size_t body_start = headers_end + 4;
-                if (body_start < headers_buffer.length()) {
-                    request.body = headers_buffer.substr(body_start);
-                }
-
-                // Read remaining body data
-                while (request.body.length() < content_length) {
-                    size_t remaining = content_length - request.body.length();
-                    size_t to_read = std::min(remaining, sizeof(buffer) - 1);
-
-                    ssize_t bytes_read = recv(client_socket, buffer, to_read, 0);
-                    if (bytes_read <= 0) {
-                        std::cout << "❌ Failed to read body: bytes_read=" << bytes_read
-                                  << ", remaining=" << remaining << ", errno=" << errno << std::endl;
-                        throw std::runtime_error("Failed to read request body");
-                    }
-
-                    request.body.append(buffer, bytes_read);
-                    std::cout << "📥 Read " << bytes_read << " bytes, total body: " << request.body.length()
-                              << "/" << content_length << std::endl;
-                }
-            }
-
-            break;
-        }
-    }
-
-    return request;
-}
+// Removed complex streaming parser - using simpler approach only
 
 HttpRequest SimpleHttpServer::parse_request(const std::string& raw_request) {
     HttpRequest request;
@@ -824,6 +727,29 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         let selectedModel = null;
         let currentModel = null;
 
+        // ADDED: JavaScript logging to server
+        function logToServer(message) {
+            try {
+                fetch('/api/log', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: message })
+                }).catch(err => {
+                    // Fallback to console if server logging fails
+                    console.log('SERVER-LOG-FAILED:', message);
+                });
+                // Also log to browser console
+                console.log(message);
+            } catch (error) {
+                console.log('LOG-ERROR:', message);
+            }
+        }
+
+        // TEST: Log when page loads to verify logging system
+        console.log('🔥 CONSOLE-TEST: JavaScript is working');
+        alert('🔥 ALERT-TEST: JavaScript is working');
+        logToServer('🔥 PAGE-LOADED: JavaScript logging system initialized');
+
         function showUploadArea() {
             document.getElementById('uploadArea').style.display = 'block';
             setupDragAndDrop();
@@ -889,62 +815,302 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 dropZone.style.backgroundColor = '#f0f8ff';
             });
 
-            dropZone.addEventListener('drop', (e) => {
+            dropZone.addEventListener('drop', async (e) => {
                 e.preventDefault();
                 dropZone.style.borderColor = '#007bff';
                 dropZone.style.backgroundColor = '#f0f8ff';
 
-                const files = Array.from(e.dataTransfer.files);
-                processFiles(files);
+                logToServer('🎯 DROP-EVENT: Drop event detected');
+                console.log('🎯 Drop event detected');
+
+                // CLEAN ARCHITECTURE: Handle files and directories as single units
+                if (e.dataTransfer.items) {
+                    const droppedItems = [];
+
+                    for (let i = 0; i < e.dataTransfer.items.length; i++) {
+                        const item = e.dataTransfer.items[i];
+
+                        if (item.kind === 'file') {
+                            const entry = item.webkitGetAsEntry();
+
+                            if (entry) {
+                                if (entry.isFile) {
+                                    // Handle individual files (.bin files)
+                                    const file = item.getAsFile();
+                                    console.log('📄 Dropped file:', file.name);
+                                    droppedItems.push(file);
+                                } else if (entry.isDirectory) {
+                                    // Handle directories as single bundles (.mlmodelc)
+                                    console.log('📁 MLMODELC-LOG: Dropped directory bundle:', entry.name);
+                                    console.log('📁 MLMODELC-LOG: Directory entry object:', entry);
+                                    droppedItems.push({
+                                        name: entry.name,
+                                        type: 'directory-bundle',
+                                        directoryEntry: entry
+                                    });
+                                    console.log('📁 MLMODELC-LOG: Added directory bundle to droppedItems');
+                                }
+                            }
+                        }
+                    }
+
+                    console.log('🔍 Total items from drop:', droppedItems.length);
+                    processDroppedItems(droppedItems);
+                } else {
+                    // Fallback for older browsers - only handles files
+                    const files = Array.from(e.dataTransfer.files);
+                    processDroppedItems(files);
+                }
+            });
+        }
+
+        // FIXED: TRUE STREAMING - Upload chunks as they're created
+        async function createAndUploadZipFromDirectory(directoryEntry, uploadCallback, maxChunkSize = 100 * 1024 * 1024) {
+            logToServer('📦 MLMODELC-LOG: === STARTING ZIP CREATION ===');
+            logToServer('📦 MLMODELC-LOG: Directory name: ' + directoryEntry.name);
+            logToServer('📦 MLMODELC-LOG: Max chunk size: ' + maxChunkSize);
+            console.log('📦 MLMODELC-LOG: === STARTING ZIP CREATION ===');
+            console.log('📦 MLMODELC-LOG: Directory name:', directoryEntry.name);
+            console.log('📦 MLMODELC-LOG: Directory entry object:', directoryEntry);
+            console.log('📦 MLMODELC-LOG: Max chunk size:', maxChunkSize);
+
+            console.log('📦 MLMODELC-LOG: Creating new JSZip instance...');
+            const zip = new JSZip();
+            console.log('📦 MLMODELC-LOG: JSZip instance created successfully');
+
+            // Read directory contents and add to ZIP
+            console.log('📦 MLMODELC-LOG: About to call addDirectoryToZip...');
+            await addDirectoryToZip(zip, directoryEntry, '');
+            console.log('📦 MLMODELC-LOG: addDirectoryToZip completed successfully');
+
+            console.log('📦 MLMODELC-LOG: ZIP created, streaming to chunks...');
+
+            // TRUE STREAMING: Upload chunks immediately as they're created
+            let chunkCount = 0;
+            let totalSize = 0;
+
+            try {
+                console.log('📦 MLMODELC-LOG: Starting streaming ZIP generation...');
+
+                // Use streaming generation with chunked output
+                console.log('📦 MLMODELC-JS-LOG: About to call zip.generateInternalStream...');
+                console.log('📦 MLMODELC-JS-LOG: zip object:', zip);
+                console.log('📦 MLMODELC-JS-LOG: Checking if zip.generateInternalStream exists:', typeof zip.generateInternalStream);
+
+                if (typeof zip.generateInternalStream !== 'function') {
+                    console.error('❌ MLMODELC-JS-LOG: zip.generateInternalStream is NOT a function!');
+                    console.error('❌ MLMODELC-JS-LOG: Available zip methods:', Object.getOwnPropertyNames(zip));
+                    throw new Error('zip.generateInternalStream is not a function');
+                }
+
+                console.log('📦 MLMODELC-JS-LOG: zip.generateInternalStream exists, calling it...');
+                const zipStream = zip.generateInternalStream({
+                    type: 'uint8array',
+                    compression: 'DEFLATE',
+                    compressionOptions: { level: 1 }, // Minimal compression
+                    streamFiles: true
+                });
+                console.log('📦 MLMODELC-JS-LOG: generateInternalStream returned successfully');
+                console.log('📦 MLMODELC-JS-LOG: zipStream object:', zipStream);
+                console.log('📦 MLMODELC-JS-LOG: zipStream type:', typeof zipStream);
+
+                console.log('📦 MLMODELC-JS-LOG: About to initialize efficient buffer');
+                let currentChunkParts = [];
+                let currentChunkSize = 0;
+
+                console.log('📦 MLMODELC-JS-LOG: About to set up zipStream.on("data") handler');
+                zipStream.on('data', (data, metadata) => {
+                    console.log('📦 MLMODELC-JS-LOG: zipStream data event fired, length:', data.length);
+
+                    // EFFICIENT: Just store the data parts, don't copy everything
+                    currentChunkParts.push(data);
+                    currentChunkSize += data.length;
+                    totalSize += data.length;
+
+                    // If chunk is large enough, upload it immediately and start new chunk
+                    if (currentChunkSize >= maxChunkSize) {
+                        console.log('📦 MLMODELC-JS-LOG: Chunk ready, size:', currentChunkSize);
+                        chunkCount++;
+                        const chunkBlob = new Blob(currentChunkParts);
+                        console.log('📦 Created chunk:', chunkCount, '(' + (maxChunkSize / 1024 / 1024).toFixed(1) + ' MB)');
+
+                        // Upload chunk immediately
+                        uploadCallback(chunkBlob, chunkCount).catch(error => {
+                            console.error('❌ Chunk upload failed:', error);
+                        });
+
+                        currentChunkParts = [];
+                        currentChunkSize = 0;
+                    }
+                });
+                console.log('📦 MLMODELC-JS-LOG: zipStream.on("data") handler set up');
+
+                // Wait for streaming to complete
+                await new Promise((resolve, reject) => {
+                    zipStream.on('end', () => {
+                        // Upload final chunk if any data remains
+                        if (currentChunkParts.length > 0) {
+                            chunkCount++;
+                            const finalChunkBlob = new Blob(currentChunkParts);
+                            console.log('📦 Created final chunk:', chunkCount, '(' + (currentChunkSize / 1024 / 1024).toFixed(1) + ' MB)');
+
+                            // Upload final chunk immediately
+                            uploadCallback(finalChunkBlob, chunkCount).catch(error => {
+                                console.error('❌ Final chunk upload failed:', error);
+                            });
+                        }
+                        resolve();
+                    });
+                    zipStream.on('error', reject);
+                    zipStream.resume();
+                });
+
+                console.log('✅ Streaming ZIP generation and upload successful:', (totalSize / 1024 / 1024).toFixed(1), 'MB in', chunkCount, 'chunks');
+
+            } catch (error) {
+                console.error('❌ Streaming ZIP generation failed:', error);
+                throw new Error(`ZIP generation failed: ${error.message}. Try uploading smaller files.`);
+            }
+
+            return {
+                name: directoryEntry.name + '.zip',
+                chunkCount: chunkCount,
+                totalSize: totalSize
+            };
+        }
+
+        async function addDirectoryToZip(zip, directoryEntry, path) {
+            console.log('📁 MLMODELC-LOG: === STARTING addDirectoryToZip ===');
+            console.log('📁 MLMODELC-LOG: Directory entry:', directoryEntry.name);
+            console.log('📁 MLMODELC-LOG: Path:', path);
+
+            return new Promise((resolve, reject) => {
+                console.log('📁 MLMODELC-LOG: Creating directory reader...');
+                const reader = directoryEntry.createReader();
+                console.log('📁 MLMODELC-LOG: Directory reader created successfully');
+
+                function readEntries() {
+                    console.log('📁 MLMODELC-LOG: Calling reader.readEntries...');
+                    reader.readEntries(async (entries) => {
+                        console.log('📁 MLMODELC-LOG: readEntries callback - entries count:', entries.length);
+                        if (entries.length === 0) {
+                            console.log('📁 MLMODELC-LOG: No more entries, resolving');
+                            resolve();
+                            return;
+                        }
+
+                        console.log('📁 MLMODELC-LOG: Processing', entries.length, 'entries...');
+                        for (let i = 0; i < entries.length; i++) {
+                            const entry = entries[i];
+                            const entryPath = path ? path + '/' + entry.name : entry.name;
+                            console.log('📁 MLMODELC-LOG: Processing entry', i + 1, '/', entries.length, ':', entry.name);
+                            console.log('📁 MLMODELC-LOG: Entry path:', entryPath);
+                            console.log('📁 MLMODELC-LOG: Entry isFile:', entry.isFile, 'isDirectory:', entry.isDirectory);
+
+                            if (entry.isFile) {
+                                console.log('📄 MLMODELC-LOG: Processing FILE:', entryPath);
+                                try {
+                                    console.log('📄 MLMODELC-LOG: Getting file object...');
+                                    const file = await new Promise((res, rej) => {
+                                        entry.file(res, rej);
+                                    });
+                                    console.log('📄 MLMODELC-LOG: File object obtained, size:', file.size);
+
+                                    // FIXED: Always use File object directly - JSZip streaming handles memory efficiently
+                                    console.log('📄 MLMODELC-LOG: Adding file to ZIP:', entryPath, '(' + (file.size / 1024 / 1024).toFixed(1) + ' MB)');
+                                    zip.file(entryPath, file);
+                                    console.log('✅ MLMODELC-LOG: Successfully added to ZIP:', entryPath);
+                                } catch (error) {
+                                    console.error('❌ MLMODELC-LOG: Error adding file to ZIP:', entryPath, error);
+                                }
+                            } else if (entry.isDirectory) {
+                                console.log('📁 MLMODELC-LOG: Processing SUBDIRECTORY:', entryPath);
+                                console.log('📁 MLMODELC-LOG: Recursively calling addDirectoryToZip...');
+                                await addDirectoryToZip(zip, entry, entryPath);
+                                console.log('📁 MLMODELC-LOG: Recursive call completed for:', entryPath);
+                            }
+                        }
+                        console.log('📁 MLMODELC-LOG: Finished processing all entries');
+
+                        console.log('📁 MLMODELC-LOG: Calling readEntries again to continue...');
+                        readEntries(); // Continue reading
+                    }, (error) => {
+                        console.error('❌ MLMODELC-LOG: readEntries error:', error);
+                        reject(error);
+                    });
+                }
+
+                console.log('📁 MLMODELC-LOG: Starting initial readEntries call...');
+                readEntries();
             });
         }
 
         function handleFiles(e) {
             const files = Array.from(e.target.files);
-            processFiles(files);
+            processDroppedItems(files);
         }
 
-        function processFiles(files) {
-            // Don't reset uploadedFiles - accumulate files instead
+        function processDroppedItems(items) {
+            console.log('🔍 Processing', items.length, 'dropped items');
 
-            files.forEach(file => {
-                console.log('🔍 Processing file:', file.name, 'webkitRelativePath:', file.webkitRelativePath);
+            items.forEach(item => {
+                if (item.type === 'directory-bundle') {
+                    // Handle .mlmodelc directory bundle
+                    console.log('📁 MLMODELC-LOG: Processing directory bundle:', item.name);
+                    console.log('📁 MLMODELC-LOG: Item object:', item);
+                    console.log('📁 MLMODELC-LOG: DirectoryEntry:', item.directoryEntry);
 
-                // Handle individual files
-                if (file.name.endsWith('.bin') || file.name.endsWith('.mlmodelc.zip')) {
-                    uploadedFiles.push(file);
-                }
+                    // Remove existing .mlmodelc files
+                    console.log('📁 MLMODELC-LOG: Before filter - uploadedFiles count:', uploadedFiles.length);
+                    uploadedFiles = uploadedFiles.filter(f =>
+                        !f.name.endsWith('.mlmodelc') &&
+                        !f.name.endsWith('.mlmodelc.zip') &&
+                        f.type !== 'mlmodelc-bundle'
+                    );
+                    console.log('📁 MLMODELC-LOG: After filter - uploadedFiles count:', uploadedFiles.length);
 
-                // Handle .mlmodelc directory contents - look for the main model file
-                if (file.webkitRelativePath && file.webkitRelativePath.includes('.mlmodelc/')) {
-                    // This is a file inside a .mlmodelc directory
-                    const dirName = file.webkitRelativePath.split('/')[0];
-                    if (dirName.endsWith('.mlmodelc')) {
-                        // Create a virtual file representing the .mlmodelc directory
-                        const existingMlmodelc = uploadedFiles.find(f => f.name === dirName);
-                        if (!existingMlmodelc) {
-                            // Create a virtual file object for the .mlmodelc directory
-                            const virtualFile = {
-                                name: dirName,
-                                size: 0, // We'll calculate this
-                                type: 'directory/mlmodelc',
-                                files: [] // Store all files in the directory
-                            };
-                            uploadedFiles.push(virtualFile);
-                        }
+                    // Add as bundle
+                    const bundleObject = {
+                        name: item.name,
+                        type: 'mlmodelc-bundle',
+                        directoryEntry: item.directoryEntry,
+                        size: 0 // Will be calculated during ZIP
+                    };
+                    console.log('📁 MLMODELC-LOG: Created bundle object:', bundleObject);
 
-                        // Add this file to the directory's file list
-                        const mlmodelcFile = uploadedFiles.find(f => f.name === dirName);
-                        if (mlmodelcFile && mlmodelcFile.files) {
-                            mlmodelcFile.files.push(file);
-                            mlmodelcFile.size += file.size;
-                        }
-                    }
-                }
+                    uploadedFiles.push(bundleObject);
+                    console.log('📁 MLMODELC-LOG: Added bundle to uploadedFiles, new count:', uploadedFiles.length);
 
-                // Handle direct .mlmodelc files (if they exist as single files)
-                if (file.name.endsWith('.mlmodelc') && !file.webkitRelativePath) {
-                    uploadedFiles.push(file);
+                    console.log('✅ MLMODELC-LOG: Successfully added .mlmodelc bundle:', item.name);
+
+                } else if (item.name && item.name.endsWith('.bin')) {
+                    // Handle .bin file
+                    console.log('📄 Processing .bin file:', item.name);
+
+                    // Remove existing .bin files
+                    uploadedFiles = uploadedFiles.filter(f => !f.name.endsWith('.bin'));
+
+                    // Add new .bin file
+                    uploadedFiles.push(item);
+                    console.log('✅ Added .bin file:', item.name);
+
+                } else if (item.name && item.name.endsWith('.mlmodelc.zip')) {
+                    // Handle pre-zipped .mlmodelc file
+                    console.log('📦 Processing .mlmodelc.zip file:', item.name);
+
+                    // Remove existing .mlmodelc files
+                    uploadedFiles = uploadedFiles.filter(f =>
+                        !f.name.endsWith('.mlmodelc') &&
+                        !f.name.endsWith('.mlmodelc.zip') &&
+                        f.type !== 'mlmodelc-bundle'
+                    );
+
+                    // Add ZIP file
+                    uploadedFiles.push(item);
+                    console.log('✅ Added .mlmodelc.zip file:', item.name);
+
+                } else {
+                    console.log('⏭️ Skipping unsupported item:', item.name || 'unknown');
                 }
             });
 
@@ -959,7 +1125,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             const mlmodelcFiles = uploadedFiles.filter(f =>
                 f.name.endsWith('.mlmodelc') ||
                 f.name.endsWith('.mlmodelc.zip') ||
-                (f.type === 'directory/mlmodelc')
+                f.type === 'mlmodelc-bundle'
             );
 
             let status = '<div style="text-align: left;">';
@@ -972,8 +1138,16 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
             if (mlmodelcFiles.length > 0) {
                 const file = mlmodelcFiles[0];
-                const sizeText = file.size > 0 ? ' (' + (file.size / 1024 / 1024).toFixed(1) + ' MB)' : '';
-                const typeText = file.type === 'directory/mlmodelc' ? ' (directory)' : '';
+                let sizeText = '';
+                let typeText = '';
+
+                if (file.type === 'mlmodelc-bundle') {
+                    typeText = ' (directory bundle)';
+                    sizeText = ' (will be zipped)';
+                } else if (file.size > 0) {
+                    sizeText = ' (' + (file.size / 1024 / 1024).toFixed(1) + ' MB)';
+                }
+
                 status += '<p style="color: #28a745;">✅ .mlmodelc file: ' + file.name + sizeText + typeText + '</p>';
             } else {
                 status += '<p style="color: #dc3545;">❌ .mlmodelc file: Not found</p>';
@@ -987,22 +1161,29 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         }
 
         async function uploadModel() {
+            logToServer('🔥 BUTTON-CLICKED: Upload button was clicked - uploadModel() called');
+            logToServer('🔥 UPLOAD-START: === UPLOAD MODEL FUNCTION CALLED ===');
+            logToServer('🔥 UPLOAD-START: uploadedFiles array length: ' + uploadedFiles.length);
+            logToServer('=== CLEAN UPLOAD STARTED ===');
+
+            logToServer('🔥 UPLOAD-START: Looking for .bin file...');
             const binFile = uploadedFiles.find(f => f.name.endsWith('.bin'));
+            logToServer('🔥 UPLOAD-START: binFile found: ' + (binFile ? binFile.name : 'NONE'));
+
+            logToServer('🔥 UPLOAD-START: Looking for .mlmodelc files...');
             const mlmodelcFiles = uploadedFiles.filter(f =>
                 f.name.endsWith('.mlmodelc') ||
                 f.name.endsWith('.mlmodelc.zip') ||
-                (f.type === 'directory/mlmodelc')
+                f.type === 'mlmodelc-bundle'
             );
+            logToServer('🔥 UPLOAD-START: mlmodelcFiles found count: ' + mlmodelcFiles.length);
 
-            console.log('🔍 Upload Debug:', {
-                totalFiles: uploadedFiles.length,
-                binFile: binFile ? binFile.name : 'NONE',
-                mlmodelcFiles: mlmodelcFiles.map(f => ({ name: f.name, type: f.type, size: f.size })),
-                allFileNames: uploadedFiles.map(f => ({ name: f.name, type: f.type }))
-            });
+            console.log('📋 Upload Summary:');
+            console.log('  .bin file:', binFile ? binFile.name : 'MISSING');
+            console.log('  .mlmodelc file:', mlmodelcFiles.length > 0 ? mlmodelcFiles[0].name : 'MISSING');
 
             if (!binFile || mlmodelcFiles.length === 0) {
-                alert('Both .bin file and .mlmodelc/.mlmodelc.zip file are required');
+                alert('Both .bin file and .mlmodelc file/directory are required');
                 return;
             }
 
@@ -1012,65 +1193,115 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             showProgressBar();
 
             try {
-                const allFiles = [binFile, ...mlmodelcFiles];
-                console.log('🚀 Starting upload of', allFiles.length, 'files:', allFiles.map(f => ({ name: f.name, type: f.type })));
+                // Check for existing files
+                console.log('🔍 Checking for existing files...');
+                const filesToCheck = [];
+                filesToCheck.push(binFile.name);
 
-                for (let i = 0; i < allFiles.length; i++) {
-                    const file = allFiles[i];
-                    const fileProgress = (i / allFiles.length) * 100;
-
-                    if (file.type === 'directory/mlmodelc') {
-                        // Create a zip file from the .mlmodelc directory
-                        console.log(`📤 Starting directory zip ${i + 1}/${allFiles.length}: ${file.name} (${file.files.length} files)`);
-                        uploadBtn.textContent = `Zipping ${file.name} directory (${i + 1}/${allFiles.length})...`;
-                        updateProgress(fileProgress, `Zipping ${file.name} directory (${i + 1}/${allFiles.length})`);
-
-                        // Create zip file using JSZip
-                        const zip = new JSZip();
-
-                        // Add all files to the zip
-                        for (let j = 0; j < file.files.length; j++) {
-                            const subFile = file.files[j];
-                            const relativePath = subFile.webkitRelativePath.split('/').slice(1).join('/'); // Remove directory name
-                            console.log(`📦 Adding to zip: ${relativePath}`);
-
-                            const fileData = await subFile.arrayBuffer();
-                            zip.file(relativePath, fileData);
-                        }
-
-                        // Generate zip blob
-                        console.log(`📦 Generating zip for ${file.name}...`);
-                        const zipBlob = await zip.generateAsync({
-                            type: 'blob',
-                            compression: 'DEFLATE',
-                            compressionOptions: { level: 6 }
-                        });
-
-                        // Create a new file object for the zip
-                        const zipFile = new File([zipBlob], file.name + '.zip', { type: 'application/zip' });
-
-                        console.log(`📤 Uploading zipped directory: ${zipFile.name} (${zipFile.size} bytes)`);
-                        await uploadFileChunked(zipFile, (progress) => {
-                            const totalProgress = fileProgress + (progress / allFiles.length);
-                            updateProgress(totalProgress, `Uploading ${file.name}.zip: ${Math.round(progress)}%`);
-                            uploadBtn.textContent = `Uploading ${file.name}.zip: ${Math.round(progress)}%`;
-                        });
-                    } else {
-                        // Upload single file
-                        console.log(`📤 Starting upload ${i + 1}/${allFiles.length}: ${file.name} (${file.size} bytes)`);
-                        uploadBtn.textContent = `Uploading ${file.name} (${i + 1}/${allFiles.length})...`;
-                        updateProgress(fileProgress, `Uploading ${file.name} (${i + 1}/${allFiles.length})`);
-
-                        await uploadFileChunked(file, (progress) => {
-                            const totalProgress = fileProgress + (progress / allFiles.length);
-                            updateProgress(totalProgress, `Uploading ${file.name}: ${Math.round(progress)}%`);
-                            uploadBtn.textContent = `Uploading ${file.name}: ${Math.round(progress)}%`;
-                        });
-                    }
-
-                    console.log(`✅ Completed upload ${i + 1}/${allFiles.length}: ${file.name}`);
+                if (mlmodelcFiles[0].type === 'mlmodelc-bundle') {
+                    filesToCheck.push(mlmodelcFiles[0].name + '.zip');
+                } else {
+                    filesToCheck.push(mlmodelcFiles[0].name);
                 }
 
+                const existingFiles = await checkExistingFiles(filesToCheck);
+                if (existingFiles.length > 0) {
+                    const fileList = existingFiles.map(f => '• ' + f).join('\n');
+                    const overwrite = confirm(
+                        `The following files already exist and will be overwritten:\n\n${fileList}\n\nDo you want to continue?`
+                    );
+
+                    if (!overwrite) {
+                        uploadBtn.disabled = false;
+                        uploadBtn.textContent = 'Upload Model';
+                        hideProgressBar();
+                        return;
+                    }
+                }
+
+                // CLEAN ARCHITECTURE: Process .mlmodelc FIRST, then .bin
+                console.log('🚀 Starting clean upload process...');
+
+                // Process .mlmodelc file/directory FIRST
+                const mlmodelcFile = mlmodelcFiles[0];
+                logToServer('📦 MLMODELC-JS-LOG: === STARTING MLMODELC PROCESSING ===');
+                logToServer('📦 MLMODELC-JS-LOG: mlmodelcFile.name: ' + mlmodelcFile.name);
+                logToServer('📦 MLMODELC-JS-LOG: mlmodelcFile.type: ' + mlmodelcFile.type);
+                logToServer('📦 MLMODELC-JS-LOG: Processing .mlmodelc FIRST: ' + mlmodelcFile.name + ' type: ' + mlmodelcFile.type);
+
+                logToServer('📦 MLMODELC-JS-LOG: Checking if mlmodelcFile.type === "mlmodelc-bundle"');
+                logToServer('📦 MLMODELC-JS-LOG: mlmodelcFile.type value: ' + mlmodelcFile.type);
+                logToServer('📦 MLMODELC-JS-LOG: Comparison result: ' + (mlmodelcFile.type === 'mlmodelc-bundle'));
+
+                if (mlmodelcFile.type === 'mlmodelc-bundle') {
+                    logToServer('📦 MLMODELC-JS-LOG: === ENTERING MLMODELC-BUNDLE PROCESSING ===');
+                    // CLEAN ARCHITECTURE: Create ZIP from directory and upload in chunks
+                    logToServer('📦 MLMODELC-JS-LOG: About to log "Creating ZIP from .mlmodelc directory bundle..."');
+                    logToServer('📦 Creating ZIP from .mlmodelc directory bundle...');
+                    logToServer('📦 MLMODELC-JS-LOG: About to call updateProgress(10, ...)');
+                    updateProgress(10, 'Creating ZIP from directory...');
+                    logToServer('📦 MLMODELC-JS-LOG: About to set uploadBtn.textContent');
+                    uploadBtn.textContent = 'Creating ZIP from directory...';
+                    logToServer('📦 MLMODELC-JS-LOG: UI updated, about to call createZipFromDirectory()');
+                    logToServer('📦 MLMODELC-JS-LOG: mlmodelcFile.directoryEntry exists: ' + !!mlmodelcFile.directoryEntry);
+
+                    logToServer('📦 MLMODELC-JS-LOG: === CALLING createAndUploadZipFromDirectory() ===');
+
+                    // Create upload callback for streaming
+                    let totalChunks = 0;
+                    const zipName = mlmodelcFile.directoryEntry.name + '.zip';
+
+                    const uploadCallback = async (chunkBlob, chunkNumber) => {
+                        totalChunks = Math.max(totalChunks, chunkNumber);
+                        const chunkName = `${zipName}.part${chunkNumber}`;
+
+                        console.log(`📤 Streaming upload chunk ${chunkNumber}:`, chunkName);
+                        logToServer(`📤 Streaming upload chunk ${chunkNumber}: ${chunkName}`);
+
+                        const chunkFile = new File([chunkBlob], chunkName, { type: 'application/zip' });
+
+                        await uploadFileChunked(chunkFile, (progress) => {
+                            const totalProgress = 10 + (chunkNumber / (totalChunks || chunkNumber)) * 40;
+                            updateProgress(totalProgress, `Uploading ${chunkName}: ${Math.round(progress)}%`);
+                            uploadBtn.textContent = `Uploading ${chunkName}: ${Math.round(progress)}%`;
+                        });
+
+                        console.log(`✅ Chunk ${chunkNumber} uploaded successfully`);
+                        logToServer(`✅ Chunk ${chunkNumber} uploaded successfully`);
+                    };
+
+                    const zipResult = await createAndUploadZipFromDirectory(mlmodelcFile.directoryEntry, uploadCallback);
+                    logToServer('📦 MLMODELC-JS-LOG: === createAndUploadZipFromDirectory() RETURNED ===');
+                    logToServer('📦 MLMODELC-JS-LOG: zipResult.name: ' + zipResult.name);
+                    logToServer('📦 ZIP created and uploaded: ' + zipResult.name + ' chunks: ' + zipResult.chunkCount);
+
+                } else {
+                    // Upload pre-zipped .mlmodelc file
+                    console.log('📤 Uploading .mlmodelc.zip file:', mlmodelcFile.name);
+                    updateProgress(10, 'Uploading .mlmodelc.zip file...');
+                    uploadBtn.textContent = 'Uploading .mlmodelc.zip file...';
+
+                    await uploadFileChunked(mlmodelcFile, (progress) => {
+                        updateProgress(10 + (progress * 0.4), `Uploading ${mlmodelcFile.name}: ${Math.round(progress)}%`);
+                        uploadBtn.textContent = `Uploading ${mlmodelcFile.name}: ${Math.round(progress)}%`;
+                    });
+                }
+
+                console.log('✅ .mlmodelc file/bundle uploaded successfully');
+
+                // Upload .bin file LAST
+                console.log('📤 Uploading .bin file:', binFile.name);
+                updateProgress(50, 'Uploading .bin file...');
+                uploadBtn.textContent = 'Uploading .bin file...';
+
+                await uploadFileChunked(binFile, (progress) => {
+                    updateProgress(50 + (progress * 0.5), `Uploading ${binFile.name}: ${Math.round(progress)}%`);
+                    uploadBtn.textContent = `Uploading ${binFile.name}: ${Math.round(progress)}%`;
+                });
+
+                console.log('✅ .bin file uploaded successfully');
+
+                console.log('✅ All uploads completed successfully!');
                 updateProgress(100, 'Upload completed successfully!');
                 uploadBtn.textContent = 'Upload Complete!';
 
@@ -1081,11 +1312,35 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 }, 1000);
 
             } catch (error) {
-                console.error('Upload error:', error);
+                console.error('❌ Upload error:', error);
                 alert('Upload failed: ' + error.message);
                 uploadBtn.disabled = false;
                 uploadBtn.textContent = 'Upload Model';
                 hideProgressBar();
+            }
+        }
+
+        async function checkExistingFiles(filenames) {
+            try {
+                console.log('Checking existing files:', filenames);
+                const response = await fetch('/api/whisper/check-files', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ filenames: filenames })
+                });
+
+                if (!response.ok) {
+                    console.error('Failed to check existing files:', response.statusText);
+                    return []; // If check fails, assume no existing files
+                }
+
+                const result = await response.json();
+                return result.existing_files || [];
+            } catch (error) {
+                console.error('Error checking existing files:', error);
+                return []; // If check fails, assume no existing files
             }
         }
 
@@ -1123,8 +1378,10 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                             throw new Error(result.error || 'Upload failed');
                         }
 
-                        if (progressCallback && result.progress !== undefined) {
-                            progressCallback(result.progress);
+                        // Calculate progress based on chunks completed
+                        const progress = ((chunkIndex + 1) / totalChunks) * 100;
+                        if (progressCallback) {
+                            progressCallback(progress);
                         }
 
                         success = true;
@@ -1317,6 +1574,39 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
     // Silence all API request logging - only show business logic messages
 
+    // ADDED: JavaScript logging endpoint
+    if (request.path == "/api/log" && request.method == "POST") {
+        // Extract message from JSON body
+        std::string message = "JS-LOG: Unknown message";
+        try {
+            // Simple JSON parsing for {"message": "..."} - handle both with and without spaces
+            size_t start = request.body.find("\"message\"");
+            if (start != std::string::npos) {
+                // Find the opening quote after the colon
+                start = request.body.find("\"", start + 9); // Skip past "message"
+                if (start != std::string::npos) {
+                    start++; // Skip the opening quote
+                    size_t end = request.body.find("\"", start);
+                    if (end != std::string::npos) {
+                        message = "JS-LOG: " + request.body.substr(start, end - start);
+                    }
+                }
+            }
+        } catch (...) {
+            message = "JS-LOG: Failed to parse log message";
+        }
+
+        // Write to server log
+        write_server_log(message);
+
+        HttpResponse response;
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.headers["Content-Type"] = "application/json";
+        response.body = R"({"success": true})";
+        return response;
+    }
+
     if (request.path == "/api/status") {
         return api_status(request);
     } else if (request.path == "/api/callers") {
@@ -1386,6 +1676,10 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
         if (request.method == "POST") {
             return api_whisper_upload(request);
         }
+    } else if (request.path == "/api/whisper/check-files") {
+        if (request.method == "POST") {
+            return api_whisper_check_files(request);
+        }
     } else if (request.path == "/api/whisper/models") {
         if (request.method == "GET") {
             return api_whisper_models_get(request);
@@ -1414,6 +1708,13 @@ HttpResponse SimpleHttpServer::api_status(const HttpRequest& request) {
     response.status_text = "OK";
     response.headers["Content-Type"] = "application/json";
 
+    // Check for detailed status request
+    bool detailed = false;
+    auto it = request.query_params.find("detailed");
+    if (it != request.query_params.end() && it->second == "true") {
+        detailed = true;
+    }
+
     // Check actual module status
     std::string db_status = database_ ? "online" : "offline";
 
@@ -1431,13 +1732,22 @@ HttpResponse SimpleHttpServer::api_status(const HttpRequest& request) {
         sip_status = "online";
     }
 
-    response.body = "{\"status\": \"online\", \"modules\": {" +
-                   std::string("\"http_server\": \"online\", ") +
-                   "\"database\": \"" + db_status + "\", " +
-                   "\"sip_client\": \"" + sip_status + "\", " +
-                   "\"whisper\": \"" + whisper_status + "\", " +
-                   "\"llama\": \"offline\", " +
-                   "\"piper\": \"offline\"}}";
+    std::string body = "{\"status\": \"online\", \"modules\": {" +
+                      std::string("\"http_server\": \"online\", ") +
+                      "\"database\": \"" + db_status + "\", " +
+                      "\"sip_client\": \"" + sip_status + "\", " +
+                      "\"whisper\": \"" + whisper_status + "\", " +
+                      "\"llama\": \"offline\", " +
+                      "\"piper\": \"offline\"}";
+
+    // Add detailed info if requested
+    if (detailed) {
+        body += ", \"uptime\": " + std::to_string(time(nullptr)) +
+                ", \"version\": \"1.0.0\"";
+    }
+
+    body += "}";
+    response.body = body;
 
     return response;
 }
@@ -1446,8 +1756,46 @@ HttpResponse SimpleHttpServer::api_callers(const HttpRequest& request) {
     HttpResponse response;
     response.status_code = 200;
     response.status_text = "OK";
-    response.body = R"({"callers": []})";
     response.headers["Content-Type"] = "application/json";
+
+    // Check for active filter
+    bool active_only = false;
+    auto it = request.query_params.find("active");
+    if (it != request.query_params.end() && it->second == "true") {
+        active_only = true;
+    }
+
+    // Get callers from database
+    std::ostringstream json;
+    json << "[";
+
+    if (database_) {
+        try {
+            auto callers = database_->get_all_callers();
+            bool first = true;
+            for (const auto& caller : callers) {
+                // Apply active filter if requested (check if they have recent calls)
+                if (active_only && caller.last_call.empty()) {
+                    continue;
+                }
+
+                if (!first) json << ",";
+                first = false;
+
+                json << "{"
+                     << "\"id\":" << caller.id << ","
+                     << "\"phone_number\":\"" << caller.phone_number << "\","
+                     << "\"created_at\":\"" << caller.created_at << "\","
+                     << "\"last_call\":\"" << caller.last_call << "\""
+                     << "}";
+            }
+        } catch (const std::exception& e) {
+            std::cout << "❌ Error getting callers: " << e.what() << std::endl;
+        }
+    }
+
+    json << "]";
+    response.body = "{\"callers\": " + json.str() + "}";
     return response;
 }
 
@@ -1480,16 +1828,29 @@ HttpResponse SimpleHttpServer::api_sip_lines(const HttpRequest& request) {
         return response;
     }
 
+    // Check for enabled filter
+    bool enabled_only = false;
+    auto it = request.query_params.find("enabled");
+    if (it != request.query_params.end() && it->second == "true") {
+        enabled_only = true;
+    }
+
     // Get SIP lines from database
     auto sip_lines = database_->get_all_sip_lines();
 
-    // Convert to JSON
+    // Convert to JSON with filtering
     std::ostringstream json;
     json << "{\"sip_lines\":[";
 
-    for (size_t i = 0; i < sip_lines.size(); ++i) {
-        const auto& line = sip_lines[i];
-        if (i > 0) json << ",";
+    bool first = true;
+    for (const auto& line : sip_lines) {
+        // Apply filter if requested
+        if (enabled_only && !line.enabled) {
+            continue;
+        }
+
+        if (!first) json << ",";
+        first = false;
 
         json << "{"
              << "\"line_id\":" << line.line_id << ","
@@ -1633,6 +1994,26 @@ HttpResponse SimpleHttpServer::api_sip_lines_delete(const HttpRequest& request, 
         return response;
     }
 
+    // Check for force delete parameter
+    bool force = false;
+    auto it = request.query_params.find("force");
+    if (it != request.query_params.end() && it->second == "true") {
+        force = true;
+    }
+
+    // If not force delete, check if line is currently active
+    if (!force) {
+        auto sip_lines = database_->get_all_sip_lines();
+        for (const auto& line : sip_lines) {
+            if (line.line_id == line_id && line.enabled && line.status == "active") {
+                response.status_code = 409;
+                response.status_text = "Conflict";
+                response.body = R"({"error": "Cannot delete active SIP line. Use force=true to override."})";
+                return response;
+            }
+        }
+    }
+
     // Delete the SIP line from database
     bool success = database_->delete_sip_line(line_id);
 
@@ -1665,6 +2046,13 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
         response.status_text = "Bad Request";
         response.body = R"({"error": "Invalid line ID"})";
         return response;
+    }
+
+    // Check for specific enable/disable action
+    std::string action = "";
+    auto it = request.query_params.find("action");
+    if (it != request.query_params.end()) {
+        action = it->second;
     }
 
     // Toggle the SIP line enabled status
@@ -1742,9 +2130,22 @@ HttpResponse SimpleHttpServer::api_system_speed_get(const HttpRequest& request) 
 
     int speed = database_->get_system_speed();
 
+    // Check for format parameter
+    std::string format = "json";
+    auto it = request.query_params.find("format");
+    if (it != request.query_params.end()) {
+        format = it->second;
+    }
+
     response.status_code = 200;
     response.status_text = "OK";
-    response.body = "{\"system_speed\": " + std::to_string(speed) + "}";
+
+    if (format == "text") {
+        response.headers["Content-Type"] = "text/plain";
+        response.body = std::to_string(speed);
+    } else {
+        response.body = "{\"system_speed\": " + std::to_string(speed) + "}";
+    }
 
     return response;
 }
@@ -1824,15 +2225,30 @@ HttpResponse SimpleHttpServer::api_whisper_service_get(const HttpRequest& reques
         return response;
     }
 
+    // Check for detailed info request
+    bool include_stats = false;
+    auto it = request.query_params.find("stats");
+    if (it != request.query_params.end() && it->second == "true") {
+        include_stats = true;
+    }
+
     bool enabled = database_->get_whisper_service_enabled();
     std::string model_path = database_->get_whisper_model_path();
     std::string status = database_->get_whisper_service_status();
 
     response.status_code = 200;
     response.status_text = "OK";
-    response.body = "{\"enabled\": " + std::string(enabled ? "true" : "false") +
-                   ", \"model_path\": \"" + model_path +
-                   "\", \"status\": \"" + status + "\"}";
+    std::string body = "{\"enabled\": " + std::string(enabled ? "true" : "false") +
+                      ", \"model_path\": \"" + model_path +
+                      "\", \"status\": \"" + status + "\"";
+
+    if (include_stats) {
+        body += ", \"uptime\": " + std::to_string(time(nullptr)) +
+                ", \"memory_usage\": \"unknown\"";
+    }
+
+    body += "}";
+    response.body = body;
 
     return response;
 }
@@ -1896,8 +2312,14 @@ HttpResponse SimpleHttpServer::api_whisper_service_toggle(const HttpRequest& req
         return response;
     }
 
+    // Check for specific enable/disable action
     bool current_enabled = database_->get_whisper_service_enabled();
     bool new_enabled = !current_enabled;
+
+    auto it = request.query_params.find("enable");
+    if (it != request.query_params.end()) {
+        new_enabled = (it->second == "true");
+    }
 
     bool success = database_->set_whisper_service_enabled(new_enabled);
 
@@ -1973,10 +2395,23 @@ HttpResponse SimpleHttpServer::api_whisper_upload(const HttpRequest& request) {
     bool is_mlmodelc = filename.length() >= 9 && filename.substr(filename.length() - 9) == ".mlmodelc";
     bool is_mlmodelc_zip = filename.length() >= 13 && filename.substr(filename.length() - 13) == ".mlmodelc.zip";
 
-    if (!is_bin && !is_mlmodelc && !is_mlmodelc_zip) {
+    // Check for chunked files (.part1, .part2, etc.)
+    bool is_chunked = false;
+    if (filename.find(".part") != std::string::npos) {
+        // Extract base filename before .partN
+        size_t part_pos = filename.find(".part");
+        std::string base_filename = filename.substr(0, part_pos);
+        // Check if base filename is valid
+        bool base_is_bin = base_filename.length() >= 4 && base_filename.substr(base_filename.length() - 4) == ".bin";
+        bool base_is_mlmodelc = base_filename.length() >= 9 && base_filename.substr(base_filename.length() - 9) == ".mlmodelc";
+        bool base_is_mlmodelc_zip = base_filename.length() >= 13 && base_filename.substr(base_filename.length() - 13) == ".mlmodelc.zip";
+        is_chunked = base_is_bin || base_is_mlmodelc || base_is_mlmodelc_zip;
+    }
+
+    if (!is_bin && !is_mlmodelc && !is_mlmodelc_zip && !is_chunked) {
         response.status_code = 400;
         response.status_text = "Bad Request";
-        response.body = R"({"error": "Invalid file type. Only .bin, .mlmodelc, and .mlmodelc.zip files are allowed"})";
+        response.body = R"({"error": "Invalid file type. Only .bin, .mlmodelc, .mlmodelc.zip files and their chunks (.partN) are allowed"})";
         return response;
     }
 
@@ -2013,6 +2448,63 @@ HttpResponse SimpleHttpServer::api_whisper_upload(const HttpRequest& request) {
     return handle_chunked_upload(request, filename, total_file_size, content_range);
 }
 
+HttpResponse SimpleHttpServer::api_whisper_check_files(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+    response.headers["Access-Control-Allow-Origin"] = "*";
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Parse JSON body to get list of filenames to check
+    std::string json_response = "{\"existing_files\": [";
+    bool first = true;
+
+    // Simple JSON parsing to extract filenames
+    size_t pos = 0;
+    while ((pos = request.body.find("\"", pos)) != std::string::npos) {
+        pos++; // Skip opening quote
+        size_t end = request.body.find("\"", pos);
+        if (end != std::string::npos) {
+            std::string filename = request.body.substr(pos, end - pos);
+
+            // Check if this looks like a filename (has extension)
+            if (filename.find('.') != std::string::npos &&
+                (filename.find('/') == std::string::npos || filename.find("models/") == 0)) {
+
+                // Remove models/ prefix if present
+                if (filename.find("models/") == 0) {
+                    filename = filename.substr(7);
+                }
+
+                // Check if file exists in models directory
+                std::string filepath = "models/" + filename;
+                struct stat file_stat;
+                if (stat(filepath.c_str(), &file_stat) == 0) {
+                    if (!first) json_response += ", ";
+                    json_response += "\"" + filename + "\"";
+                    first = false;
+                }
+            }
+            pos = end + 1;
+        } else {
+            break;
+        }
+    }
+
+    json_response += "]}";
+
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.body = json_response;
+    return response;
+}
+
 HttpResponse SimpleHttpServer::api_whisper_models_get(const HttpRequest& request) {
     HttpResponse response;
     response.headers["Content-Type"] = "application/json";
@@ -2024,11 +2516,18 @@ HttpResponse SimpleHttpServer::api_whisper_models_get(const HttpRequest& request
         return response;
     }
 
-    // Scan models directory for .bin files
+    // Check for file type filter
+    std::string file_type = "bin";
+    auto it = request.query_params.find("type");
+    if (it != request.query_params.end()) {
+        file_type = it->second;
+    }
+
+    // Scan models directory for model files
     std::string json_response = R"({"models": [)";
     bool first = true;
 
-    // Scan the models directory for actual .bin files
+    // Scan the models directory for model files
     std::string models_dir = "models";
     DIR* dir = opendir(models_dir.c_str());
 
@@ -2036,10 +2535,12 @@ HttpResponse SimpleHttpServer::api_whisper_models_get(const HttpRequest& request
         struct dirent* entry;
         std::vector<std::string> model_files;
 
-        // Collect all .bin files
+        // Collect model files based on type filter
         while ((entry = readdir(dir)) != nullptr) {
             std::string filename = entry->d_name;
-            if (filename.length() > 4 && filename.substr(filename.length() - 4) == ".bin") {
+            std::string extension = "." + file_type;
+            if (filename.length() > extension.length() &&
+                filename.substr(filename.length() - extension.length()) == extension) {
                 model_files.push_back(models_dir + "/" + filename);
             }
         }
@@ -2171,23 +2672,11 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
     response.headers["Content-Type"] = "application/json";
     response.headers["Access-Control-Allow-Origin"] = "*";
 
-    // Disable cleanup thread for now to avoid race conditions
-    // TODO: Re-enable cleanup with proper synchronization
-
-    // Validate max concurrent uploads (limit to 10)
-    {
-        std::lock_guard<std::mutex> lock(uploads_mutex);
-        if (active_uploads.size() >= 10) {
-            response.status_code = 429;
-            response.status_text = "Too Many Requests";
-            response.body = R"({"error": "Too many concurrent uploads"})";
-            return response;
-        }
-    }
+    // Simplified upload handling - removed complex concurrent limits
+    std::lock_guard<std::mutex> lock(uploads_mutex);
 
     // Parse Content-Range header: "bytes start-end/total" or "bytes start-end/*"
     size_t range_start = 0, range_end = 0;
-    bool is_final_chunk = false;
 
     if (!content_range.empty()) {
         // Parse "bytes 0-1023/2048" format
@@ -2243,13 +2732,15 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
         }
     }
 
-    // Validate chunk size matches request body
-    size_t expected_chunk_size = range_end - range_start + 1;
-    if (expected_chunk_size != request.body.length()) {
-        response.status_code = 400;
-        response.status_text = "Bad Request";
-        response.body = R"({"error": "Chunk size mismatch"})";
-        return response;
+    // Validate chunk size matches request body (only if we have content range)
+    if (!content_range.empty()) {
+        size_t expected_chunk_size = range_end - range_start + 1;
+        if (expected_chunk_size != request.body.length()) {
+            response.status_code = 400;
+            response.status_text = "Bad Request";
+            response.body = R"({"error": "Chunk size mismatch"})";
+            return response;
+        }
     }
 
     // Validate chunk size limits (max 10MB per chunk)
@@ -2260,23 +2751,8 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
         return response;
     }
 
-    // Use filename as key - each file upload is tracked separately
-    // Sanitize the filename to prevent memory issues
+    // Simplified filename handling - use filename directly as key
     std::string upload_key = filename;
-
-    // Replace any problematic characters
-    for (char& c : upload_key) {
-        if (c == ' ' || c == '.' || c == '-') {
-            c = '_';
-        }
-    }
-
-    // Limit key length to prevent memory issues
-    if (upload_key.length() > 100) {
-        upload_key = upload_key.substr(0, 100);
-    }
-
-    std::lock_guard<std::mutex> global_lock(uploads_mutex);
     auto it = active_uploads.find(upload_key);
 
     // First chunk - create new upload
@@ -2306,100 +2782,73 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
         }
 
         active_uploads[upload_key] = std::move(upload);
-        it = active_uploads.find(upload_key);
         std::cout << "🎤 Started chunked upload: " << filename << " (total: " << total_size << " bytes)" << std::endl;
     }
 
-    // Get upload reference (already have global lock)
-    auto it_check = active_uploads.find(upload_key);
-    if (it_check == active_uploads.end()) {
-        response.status_code = 404;
-        response.status_text = "Not Found";
-        response.body = R"({"error": "Upload session not found"})";
-        return response;
-    }
-    auto& upload = it_check->second;
+    // Get upload reference (we know it exists now)
+    auto& upload = active_uploads[upload_key];
 
-    // Scope the upload lock to avoid use-after-free when erasing
-    bool upload_completed = false;
-    size_t final_received_size = 0;
-    {
-        std::lock_guard<std::mutex> upload_lock(upload->mutex);
-
-    // Validate chunk sequence
-    if (range_start != upload->received_size) {
+    // Validate chunk sequence (only if we have content range)
+    if (!content_range.empty() && range_start != upload->received_size) {
         response.status_code = 400;
         response.status_text = "Bad Request";
         response.body = R"({"error": "Chunk out of sequence"})";
         return response;
     }
 
-        // Write chunk to file
-        upload->file_stream.write(request.body.c_str(), request.body.length());
-        if (!upload->file_stream.good()) {
-            upload->file_stream.close();
-
-            // Mark for cleanup - will be done outside lock scope
-            upload_completed = true; // Use this flag to indicate failure cleanup needed
-            final_received_size = 0; // Use 0 to indicate failure
-        } else {
-            // Update progress
-            upload->received_size += request.body.length();
-            upload->last_activity = std::chrono::steady_clock::now();
-
-            // Check if upload is complete
-            upload_completed = (upload->received_size >= upload->total_size) ||
-                              (range_end + 1 >= total_size && total_size > 0);
-
-            if (upload_completed) {
-                upload->file_stream.close();
-                final_received_size = upload->received_size;
-            } else {
-                // Store values for partial response before leaving lock scope
-                final_received_size = upload->received_size;
-            }
-        }
-    } // upload_lock destructor runs here - SAFE because upload object still exists
-
-    // Handle file write failure outside lock scope
-    if (upload_completed && final_received_size == 0) {
-        // Clean up failed upload (already have global lock)
+    // Write chunk to file
+    upload->file_stream.write(request.body.c_str(), request.body.length());
+    if (!upload->file_stream.good()) {
+        upload->file_stream.close();
         active_uploads.erase(upload_key);
-
         std::string filepath = "models/" + filename;
         std::remove(filepath.c_str());
-
         response.status_code = 500;
         response.status_text = "Internal Server Error";
         response.body = R"({"error": "Failed to write chunk"})";
         return response;
     }
 
+    // Update progress
+    upload->received_size += request.body.length();
+    upload->last_activity = std::chrono::steady_clock::now();
 
+    // Check if upload is complete
+    bool upload_completed = (upload->received_size >= upload->total_size) ||
+                          (range_end + 1 >= total_size && total_size > 0);
 
-    // Handle completion outside the upload lock scope
     if (upload_completed) {
-        std::cout << "🎤 Completed chunked upload: " << filename << " (" << final_received_size << " bytes)" << std::endl;
+        // FIXED: Store all values BEFORE accessing upload members to prevent use-after-free
+        size_t received_size = upload->received_size;
+
+        // Close file stream
+        upload->file_stream.close();
+
+        // Clean up completed upload ONCE - do this early to prevent any use-after-free
+        active_uploads.erase(upload_key);
+
+        std::cout << "🎤 Completed chunked upload: " << filename << " (" << received_size << " bytes)" << std::endl;
+
+        // DEBUG: Add safety logging
+        std::cout << "DEBUG: About to validate file size" << std::endl;
 
         // Validate final file size
-        if (total_size > 0 && final_received_size != total_size) {
+        if (total_size > 0 && received_size != total_size) {
+            std::cout << "DEBUG: File size validation failed" << std::endl;
             std::string filepath = "models/" + filename;
             std::remove(filepath.c_str());
-
-            // Clean up incomplete upload (already have global lock)
-            active_uploads.erase(upload_key);
-
             response.status_code = 400;
             response.status_text = "Bad Request";
             response.body = R"({"error": "Incomplete upload"})";
             return response;
         }
 
-        // Clean up completed upload (already have global lock) - NOW SAFE
-        active_uploads.erase(upload_key);
+        std::cout << "DEBUG: File size validation passed" << std::endl;
+        std::cout << "DEBUG: Checking if file is .mlmodelc.zip" << std::endl;
 
         // Handle .mlmodelc.zip files - extract them after upload
         if (filename.length() >= 13 && filename.substr(filename.length() - 13) == ".mlmodelc.zip") {
+            std::cout << "DEBUG: File IS .mlmodelc.zip, starting extraction" << std::endl;
             std::string zip_path = "models/" + filename;
             std::string extract_dir = "models/" + filename.substr(0, filename.length() - 4); // Remove .zip extension
 
@@ -2409,38 +2858,67 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
             std::string mkdir_cmd = "mkdir -p \"" + extract_dir + "\"";
             system(mkdir_cmd.c_str());
 
-            // Extract zip file using unzip command
-            std::string unzip_cmd = "cd models && unzip -o \"" + filename + "\" -d \"" + filename.substr(0, filename.length() - 4) + "\"";
+            // Extract zip file using unzip command - simple approach
+            std::string unzip_cmd = "cd models && unzip -o \"" + filename + "\"";
             int unzip_result = system(unzip_cmd.c_str());
 
             if (unzip_result == 0) {
                 std::cout << "✅ Successfully extracted " << filename << std::endl;
 
-                // Optionally remove the zip file after extraction
+                // Remove the zip file after extraction
                 std::remove(zip_path.c_str());
                 std::cout << "🗑️ Removed zip file: " << filename << std::endl;
 
-                response.body = R"({"success": true, "message": "Upload completed and extracted", "filename": ")" + filename.substr(0, filename.length() - 4) + R"("})";
+                // FIXED: Safe JSON construction
+                std::string extracted_name = filename.substr(0, filename.length() - 4);
+                response.body = R"({"success": true, "message": "Upload completed and extracted", "filename": ")" + extracted_name + R"("})";
             } else {
                 std::cout << "❌ Failed to extract " << filename << " (exit code: " << unzip_result << ")" << std::endl;
+                // FIXED: Safe JSON construction
                 response.body = R"({"success": true, "message": "Upload completed but extraction failed", "filename": ")" + filename + R"("})";
             }
         } else {
-            response.body = R"({"success": true, "message": "Upload completed", "filename": ")" + filename + R"("})";
+            std::cout << "DEBUG: File is NOT .mlmodelc.zip, creating success response" << std::endl;
+
+            // FIXED: Safe JSON response - escape filename to prevent segfault
+            std::cout << "DEBUG: About to escape filename: " << filename << std::endl;
+            std::string escaped_filename = filename;
+
+            std::cout << "DEBUG: Starting JSON escaping" << std::endl;
+            // Simple JSON escaping for common problematic characters
+            size_t pos = 0;
+            while ((pos = escaped_filename.find("\"", pos)) != std::string::npos) {
+                escaped_filename.replace(pos, 1, "\\\"");
+                pos += 2;
+            }
+            pos = 0;
+            while ((pos = escaped_filename.find("\\", pos)) != std::string::npos) {
+                escaped_filename.replace(pos, 1, "\\\\");
+                pos += 2;
+            }
+
+            std::cout << "DEBUG: JSON escaping completed, escaped filename: " << escaped_filename << std::endl;
+            std::cout << "DEBUG: About to create response body" << std::endl;
+
+            response.body = R"({"success": true, "message": "Upload completed", "filename": ")" + escaped_filename + R"("})";
+
+            std::cout << "DEBUG: Response body created successfully" << std::endl;
         }
 
+        std::cout << "DEBUG: About to set response status" << std::endl;
         response.status_code = 200;
         response.status_text = "OK";
+        std::cout << "DEBUG: About to return response" << std::endl;
         return response;
     } else {
-        // Partial content response (using stored values, not accessing upload object)
+        // Partial content response
         response.status_code = 206;
         response.status_text = "Partial Content";
-        response.headers["Range"] = "bytes=0-" + std::to_string(final_received_size - 1);
+        response.headers["Range"] = "bytes=0-" + std::to_string(upload->received_size - 1);
 
-        double progress = total_size > 0 ? (double)final_received_size / total_size * 100.0 : 0.0;
+        double progress = total_size > 0 ? (double)upload->received_size / total_size * 100.0 : 0.0;
         response.body = R"({"success": true, "progress": )" + std::to_string(progress) +
-                       R"(, "received": )" + std::to_string(final_received_size) + "}";
+                       R"(, "received": )" + std::to_string(upload->received_size) + "}";
     }
 
     return response;

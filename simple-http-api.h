@@ -73,6 +73,7 @@ private:
     HttpResponse api_whisper_service_post(const HttpRequest& request);
     HttpResponse api_whisper_service_toggle(const HttpRequest& request);
     HttpResponse api_whisper_upload(const HttpRequest& request);
+    HttpResponse api_whisper_check_files(const HttpRequest& request);
     HttpResponse api_whisper_models_get(const HttpRequest& request);
     HttpResponse api_whisper_restart(const HttpRequest& request);
 
