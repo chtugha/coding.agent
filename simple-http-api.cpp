@@ -179,19 +179,19 @@ void SimpleHttpServer::handle_client(int client_socket) {
 
         // write_server_log("SERVER: About to parse request"); // SILENCED: Too verbose
         HttpRequest request = parse_request(raw_request);
-        write_server_log("SERVER: Request parsed, method: " + request.method + " path: " + request.path);
+        // write_server_log("SERVER: Request parsed, method: " + request.method + " path: " + request.path); // SILENCED
 
-        write_server_log("SERVER: About to handle request");
+        // write_server_log("SERVER: About to handle request"); // SILENCED
         HttpResponse response = handle_request(request);
-        write_server_log("SERVER: Request handled, status: " + std::to_string(response.status_code));
+        // write_server_log("SERVER: Request handled, status: " + std::to_string(response.status_code)); // SILENCED
 
-        write_server_log("SERVER: About to create response string");
+        // write_server_log("SERVER: About to create response string"); // SILENCED
         std::string response_str = create_response(response);
-        write_server_log("SERVER: Response string created, length: " + std::to_string(response_str.length()));
+        // write_server_log("SERVER: Response string created, length: " + std::to_string(response_str.length())); // SILENCED
 
-        write_server_log("SERVER: About to send response");
+        // write_server_log("SERVER: About to send response"); // SILENCED
         send(client_socket, response_str.c_str(), response_str.length(), 0);
-        write_server_log("SERVER: Response sent successfully");
+        // write_server_log("SERVER: Response sent successfully"); // SILENCED
     } catch (const std::exception& e) {
         std::cerr << "Client handling error: " << e.what() << std::endl;
         // Send error response
@@ -2846,13 +2846,13 @@ HttpResponse SimpleHttpServer::handle_chunked_upload(const HttpRequest& request,
         std::cout << "DEBUG: File size validation passed" << std::endl;
         std::cout << "DEBUG: Checking if file is .mlmodelc.zip" << std::endl;
 
-        // Handle .mlmodelc.zip files - extract them after upload
-        if (filename.length() >= 13 && filename.substr(filename.length() - 13) == ".mlmodelc.zip") {
-            std::cout << "DEBUG: File IS .mlmodelc.zip, starting extraction" << std::endl;
+        // Handle .zip files - extract them after upload
+        if (filename.length() >= 4 && filename.substr(filename.length() - 4) == ".zip") {
+            std::cout << "DEBUG: File IS .zip, starting extraction" << std::endl;
             std::string zip_path = "models/" + filename;
             std::string extract_dir = "models/" + filename.substr(0, filename.length() - 4); // Remove .zip extension
 
-            std::cout << "🎤 Extracting .mlmodelc.zip: " << filename << " to " << extract_dir << std::endl;
+            std::cout << "🎤 Extracting .zip: " << filename << " to " << extract_dir << std::endl;
 
             // Create extraction directory
             std::string mkdir_cmd = "mkdir -p \"" + extract_dir + "\"";
