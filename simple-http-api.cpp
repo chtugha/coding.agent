@@ -19,6 +19,7 @@
 #include <chrono>
 #include <thread>
 #include <sys/wait.h>
+#include <iomanip>
 
 // ADDED: Server-side logging for debugging crashes
 static std::mutex log_mutex;
@@ -156,13 +157,13 @@ void SimpleHttpServer::handle_client(int client_socket) {
             }
         }
 
-        std::cout << "DEBUG: About to parse request" << std::endl;
+        // write_server_log("SERVER: About to parse request"); // SILENCED: Too verbose
         HttpRequest request = parse_request(raw_request);
-        std::cout << "DEBUG: Request parsed, method: " << request.method << " path: " << request.path << std::endl;
+        // write_server_log("SERVER: Request parsed, method: " + request.method + " path: " + request.path); // SILENCED
 
-        std::cout << "DEBUG: About to handle request" << std::endl;
+        // write_server_log("SERVER: About to handle request"); // SILENCED
         HttpResponse response = handle_request(request);
-        std::cout << "DEBUG: Request handled, status: " << response.status_code << std::endl;
+        // write_server_log("SERVER: Request handled, status: " + std::to_string(response.status_code)); // SILENCED
 
         // write_server_log("SERVER: About to create response string"); // SILENCED
         std::string response_str = create_response(response);
@@ -1036,10 +1037,10 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
                 if (item.type === 'directory-bundle' || item.type === 'mlmodelc-bundle') {
                     console.log('📁 STREAM: Streaming directory bundle:', item.name);
-                    await streamDirectoryToBackend(item.directoryEntry, item.name);
+                    await streamDirectoryToBackend(item.directoryEntry, item.name, i, droppedItems.length);
                 } else if (item.file) {
                     console.log('📄 STREAM: Streaming file:', item.name);
-                    await streamFileToBackend(item.file);
+                    await streamFileToBackend(item.file, i, droppedItems.length);
                 } else {
                     console.log('⚠️ STREAM: Unknown item type or missing file:', item);
                 }
@@ -1049,7 +1050,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         }
 
         // Stream individual file to backend (TRUE STREAMING - no chunking)
-        async function streamFileToBackend(file) {
+        async function streamFileToBackend(file, fileIndex = 0, totalFiles = 1) {
             console.log('📄 STREAM-FILE: Uploading:', file.name, '(' + (file.size / 1024 / 1024).toFixed(1) + ' MB)');
 
             const xhr = new XMLHttpRequest();
@@ -1057,11 +1058,14 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             return new Promise((resolve, reject) => {
                 xhr.upload.addEventListener('progress', (e) => {
                     if (e.lengthComputable) {
-                        const progress = (e.loaded / e.total) * 100;
-                        updateProgress(progress, `Uploading ${file.name}: ${Math.round(progress)}%`);
+                        // Calculate overall progress across all files
+                        const fileProgress = (e.loaded / e.total) * 100;
+                        const overallProgress = ((fileIndex * 100) + fileProgress) / totalFiles;
+
+                        updateProgress(overallProgress, `Uploading ${file.name}: ${Math.round(fileProgress)}% (File ${fileIndex + 1}/${totalFiles})`);
                         const uploadBtn = document.getElementById('uploadBtn');
                         if (uploadBtn) {
-                            uploadBtn.textContent = `Uploading ${file.name}: ${Math.round(progress)}%`;
+                            uploadBtn.textContent = `Uploading ${file.name}: ${Math.round(fileProgress)}% (${fileIndex + 1}/${totalFiles})`;
                         }
                     }
                 });
@@ -1089,15 +1093,15 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         }
 
         // Stream directory to backend (as individual files)
-        async function streamDirectoryToBackend(directoryEntry, baseName) {
+        async function streamDirectoryToBackend(directoryEntry, baseName, fileIndex = 0, totalFiles = 1) {
             console.log('📁 STREAM-DIR: Streaming directory contents as individual files:', baseName);
 
             // Stream each file in the directory individually
-            await streamDirectoryContents(directoryEntry, baseName);
+            await streamDirectoryContents(directoryEntry, baseName, fileIndex, totalFiles);
         }
 
         // Stream directory contents as individual files (no ZIP creation)
-        async function streamDirectoryContents(directoryEntry, pathPrefix) {
+        async function streamDirectoryContents(directoryEntry, pathPrefix, fileIndex = 0, totalFiles = 1) {
             return new Promise((resolve, reject) => {
                 const reader = directoryEntry.createReader();
 
@@ -1115,10 +1119,10 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                                 console.log('📄 STREAM-DIR: Streaming file:', entryPath);
                                 const file = await new Promise((res, rej) => entry.file(res, rej));
                                 const renamedFile = new File([file], entryPath, { type: file.type });
-                                await streamFileToBackend(renamedFile);
+                                await streamFileToBackend(renamedFile, fileIndex, totalFiles);
                             } else if (entry.isDirectory) {
                                 console.log('📁 STREAM-DIR: Streaming subdirectory:', entryPath);
-                                await streamDirectoryContents(entry, entryPath);
+                                await streamDirectoryContents(entry, entryPath, fileIndex, totalFiles);
                             }
                         }
                         readEntries(); // Continue reading
