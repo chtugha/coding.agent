@@ -49,6 +49,7 @@ private:
     void handle_client(int client_socket);
     HttpRequest parse_request(const std::string& raw_request);
     HttpRequest parse_request_streaming(int client_socket);
+    HttpResponse handle_streaming_upload(int client_socket, const std::string& headers_data);
     std::string create_response(const HttpResponse& response);
     
     // Route handlers
@@ -72,13 +73,10 @@ private:
     HttpResponse api_whisper_service_get(const HttpRequest& request);
     HttpResponse api_whisper_service_post(const HttpRequest& request);
     HttpResponse api_whisper_service_toggle(const HttpRequest& request);
-    HttpResponse api_whisper_upload(const HttpRequest& request);
+    HttpResponse api_upload_stream(const HttpRequest& request);
     HttpResponse api_whisper_check_files(const HttpRequest& request);
     HttpResponse api_whisper_models_get(const HttpRequest& request);
     HttpResponse api_whisper_restart(const HttpRequest& request);
-
-    // Chunked upload handler
-    HttpResponse handle_chunked_upload(const HttpRequest& request, const std::string& filename, size_t total_size, const std::string& content_range);
 
     std::string get_mime_type(const std::string& extension);
 
