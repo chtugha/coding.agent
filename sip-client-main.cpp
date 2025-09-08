@@ -1531,6 +1531,10 @@ bool SimpleSipClient::test_sip_connection(const SipLineConfig& line) {
             if (status_line.find("SIP/2.0 2") != std::string::npos) {
                 std::cout << "🎉 SIP REGISTRATION SUCCESSFUL!" << std::endl;
                 std::cout << "===== SIP REGISTRATION COMPLETE =====\n" << std::endl;
+
+                // Immediately update database status to "connected"
+                update_line_status(line.line_id, "connected");
+
                 return true;
             } else if (status_line.find("SIP/2.0 401") != std::string::npos ||
                       status_line.find("SIP/2.0 407") != std::string::npos) {
@@ -1949,6 +1953,10 @@ bool SimpleSipClient::send_authenticated_register(const SipLineConfig& line, con
                 query_extension_user_info(line.username);
 
                 std::cout << "===== SIP REGISTRATION COMPLETE =====\n" << std::endl;
+
+                // Immediately update database status to "connected"
+                update_line_status(line.line_id, "connected");
+
                 return true;
             } else {
                 std::cout << "❌ Authentication failed: " << status_line << std::endl;

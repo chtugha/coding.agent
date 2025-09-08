@@ -70,9 +70,9 @@ public:
     virtual ~SipAudioInterface() = default;
     
     // Called by audio processor when it needs to send processed audio
-    virtual void send_to_whisper(const std::string& session_id, const std::vector<float>& audio_samples) = 0;
-    
+    virtual void send_to_whisper(const std::string& call_id, const std::vector<float>& audio_samples) = 0;
+
     // Called by audio processor for status updates
-    virtual void on_audio_processing_error(const std::string& session_id, const std::string& error) = 0;
-    virtual void on_audio_chunk_ready(const std::string& session_id, size_t chunk_size_samples) = 0;
+    virtual void on_audio_processing_error(const std::string& call_id, const std::string& error) = 0;
+    virtual void on_audio_chunk_ready(const std::string& call_id, size_t chunk_size_samples) = 0;
 };

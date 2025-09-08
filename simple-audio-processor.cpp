@@ -72,8 +72,8 @@ const std::vector<float>& G711Tables::get_alaw_table() {
 // SimpleAudioProcessor Implementation
 SimpleAudioProcessor::SimpleAudioProcessor(SipAudioInterface* sip_interface)
     : sip_interface_(sip_interface), running_(false),
-      chunk_duration_ms_(3000), vad_threshold_(0.01f), silence_timeout_ms_(500), database_(nullptr),
-      has_speech_(false), sample_rate_(16000) {
+      has_speech_(false), sample_rate_(16000),
+      chunk_duration_ms_(3000), vad_threshold_(0.01f), silence_timeout_ms_(500), database_(nullptr) {
 
     G711Tables::initialize_tables(); // Initialize lookup tables
     last_speech_time_ = std::chrono::steady_clock::now();
@@ -290,8 +290,8 @@ void SimpleAudioProcessor::send_audio_chunk_sessionless() {
 
     // Send to SIP interface
     if (sip_interface_) {
-        sip_interface_->send_to_whisper("sessionless", whisper_chunk);
-        sip_interface_->on_audio_chunk_ready("sessionless", whisper_chunk.size());
+        sip_interface_->send_to_whisper("global", whisper_chunk);
+        sip_interface_->on_audio_chunk_ready("global", whisper_chunk.size());
     }
 
     // Reset global buffer

@@ -554,18 +554,30 @@ bool Database::set_whisper_service_enabled(bool enabled) {
 }
 
 std::string Database::get_whisper_model_path() {
+    // Safety check for database connection
+    if (!db_) {
+        std::cerr << "❌ Database connection is null in get_whisper_model_path()" << std::endl;
+        return "models/ggml-small.en.bin"; // default fallback
+    }
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'whisper_model_path'";
-    sqlite3_stmt* stmt;
+    sqlite3_stmt* stmt = nullptr;
     std::string model_path = "models/ggml-small.en.bin"; // default
 
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
+    int prepare_result = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (prepare_result == SQLITE_OK) {
+        int step_result = sqlite3_step(stmt);
+        if (step_result == SQLITE_ROW) {
             const char* value = (char*)sqlite3_column_text(stmt, 0);
             if (value) {
                 model_path = value;
             }
+        } else if (step_result != SQLITE_DONE) {
+            std::cerr << "❌ SQLite step error in get_whisper_model_path(): " << sqlite3_errmsg(db_) << std::endl;
         }
         sqlite3_finalize(stmt);
+    } else {
+        std::cerr << "❌ SQLite prepare error in get_whisper_model_path(): " << sqlite3_errmsg(db_) << std::endl;
     }
 
     return model_path;

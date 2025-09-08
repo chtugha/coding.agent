@@ -654,8 +654,21 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         console.log('JavaScript loaded - version 3.0 with JSZip support');
 
         async function refreshStatus() {
+            console.log('🔄 refreshStatus() called');
             try {
-                const response = await fetch('/api/status');
+                console.log('📡 Fetching /api/status...');
+
+                // Add timeout to prevent hanging fetch requests
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
+
+                const response = await fetch('/api/status', {
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+
+                console.log('📡 Status response received:', response.status, response.statusText);
+
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
@@ -665,9 +678,13 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 const safeData = data || { status: 'unknown', modules: {} };
                 updateStatusDisplay(safeData);
             } catch (error) {
-                console.error('Failed to fetch status:', error);
-                // Show fallback status
-                updateStatusDisplay({ status: 'error', modules: {} });
+                if (error.name === 'AbortError') {
+                    console.error('❌ Status request timed out after 3 seconds');
+                    updateStatusDisplay({ status: 'timeout', modules: {} });
+                } else {
+                    console.error('❌ Failed to fetch status:', error);
+                    updateStatusDisplay({ status: 'error', modules: {} });
+                }
             }
         }
 
@@ -700,7 +717,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             }
         }
 
-        // Load SIP lines on page load
+        // Load SIP lines on page load - use direct call for initial load
         loadSipLines();
 
         // Simple function to add SIP line
@@ -747,8 +764,8 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 // Clear form
                 document.getElementById('username').value = '';
                 document.getElementById('password').value = '';
-                // Refresh list
-                loadSipLines();
+                // Refresh list using safe version
+                safeLoadSipLines();
             })
             .catch(error => {
                 console.error('Error:', error);
@@ -760,22 +777,99 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         let refreshIntervals = [];
         let isRefreshing = { status: false, sip: false, whisper: false };
 
+        // Reset all refresh flags on page load to prevent stuck states
+        function resetRefreshFlags() {
+            isRefreshing.status = false;
+            isRefreshing.sip = false;
+            isRefreshing.whisper = false;
+            console.log('🔄 Refresh flags reset');
+        }
+
+        // Call reset immediately
+        resetRefreshFlags();
+
         function safeRefreshStatus() {
-            if (isRefreshing.status) return;
+            if (isRefreshing.status) {
+                console.log('Status already refreshing, skipping...');
+                return;
+            }
             isRefreshing.status = true;
-            refreshStatus().finally(() => { isRefreshing.status = false; });
+            console.log('Starting status refresh...');
+
+            // Set timeout to force reset if stuck (last resort)
+            const safetyTimeoutId = setTimeout(() => {
+                console.warn('⚠️ Status refresh safety timeout - forcing reset');
+                isRefreshing.status = false;
+            }, 3000); // 3 second safety timeout
+
+            refreshStatus()
+                .then(() => {
+                    console.log('Status refresh completed successfully');
+                })
+                .catch((error) => {
+                    console.error('Status refresh failed:', error);
+                })
+                .finally(() => {
+                    clearTimeout(safetyTimeoutId);
+                    console.log('Resetting status refresh flag');
+                    isRefreshing.status = false;
+                });
         }
 
         function safeLoadSipLines() {
-            if (isRefreshing.sip) return;
+            if (isRefreshing.sip) {
+                console.log('SIP lines already refreshing, skipping...');
+                return;
+            }
             isRefreshing.sip = true;
-            loadSipLines().finally(() => { isRefreshing.sip = false; });
+            console.log('Starting SIP lines refresh...');
+
+            // Set timeout to force reset if stuck (last resort)
+            const safetyTimeoutId = setTimeout(() => {
+                console.warn('⚠️ SIP refresh safety timeout - forcing reset');
+                isRefreshing.sip = false;
+            }, 3000); // 3 second safety timeout
+
+            loadSipLines()
+                .then(() => {
+                    console.log('SIP lines refresh completed successfully');
+                })
+                .catch((error) => {
+                    console.error('SIP lines refresh failed:', error);
+                })
+                .finally(() => {
+                    clearTimeout(safetyTimeoutId);
+                    console.log('Resetting SIP refresh flag');
+                    isRefreshing.sip = false;
+                });
         }
 
         function safeLoadWhisperService() {
-            if (isRefreshing.whisper) return;
+            if (isRefreshing.whisper) {
+                console.log('Whisper service already refreshing, skipping...');
+                return;
+            }
             isRefreshing.whisper = true;
-            loadWhisperService().finally(() => { isRefreshing.whisper = false; });
+            console.log('Starting Whisper service refresh...');
+
+            // Set timeout to force reset if stuck (last resort)
+            const safetyTimeoutId = setTimeout(() => {
+                console.warn('⚠️ Whisper refresh safety timeout - forcing reset');
+                isRefreshing.whisper = false;
+            }, 3000); // 3 second safety timeout
+
+            loadWhisperService()
+                .then(() => {
+                    console.log('Whisper service refresh completed successfully');
+                })
+                .catch((error) => {
+                    console.error('Whisper service refresh failed:', error);
+                })
+                .finally(() => {
+                    clearTimeout(safetyTimeoutId);
+                    console.log('Resetting Whisper refresh flag');
+                    isRefreshing.whisper = false;
+                });
         }
 
         refreshIntervals.push(setInterval(safeRefreshStatus, 5000));
@@ -788,21 +882,50 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         });
 
         async function loadSipLines() {
+            console.log('🔄 loadSipLines() called');
+
+            // ALWAYS clear the loading message first
+            const container = document.getElementById('sipLinesContainer');
+            if (!container) {
+                console.error('❌ sipLinesContainer element not found!');
+                return;
+            }
+
             try {
-                const response = await fetch('/api/sip-lines');
+                console.log('📡 Fetching /api/sip-lines...');
+
+                // Add timeout to prevent hanging fetch requests
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
+
+                const response = await fetch('/api/sip-lines', {
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+
+                console.log('📡 Response received:', response.status, response.statusText);
+
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
+
                 const data = await response.json();
+                console.log('📡 Data received:', data);
+
                 const sipLines = data && data.sip_lines ? data.sip_lines : [];
+                console.log('📡 SIP lines extracted:', sipLines.length, 'lines');
+
                 displaySipLines(sipLines);
+                console.log('✅ SIP lines displayed successfully');
             } catch (error) {
-                console.error('Failed to load SIP lines:', error);
-                // Show fallback UI
-                const container = document.getElementById('sipLinesContainer');
-                if (container) {
+                if (error.name === 'AbortError') {
+                    console.error('❌ SIP lines request timed out after 3 seconds');
+                    container.innerHTML = '<p>Request timed out - server may be slow</p>';
+                } else {
+                    console.error('❌ Failed to load SIP lines:', error);
                     container.innerHTML = '<p>Unable to load SIP lines</p>';
                 }
+                console.log('❌ Fallback UI displayed');
             }
         }
 
@@ -871,7 +994,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
                 if (response.ok) {
                     console.log('SIP line toggled successfully');
-                    loadSipLines(); // Refresh the list
+                    safeLoadSipLines(); // Refresh the list safely
                 } else {
                     alert(`Failed to toggle SIP line: ${result.error}`);
                 }
@@ -892,7 +1015,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
                     if (response.ok) {
                         alert('SIP line deleted successfully');
-                        loadSipLines(); // Refresh the list
+                        safeLoadSipLines(); // Refresh the list safely
                     } else {
                         alert(`Failed to delete SIP line: ${result.error}`);
                     }
@@ -1380,11 +1503,28 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         }
 
         async function loadWhisperService() {
+            console.log('🔄 loadWhisperService() called');
             try {
+                console.log('📡 Fetching whisper service and models...');
+
+                // Create abort controllers for both requests
+                const serviceController = new AbortController();
+                const modelsController = new AbortController();
+
+                // Set timeouts for both requests
+                const serviceTimeoutId = setTimeout(() => serviceController.abort(), 3000);
+                const modelsTimeoutId = setTimeout(() => modelsController.abort(), 3000);
+
                 const [serviceResponse, modelsResponse] = await Promise.all([
-                    fetch('/api/whisper/service'),
-                    fetch('/api/whisper/models')
+                    fetch('/api/whisper/service', { signal: serviceController.signal }),
+                    fetch('/api/whisper/models', { signal: modelsController.signal })
                 ]);
+
+                // Clear timeouts on success
+                clearTimeout(serviceTimeoutId);
+                clearTimeout(modelsTimeoutId);
+
+                console.log('📡 Both responses received');
 
                 if (!serviceResponse.ok) {
                     throw new Error(`Service API HTTP ${serviceResponse.status}: ${serviceResponse.statusText}`);
@@ -1403,14 +1543,28 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 updateWhisperServiceDisplay(safeServiceData);
                 updateModelList(safeModelsData, safeServiceData.model_path);
             } catch (error) {
-                console.error('Failed to load whisper service:', error);
+                if (error.name === 'AbortError') {
+                    console.error('❌ Whisper service requests timed out after 3 seconds');
+                } else {
+                    console.error('❌ Failed to load whisper service:', error);
+                }
+
                 // Show fallback UI for SERVICE STATUS only - keep model list intact
                 const statusDiv = document.getElementById('whisperStatus');
                 if (statusDiv) {
-                    statusDiv.innerHTML = '<span class="status-error">● Service Unavailable</span>';
+                    const errorMsg = error.name === 'AbortError' ?
+                        '<span class="status-error">● Request Timeout</span>' :
+                        '<span class="status-error">● Service Unavailable</span>';
+                    statusDiv.innerHTML = errorMsg;
                 }
-                // DON'T clear the model list - keep showing last known models
-                console.log('Keeping existing model list during API error');
+
+                // Show timeout message for models if needed
+                const modelListDiv = document.getElementById('modelList');
+                if (modelListDiv && error.name === 'AbortError') {
+                    modelListDiv.innerHTML = '<div style="padding: 10px; color: #666;">Request timed out - server may be slow</div>';
+                }
+
+                console.log('Keeping existing data during API error');
             }
         }
 
@@ -1552,7 +1706,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         // updateModelPath function removed - replaced with model selection list
 
-        // Load initial data
+        // Load initial data - use direct call for initial load
         loadWhisperService();
     </script>
 </body>
@@ -1905,45 +2059,53 @@ HttpResponse SimpleHttpServer::api_sip_lines_post(const HttpRequest& request) {
 
     std::cout << "POST body: " << request.body << std::endl;
 
-    // Simple JSON value extraction
+    // Safe JSON value extraction
     if (!request.body.empty()) {
-        std::string body = request.body;
+        const std::string& body = request.body;
 
-        // Helper function to extract JSON string value
-        auto extract_json_string = [&](const std::string& key) -> std::string {
-            std::string search = "\"" + key + "\":\"";
-            size_t start = body.find(search);
-            if (start != std::string::npos) {
-                start += search.length();
-                size_t end = body.find("\"", start);
-                if (end != std::string::npos) {
-                    return body.substr(start, end - start);
+        // Safe helper function to extract JSON string value
+        auto extract_json_string = [](const std::string& body, const std::string& key) -> std::string {
+            try {
+                std::string search = "\"" + key + "\":\"";
+                size_t start = body.find(search);
+                if (start != std::string::npos) {
+                    start += search.length();
+                    size_t end = body.find("\"", start);
+                    if (end != std::string::npos && end > start) {
+                        return body.substr(start, end - start);
+                    }
                 }
+            } catch (const std::exception& e) {
+                std::cout << "❌ Error extracting JSON string for key '" << key << "': " << e.what() << std::endl;
             }
             return "";
         };
 
-        // Helper function to extract JSON number value
-        auto extract_json_number = [&](const std::string& key) -> int {
-            std::string search = "\"" + key + "\":";
-            size_t start = body.find(search);
-            if (start != std::string::npos) {
-                start += search.length();
-                size_t end = body.find_first_of(",}", start);
-                if (end != std::string::npos) {
-                    std::string num_str = body.substr(start, end - start);
-                    return std::atoi(num_str.c_str());
+        // Safe helper function to extract JSON number value
+        auto extract_json_number = [](const std::string& body, const std::string& key) -> int {
+            try {
+                std::string search = "\"" + key + "\":";
+                size_t start = body.find(search);
+                if (start != std::string::npos) {
+                    start += search.length();
+                    size_t end = body.find_first_of(",}", start);
+                    if (end != std::string::npos && end > start) {
+                        std::string num_str = body.substr(start, end - start);
+                        return std::atoi(num_str.c_str());
+                    }
                 }
+            } catch (const std::exception& e) {
+                std::cout << "❌ Error extracting JSON number for key '" << key << "': " << e.what() << std::endl;
             }
             return 0;
         };
 
-        // Extract all values
-        server_ip = extract_json_string("server_ip");
-        username = extract_json_string("username");
-        password = extract_json_string("password");
+        // Extract all values safely
+        server_ip = extract_json_string(body, "server_ip");
+        username = extract_json_string(body, "username");
+        password = extract_json_string(body, "password");
 
-        int port = extract_json_number("server_port");
+        int port = extract_json_number(body, "server_port");
         if (port > 0) server_port = port;
 
         // Debug output
@@ -2249,9 +2411,21 @@ HttpResponse SimpleHttpServer::api_whisper_service_get(const HttpRequest& reques
         include_stats = true;
     }
 
-    bool enabled = database_->get_whisper_service_enabled();
-    std::string model_path = database_->get_whisper_model_path();
-    std::string status = database_->get_whisper_service_status();
+    bool enabled = false;
+    std::string model_path = "models/ggml-small.en.bin";
+    std::string status = "unknown";
+
+    try {
+        enabled = database_->get_whisper_service_enabled();
+        model_path = database_->get_whisper_model_path();
+        status = database_->get_whisper_service_status();
+    } catch (const std::exception& e) {
+        std::cout << "❌ Database error in api_whisper_service_get: " << e.what() << std::endl;
+        // Use default values set above
+    } catch (...) {
+        std::cout << "❌ Unknown database error in api_whisper_service_get" << std::endl;
+        // Use default values set above
+    }
 
     response.status_code = 200;
     response.status_text = "OK";
@@ -2352,13 +2526,72 @@ HttpResponse SimpleHttpServer::api_whisper_service_toggle(const HttpRequest& req
                        ", \"status\": \"" + new_status + "\"}";
 
         if (new_enabled) {
-            std::cout << "🎤 Whisper service enabled" << std::endl;
-        } else {
-            std::cout << "🎤 Whisper service disabled" << std::endl;
-        }
+            std::cout << "🎤 Whisper service enabled - starting service..." << std::endl;
 
-        // TODO: Actually start/stop the whisper service process here
-        // For now, we just update the database state
+            // Get the configured model path from database
+            std::string model_path;
+            try {
+                model_path = database_->get_whisper_model_path();
+                std::cout << "🎤 Got model path: " << model_path << std::endl;
+            } catch (const std::exception& e) {
+                std::cout << "❌ Database error getting model path: " << e.what() << std::endl;
+                database_->set_whisper_service_status("error");
+                response.status_code = 500;
+                response.status_text = "Internal Server Error";
+                response.body = R"({"error": "Database error"})";
+                return response;
+            }
+
+            if (model_path.empty()) {
+                std::cout << "❌ No model configured - cannot start service" << std::endl;
+                database_->set_whisper_service_status("error");
+                response.status_code = 400;
+                response.status_text = "Bad Request";
+                response.body = R"({"error": "No model configured. Please select a model first."})";
+                return response;
+            }
+
+            // Validate model file exists
+            struct stat file_stat;
+            if (stat(model_path.c_str(), &file_stat) != 0) {
+                std::cout << "❌ Model file not found: " << model_path << std::endl;
+                database_->set_whisper_service_status("error");
+                response.status_code = 404;
+                response.status_text = "Not Found";
+                response.body = R"({"error": "Configured model file not found"})";
+                return response;
+            }
+
+            // Kill existing whisper service processes
+            std::cout << "🎤 Stopping existing whisper service..." << std::endl;
+            system("pkill -TERM -f whisper-service");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+            // Start new whisper service with configured model
+            std::string start_command = "./whisper-service --model \"" + model_path + "\" &";
+            std::cout << "🎤 Starting whisper service: " << start_command << std::endl;
+            int start_result = system(start_command.c_str());
+
+            if (start_result == 0) {
+                std::cout << "✅ Whisper service started successfully" << std::endl;
+                database_->set_whisper_service_status("running");
+            } else {
+                std::cout << "❌ Failed to start whisper service" << std::endl;
+                database_->set_whisper_service_status("error");
+                response.status_code = 500;
+                response.status_text = "Internal Server Error";
+                response.body = R"({"error": "Failed to start whisper service"})";
+                return response;
+            }
+
+        } else {
+            std::cout << "🎤 Whisper service disabled - stopping service..." << std::endl;
+
+            // Kill existing whisper service processes
+            system("pkill -TERM -f whisper-service");
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            database_->set_whisper_service_status("stopped");
+        }
 
     } else {
         response.status_code = 500;
@@ -2574,10 +2807,14 @@ HttpResponse SimpleHttpServer::api_whisper_models_get(const HttpRequest& request
         // Sort the files for consistent ordering
         std::sort(model_files.begin(), model_files.end());
 
-        // Add to JSON response
+        // Add to JSON response with safer string building
         for (const auto& model_path : model_files) {
-            if (!first) json_response += ",";
-            json_response += R"({"path": ")" + model_path + R"("})";
+            if (!first) {
+                json_response += ",";
+            }
+            json_response += "{\"path\": \"";
+            json_response += model_path;
+            json_response += "\"}";
             first = false;
         }
     } else {

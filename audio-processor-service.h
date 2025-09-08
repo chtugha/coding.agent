@@ -57,9 +57,9 @@ private:
     public:
         ServiceAudioInterface(AudioProcessorService* service);
         
-        void send_to_whisper(const std::string& session_id, const std::vector<float>& audio_samples) override;
-        void on_audio_processing_error(const std::string& session_id, const std::string& error) override;
-        void on_audio_chunk_ready(const std::string& session_id, size_t chunk_size_samples) override;
+        void send_to_whisper(const std::string& call_id, const std::vector<float>& audio_samples) override;
+        void on_audio_processing_error(const std::string& call_id, const std::string& error) override;
+        void on_audio_chunk_ready(const std::string& call_id, size_t chunk_size_samples) override;
         
     private:
         AudioProcessorService* service_;
@@ -144,5 +144,5 @@ public:
         DEBUG
     };
     
-    static std::unique_ptr<AudioProcessorService> create(ProcessorType type = ProcessorType::SIMPLE);
+    static std::unique_ptr<AudioProcessorService> create();
 };

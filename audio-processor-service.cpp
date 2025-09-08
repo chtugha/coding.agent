@@ -16,18 +16,19 @@
 AudioProcessorService::ServiceAudioInterface::ServiceAudioInterface(AudioProcessorService* service)
     : service_(service) {}
 
-void AudioProcessorService::ServiceAudioInterface::send_to_whisper(const std::string& session_id, const std::vector<float>& audio_samples) {
+void AudioProcessorService::ServiceAudioInterface::send_to_whisper(const std::string& call_id, const std::vector<float>& audio_samples) {
     if (service_) {
+        std::cout << "🎤 Sending " << audio_samples.size() << " audio samples to Whisper for call: " << call_id << std::endl;
         service_->handle_whisper_transcription(audio_samples);
     }
 }
 
-void AudioProcessorService::ServiceAudioInterface::on_audio_processing_error(const std::string& session_id, const std::string& error) {
-    std::cout << "❌ Audio processing error: " << error << std::endl;
+void AudioProcessorService::ServiceAudioInterface::on_audio_processing_error(const std::string& call_id, const std::string& error) {
+    std::cout << "❌ Audio processing error for call " << call_id << ": " << error << std::endl;
 }
 
-void AudioProcessorService::ServiceAudioInterface::on_audio_chunk_ready(const std::string& session_id, size_t chunk_size_samples) {
-    std::cout << "✅ Audio chunk ready: " << chunk_size_samples << " samples" << std::endl;
+void AudioProcessorService::ServiceAudioInterface::on_audio_chunk_ready(const std::string& call_id, size_t chunk_size_samples) {
+    std::cout << "✅ Audio chunk ready for call " << call_id << ": " << chunk_size_samples << " samples" << std::endl;
 }
 
 // AudioProcessorService Implementation
@@ -559,8 +560,6 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
 
         // Handle this connection in a separate thread
         std::thread([this, client_socket]() {
-            char buffer[4096];
-
             // Read HELLO message first
             uint32_t length;
             if (recv(client_socket, &length, 4, 0) == 4) {
@@ -682,8 +681,6 @@ void AudioProcessorService::forward_to_external_service(const std::vector<float>
 }
 
 // Factory Implementation
-std::unique_ptr<AudioProcessorService> AudioProcessorServiceFactory::create(ProcessorType type) {
-    // For now, always create simple processor
-    // In future, could create different types based on parameter
+std::unique_ptr<AudioProcessorService> AudioProcessorServiceFactory::create() {
     return std::make_unique<AudioProcessorService>();
 }
