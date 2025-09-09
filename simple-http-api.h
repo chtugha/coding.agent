@@ -78,6 +78,13 @@ private:
     HttpResponse api_whisper_models_get(const HttpRequest& request);
     HttpResponse api_whisper_restart(const HttpRequest& request);
 
+    // LLaMA service endpoints
+    HttpResponse api_llama_service_get(const HttpRequest& request);
+    HttpResponse api_llama_service_post(const HttpRequest& request);
+    HttpResponse api_llama_service_toggle(const HttpRequest& request);
+    HttpResponse api_llama_models_get(const HttpRequest& request);
+    HttpResponse api_llama_restart(const HttpRequest& request);
+
     std::string get_mime_type(const std::string& extension);
 
     // Database connection

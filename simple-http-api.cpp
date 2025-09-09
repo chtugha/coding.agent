@@ -637,6 +637,33 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         </div>
 
         <div class="card">
+            <h2>🦙 LLaMA Service</h2>
+            <div id="llamaServiceContainer">
+                <div class="status-grid">
+                    <div class="status-item">
+                        <h3>Service Status</h3>
+                        <div id="llamaStatus" class="status-offline">● Stopped</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Available Models</h3>
+                        <div id="llamaModelList" style="max-height: 150px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 5px;">
+                            Loading models...
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <button id="llamaToggleBtn" class="refresh-btn" onclick="toggleLlamaService()">
+                        Start Service
+                    </button>
+                    <button id="llamaRestartBtn" class="refresh-btn" onclick="restartLlamaWithSelectedModel()" style="margin-left: 10px; background: #ffc107; color: #000;" disabled>
+                        Restart with Selected Model
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>API Endpoints</h2>
             <ul>
                 <li><a href="/api/status">/api/status</a> - System status</li>
@@ -644,6 +671,9 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 <li><a href="/api/sip-lines">/api/sip-lines</a> - SIP lines</li>
                 <li><a href="/api/whisper/service">/api/whisper/service</a> - Whisper service info</li>
                 <li><strong>POST</strong> /api/whisper/service/toggle - Start/stop service</li>
+                <li><a href="/api/llama/service">/api/llama/service</a> - LLaMA service info</li>
+                <li><strong>POST</strong> /api/llama/service/toggle - Start/stop service</li>
+                <li><a href="/api/llama/models">/api/llama/models</a> - Available LLaMA models</li>
             </ul>
         </div>
     </div>
@@ -1706,8 +1736,169 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         // updateModelPath function removed - replaced with model selection list
 
+        // LLaMA Service Functions
+        async function loadLlamaService() {
+            try {
+                const serviceController = new AbortController();
+                const modelsController = new AbortController();
+
+                // Set timeouts for both requests
+                const serviceTimeoutId = setTimeout(() => serviceController.abort(), 3000);
+                const modelsTimeoutId = setTimeout(() => modelsController.abort(), 3000);
+
+                const [serviceResponse, modelsResponse] = await Promise.all([
+                    fetch('/api/llama/service', { signal: serviceController.signal }),
+                    fetch('/api/llama/models', { signal: modelsController.signal })
+                ]);
+
+                // Clear timeouts on success
+                clearTimeout(serviceTimeoutId);
+                clearTimeout(modelsTimeoutId);
+
+                if (serviceResponse.ok && modelsResponse.ok) {
+                    const serviceData = await serviceResponse.json();
+                    const modelsData = await modelsResponse.json();
+
+                    // Update service status
+                    const statusElement = document.getElementById('llamaStatus');
+                    const toggleBtn = document.getElementById('llamaToggleBtn');
+                    const restartBtn = document.getElementById('llamaRestartBtn');
+
+                    if (statusElement && toggleBtn) {
+                        if (serviceData.enabled && serviceData.status === 'running') {
+                            statusElement.textContent = '● Running';
+                            statusElement.className = 'status-online';
+                            toggleBtn.textContent = 'Stop Service';
+                            if (restartBtn) restartBtn.disabled = false;
+                        } else if (serviceData.enabled && serviceData.status === 'starting') {
+                            statusElement.textContent = '● Starting...';
+                            statusElement.className = 'status-warning';
+                            toggleBtn.textContent = 'Stop Service';
+                            if (restartBtn) restartBtn.disabled = true;
+                        } else if (serviceData.enabled && serviceData.status === 'error') {
+                            statusElement.textContent = '● Error';
+                            statusElement.className = 'status-error';
+                            toggleBtn.textContent = 'Start Service';
+                            if (restartBtn) restartBtn.disabled = true;
+                        } else {
+                            statusElement.textContent = '● Stopped';
+                            statusElement.className = 'status-offline';
+                            toggleBtn.textContent = 'Start Service';
+                            if (restartBtn) restartBtn.disabled = true;
+                        }
+                    }
+
+                    // Update models list
+                    const modelListElement = document.getElementById('llamaModelList');
+                    if (modelListElement && modelsData.models) {
+                        let modelHtml = '';
+                        modelsData.models.forEach(model => {
+                            const isSelected = model.path === serviceData.model_path;
+                            modelHtml += `<div style="padding: 5px; border-bottom: 1px solid #eee; cursor: pointer; ${isSelected ? 'background: #e3f2fd; font-weight: bold;' : ''}"
+                                         onclick="selectLlamaModel('${model.path}')"
+                                         data-model-path="${model.path}">
+                                         ${model.path.split('/').pop()} (${model.size})
+                                         ${isSelected ? ' ✓' : ''}
+                                      </div>`;
+                        });
+                        modelListElement.innerHTML = modelHtml || '<div style="padding: 5px; color: #666;">No .gguf models found</div>';
+                    }
+                } else {
+                    console.error('Failed to load LLaMA service data');
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('LLaMA service request timed out');
+                } else {
+                    console.error('Error loading LLaMA service:', error);
+                }
+            }
+        }
+
+        async function selectLlamaModel(modelPath) {
+            try {
+                const response = await fetch('/api/llama/service', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ model_path: modelPath })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    console.log('LLaMA model updated:', result);
+                    loadLlamaService(); // Refresh display
+
+                    // Enable restart button if service is running
+                    const restartBtn = document.getElementById('llamaRestartBtn');
+                    const statusElement = document.getElementById('llamaStatus');
+                    if (restartBtn && statusElement && statusElement.textContent.includes('Running')) {
+                        restartBtn.disabled = false;
+                    }
+                } else {
+                    alert(`Failed to update model: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error updating model:', error);
+                alert('Failed to update model');
+            }
+        }
+
+        async function restartLlamaWithSelectedModel() {
+            if (!confirm('Restart LLaMA service with the selected model?')) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/llama/restart', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    console.log('LLaMA service restarted:', result);
+                    loadLlamaService(); // Refresh display
+                } else {
+                    alert(`Failed to restart service: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error restarting service:', error);
+                alert('Failed to restart service');
+            }
+        }
+
+        async function toggleLlamaService() {
+            try {
+                const response = await fetch('/api/llama/service/toggle', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    console.log('LLaMA service toggled:', result);
+                    loadLlamaService(); // Refresh display
+                } else {
+                    alert(`Failed to toggle llama service: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error toggling llama service:', error);
+                alert('Failed to toggle llama service');
+            }
+        }
+
         // Load initial data - use direct call for initial load
         loadWhisperService();
+        loadLlamaService();
     </script>
 </body>
 </html>)HTML";
@@ -1842,6 +2033,24 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
     } else if (request.path == "/api/whisper/service/toggle") {
         if (request.method == "POST") {
             return api_whisper_service_toggle(request);
+        }
+    } else if (request.path == "/api/llama/service") {
+        if (request.method == "GET") {
+            return api_llama_service_get(request);
+        } else if (request.method == "POST") {
+            return api_llama_service_post(request);
+        }
+    } else if (request.path == "/api/llama/service/toggle") {
+        if (request.method == "POST") {
+            return api_llama_service_toggle(request);
+        }
+    } else if (request.path == "/api/llama/models") {
+        if (request.method == "GET") {
+            return api_llama_models_get(request);
+        }
+    } else if (request.path == "/api/llama/restart") {
+        if (request.method == "POST") {
+            return api_llama_restart(request);
         }
     } else if (request.path == "/api/upload-stream") {
         if (request.method == "POST") {
@@ -2924,6 +3133,322 @@ HttpResponse SimpleHttpServer::api_whisper_restart(const HttpRequest& request) {
         response.status_code = 500;
         response.status_text = "Internal Server Error";
         response.body = R"({"error": "Failed to restart service with new model"})";
+    }
+
+    return response;
+}
+
+// LLaMA service management endpoints
+HttpResponse SimpleHttpServer::api_llama_service_get(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Check for detailed info request
+    bool include_stats = false;
+    auto it = request.query_params.find("stats");
+    if (it != request.query_params.end() && it->second == "true") {
+        include_stats = true;
+    }
+
+    bool enabled = false;
+    std::string model_path = "models/llama-7b-q4_0.gguf";
+    std::string status = "unknown";
+
+    try {
+        enabled = database_->get_llama_service_enabled();
+        model_path = database_->get_llama_model_path();
+        status = database_->get_llama_service_status();
+    } catch (const std::exception& e) {
+        std::cout << "❌ Database error in api_llama_service_get: " << e.what() << std::endl;
+        // Use default values set above
+    } catch (...) {
+        std::cout << "❌ Unknown database error in api_llama_service_get" << std::endl;
+        // Use default values set above
+    }
+
+    response.status_code = 200;
+    response.status_text = "OK";
+    std::string body = "{\"enabled\": " + std::string(enabled ? "true" : "false") +
+                      ", \"model_path\": \"" + model_path +
+                      "\", \"status\": \"" + status + "\"";
+
+    if (include_stats) {
+        body += ", \"uptime\": " + std::to_string(time(nullptr)) +
+                ", \"memory_usage\": \"unknown\"";
+    }
+
+    body += "}";
+    response.body = body;
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_llama_service_post(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Parse JSON body to update model path
+    std::string model_path;
+    size_t model_pos = request.body.find("\"model_path\":");
+    if (model_pos != std::string::npos) {
+        size_t start = request.body.find("\"", model_pos + 13);
+        if (start != std::string::npos) {
+            start++; // Skip opening quote
+            size_t end = request.body.find("\"", start);
+            if (end != std::string::npos) {
+                model_path = request.body.substr(start, end - start);
+            }
+        }
+    }
+
+    if (model_path.empty()) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Model path is required"})";
+        return response;
+    }
+
+    bool success = database_->set_llama_model_path(model_path);
+
+    if (success) {
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.body = "{\"success\": true, \"model_path\": \"" + model_path + "\"}";
+    } else {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Failed to update model path"})";
+    }
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_llama_service_toggle(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Check for specific enable/disable action
+    bool current_enabled = database_->get_llama_service_enabled();
+    bool new_enabled = !current_enabled;
+
+    auto it = request.query_params.find("enable");
+    if (it != request.query_params.end()) {
+        new_enabled = (it->second == "true");
+    }
+
+    bool success = database_->set_llama_service_enabled(new_enabled);
+
+    if (success) {
+        // Update status based on enabled state
+        std::string new_status = new_enabled ? "starting" : "stopped";
+        database_->set_llama_service_status(new_status);
+
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.body = "{\"success\": true, \"enabled\": " +
+                       std::string(new_enabled ? "true" : "false") +
+                       ", \"status\": \"" + new_status + "\"}";
+
+        if (new_enabled) {
+            std::cout << "🦙 LLaMA service enabled - starting service..." << std::endl;
+
+            // Get the configured model path from database
+            std::string model_path;
+            try {
+                model_path = database_->get_llama_model_path();
+                std::cout << "🦙 Got model path: " << model_path << std::endl;
+            } catch (const std::exception& e) {
+                std::cout << "❌ Database error getting model path: " << e.what() << std::endl;
+                database_->set_llama_service_status("error");
+                response.status_code = 500;
+                response.status_text = "Internal Server Error";
+                response.body = R"({"error": "Database error"})";
+                return response;
+            }
+
+            if (model_path.empty()) {
+                std::cout << "❌ No model configured - cannot start service" << std::endl;
+                database_->set_llama_service_status("error");
+                response.status_code = 400;
+                response.status_text = "Bad Request";
+                response.body = R"({"error": "No model configured. Please select a model first."})";
+                return response;
+            }
+
+            // Validate model file exists
+            struct stat file_stat;
+            if (stat(model_path.c_str(), &file_stat) != 0) {
+                std::cout << "❌ Model file not found: " << model_path << std::endl;
+                database_->set_llama_service_status("error");
+                response.status_code = 404;
+                response.status_text = "Not Found";
+                response.body = R"({"error": "Configured model file not found"})";
+                return response;
+            }
+
+            // Kill existing llama service processes
+            std::cout << "🦙 Stopping existing llama service..." << std::endl;
+            system("pkill -TERM -f llama-service");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+            // Start new llama service with configured model
+            std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 &";
+            std::cout << "🦙 Starting llama service: " << start_command << std::endl;
+            int start_result = system(start_command.c_str());
+
+            if (start_result == 0) {
+                std::cout << "✅ LLaMA service started successfully" << std::endl;
+                database_->set_llama_service_status("running");
+            } else {
+                std::cout << "❌ Failed to start llama service" << std::endl;
+                database_->set_llama_service_status("error");
+                response.status_code = 500;
+                response.status_text = "Internal Server Error";
+                response.body = R"({"error": "Failed to start llama service"})";
+                return response;
+            }
+
+        } else {
+            std::cout << "🦙 LLaMA service disabled - stopping service..." << std::endl;
+
+            // Kill existing llama service processes
+            system("pkill -TERM -f llama-service");
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            database_->set_llama_service_status("stopped");
+        }
+
+    } else {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Failed to toggle llama service"})";
+    }
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_llama_models_get(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    // Scan for .gguf model files in models directory
+    std::vector<std::string> model_files;
+    std::string models_dir = "models";
+
+    DIR* dir = opendir(models_dir.c_str());
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string filename = entry->d_name;
+            if (filename.length() > 5 && filename.substr(filename.length() - 5) == ".gguf") {
+                model_files.push_back(models_dir + "/" + filename);
+            }
+        }
+        closedir(dir);
+    }
+
+    // Sort model files
+    std::sort(model_files.begin(), model_files.end());
+
+    response.status_code = 200;
+    response.status_text = "OK";
+
+    std::string body = "{\"models\": [";
+    for (size_t i = 0; i < model_files.size(); i++) {
+        if (i > 0) body += ", ";
+
+        // Get file size
+        struct stat file_stat;
+        std::string size_str = "unknown";
+        if (stat(model_files[i].c_str(), &file_stat) == 0) {
+            double size_mb = file_stat.st_size / (1024.0 * 1024.0);
+            if (size_mb < 1024) {
+                size_str = std::to_string((int)size_mb) + " MB";
+            } else {
+                size_str = std::to_string((int)(size_mb / 1024.0)) + " GB";
+            }
+        }
+
+        body += "{\"path\": \"" + model_files[i] + "\", \"size\": \"" + size_str + "\"}";
+    }
+    body += "]}";
+
+    response.body = body;
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_llama_restart(const HttpRequest& request) {
+    HttpResponse response;
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Check if service is enabled
+    bool enabled = database_->get_llama_service_enabled();
+    if (!enabled) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "LLaMA service is not enabled"})";
+        return response;
+    }
+
+    std::cout << "🦙 Restarting LLaMA service..." << std::endl;
+    database_->set_llama_service_status("restarting");
+
+    // Kill existing processes
+    system("pkill -TERM -f llama-service");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+    // Get model path and restart
+    std::string model_path = database_->get_llama_model_path();
+    if (model_path.empty()) {
+        database_->set_llama_service_status("error");
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "No model configured"})";
+        return response;
+    }
+
+    std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 &";
+    int start_result = system(start_command.c_str());
+
+    if (start_result == 0) {
+        std::cout << "✅ LLaMA service restarted successfully" << std::endl;
+        database_->set_llama_service_status("running");
+        response.status_code = 200;
+        response.status_text = "OK";
+        response.body = R"({"success": true, "message": "LLaMA service restarted"})";
+    } else {
+        std::cout << "❌ Failed to restart llama service" << std::endl;
+        database_->set_llama_service_status("error");
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Failed to restart llama service"})";
     }
 
     return response;

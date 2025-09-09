@@ -13,9 +13,9 @@
 // WhisperSession Implementation
 WhisperSession::WhisperSession(const std::string& call_id, const WhisperSessionConfig& config)
     : call_id_(call_id), ctx_(nullptr), is_active_(true), config_(config) {
-    
+
     last_activity_ = std::chrono::steady_clock::now();
-    
+
     if (!initialize_whisper_context()) {
         std::cout << "❌ Failed to initialize whisper context for call " << call_id << std::endl;
         is_active_.store(false);
@@ -64,29 +64,14 @@ bool WhisperSession::process_audio_chunk(const std::vector<float>& audio_samples
     if (!is_active_.load() || !ctx_) {
         return false;
     }
-    
-    std::lock_guard<std::mutex> lock(session_mutex_);
-    
-    // Add audio to buffer (no VAD - use chunks as provided)
-    audio_buffer_.insert(audio_buffer_.end(), audio_samples.begin(), audio_samples.end());
-    
-    mark_activity();
-    
-    // Process if we have enough audio (e.g., 1 second worth)
-    const size_t min_samples = config_.language == "en" ? 8000 : 16000; // 1 second at 8kHz/16kHz
-    
-    if (audio_buffer_.size() >= min_samples) {
-        return process_buffered_audio();
-    }
-    
-    return true;
-}
 
-bool WhisperSession::process_buffered_audio() {
-    if (!ctx_ || audio_buffer_.empty()) {
-        return false;
+    if (audio_samples.empty()) {
+        return true; // Nothing to process
     }
-    
+
+    std::lock_guard<std::mutex> lock(session_mutex_);
+    mark_activity();
+
     // Create real whisper parameters
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wparams.language = config_.language.c_str();
@@ -96,34 +81,33 @@ bool WhisperSession::process_buffered_audio() {
     wparams.translate = config_.translate;
     wparams.print_progress = false;
     wparams.print_realtime = false;
-    
-    // Process audio with whisper
-    int result = whisper_full(ctx_, wparams, audio_buffer_.data(), audio_buffer_.size());
-    
+
+    // Process audio chunk directly with whisper
+    int result = whisper_full(ctx_, wparams, audio_samples.data(), audio_samples.size());
+
     if (result == 0) {
         // Extract transcription
         const int n_segments = whisper_full_n_segments(ctx_);
         std::string transcription;
-        
+
         for (int i = 0; i < n_segments; ++i) {
             const char* text = whisper_full_get_segment_text(ctx_, i);
             transcription += text;
         }
-        
+
         if (!transcription.empty()) {
             latest_transcription_ = transcription;
             std::cout << "📝 [" << call_id_ << "] Transcription: " << transcription << std::endl;
         }
-        
-        // Clear processed audio buffer
-        audio_buffer_.clear();
-        
+
         return true;
     }
-    
+
     std::cout << "❌ Whisper processing failed for call " << call_id_ << std::endl;
     return false;
 }
+
+
 
 std::string WhisperSession::get_latest_transcription() {
     std::lock_guard<std::mutex> lock(session_mutex_);
@@ -133,9 +117,9 @@ std::string WhisperSession::get_latest_transcription() {
 }
 
 // StandaloneWhisperService Implementation
-StandaloneWhisperService::StandaloneWhisperService() 
+StandaloneWhisperService::StandaloneWhisperService()
     : running_(false) {
-    
+
     service_discovery_ = std::make_unique<ServiceDiscovery>();
 }
 
@@ -170,9 +154,9 @@ bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const s
 
 void StandaloneWhisperService::stop() {
     if (!running_.load()) return;
-    
+
     running_.store(false);
-    
+
     // Close all TCP connections
     {
         std::lock_guard<std::mutex> lock(tcp_mutex_);
@@ -183,7 +167,7 @@ void StandaloneWhisperService::stop() {
             }
         }
         call_tcp_sockets_.clear();
-        
+
         // Join all TCP threads
         for (auto& pair : call_tcp_threads_) {
             if (pair.second.joinable()) {
@@ -192,47 +176,47 @@ void StandaloneWhisperService::stop() {
         }
         call_tcp_threads_.clear();
     }
-    
+
     // Destroy all sessions
     {
         std::lock_guard<std::mutex> lock(sessions_mutex_);
         sessions_.clear();
     }
-    
+
     if (discovery_thread_.joinable()) {
         discovery_thread_.join();
     }
-    
+
     std::cout << "🛑 Standalone Whisper Service stopped" << std::endl;
 }
 
 void StandaloneWhisperService::run_service_loop() {
     last_discovery_ = std::chrono::steady_clock::now();
-    
+
     while (running_.load()) {
         auto now = std::chrono::steady_clock::now();
-        
+
         // Discover new streams every 5 seconds
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discovery_).count() > 5000) {
             discover_and_connect_streams();
             last_discovery_ = now;
         }
-        
+
         // Cleanup inactive sessions
         cleanup_inactive_sessions();
-        
+
         // Log session statistics
         log_session_stats();
-        
+
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 }
 
 void StandaloneWhisperService::discover_and_connect_streams() {
     auto streams = service_discovery_->discover_streams("127.0.0.1", 13000);
-    
+
     std::cout << "🔍 Discovered " << streams.size() << " audio streams" << std::endl;
-    
+
     for (const auto& stream : streams) {
         // Check if we're already connected to this stream
         {
@@ -241,10 +225,10 @@ void StandaloneWhisperService::discover_and_connect_streams() {
                 continue; // Already connected
             }
         }
-        
-        std::cout << "🔗 Connecting to new audio stream: " << stream.call_id 
+
+        std::cout << "🔗 Connecting to new audio stream: " << stream.call_id
                   << " on port " << stream.tcp_port << std::endl;
-        
+
         if (connect_to_audio_stream(stream)) {
             create_session(stream.call_id);
         }
@@ -257,75 +241,88 @@ bool StandaloneWhisperService::connect_to_audio_stream(const AudioStreamInfo& st
         std::cout << "❌ Failed to create socket for call " << stream_info.call_id << std::endl;
         return false;
     }
-    
+
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     server_addr.sin_port = htons(stream_info.tcp_port);
-    
+
     if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        std::cout << "❌ Failed to connect to audio stream " << stream_info.call_id 
+        std::cout << "❌ Failed to connect to audio stream " << stream_info.call_id
                   << " on port " << stream_info.tcp_port << std::endl;
         close(sock);
         return false;
     }
-    
-    std::cout << "✅ Connected to audio stream " << stream_info.call_id 
+
+    std::cout << "✅ Connected to audio stream " << stream_info.call_id
               << " on port " << stream_info.tcp_port << std::endl;
-    
+
     // Store connection
     {
         std::lock_guard<std::mutex> lock(tcp_mutex_);
         call_tcp_sockets_[stream_info.call_id] = sock;
-        
+
         // Start TCP handler thread
         call_tcp_threads_[stream_info.call_id] = std::thread(
             &StandaloneWhisperService::handle_tcp_audio_stream, this, stream_info.call_id, sock);
     }
-    
+
     return true;
 }
 
 bool StandaloneWhisperService::create_session(const std::string& call_id) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
-    
+
     if (sessions_.find(call_id) != sessions_.end()) {
         return false; // Session already exists
     }
-    
+
     auto session = std::make_unique<WhisperSession>(call_id, config_);
     if (!session->is_active()) {
         return false;
     }
-    
+
     sessions_[call_id] = std::move(session);
     std::cout << "🎤 Created whisper session for call " << call_id << std::endl;
-    
+
     return true;
 }
 
 bool StandaloneWhisperService::destroy_session(const std::string& call_id) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
-    
+
     auto it = sessions_.find(call_id);
     if (it != sessions_.end()) {
         sessions_.erase(it);
+
+        // Close LLaMA socket for this call if open
+        {
+            std::lock_guard<std::mutex> tlock(tcp_mutex_);
+            auto lit = llama_sockets_.find(call_id);
+            if (lit != llama_sockets_.end()) {
+                uint32_t bye = 0xFFFFFFFF;
+                send(lit->second, &bye, 4, 0);
+                close(lit->second);
+                llama_sockets_.erase(lit);
+            }
+        }
+
         std::cout << "🗑️ Destroyed whisper session for call " << call_id << std::endl;
         return true;
     }
-    
+
     return false;
 }
 
 void StandaloneWhisperService::cleanup_inactive_sessions() {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
-    
+
     auto now = std::chrono::steady_clock::now();
     auto it = sessions_.begin();
-    
+
     while (it != sessions_.end()) {
         auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->get_last_activity());
-        
+
         if (age.count() > 300) { // 5 minutes timeout
             std::cout << "🗑️ Removing inactive session: " << it->first << std::endl;
             it = sessions_.erase(it);
@@ -356,6 +353,9 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
         std::cout << "⚠️ Call ID mismatch: expected " << call_id << ", got " << received_call_id << std::endl;
     }
 
+    // Ensure LLaMA connection for this call
+    connect_llama_for_call(call_id);
+
     // Process audio chunks
     while (running_.load()) {
         std::vector<float> audio_samples;
@@ -377,13 +377,16 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
                     // Check for new transcription
                     std::string transcription = it->second->get_latest_transcription();
                     if (!transcription.empty()) {
-                        // Send transcription via TCP
+                        // Send transcription via TCP back to audio source (optional)
                         send_tcp_transcription(socket, transcription);
 
                         // Append transcription to database
                         if (database_) {
                             database_->append_transcription(call_id, transcription);
                         }
+
+                        // Forward to LLaMA service via dedicated TCP connection
+                        send_llama_text(call_id, transcription);
                     }
                 }
             }
@@ -463,6 +466,52 @@ bool StandaloneWhisperService::send_tcp_transcription(int socket, const std::str
     }
 
     std::cout << "📝 TCP transcription sent: " << transcription << std::endl;
+    return true;
+}
+
+
+// LLaMA client helpers
+bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id) {
+    std::lock_guard<std::mutex> lock(tcp_mutex_);
+    if (llama_sockets_.find(call_id) != llama_sockets_.end()) return true;
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return false;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(llama_port_);
+    addr.sin_addr.s_addr = inet_addr(llama_host_.c_str());
+
+    if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(s);
+        return false;
+    }
+
+    // Send HELLO(call_id)
+    uint32_t n = htonl((uint32_t)call_id.size());
+    if (send(s, &n, 4, 0) != 4) { close(s); return false; }
+    if (send(s, call_id.data(), call_id.size(), 0) != (ssize_t)call_id.size()) { close(s); return false; }
+
+    llama_sockets_[call_id] = s;
+    std::cout << "🦙 Connected to LLaMA for call " << call_id << " at " << llama_host_ << ":" << llama_port_ << std::endl;
+    return true;
+}
+
+bool StandaloneWhisperService::send_llama_text(const std::string& call_id, const std::string& text) {
+    std::lock_guard<std::mutex> lock(tcp_mutex_);
+    auto it = llama_sockets_.find(call_id);
+    if (it == llama_sockets_.end()) {
+        // Try to connect on demand
+        if (!connect_llama_for_call(call_id)) return false;
+        it = llama_sockets_.find(call_id);
+        if (it == llama_sockets_.end()) return false;
+    }
+
+    int s = it->second;
+    uint32_t l = htonl((uint32_t)text.size());
+    if (send(s, &l, 4, 0) != 4) return false;
+    if (!text.empty() && send(s, text.data(), text.size(), 0) != (ssize_t)text.size()) return false;
     return true;
 }
 

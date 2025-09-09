@@ -17,11 +17,11 @@ bool Database::init(const std::string& db_path) {
         std::cerr << "Cannot open database: " << sqlite3_errmsg(db_) << std::endl;
         return false;
     }
-    
+
     // Enable WAL mode for better performance
     sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
-    
+
     return create_tables();
 }
 
@@ -42,7 +42,7 @@ bool Database::create_tables() {
         );
         CREATE INDEX IF NOT EXISTS idx_phone_number ON callers(phone_number);
     )";
-    
+
     const char* calls_sql = R"(
         CREATE TABLE IF NOT EXISTS calls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,6 +53,7 @@ bool Database::create_tables() {
             start_time TEXT NOT NULL,
             end_time TEXT,
             transcription TEXT DEFAULT '',
+            llama_response TEXT DEFAULT '',
             status TEXT DEFAULT 'active',
             FOREIGN KEY (caller_id) REFERENCES callers(id)
         );
@@ -74,6 +75,10 @@ bool Database::create_tables() {
         sqlite3_free(err_msg);
         return false;
     }
+
+    // Try to add llama_response column for existing databases (ignore error if it already exists)
+    const char* alter_calls_add_llama = "ALTER TABLE calls ADD COLUMN llama_response TEXT DEFAULT ''";
+    sqlite3_exec(db_, alter_calls_add_llama, nullptr, nullptr, nullptr);
 
     // Create SIP lines table
     const char* sip_lines_sql = R"(
@@ -101,6 +106,9 @@ bool Database::create_tables() {
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('whisper_service_enabled', 'false');
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('whisper_model_path', 'models/ggml-small.en.bin');
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('whisper_service_status', 'stopped');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('llama_service_enabled', 'false');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('llama_model_path', 'models/llama-7b-q4_0.gguf');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('llama_service_status', 'stopped');
     )";
 
     rc = sqlite3_exec(db_, sip_lines_sql, nullptr, nullptr, &err_msg);
@@ -125,12 +133,12 @@ int Database::get_or_create_caller(const std::string& phone_number) {
         // Create anonymous caller
         const char* sql = "INSERT INTO callers (phone_number, created_at, last_call) VALUES (NULL, ?, ?)";
         sqlite3_stmt* stmt;
-        
+
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             std::string timestamp = get_current_timestamp();
             sqlite3_bind_text(stmt, 1, timestamp.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 2, timestamp.c_str(), -1, SQLITE_STATIC);
-            
+
             if (sqlite3_step(stmt) == SQLITE_DONE) {
                 int caller_id = sqlite3_last_insert_rowid(db_);
                 sqlite3_finalize(stmt);
@@ -140,14 +148,14 @@ int Database::get_or_create_caller(const std::string& phone_number) {
         sqlite3_finalize(stmt);
         return -1;
     }
-    
+
     // Check if caller exists
     const char* select_sql = "SELECT id FROM callers WHERE phone_number = ?";
     sqlite3_stmt* stmt;
-    
+
     if (sqlite3_prepare_v2(db_, select_sql, -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, phone_number.c_str(), -1, SQLITE_STATIC);
-        
+
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             int caller_id = sqlite3_column_int(stmt, 0);
             sqlite3_finalize(stmt);
@@ -156,7 +164,7 @@ int Database::get_or_create_caller(const std::string& phone_number) {
         }
     }
     sqlite3_finalize(stmt);
-    
+
     // Create new caller
     const char* insert_sql = "INSERT INTO callers (phone_number, created_at, last_call) VALUES (?, ?, ?)";
     if (sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -164,7 +172,7 @@ int Database::get_or_create_caller(const std::string& phone_number) {
         sqlite3_bind_text(stmt, 1, phone_number.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 2, timestamp.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 3, timestamp.c_str(), -1, SQLITE_STATIC);
-        
+
         if (sqlite3_step(stmt) == SQLITE_DONE) {
             int caller_id = sqlite3_last_insert_rowid(db_);
             sqlite3_finalize(stmt);
@@ -178,12 +186,12 @@ int Database::get_or_create_caller(const std::string& phone_number) {
 bool Database::update_caller_last_call(int caller_id) {
     const char* sql = "UPDATE callers SET last_call = ? WHERE id = ?";
     sqlite3_stmt* stmt;
-    
+
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         std::string timestamp = get_current_timestamp();
         sqlite3_bind_text(stmt, 1, timestamp.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_int(stmt, 2, caller_id);
-        
+
         bool success = sqlite3_step(stmt) == SQLITE_DONE;
         sqlite3_finalize(stmt);
         return success;
@@ -203,7 +211,7 @@ std::string Database::generate_uuid() {
     static std::mt19937 gen(rd());
     static std::uniform_int_distribution<> dis(0, 15);
     static std::uniform_int_distribution<> dis2(8, 11);
-    
+
     std::stringstream ss;
     ss << std::hex;
     for (int i = 0; i < 8; i++) ss << dis(gen);
@@ -216,14 +224,14 @@ std::string Database::generate_uuid() {
     for (int i = 0; i < 3; i++) ss << dis(gen);
     ss << "-";
     for (int i = 0; i < 12; i++) ss << dis(gen);
-    
+
     return ss.str();
 }
 
 std::string Database::get_current_timestamp() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
-    
+
     std::stringstream ss;
     ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d %H:%M:%S");
     return ss.str();
@@ -489,9 +497,33 @@ bool Database::append_transcription(const std::string& call_id, const std::strin
     return false;
 }
 
+bool Database::append_llama_response(const std::string& call_id, const std::string& text) {
+    const char* sql = "UPDATE calls SET llama_response = llama_response || ? WHERE call_id = ?";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        std::string text_with_space = " " + text; // Add space before appending
+        sqlite3_bind_text(stmt, 1, text_with_space.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, call_id.c_str(), -1, SQLITE_STATIC);
+
+        bool success = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+
+        if (success) {
+            std::cout << "🦙 LLaMA response appended to call " << call_id << ": " << text << std::endl;
+        }
+
+        return success;
+    }
+
+    sqlite3_finalize(stmt);
+    return false;
+}
+
+
 Call Database::get_call(const std::string& call_id) {
     Call call;
-    const char* sql = "SELECT id, call_id, caller_id, line_id, phone_number, start_time, end_time, transcription, status FROM calls WHERE call_id = ?";
+    const char* sql = "SELECT id, call_id, caller_id, line_id, phone_number, start_time, end_time, transcription, llama_response, status FROM calls WHERE call_id = ?";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -511,7 +543,10 @@ Call Database::get_call(const std::string& call_id) {
             const char* transcription = (char*)sqlite3_column_text(stmt, 7);
             call.transcription = transcription ? transcription : "";
 
-            call.status = (char*)sqlite3_column_text(stmt, 8);
+            const char* llama_resp = (char*)sqlite3_column_text(stmt, 8);
+            call.llama_response = llama_resp ? llama_resp : "";
+
+            call.status = (char*)sqlite3_column_text(stmt, 9);
         }
 
         sqlite3_finalize(stmt);
@@ -617,6 +652,106 @@ std::string Database::get_whisper_service_status() {
 
 bool Database::set_whisper_service_status(const std::string& status) {
     const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('whisper_service_status', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+// LLaMA service management methods
+bool Database::get_llama_service_enabled() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'llama_service_enabled'";
+    sqlite3_stmt* stmt;
+    bool enabled = false;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* value = (char*)sqlite3_column_text(stmt, 0);
+            enabled = (value && std::string(value) == "true");
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return enabled;
+}
+
+bool Database::set_llama_service_enabled(bool enabled) {
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('llama_service_enabled', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, enabled ? "true" : "false", -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_llama_model_path() {
+    if (!db_) {
+        std::cerr << "❌ Database connection is null in get_llama_model_path()" << std::endl;
+        return "models/llama-7b-q4_0.gguf";
+    }
+
+    const char* sql = "SELECT value FROM system_config WHERE key = 'llama_model_path'";
+    sqlite3_stmt* stmt;
+    std::string model_path = "models/llama-7b-q4_0.gguf";
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* value = (char*)sqlite3_column_text(stmt, 0);
+            if (value) {
+                model_path = std::string(value);
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return model_path;
+}
+
+bool Database::set_llama_model_path(const std::string& model_path) {
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('llama_model_path', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_llama_service_status() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'llama_service_status'";
+    sqlite3_stmt* stmt;
+    std::string status = "stopped";
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* value = (char*)sqlite3_column_text(stmt, 0);
+            if (value) {
+                status = std::string(value);
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return status;
+}
+
+bool Database::set_llama_service_status(const std::string& status) {
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('llama_service_status', ?, CURRENT_TIMESTAMP)";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {

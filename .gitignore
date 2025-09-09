@@ -49,3 +49,4 @@ compile_commands.json
 
 # Temporary download directory
 /tmp/whisper-cpp-*
+llama-cpp/

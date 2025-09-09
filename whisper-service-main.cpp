@@ -63,6 +63,16 @@ bool parse_whisper_service_args(int argc, char** argv, WhisperServiceArgs& args)
         else if (arg == "--no-timestamps") {
             args.no_timestamps = true;
         }
+        else if (arg == "--llama-host") {
+            if (i + 1 < argc) {
+                args.llama_host = argv[++i];
+            }
+        }
+        else if (arg == "--llama-port") {
+            if (i + 1 < argc) {
+                args.llama_port = std::stoi(argv[++i]);
+            }
+        }
         else if (arg == "-v" || arg == "--verbose") {
             args.verbose = true;
         }
@@ -92,6 +102,8 @@ void print_whisper_service_usage(const char* program_name) {
     std::cout << "  -l, --language LANG        Language code [en]" << std::endl;
     std::cout << "  --host HOST                Discovery server host [127.0.0.1]" << std::endl;
     std::cout << "  --port PORT                Discovery server port [13000]" << std::endl;
+    std::cout << "  --llama-host HOST          LLaMA service host [127.0.0.1]" << std::endl;
+    std::cout << "  --llama-port PORT          LLaMA service port [8083]" << std::endl;
     std::cout << "  --no-gpu                   Disable GPU acceleration" << std::endl;
     std::cout << "  --translate                Translate to English" << std::endl;
     std::cout << "  --no-timestamps            Disable timestamps" << std::endl;
@@ -132,6 +144,9 @@ int main(int argc, char** argv) {
     
     // Create and start whisper service
     g_whisper_service = std::make_unique<StandaloneWhisperService>();
+
+    // Configure LLaMA endpoint before starting
+    g_whisper_service->set_llama_endpoint(args.llama_host, args.llama_port);
 
     if (!g_whisper_service->start(config, args.database_path)) {
         std::cout << "❌ Failed to start whisper service" << std::endl;

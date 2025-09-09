@@ -21,6 +21,7 @@ struct Call {
     std::string start_time;
     std::string end_time;
     std::string transcription; // Accumulated whisper output
+    std::string llama_response; // Accumulated llama output
     std::string status;        // 'active', 'ended', 'missed'
 };
 
@@ -38,10 +39,10 @@ class Database {
 public:
     Database();
     ~Database();
-    
+
     bool init(const std::string& db_path = "whisper_talk.db");
     void close();
-    
+
     // Caller management
     int get_or_create_caller(const std::string& phone_number);
     bool update_caller_last_call(int caller_id);
@@ -51,6 +52,8 @@ public:
     bool create_call(const std::string& call_id, int caller_id, int line_id, const std::string& phone_number);
     bool end_call(const std::string& call_id);
     bool append_transcription(const std::string& call_id, const std::string& text);
+    bool append_llama_response(const std::string& call_id, const std::string& text);
+
     Call get_call(const std::string& call_id);
 
     // Session management removed
@@ -76,6 +79,14 @@ public:
     bool set_whisper_model_path(const std::string& model_path);
     std::string get_whisper_service_status(); // "running", "stopped", "error"
     bool set_whisper_service_status(const std::string& status);
+
+    // LLaMA service management
+    bool get_llama_service_enabled();
+    bool set_llama_service_enabled(bool enabled);
+    std::string get_llama_model_path();
+    bool set_llama_model_path(const std::string& model_path);
+    std::string get_llama_service_status(); // "running", "stopped", "error"
+    bool set_llama_service_status(const std::string& status);
 
 private:
     sqlite3* db_;
