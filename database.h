@@ -88,6 +88,16 @@ public:
     std::string get_llama_service_status(); // "running", "stopped", "error"
     bool set_llama_service_status(const std::string& status);
 
+    // Piper service management
+    bool get_piper_service_enabled();
+    bool set_piper_service_enabled(bool enabled);
+    std::string get_piper_model_path();
+    bool set_piper_model_path(const std::string& model_path);
+    std::string get_piper_espeak_data_path();
+    bool set_piper_espeak_data_path(const std::string& espeak_data_path);
+    std::string get_piper_service_status(); // "running", "stopped", "error"
+    bool set_piper_service_status(const std::string& status);
+
 private:
     sqlite3* db_;
     bool create_tables();

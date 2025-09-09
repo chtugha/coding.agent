@@ -113,8 +113,8 @@ private:
     std::unordered_map<std::string, std::thread> call_tcp_threads_;
 
     // TCP output (to downstream, e.g., Piper) per call
-    std::string output_host_ = ""; // empty disables output
-    int output_port_ = 0;
+    std::string output_host_ = "127.0.0.1"; // default output host
+    int output_port_ = 8090;
     std::unordered_map<std::string, int> output_sockets_;
 
 

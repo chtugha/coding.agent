@@ -85,6 +85,13 @@ private:
     HttpResponse api_llama_models_get(const HttpRequest& request);
     HttpResponse api_llama_restart(const HttpRequest& request);
 
+    // Piper service endpoints
+    HttpResponse api_piper_service_get(const HttpRequest& request);
+    HttpResponse api_piper_service_post(const HttpRequest& request);
+    HttpResponse api_piper_service_toggle(const HttpRequest& request);
+    HttpResponse api_piper_models_get(const HttpRequest& request);
+    HttpResponse api_piper_restart(const HttpRequest& request);
+
     std::string get_mime_type(const std::string& extension);
 
     // Database connection

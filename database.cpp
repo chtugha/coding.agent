@@ -109,6 +109,10 @@ bool Database::create_tables() {
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('llama_service_enabled', 'false');
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('llama_model_path', 'models/llama-7b-q4_0.gguf');
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('llama_service_status', 'stopped');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('piper_service_enabled', 'false');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('piper_model_path', 'models/voice.onnx');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('piper_espeak_data_path', 'espeak-ng-data');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('piper_service_status', 'stopped');
     )";
 
     rc = sqlite3_exec(db_, sip_lines_sql, nullptr, nullptr, &err_msg);
@@ -752,6 +756,127 @@ std::string Database::get_llama_service_status() {
 
 bool Database::set_llama_service_status(const std::string& status) {
     const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('llama_service_status', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+// Piper service management methods
+bool Database::get_piper_service_enabled() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'piper_service_enabled'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            sqlite3_finalize(stmt);
+            return value == "true";
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return false;
+}
+
+bool Database::set_piper_service_enabled(bool enabled) {
+    const char* sql = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_service_enabled'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, enabled ? "true" : "false", -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_piper_model_path() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'piper_model_path'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            sqlite3_finalize(stmt);
+            return value;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return "models/voice.onnx";
+}
+
+bool Database::set_piper_model_path(const std::string& model_path) {
+    const char* sql = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_model_path'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_piper_espeak_data_path() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'piper_espeak_data_path'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            sqlite3_finalize(stmt);
+            return value;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return "espeak-ng-data";
+}
+
+bool Database::set_piper_espeak_data_path(const std::string& espeak_data_path) {
+    const char* sql = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_espeak_data_path'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, espeak_data_path.c_str(), -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_piper_service_status() {
+    const char* sql = "SELECT value FROM system_config WHERE key = 'piper_service_status'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            sqlite3_finalize(stmt);
+            return value;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return "stopped";
+}
+
+bool Database::set_piper_service_status(const std::string& status) {
+    const char* sql = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_service_status'";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {

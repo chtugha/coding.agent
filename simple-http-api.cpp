@@ -664,6 +664,33 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         </div>
 
         <div class="card">
+            <h2>🎤 Piper TTS Service</h2>
+            <div id="piperServiceContainer">
+                <div class="status-grid">
+                    <div class="status-item">
+                        <h3>Service Status</h3>
+                        <div id="piperStatus" class="status-offline">● Stopped</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Available Models</h3>
+                        <div id="piperModelList" style="max-height: 150px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 5px;">
+                            Loading models...
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <button id="piperToggleBtn" class="refresh-btn" onclick="togglePiperService()">
+                        Start Service
+                    </button>
+                    <button id="piperRestartBtn" class="refresh-btn" onclick="restartPiperWithSelectedModel()" style="margin-left: 10px; background: #ffc107; color: #000;" disabled>
+                        Restart with Selected Model
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>API Endpoints</h2>
             <ul>
                 <li><a href="/api/status">/api/status</a> - System status</li>
@@ -674,6 +701,9 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 <li><a href="/api/llama/service">/api/llama/service</a> - LLaMA service info</li>
                 <li><strong>POST</strong> /api/llama/service/toggle - Start/stop service</li>
                 <li><a href="/api/llama/models">/api/llama/models</a> - Available LLaMA models</li>
+                <li><a href="/api/piper/service">/api/piper/service</a> - Piper TTS service info</li>
+                <li><strong>POST</strong> /api/piper/service/toggle - Start/stop service</li>
+                <li><a href="/api/piper/models">/api/piper/models</a> - Available Piper models</li>
             </ul>
         </div>
     </div>
@@ -1896,9 +1926,164 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             }
         }
 
+        // Piper TTS service functions
+        async function loadPiperService() {
+            try {
+                const response = await fetch('/api/piper/service');
+                const data = await response.json();
+
+                const statusDiv = document.getElementById('piperStatus');
+                const toggleBtn = document.getElementById('piperToggleBtn');
+                const restartBtn = document.getElementById('piperRestartBtn');
+
+                if (data.enabled && data.status === 'running') {
+                    statusDiv.className = 'status-online';
+                    statusDiv.textContent = '● Running';
+                    toggleBtn.textContent = 'Stop Service';
+                    restartBtn.disabled = false;
+                } else if (data.enabled && data.status === 'error') {
+                    statusDiv.className = 'status-error';
+                    statusDiv.textContent = '● Error';
+                    toggleBtn.textContent = 'Start Service';
+                    restartBtn.disabled = true;
+                } else {
+                    statusDiv.className = 'status-offline';
+                    statusDiv.textContent = '● Stopped';
+                    toggleBtn.textContent = 'Start Service';
+                    restartBtn.disabled = true;
+                }
+
+                // Load available models
+                loadPiperModels();
+
+            } catch (error) {
+                console.error('Error loading piper service:', error);
+                const statusDiv = document.getElementById('piperStatus');
+                statusDiv.className = 'status-error';
+                statusDiv.textContent = '● Error';
+            }
+        }
+
+        async function loadPiperModels() {
+            try {
+                const response = await fetch('/api/piper/models');
+                const data = await response.json();
+
+                const modelList = document.getElementById('piperModelList');
+                if (data.models && data.models.length > 0) {
+                    modelList.innerHTML = data.models.map(model =>
+                        `<div style="padding: 5px; border-bottom: 1px solid #eee; cursor: pointer;"
+                              onclick="selectPiperModel('${model.path}')"
+                              data-model-path="${model.path}">
+                            <strong>${model.name}</strong><br>
+                            <small>Size: ${(model.size / (1024*1024)).toFixed(1)} MB</small>
+                        </div>`
+                    ).join('');
+                } else {
+                    modelList.innerHTML = '<div style="padding: 10px; color: #666;">No .onnx models found in models/ directory</div>';
+                }
+            } catch (error) {
+                console.error('Error loading piper models:', error);
+                document.getElementById('piperModelList').innerHTML = '<div style="padding: 10px; color: #f00;">Error loading models</div>';
+            }
+        }
+
+        function selectPiperModel(modelPath) {
+            // Remove previous selection
+            document.querySelectorAll('#piperModelList div').forEach(div => {
+                div.style.backgroundColor = '';
+                div.style.color = '';
+            });
+
+            // Highlight selected model
+            const selectedDiv = document.querySelector(`#piperModelList div[data-model-path="${modelPath}"]`);
+            if (selectedDiv) {
+                selectedDiv.style.backgroundColor = '#007bff';
+                selectedDiv.style.color = 'white';
+            }
+
+            // Store selected model
+            window.selectedPiperModel = modelPath;
+
+            // Enable restart button if service is running
+            const restartBtn = document.getElementById('piperRestartBtn');
+            const statusDiv = document.getElementById('piperStatus');
+            if (statusDiv.textContent.includes('Running')) {
+                restartBtn.disabled = false;
+            }
+        }
+
+        async function restartPiperWithSelectedModel() {
+            if (!window.selectedPiperModel) {
+                alert('Please select a model first');
+                return;
+            }
+
+            try {
+                // Update model configuration
+                const configResponse = await fetch('/api/piper/service', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        model_path: window.selectedPiperModel,
+                        enabled: true
+                    })
+                });
+
+                if (!configResponse.ok) {
+                    throw new Error('Failed to update configuration');
+                }
+
+                const response = await fetch('/api/piper/restart', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    console.log('Piper service restarted:', result);
+                    loadPiperService(); // Refresh display
+                } else {
+                    alert(`Failed to restart piper service: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error restarting service:', error);
+                alert('Failed to restart service');
+            }
+        }
+
+        async function togglePiperService() {
+            try {
+                const response = await fetch('/api/piper/service/toggle', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    console.log('Piper service toggled:', result);
+                    loadPiperService(); // Refresh display
+                } else {
+                    alert(`Failed to toggle piper service: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error toggling piper service:', error);
+                alert('Failed to toggle piper service');
+            }
+        }
+
         // Load initial data - use direct call for initial load
         loadWhisperService();
         loadLlamaService();
+        loadPiperService();
     </script>
 </body>
 </html>)HTML";
@@ -2051,6 +2236,24 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
     } else if (request.path == "/api/llama/restart") {
         if (request.method == "POST") {
             return api_llama_restart(request);
+        }
+    } else if (request.path == "/api/piper/service") {
+        if (request.method == "GET") {
+            return api_piper_service_get(request);
+        } else if (request.method == "POST") {
+            return api_piper_service_post(request);
+        }
+    } else if (request.path == "/api/piper/service/toggle") {
+        if (request.method == "POST") {
+            return api_piper_service_toggle(request);
+        }
+    } else if (request.path == "/api/piper/models") {
+        if (request.method == "GET") {
+            return api_piper_models_get(request);
+        }
+    } else if (request.path == "/api/piper/restart") {
+        if (request.method == "POST") {
+            return api_piper_restart(request);
         }
     } else if (request.path == "/api/upload-stream") {
         if (request.method == "POST") {
@@ -3313,7 +3516,7 @@ HttpResponse SimpleHttpServer::api_llama_service_toggle(const HttpRequest& reque
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
             // Start new llama service with configured model
-            std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 &";
+            std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 --out-host 127.0.0.1 --out-port 8090 &";
             std::cout << "🦙 Starting llama service: " << start_command << std::endl;
             int start_result = system(start_command.c_str());
 
@@ -3434,7 +3637,7 @@ HttpResponse SimpleHttpServer::api_llama_restart(const HttpRequest& request) {
         return response;
     }
 
-    std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 &";
+    std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 --out-host 127.0.0.1 --out-port 8090 &";
     int start_result = system(start_command.c_str());
 
     if (start_result == 0) {
@@ -3449,6 +3652,244 @@ HttpResponse SimpleHttpServer::api_llama_restart(const HttpRequest& request) {
         response.status_code = 500;
         response.status_text = "Internal Server Error";
         response.body = R"({"error": "Failed to restart llama service"})";
+    }
+
+    return response;
+}
+
+// Piper service API endpoints
+HttpResponse SimpleHttpServer::api_piper_service_get(const HttpRequest& request) {
+    HttpResponse response;
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    bool enabled = database_->get_piper_service_enabled();
+    std::string model_path = database_->get_piper_model_path();
+    std::string espeak_data_path = database_->get_piper_espeak_data_path();
+    std::string status = database_->get_piper_service_status();
+
+    std::ostringstream json;
+    json << "{"
+         << "\"enabled\": " << (enabled ? "true" : "false") << ","
+         << "\"model_path\": \"" << model_path << "\","
+         << "\"espeak_data_path\": \"" << espeak_data_path << "\","
+         << "\"status\": \"" << status << "\""
+         << "}";
+
+    response.body = json.str();
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_piper_service_post(const HttpRequest& request) {
+    HttpResponse response;
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Parse JSON body
+    try {
+        size_t enabled_pos = request.body.find("\"enabled\":");
+        size_t model_pos = request.body.find("\"model_path\":");
+        size_t espeak_pos = request.body.find("\"espeak_data_path\":");
+
+        if (enabled_pos != std::string::npos) {
+            size_t value_start = request.body.find(":", enabled_pos) + 1;
+            size_t value_end = request.body.find_first_of(",}", value_start);
+            std::string value = request.body.substr(value_start, value_end - value_start);
+
+            // Remove whitespace and quotes
+            value.erase(0, value.find_first_not_of(" \t\""));
+            value.erase(value.find_last_not_of(" \t\"") + 1);
+
+            bool enabled = (value == "true");
+            database_->set_piper_service_enabled(enabled);
+        }
+
+        if (model_pos != std::string::npos) {
+            size_t value_start = request.body.find("\"", model_pos + 13) + 1;
+            size_t value_end = request.body.find("\"", value_start);
+            std::string model_path = request.body.substr(value_start, value_end - value_start);
+            database_->set_piper_model_path(model_path);
+        }
+
+        if (espeak_pos != std::string::npos) {
+            size_t value_start = request.body.find("\"", espeak_pos + 19) + 1;
+            size_t value_end = request.body.find("\"", value_start);
+            std::string espeak_data_path = request.body.substr(value_start, value_end - value_start);
+            database_->set_piper_espeak_data_path(espeak_data_path);
+        }
+
+        response.body = R"({"success": true, "message": "Piper service configuration updated"})";
+    } catch (const std::exception& e) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "Invalid JSON format"})";
+    }
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_piper_service_toggle(const HttpRequest& request) {
+    HttpResponse response;
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    bool current_enabled = database_->get_piper_service_enabled();
+    bool new_enabled = !current_enabled;
+
+    database_->set_piper_service_enabled(new_enabled);
+
+    std::string action = new_enabled ? "enabled" : "disabled";
+    std::string status = new_enabled ? "running" : "stopped";
+
+    database_->set_piper_service_status(status);
+
+    if (new_enabled) {
+        // Start Piper service
+        std::string model_path = database_->get_piper_model_path();
+        std::string espeak_data_path = database_->get_piper_espeak_data_path();
+
+        // Kill any existing piper service
+        system("pkill -f piper-service");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+        // Start new piper service with configured model
+        std::string start_command = "./piper-service -m \"" + model_path + "\" -e \"" + espeak_data_path + "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091 &";
+        std::cout << "🎤 Starting piper service: " << start_command << std::endl;
+        int start_result = system(start_command.c_str());
+
+        if (start_result == 0) {
+            database_->set_piper_service_status("running");
+            response.body = R"({"success": true, "message": "Piper service started", "enabled": true})";
+        } else {
+            database_->set_piper_service_enabled(false);
+            database_->set_piper_service_status("error");
+            response.status_code = 500;
+            response.status_text = "Internal Server Error";
+            response.body = R"({"error": "Failed to start Piper service"})";
+        }
+    } else {
+        // Stop Piper service
+        system("pkill -f piper-service");
+        database_->set_piper_service_status("stopped");
+        response.body = R"({"success": true, "message": "Piper service stopped", "enabled": false})";
+    }
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_piper_models_get(const HttpRequest& request) {
+    HttpResponse response;
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.headers["Content-Type"] = "application/json";
+
+    std::ostringstream json;
+    json << "{\"models\": [";
+
+    // Scan for .onnx model files in models directory
+    std::string models_dir = "models";
+    DIR* dir = opendir(models_dir.c_str());
+    bool first = true;
+
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string filename = entry->d_name;
+            if (filename.length() > 5 && filename.substr(filename.length() - 5) == ".onnx") {
+                if (!first) json << ",";
+                first = false;
+
+                std::string full_path = models_dir + "/" + filename;
+                struct stat file_stat;
+                long file_size = 0;
+                if (stat(full_path.c_str(), &file_stat) == 0) {
+                    file_size = file_stat.st_size;
+                }
+
+                json << "{"
+                     << "\"name\": \"" << filename << "\","
+                     << "\"path\": \"" << full_path << "\","
+                     << "\"size\": " << file_size
+                     << "}";
+            }
+        }
+        closedir(dir);
+    }
+
+    json << "]}";
+    response.body = json.str();
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_piper_restart(const HttpRequest& request) {
+    HttpResponse response;
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Kill existing piper service
+    system("pkill -f piper-service");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+    // Check if service should be running
+    if (!database_->get_piper_service_enabled()) {
+        database_->set_piper_service_status("stopped");
+        response.body = R"({"success": true, "message": "Piper service is disabled"})";
+        return response;
+    }
+
+    std::string model_path = database_->get_piper_model_path();
+    std::string espeak_data_path = database_->get_piper_espeak_data_path();
+
+    if (model_path.empty()) {
+        response.status_code = 400;
+        response.status_text = "Bad Request";
+        response.body = R"({"error": "No model configured"})";
+        return response;
+    }
+
+    std::string start_command = "./piper-service -m \"" + model_path + "\" -e \"" + espeak_data_path + "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091 &";
+    int start_result = system(start_command.c_str());
+
+    if (start_result == 0) {
+        database_->set_piper_service_status("running");
+        response.body = R"({"success": true, "message": "Piper service restarted"})";
+    } else {
+        database_->set_piper_service_status("error");
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Failed to restart Piper service"})";
     }
 
     return response;

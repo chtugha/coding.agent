@@ -22,8 +22,8 @@ struct LlamaArgs {
     bool flash_attn        = false;
     std::string person     = "User";
     std::string bot        = "Assistant";
-    std::string out_host   = "";  // empty disables output
-    int out_port           = 0;
+    std::string out_host   = "127.0.0.1";  // default output host
+    int out_port           = 8090;
 };
 
 static void print_usage(const char* prog) {
@@ -41,8 +41,8 @@ static void print_usage(const char* prog) {
     std::cout << "  --flash-attn               Enable flash attention\n";
     std::cout << "  --person NAME              User name in prompt [User]\n";
     std::cout << "  --bot NAME                 Bot name in prompt [Assistant]\n";
-    std::cout << "  --out-host HOST            Output endpoint host (optional)\n";
-    std::cout << "  --out-port PORT            Output endpoint port (optional)\n";
+    std::cout << "  --out-host HOST            Output endpoint host [127.0.0.1]\n";
+    std::cout << "  --out-port PORT            Output endpoint port [8090]\n";
 }
 
 static bool parse_args(int argc, char** argv, LlamaArgs& a) {
@@ -95,9 +95,8 @@ int main(int argc, char** argv) {
     if (!g_llama_service->init_database(a.db_path)) {
         return 1;
     }
-    if (!a.out_host.empty() && a.out_port > 0) {
-        g_llama_service->set_output_endpoint(a.out_host, a.out_port);
-    }
+    // Always set output endpoint (now enabled by default)
+    g_llama_service->set_output_endpoint(a.out_host, a.out_port);
 
     if (!g_llama_service->start(a.port)) {
         return 1;
