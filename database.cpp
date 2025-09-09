@@ -786,17 +786,30 @@ bool Database::get_piper_service_enabled() {
 }
 
 bool Database::set_piper_service_enabled(bool enabled) {
+    // Begin transaction
+    if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
     const char* sql = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_service_enabled'";
     sqlite3_stmt* stmt;
+    bool success = false;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, enabled ? "true" : "false", -1, SQLITE_STATIC);
         int result = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
-        return result == SQLITE_DONE;
+        success = (result == SQLITE_DONE);
     }
 
-    return false;
+    // Commit or rollback
+    if (success) {
+        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+    } else {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+
+    return success;
 }
 
 std::string Database::get_piper_model_path() {
@@ -816,17 +829,30 @@ std::string Database::get_piper_model_path() {
 }
 
 bool Database::set_piper_model_path(const std::string& model_path) {
+    // Begin transaction
+    if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
     const char* sql = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_model_path'";
     sqlite3_stmt* stmt;
+    bool success = false;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_STATIC);
         int result = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
-        return result == SQLITE_DONE;
+        success = (result == SQLITE_DONE);
     }
 
-    return false;
+    // Commit or rollback
+    if (success) {
+        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+    } else {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+
+    return success;
 }
 
 std::string Database::get_piper_espeak_data_path() {
@@ -846,17 +872,30 @@ std::string Database::get_piper_espeak_data_path() {
 }
 
 bool Database::set_piper_espeak_data_path(const std::string& espeak_data_path) {
+    // Begin transaction
+    if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
     const char* sql = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_espeak_data_path'";
     sqlite3_stmt* stmt;
+    bool success = false;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, espeak_data_path.c_str(), -1, SQLITE_STATIC);
         int result = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
-        return result == SQLITE_DONE;
+        success = (result == SQLITE_DONE);
     }
 
-    return false;
+    // Commit or rollback
+    if (success) {
+        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+    } else {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+
+    return success;
 }
 
 std::string Database::get_piper_service_status() {
@@ -876,15 +915,94 @@ std::string Database::get_piper_service_status() {
 }
 
 bool Database::set_piper_service_status(const std::string& status) {
+    // Begin transaction
+    if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
     const char* sql = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_service_status'";
     sqlite3_stmt* stmt;
+    bool success = false;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
         int result = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
-        return result == SQLITE_DONE;
+        success = (result == SQLITE_DONE);
     }
 
-    return false;
+    // Commit or rollback
+    if (success) {
+        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+    } else {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+
+    return success;
+}
+
+// Atomic Piper configuration update (transaction-safe)
+bool Database::set_piper_service_config_atomic(bool enabled, const std::string& model_path,
+                                              const std::string& espeak_path, const std::string& status) {
+    // Begin transaction
+    if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    bool success = true;
+
+    // Update all Piper configuration values in single transaction
+    const char* sql_enabled = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_service_enabled'";
+    const char* sql_model = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_model_path'";
+    const char* sql_espeak = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_espeak_data_path'";
+    const char* sql_status = "UPDATE system_config SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'piper_service_status'";
+
+    sqlite3_stmt* stmt;
+
+    // Update enabled status
+    if (success && sqlite3_prepare_v2(db_, sql_enabled, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, enabled ? "true" : "false", -1, SQLITE_STATIC);
+        success = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+    } else {
+        success = false;
+    }
+
+    // Update model path
+    if (success && sqlite3_prepare_v2(db_, sql_model, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_STATIC);
+        success = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+    } else {
+        success = false;
+    }
+
+    // Update espeak data path
+    if (success && sqlite3_prepare_v2(db_, sql_espeak, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, espeak_path.c_str(), -1, SQLITE_STATIC);
+        success = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+    } else {
+        success = false;
+    }
+
+    // Update service status
+    if (success && sqlite3_prepare_v2(db_, sql_status, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+        success = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+    } else {
+        success = false;
+    }
+
+    // Commit or rollback
+    if (success) {
+        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+        std::cout << "✅ Piper service configuration updated atomically" << std::endl;
+    } else {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        std::cout << "❌ Piper service configuration update failed - transaction rolled back" << std::endl;
+    }
+
+    return success;
 }

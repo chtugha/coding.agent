@@ -98,6 +98,10 @@ public:
     std::string get_piper_service_status(); // "running", "stopped", "error"
     bool set_piper_service_status(const std::string& status);
 
+    // Atomic Piper configuration update (transaction-safe)
+    bool set_piper_service_config_atomic(bool enabled, const std::string& model_path,
+                                        const std::string& espeak_path, const std::string& status);
+
 private:
     sqlite3* db_;
     bool create_tables();

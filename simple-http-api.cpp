@@ -3554,16 +3554,31 @@ HttpResponse SimpleHttpServer::api_llama_models_get(const HttpRequest& request) 
     HttpResponse response;
     response.headers["Content-Type"] = "application/json";
 
-    // Scan for .gguf model files in models directory
-    std::vector<std::string> model_files;
+    // Check for custom models directory
     std::string models_dir = "models";
+    auto dir_it = request.query_params.find("dir");
+    if (dir_it != request.query_params.end()) {
+        models_dir = dir_it->second;
+    }
+
+    // Check for file type filter (default: gguf)
+    std::string file_type = "gguf";
+    auto type_it = request.query_params.find("type");
+    if (type_it != request.query_params.end()) {
+        file_type = type_it->second;
+    }
+
+    // Scan for model files in directory
+    std::vector<std::string> model_files;
+    std::string extension = "." + file_type;
 
     DIR* dir = opendir(models_dir.c_str());
     if (dir) {
         struct dirent* entry;
         while ((entry = readdir(dir)) != nullptr) {
             std::string filename = entry->d_name;
-            if (filename.length() > 5 && filename.substr(filename.length() - 5) == ".gguf") {
+            if (filename.length() > extension.length() &&
+                filename.substr(filename.length() - extension.length()) == extension) {
                 model_files.push_back(models_dir + "/" + filename);
             }
         }
@@ -3611,6 +3626,22 @@ HttpResponse SimpleHttpServer::api_llama_restart(const HttpRequest& request) {
         return response;
     }
 
+    // Parse JSON body for restart options
+    std::string custom_model_path;
+    if (!request.body.empty()) {
+        size_t model_pos = request.body.find("\"model_path\":");
+        if (model_pos != std::string::npos) {
+            size_t start = request.body.find("\"", model_pos + 13);
+            if (start != std::string::npos) {
+                start++; // Skip opening quote
+                size_t end = request.body.find("\"", start);
+                if (end != std::string::npos) {
+                    custom_model_path = request.body.substr(start, end - start);
+                }
+            }
+        }
+    }
+
     // Check if service is enabled
     bool enabled = database_->get_llama_service_enabled();
     if (!enabled) {
@@ -3627,14 +3658,19 @@ HttpResponse SimpleHttpServer::api_llama_restart(const HttpRequest& request) {
     system("pkill -TERM -f llama-service");
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-    // Get model path and restart
-    std::string model_path = database_->get_llama_model_path();
+    // Get model path (use custom if provided, otherwise database default)
+    std::string model_path = custom_model_path.empty() ? database_->get_llama_model_path() : custom_model_path;
     if (model_path.empty()) {
         database_->set_llama_service_status("error");
         response.status_code = 400;
         response.status_text = "Bad Request";
         response.body = R"({"error": "No model configured"})";
         return response;
+    }
+
+    // Update database with new model path if custom one was provided
+    if (!custom_model_path.empty()) {
+        database_->set_llama_model_path(custom_model_path);
     }
 
     std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 --out-host 127.0.0.1 --out-port 8090 &";
@@ -3671,6 +3707,13 @@ HttpResponse SimpleHttpServer::api_piper_service_get(const HttpRequest& request)
         return response;
     }
 
+    // Check for detailed info request
+    bool include_stats = false;
+    auto it = request.query_params.find("stats");
+    if (it != request.query_params.end() && it->second == "true") {
+        include_stats = true;
+    }
+
     bool enabled = database_->get_piper_service_enabled();
     std::string model_path = database_->get_piper_model_path();
     std::string espeak_data_path = database_->get_piper_espeak_data_path();
@@ -3681,9 +3724,19 @@ HttpResponse SimpleHttpServer::api_piper_service_get(const HttpRequest& request)
          << "\"enabled\": " << (enabled ? "true" : "false") << ","
          << "\"model_path\": \"" << model_path << "\","
          << "\"espeak_data_path\": \"" << espeak_data_path << "\","
-         << "\"status\": \"" << status << "\""
-         << "}";
+         << "\"status\": \"" << status << "\"";
 
+    // Add stats if requested
+    if (include_stats) {
+        json << ","
+             << "\"process_info\": {"
+             << "\"pid\": \"" << (system("pgrep -f piper-service") == 0 ? "running" : "stopped") << "\","
+             << "\"uptime\": \"unknown\","
+             << "\"memory_usage\": \"unknown\""
+             << "}";
+    }
+
+    json << "}";
     response.body = json.str();
     return response;
 }
@@ -3757,8 +3810,14 @@ HttpResponse SimpleHttpServer::api_piper_service_toggle(const HttpRequest& reque
         return response;
     }
 
+    // Check for specific enable/disable action
     bool current_enabled = database_->get_piper_service_enabled();
     bool new_enabled = !current_enabled;
+
+    auto it = request.query_params.find("enable");
+    if (it != request.query_params.end()) {
+        new_enabled = (it->second == "true");
+    }
 
     database_->set_piper_service_enabled(new_enabled);
 
@@ -3807,11 +3866,25 @@ HttpResponse SimpleHttpServer::api_piper_models_get(const HttpRequest& request) 
     response.status_text = "OK";
     response.headers["Content-Type"] = "application/json";
 
+    // Check for custom models directory
+    std::string models_dir = "models";
+    auto dir_it = request.query_params.find("dir");
+    if (dir_it != request.query_params.end()) {
+        models_dir = dir_it->second;
+    }
+
+    // Check for file type filter (default: onnx)
+    std::string file_type = "onnx";
+    auto type_it = request.query_params.find("type");
+    if (type_it != request.query_params.end()) {
+        file_type = type_it->second;
+    }
+
     std::ostringstream json;
     json << "{\"models\": [";
 
-    // Scan for .onnx model files in models directory
-    std::string models_dir = "models";
+    // Scan for model files in directory
+    std::string extension = "." + file_type;
     DIR* dir = opendir(models_dir.c_str());
     bool first = true;
 
@@ -3819,7 +3892,8 @@ HttpResponse SimpleHttpServer::api_piper_models_get(const HttpRequest& request) 
         struct dirent* entry;
         while ((entry = readdir(dir)) != nullptr) {
             std::string filename = entry->d_name;
-            if (filename.length() > 5 && filename.substr(filename.length() - 5) == ".onnx") {
+            if (filename.length() > extension.length() &&
+                filename.substr(filename.length() - extension.length()) == extension) {
                 if (!first) json << ",";
                 first = false;
 
@@ -3858,6 +3932,35 @@ HttpResponse SimpleHttpServer::api_piper_restart(const HttpRequest& request) {
         return response;
     }
 
+    // Parse JSON body for restart options
+    std::string custom_model_path;
+    std::string custom_espeak_path;
+    if (!request.body.empty()) {
+        size_t model_pos = request.body.find("\"model_path\":");
+        if (model_pos != std::string::npos) {
+            size_t start = request.body.find("\"", model_pos + 13);
+            if (start != std::string::npos) {
+                start++; // Skip opening quote
+                size_t end = request.body.find("\"", start);
+                if (end != std::string::npos) {
+                    custom_model_path = request.body.substr(start, end - start);
+                }
+            }
+        }
+
+        size_t espeak_pos = request.body.find("\"espeak_data_path\":");
+        if (espeak_pos != std::string::npos) {
+            size_t start = request.body.find("\"", espeak_pos + 19);
+            if (start != std::string::npos) {
+                start++; // Skip opening quote
+                size_t end = request.body.find("\"", start);
+                if (end != std::string::npos) {
+                    custom_espeak_path = request.body.substr(start, end - start);
+                }
+            }
+        }
+    }
+
     // Kill existing piper service
     system("pkill -f piper-service");
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -3869,8 +3972,17 @@ HttpResponse SimpleHttpServer::api_piper_restart(const HttpRequest& request) {
         return response;
     }
 
-    std::string model_path = database_->get_piper_model_path();
-    std::string espeak_data_path = database_->get_piper_espeak_data_path();
+    // Get paths (use custom if provided, otherwise database defaults)
+    std::string model_path = custom_model_path.empty() ? database_->get_piper_model_path() : custom_model_path;
+    std::string espeak_data_path = custom_espeak_path.empty() ? database_->get_piper_espeak_data_path() : custom_espeak_path;
+
+    // Update database with new paths if custom ones were provided
+    if (!custom_model_path.empty()) {
+        database_->set_piper_model_path(custom_model_path);
+    }
+    if (!custom_espeak_path.empty()) {
+        database_->set_piper_espeak_data_path(custom_espeak_path);
+    }
 
     if (model_path.empty()) {
         response.status_code = 400;

@@ -11,6 +11,7 @@
 #include <thread>
 #include <string>
 #include <stdexcept>
+#include <cerrno>
 
 // ServiceAudioInterface Implementation
 AudioProcessorService::ServiceAudioInterface::ServiceAudioInterface(AudioProcessorService* service)
@@ -542,6 +543,15 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
     std::cout << "👂 Incoming TCP connection handler started on port " << incoming_tcp_port_ << std::endl;
 
     while (running_.load()) {
+        // Check if socket is still valid before attempting accept
+        {
+            std::lock_guard<std::mutex> lock(tcp_mutex_);
+            if (incoming_tcp_socket_ < 0) {
+                std::cout << "🔌 Incoming TCP socket closed, exiting handler" << std::endl;
+                break;
+            }
+        }
+
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
 
@@ -549,8 +559,14 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
         int client_socket = accept(incoming_tcp_socket_, (struct sockaddr*)&client_addr, &client_len);
 
         if (client_socket < 0) {
+            // Check if socket was closed (errno EBADF = bad file descriptor)
+            if (errno == EBADF || errno == EINVAL) {
+                std::cout << "🔌 Incoming TCP socket closed during accept, exiting handler" << std::endl;
+                break;
+            }
+
             if (running_.load()) {
-                std::cout << "❌ Failed to accept incoming TCP connection" << std::endl;
+                std::cout << "❌ Failed to accept incoming TCP connection (errno: " << errno << ")" << std::endl;
             }
             continue;
         }
