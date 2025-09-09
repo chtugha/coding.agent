@@ -5,18 +5,10 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
+#include <sys/stat.h>
 
-// Note: This would normally include whisper.h, but we'll simulate for now
-// #include "whisper.h"
-
-// Simulated whisper functions for compilation
-struct whisper_context {};
-struct whisper_full_params {};
-whisper_context* whisper_init_from_file(const char* path) { return nullptr; }
-void whisper_free(whisper_context* ctx) {}
-int whisper_full(whisper_context* ctx, whisper_full_params params, const float* samples, int n_samples) { return 0; }
-int whisper_full_n_segments(whisper_context* ctx) { return 0; }
-const char* whisper_full_get_segment_text(whisper_context* ctx, int i) { return ""; }
+// Real whisper.cpp integration
+#include "whisper-cpp/include/whisper.h"
 
 // WhisperSession Implementation
 WhisperSession::WhisperSession(const std::string& call_id, const WhisperSessionConfig& config)
@@ -38,9 +30,27 @@ WhisperSession::~WhisperSession() {
 }
 
 bool WhisperSession::initialize_whisper_context() {
-    // Initialize whisper context for this session
-    ctx_ = whisper_init_from_file(config_.model_path.c_str());
-    return ctx_ != nullptr;
+    // Validate model file exists
+    struct stat file_stat;
+    if (stat(config_.model_path.c_str(), &file_stat) != 0) {
+        std::cout << "❌ Model file not found: " << config_.model_path << std::endl;
+        return false;
+    }
+
+    std::cout << "📂 Loading Whisper model: " << config_.model_path << std::endl;
+
+    // Initialize real whisper context with modern API
+    whisper_context_params cparams = whisper_context_default_params();
+    cparams.use_gpu = config_.use_gpu;
+    ctx_ = whisper_init_from_file_with_params(config_.model_path.c_str(), cparams);
+
+    if (!ctx_) {
+        std::cout << "❌ Failed to load Whisper model: " << config_.model_path << std::endl;
+        return false;
+    }
+
+    std::cout << "✅ Whisper model loaded successfully for call " << call_id_ << std::endl;
+    return true;
 }
 
 void WhisperSession::cleanup_whisper_context() {
@@ -77,9 +87,15 @@ bool WhisperSession::process_buffered_audio() {
         return false;
     }
     
-    // Create whisper parameters (simplified)
-    whisper_full_params wparams = {};
-    // wparams would be configured here with config_ values
+    // Create real whisper parameters
+    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    wparams.language = config_.language.c_str();
+    wparams.n_threads = config_.n_threads;
+    wparams.temperature = config_.temperature;
+    wparams.no_timestamps = config_.no_timestamps;
+    wparams.translate = config_.translate;
+    wparams.print_progress = false;
+    wparams.print_realtime = false;
     
     // Process audio with whisper
     int result = whisper_full(ctx_, wparams, audio_buffer_.data(), audio_buffer_.size());
