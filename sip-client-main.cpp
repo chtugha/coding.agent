@@ -263,7 +263,7 @@ void signal_handler(int signal) {
 }
 
 void print_usage() {
-    std::cout << "Usage: whisper-sip-client [options]\n"
+    std::cout << "Usage: sip-client [options]\n"
               << "Options:\n"
               << "  --db PATH          Database file path (default: whisper_talk.db)\n"
               << "  --help             Show this help message\n"

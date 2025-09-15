@@ -2389,7 +2389,7 @@ HttpResponse SimpleHttpServer::api_status(const HttpRequest& request) {
 
     // Check SIP client processes
     std::string sip_status = "offline";
-    int sip_result = system("pgrep -f whisper-sip-client > /dev/null 2>&1");
+    int sip_result = system("pgrep -f sip-client > /dev/null 2>&1");
     if (sip_result == 0) {
         sip_status = "online";
     }
@@ -2776,7 +2776,7 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
 
             // Start SIP client in background with specific line ID
             // Use relative path to call SIP client from same directory as HTTP server
-            std::string command = "./whisper-sip-client --db '" + db_path_ + "' --line-id " + std::to_string(line_id) + " &";
+            std::string command = "./sip-client --db '" + db_path_ + "' --line-id " + std::to_string(line_id) + " &";
             (void) system(command.c_str());
             std::cout << "ℹ️ Launched SIP client for " << line_info << std::endl;
             response.body = R"({"success": true, "message": "SIP line enabled and client launch attempted"})";
@@ -2786,7 +2786,7 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
 
             // Kill any existing SIP client processes for this line
             std::cout << "🛑 Sending SIGTERM to SIP client processes..." << std::endl;
-            std::string kill_command = "pkill -TERM -f 'whisper-sip-client.*--line-id " + std::to_string(line_id) + "'";
+            std::string kill_command = "pkill -TERM -f 'sip-client.*--line-id " + std::to_string(line_id) + "'";
             int kill_result = system(kill_command.c_str());
             std::cout << "🛑 Kill command result: " << kill_result << std::endl;
 
