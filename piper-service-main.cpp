@@ -22,6 +22,7 @@ struct PiperArgs {
     float noise_w_scale = 0.8f;
     std::string out_host = "127.0.0.1";  // output to audio processor
     int out_port = 8091;
+    int max_concurrency = 4;
     bool verbose = false;
 };
 
@@ -40,6 +41,7 @@ static void print_usage(const char* prog) {
     std::cout << "  --noise-w-scale F          Phoneme length variation [0.8]\n";
     std::cout << "  --out-host HOST            Audio processor host [127.0.0.1]\n";
     std::cout << "  --out-port PORT            Audio processor base port [8091]\n";
+    std::cout << "  --max-concurrency N        Max concurrent syntheses [4, 1..hardware]\n";
     std::cout << "  -v, --verbose              Verbose output\n";
     std::cout << "  -h, --help                 Show this help\n\n";
     std::cout << "The service receives text from LLaMA service and sends audio to audio processors.\n";
@@ -50,41 +52,44 @@ static bool parse_args(int argc, char** argv, PiperArgs& a) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") { print_usage(argv[0]); return false; }
-        else if (arg == "-m" || arg == "--model") { 
-            if (i + 1 < argc) a.model_path = argv[++i]; 
+        else if (arg == "-m" || arg == "--model") {
+            if (i + 1 < argc) a.model_path = argv[++i];
         }
-        else if (arg == "-c" || arg == "--config") { 
-            if (i + 1 < argc) a.config_path = argv[++i]; 
+        else if (arg == "-c" || arg == "--config") {
+            if (i + 1 < argc) a.config_path = argv[++i];
         }
-        else if (arg == "-e" || arg == "--espeak-data") { 
-            if (i + 1 < argc) a.espeak_data_path = argv[++i]; 
+        else if (arg == "-e" || arg == "--espeak-data") {
+            if (i + 1 < argc) a.espeak_data_path = argv[++i];
         }
-        else if (arg == "-d" || arg == "--database") { 
-            if (i + 1 < argc) a.db_path = argv[++i]; 
+        else if (arg == "-d" || arg == "--database") {
+            if (i + 1 < argc) a.db_path = argv[++i];
         }
-        else if (arg == "-p" || arg == "--port") { 
-            if (i + 1 < argc) a.port = std::stoi(argv[++i]); 
+        else if (arg == "-p" || arg == "--port") {
+            if (i + 1 < argc) a.port = std::stoi(argv[++i]);
         }
-        else if (arg == "--speaker-id") { 
-            if (i + 1 < argc) a.speaker_id = std::stoi(argv[++i]); 
+        else if (arg == "--speaker-id") {
+            if (i + 1 < argc) a.speaker_id = std::stoi(argv[++i]);
         }
-        else if (arg == "--length-scale") { 
-            if (i + 1 < argc) a.length_scale = std::stof(argv[++i]); 
+        else if (arg == "--length-scale") {
+            if (i + 1 < argc) a.length_scale = std::stof(argv[++i]);
         }
-        else if (arg == "--noise-scale") { 
-            if (i + 1 < argc) a.noise_scale = std::stof(argv[++i]); 
+        else if (arg == "--noise-scale") {
+            if (i + 1 < argc) a.noise_scale = std::stof(argv[++i]);
         }
-        else if (arg == "--noise-w-scale") { 
-            if (i + 1 < argc) a.noise_w_scale = std::stof(argv[++i]); 
+        else if (arg == "--noise-w-scale") {
+            if (i + 1 < argc) a.noise_w_scale = std::stof(argv[++i]);
         }
-        else if (arg == "--out-host") { 
-            if (i + 1 < argc) a.out_host = argv[++i]; 
+        else if (arg == "--out-host") {
+            if (i + 1 < argc) a.out_host = argv[++i];
         }
-        else if (arg == "--out-port") { 
-            if (i + 1 < argc) a.out_port = std::stoi(argv[++i]); 
+        else if (arg == "--out-port") {
+            if (i + 1 < argc) a.out_port = std::stoi(argv[++i]);
         }
-        else if (arg == "-v" || arg == "--verbose") { 
-            a.verbose = true; 
+        else if (arg == "--max-concurrency") {
+            if (i + 1 < argc) a.max_concurrency = std::stoi(argv[++i]);
+        }
+        else if (arg == "-v" || arg == "--verbose") {
+            a.verbose = true;
         }
         else {
             std::cout << "❌ Unknown argument: " << arg << std::endl;
@@ -122,14 +127,17 @@ int main(int argc, char** argv) {
     cfg.verbose = a.verbose;
 
     g_piper_service = std::make_unique<StandalonePiperService>(cfg);
-    
+
+    // Database is optional - service continues without it
     if (!g_piper_service->init_database(a.db_path)) {
-        return 1;
+        std::cout << "⚠️ Database unavailable - continuing without database support" << std::endl;
     }
-    
+
     g_piper_service->set_output_endpoint(a.out_host, a.out_port);
+    g_piper_service->set_max_concurrency(static_cast<size_t>(a.max_concurrency));
 
     if (!g_piper_service->start(a.port)) {
+        std::cout << "❌ Failed to start Piper service" << std::endl;
         return 1;
     }
 

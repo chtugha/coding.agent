@@ -13,6 +13,20 @@
 #include <stdexcept>
 #include <cerrno>
 
+// Robust I/O helpers for TCP (avoid partial send/recv issues)
+static bool write_all_fd(int fd, const void* buf, size_t nbytes) {
+    const uint8_t* p = static_cast<const uint8_t*>(buf);
+    size_t off = 0;
+    while (off < nbytes) {
+        ssize_t m = send(fd, p + off, nbytes - off, 0);
+        if (m <= 0) {
+            return false;
+        }
+        off += static_cast<size_t>(m);
+    }
+    return true;
+}
+
 // ServiceAudioInterface Implementation
 AudioProcessorService::ServiceAudioInterface::ServiceAudioInterface(AudioProcessorService* service)
     : service_(service) {}
@@ -35,7 +49,7 @@ void AudioProcessorService::ServiceAudioInterface::on_audio_chunk_ready(const st
 // AudioProcessorService Implementation
 AudioProcessorService::AudioProcessorService()
     : running_(false), active_(false), service_port_(8083), database_(nullptr),
-      total_packets_processed_(0), outgoing_tcp_socket_(-1), incoming_tcp_socket_(-1),
+      total_packets_processed_(0), outgoing_listen_socket_(-1), outgoing_tcp_socket_(-1), incoming_tcp_socket_(-1),
       outgoing_tcp_port_(-1), incoming_tcp_port_(-1),
       outgoing_connected_(false), incoming_connected_(false) {
 
@@ -101,11 +115,18 @@ void AudioProcessorService::stop() {
     // Close TCP sockets
     {
         std::lock_guard<std::mutex> lock(tcp_mutex_);
+        // Close active outgoing client socket
         if (outgoing_tcp_socket_ >= 0) {
             send_tcp_bye(outgoing_tcp_socket_);
             close(outgoing_tcp_socket_);
             outgoing_tcp_socket_ = -1;
         }
+        // Close outgoing listen socket
+        if (outgoing_listen_socket_ >= 0) {
+            close(outgoing_listen_socket_);
+            outgoing_listen_socket_ = -1;
+        }
+        // Close incoming listen socket
         if (incoming_tcp_socket_ >= 0) {
             close(incoming_tcp_socket_);
             incoming_tcp_socket_ = -1;
@@ -187,12 +208,12 @@ std::string AudioProcessorService::simulate_whisper_transcription(const std::vec
         energy += sample * sample;
     }
     energy = std::sqrt(energy / audio_samples.size());
-    
+
     std::ostringstream oss;
     oss << "Audio chunk processed (";
     oss << std::fixed << std::setprecision(1) << (audio_samples.size() / 16000.0f) << "s, ";
     oss << std::fixed << std::setprecision(3) << energy << " energy)";
-    
+
     return oss.str();
 }
 
@@ -204,7 +225,7 @@ AudioProcessorService::ServiceStatus AudioProcessorService::get_status() const {
     // No session management - active_sessions field removed
     status.total_packets_processed = total_packets_processed_.load();
     status.whisper_endpoint = "clean-output-connector";
-    
+
     if (audio_processor_) {
         status.processor_type = audio_processor_->get_processor_name();
 
@@ -274,23 +295,27 @@ void AudioProcessorService::activate_for_call(const std::string& call_id) {
         }
 
         // Setup TCP sockets with call_id-based ports
-        if (!setup_outgoing_tcp_socket(call_id)) {
-            std::cout << "❌ Failed to setup outgoing TCP socket for call " << call_id << std::endl;
-            return;
+        bool ok_out = setup_outgoing_tcp_socket(call_id);
+        if (!ok_out) {
+            std::cout << "❌ Failed to set up OUTGOING (Whisper) TCP server for call " << call_id << std::endl;
         }
 
-        if (!setup_incoming_tcp_socket(call_id)) {
-            std::cout << "❌ Failed to setup incoming TCP socket for call " << call_id << std::endl;
-            return;
+        bool ok_in = setup_incoming_tcp_socket(call_id);
+        if (!ok_in) {
+            std::cout << "⚠️ Failed to set up INCOMING (Piper) TCP listener for call " << call_id << " — continuing without TTS return path" << std::endl;
         }
 
-        // Advertise outgoing audio stream for external services
-        if (service_advertiser_) {
+        // Advertise outgoing audio stream for external services even if incoming failed
+        if (ok_out && service_advertiser_) {
             service_advertiser_->advertise_stream(call_id, outgoing_tcp_port_, "pcm_float");
         }
 
-        active_.store(true);
-        std::cout << "✅ Audio Processor ACTIVE - TCP sockets ready and advertised for call " << call_id << std::endl;
+        if (ok_out) {
+            active_.store(true);
+            std::cout << "✅ Audio Processor ACTIVE - Outgoing stream ready and advertised for call " << call_id << std::endl;
+        } else {
+            std::cout << "❌ Audio Processor activation failed: no outgoing stream" << std::endl;
+        }
     }
 }
 
@@ -302,7 +327,7 @@ void AudioProcessorService::deactivate_after_call() {
         {
             std::lock_guard<std::mutex> lock(tcp_mutex_);
 
-            // Close outgoing TCP connection
+            // Close outgoing TCP client connection
             if (outgoing_connected_.load() && outgoing_tcp_socket_ >= 0) {
                 send_tcp_bye(outgoing_tcp_socket_);
                 close(outgoing_tcp_socket_);
@@ -310,8 +335,13 @@ void AudioProcessorService::deactivate_after_call() {
                 outgoing_connected_.store(false);
                 std::cout << "🔌 Outgoing TCP connection closed (port " << outgoing_tcp_port_ << ")" << std::endl;
             }
+            // Close outgoing listen socket
+            if (outgoing_listen_socket_ >= 0) {
+                close(outgoing_listen_socket_);
+                outgoing_listen_socket_ = -1;
+            }
 
-            // Close incoming TCP connection and stop thread
+            // Close incoming TCP listen socket
             if (incoming_tcp_socket_ >= 0) {
                 close(incoming_tcp_socket_);
                 incoming_tcp_socket_ = -1;
@@ -319,7 +349,10 @@ void AudioProcessorService::deactivate_after_call() {
                 std::cout << "🔌 Incoming TCP connection closed (port " << incoming_tcp_port_ << ")" << std::endl;
             }
 
-            // Join incoming thread if it exists
+            // Join TCP threads if they exist
+            if (outgoing_tcp_thread_.joinable()) {
+                outgoing_tcp_thread_.join();
+            }
             if (incoming_tcp_thread_.joinable()) {
                 incoming_tcp_thread_.join();
             }
@@ -423,18 +456,42 @@ std::vector<uint8_t> AudioProcessorService::convert_float_to_g711_ulaw(const std
 
 // TCP Socket Implementation
 bool AudioProcessorService::setup_outgoing_tcp_socket(const std::string& call_id) {
-    outgoing_tcp_socket_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (outgoing_tcp_socket_ < 0) {
-        std::cout << "❌ Failed to create outgoing TCP socket" << std::endl;
+    // Create a listening server socket for Whisper to connect to
+    outgoing_listen_socket_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (outgoing_listen_socket_ < 0) {
+        std::cout << "❌ Failed to create outgoing TCP listen socket" << std::endl;
         return false;
     }
 
     // Set socket options
     int opt = 1;
-    setsockopt(outgoing_tcp_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(outgoing_listen_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     outgoing_tcp_port_ = calculate_outgoing_port(call_id);
-    std::cout << "✅ Outgoing TCP socket created for call " << call_id << " (will connect on demand to port " << outgoing_tcp_port_ << ")" << std::endl;
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(outgoing_tcp_port_);
+
+    if (bind(outgoing_listen_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cout << "❌ Failed to bind outgoing TCP server to port " << outgoing_tcp_port_ << std::endl;
+        close(outgoing_listen_socket_);
+        outgoing_listen_socket_ = -1;
+        return false;
+    }
+
+    if (listen(outgoing_listen_socket_, 5) < 0) {
+        std::cout << "❌ Failed to listen on outgoing TCP server" << std::endl;
+        close(outgoing_listen_socket_);
+        outgoing_listen_socket_ = -1;
+        return false;
+    }
+
+    // Start outgoing connection handler (server accept loop)
+    outgoing_tcp_thread_ = std::thread(&AudioProcessorService::handle_outgoing_tcp_connection, this);
+
+    std::cout << "✅ Outgoing TCP server listening on port " << outgoing_tcp_port_ << " for call " << call_id << std::endl;
     return true;
 }
 
@@ -484,13 +541,13 @@ void AudioProcessorService::send_tcp_hello(int socket_fd, const std::string& cal
     uint32_t length = htonl(call_id.length());
 
     // Send length prefix
-    if (send(socket_fd, &length, 4, 0) != 4) {
+    if (!write_all_fd(socket_fd, &length, 4)) {
         std::cout << "❌ Failed to send TCP HELLO length" << std::endl;
         return;
     }
 
     // Send call_id
-    if (send(socket_fd, call_id.c_str(), call_id.length(), 0) != (ssize_t)call_id.length()) {
+    if (!write_all_fd(socket_fd, call_id.c_str(), call_id.length())) {
         std::cout << "❌ Failed to send TCP HELLO call_id" << std::endl;
         return;
     }
@@ -506,14 +563,20 @@ void AudioProcessorService::send_tcp_audio_chunk(int socket_fd, const std::vecto
     uint32_t length = htonl(data_size);
 
     // Send length prefix
-    if (send(socket_fd, &length, 4, 0) != 4) {
+    if (!write_all_fd(socket_fd, &length, 4)) {
         std::cout << "❌ Failed to send TCP audio chunk length" << std::endl;
+        // Mark disconnected and close
+        outgoing_connected_.store(false);
+        close(socket_fd);
         return;
     }
 
     // Send audio data
-    if (send(socket_fd, audio_samples.data(), data_size, 0) != (ssize_t)data_size) {
+    if (!write_all_fd(socket_fd, audio_samples.data(), data_size)) {
         std::cout << "❌ Failed to send TCP audio chunk data" << std::endl;
+        // Mark disconnected and close
+        outgoing_connected_.store(false);
+        close(socket_fd);
         return;
     }
 
@@ -525,7 +588,7 @@ void AudioProcessorService::send_tcp_bye(int socket_fd) {
 
     uint32_t bye_marker = 0xFFFFFFFF;
 
-    if (send(socket_fd, &bye_marker, 4, 0) != 4) {
+    if (!write_all_fd(socket_fd, &bye_marker, 4)) {
         std::cout << "❌ Failed to send TCP BYE" << std::endl;
         return;
     }
@@ -534,9 +597,60 @@ void AudioProcessorService::send_tcp_bye(int socket_fd) {
 }
 
 void AudioProcessorService::handle_outgoing_tcp_connection() {
-    // This method handles connecting to external services when needed
-    // Called when we have audio to send and no connection exists
-    std::cout << "🔌 Outgoing TCP connection handler ready" << std::endl;
+    std::cout << "👂 Outgoing TCP server started on port " << outgoing_tcp_port_ << std::endl;
+
+    while (running_.load()) {
+        // Check if listen socket is still valid
+        {
+            std::lock_guard<std::mutex> lock(tcp_mutex_);
+            if (outgoing_listen_socket_ < 0) {
+                std::cout << "🔌 Outgoing TCP listen socket closed, exiting handler" << std::endl;
+                break;
+            }
+        }
+
+        struct sockaddr_in client_addr{};
+        socklen_t client_len = sizeof(client_addr);
+        int client_socket = accept(outgoing_listen_socket_, (struct sockaddr*)&client_addr, &client_len);
+
+        if (client_socket < 0) {
+            if (errno == EBADF || errno == EINVAL) {
+                std::cout << "🔌 Outgoing TCP listen socket closed during accept, exiting handler" << std::endl;
+                break;
+            }
+            if (running_.load()) {
+                std::cout << "❌ Failed to accept outgoing TCP client (errno: " << errno << ")" << std::endl;
+            }
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(tcp_mutex_);
+            // Close any previous client
+            if (outgoing_tcp_socket_ >= 0) close(outgoing_tcp_socket_);
+            outgoing_tcp_socket_ = client_socket;
+            outgoing_connected_.store(true);
+        }
+
+        std::cout << "🔗 Whisper client connected for call " << current_call_id_ << std::endl;
+
+        // Send HELLO immediately with current call_id
+        if (!current_call_id_.empty()) {
+            send_tcp_hello(outgoing_tcp_socket_, current_call_id_);
+        }
+
+        // No read loop needed; we only transmit. Monitor socket liveness with a tiny watcher.
+        std::thread([this]() {
+            // Periodically test socket by sending zero-length (not protocol) or use recv peek
+            // Here we just wait for running_ to go false; actual send failures are handled in send path.
+            while (running_.load() && outgoing_connected_.load()) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            std::cout << "🔌 Whisper client disconnected" << std::endl;
+        }).detach();
+    }
+
+    std::cout << "👂 Outgoing TCP server stopped" << std::endl;
 }
 
 void AudioProcessorService::handle_incoming_tcp_connection() {
@@ -669,31 +783,14 @@ bool AudioProcessorService::has_external_peer_connected() const {
 void AudioProcessorService::forward_to_external_service(const std::vector<float>& audio_samples) {
     std::lock_guard<std::mutex> lock(tcp_mutex_);
 
-    // Try to connect if not connected
-    if (!outgoing_connected_.load() && outgoing_tcp_socket_ >= 0) {
-        struct sockaddr_in server_addr;
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_addr.s_addr = inet_addr("127.0.0.1"); // localhost for now
-        server_addr.sin_port = htons(outgoing_tcp_port_);
-
-        if (connect(outgoing_tcp_socket_, (struct sockaddr*)&server_addr, sizeof(server_addr)) == 0) {
-            outgoing_connected_.store(true);
-            std::cout << "🔗 Connected to external service on port " << outgoing_tcp_port_ << std::endl;
-
-            // Send HELLO with current call_id
-            if (!current_call_id_.empty()) {
-                send_tcp_hello(outgoing_tcp_socket_, current_call_id_);
-            }
-        } else {
-            std::cout << "⚠️ Failed to connect to external service on port " << outgoing_tcp_port_ << std::endl;
-            return;
-        }
+    if (!outgoing_connected_.load() || outgoing_tcp_socket_ < 0) {
+        // Whisper has not connected yet; drop or buffer if needed
+        std::cout << "⚠️ No Whisper client connected on port " << outgoing_tcp_port_ << ", dropping chunk of " << audio_samples.size() << " samples" << std::endl;
+        return;
     }
 
-    // Send audio chunk if connected
-    if (outgoing_connected_.load()) {
-        send_tcp_audio_chunk(outgoing_tcp_socket_, audio_samples);
-    }
+    // Send audio chunk to connected Whisper client
+    send_tcp_audio_chunk(outgoing_tcp_socket_, audio_samples);
 }
 
 // Factory Implementation

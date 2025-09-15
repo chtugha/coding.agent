@@ -78,12 +78,16 @@ void ServiceAdvertiser::stop() {
     std::cout << "📢 Service advertisement server stopped" << std::endl;
 }
 
-bool ServiceAdvertiser::advertise_stream(const std::string& call_id, int tcp_port, 
+bool ServiceAdvertiser::advertise_stream(const std::string& call_id, int tcp_port,
                                         const std::string& stream_type) {
     std::lock_guard<std::mutex> lock(streams_mutex_);
-    
+
+    // Sanitize call_id to avoid ':' tokenization issues in legacy clients
+    std::string sanitized_id = call_id;
+    for (char &ch : sanitized_id) { if (ch == ':') ch = '_'; }
+
     AudioStreamInfo stream_info;
-    stream_info.call_id = call_id;
+    stream_info.call_id = sanitized_id;
     stream_info.tcp_port = tcp_port;
     stream_info.stream_type = stream_type;
     stream_info.sample_rate = 8000;
@@ -91,12 +95,12 @@ bool ServiceAdvertiser::advertise_stream(const std::string& call_id, int tcp_por
     stream_info.created_time = std::chrono::steady_clock::now();
     stream_info.last_activity = std::chrono::steady_clock::now();
     stream_info.is_active = true;
-    
-    active_streams_[call_id] = stream_info;
-    
-    std::cout << "📢 Advertising audio stream: call_id=" << call_id 
+
+    active_streams_[sanitized_id] = stream_info;
+
+    std::cout << "📢 Advertising audio stream: call_id=" << sanitized_id
               << ", port=" << tcp_port << ", type=" << stream_type << std::endl;
-    
+
     return true;
 }
 
@@ -187,14 +191,11 @@ std::string ServiceAdvertiser::create_advertisement_response() const {
     for (const auto& pair : active_streams_) {
         const auto& stream = pair.second;
         if (stream.is_active) {
-            response << "STREAM:" << stream.call_id 
-                    << ":" << stream.tcp_port 
-                    << ":" << stream.stream_type
-                    << ":" << stream.sample_rate
-                    << ":" << stream.channels << "\n";
+            // Minimal legacy-friendly advertisement: STREAM:<port>
+            response << "STREAM:" << stream.tcp_port << "\n";
         }
     }
-    
+
     response << "END\n";
     return response.str();
 }
@@ -282,33 +283,46 @@ std::vector<AudioStreamInfo> ServiceDiscovery::parse_advertisement_response(cons
     std::vector<AudioStreamInfo> streams;
     std::istringstream iss(response);
     std::string line;
-    
+
     while (std::getline(iss, line)) {
-        if (line.substr(0, 7) == "STREAM:") {
-            // Parse: STREAM:call_id:port:type:sample_rate:channels
+        if (line.rfind("STREAM:", 0) == 0) {
+            // Robust parse allowing ':' inside call_id by parsing from the end
+            // Format: STREAM:call_id:port:type:sample_rate:channels
             std::istringstream stream_iss(line.substr(7));
             std::string token;
             std::vector<std::string> tokens;
-            
+
             while (std::getline(stream_iss, token, ':')) {
                 tokens.push_back(token);
             }
-            
+
             if (tokens.size() >= 5) {
-                AudioStreamInfo stream;
-                stream.call_id = tokens[0];
-                stream.tcp_port = std::stoi(tokens[1]);
-                stream.stream_type = tokens[2];
-                stream.sample_rate = std::stoi(tokens[3]);
-                stream.channels = std::stoi(tokens[4]);
-                stream.is_active = true;
-                stream.created_time = std::chrono::steady_clock::now();
-                stream.last_activity = std::chrono::steady_clock::now();
-                
-                streams.push_back(stream);
+                try {
+                    const int n = static_cast<int>(tokens.size());
+                    AudioStreamInfo stream;
+                    // Join call_id tokens back together with ':' in case call_id contains ':' (e.g., host:port)
+                    std::ostringstream call_id_oss;
+                    for (int i = 0; i < n - 4; ++i) {
+                        if (i > 0) call_id_oss << ":";
+                        call_id_oss << tokens[i];
+                    }
+                    stream.call_id = call_id_oss.str();
+                    stream.tcp_port = std::stoi(tokens[n - 4]);
+                    stream.stream_type = tokens[n - 3];
+                    stream.sample_rate = std::stoi(tokens[n - 2]);
+                    stream.channels = std::stoi(tokens[n - 1]);
+                    stream.is_active = true;
+                    stream.created_time = std::chrono::steady_clock::now();
+                    stream.last_activity = std::chrono::steady_clock::now();
+                    streams.push_back(stream);
+                } catch (const std::exception& e) {
+                    std::cout << "⚠️  Failed to parse stream line: '" << line << "' (" << e.what() << ")" << std::endl;
+                }
+            } else {
+                std::cout << "⚠️  Malformed stream line (too few tokens): '" << line << "'" << std::endl;
             }
         }
     }
-    
+
     return streams;
 }

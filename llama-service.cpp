@@ -278,14 +278,54 @@ bool StandaloneLlamaService::start(int tcp_port) {
     std::cout << "🚀 Starting LLaMA service on TCP port " << tcp_port << std::endl;
     std::cout << "📁 Model: " << default_config_.model_path << std::endl;
 
+    // Mark service as starting in DB if available
+    if (database_) {
+        database_->set_llama_service_status("starting");
+    }
+
+    // Eager warm load
+    auto t0 = std::chrono::steady_clock::now();
+    std::cout << "⏳ Preloading LLaMA model..." << std::endl;
+    llama_backend_init();
+    llama_model_params model_params = llama_model_default_params();
+    model_params.n_gpu_layers = default_config_.use_gpu ? default_config_.n_gpu_layers : 0;
+    warm_model_ = llama_model_load_from_file(default_config_.model_path.c_str(), model_params);
+    if (!warm_model_) {
+        std::cout << "❌ Failed to load LLaMA model: " << default_config_.model_path << std::endl;
+        if (database_) database_->set_llama_service_status("error");
+        return false;
+    }
+
+    llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.n_ctx = default_config_.n_ctx;
+    ctx_params.n_threads = default_config_.n_threads;
+    warm_ctx_ = llama_init_from_model(warm_model_, ctx_params);
+    if (!warm_ctx_) {
+        std::cout << "❌ Failed to create LLaMA context" << std::endl;
+        llama_model_free(warm_model_);
+        warm_model_ = nullptr;
+        if (database_) database_->set_llama_service_status("error");
+        return false;
+    }
+
+    warm_loaded_ = true;
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    std::cout << "✅ LLaMA model preloaded in " << ms << " ms" << std::endl;
+
+    // Now mark running and start server
     running_.store(true);
     server_thread_ = std::thread(&StandaloneLlamaService::run_tcp_server, this, tcp_port);
+
+    if (database_) {
+        database_->set_llama_service_status("running");
+    }
 
     return true;
 }
 
 void StandaloneLlamaService::stop() {
-    if (!running_.load()) {
+    if (!running_.load() && !warm_loaded_) {
         return;
     }
 
@@ -308,6 +348,15 @@ void StandaloneLlamaService::stop() {
     {
         std::lock_guard<std::mutex> lock(sessions_mutex_);
         sessions_.clear();
+    }
+
+    // Free warm context/model
+    if (warm_ctx_) { llama_free(warm_ctx_); warm_ctx_ = nullptr; }
+    if (warm_model_) { llama_model_free(warm_model_); warm_model_ = nullptr; }
+    warm_loaded_ = false;
+
+    if (database_) {
+        database_->set_llama_service_status("stopped");
     }
 
     std::cout << "✅ LLaMA service stopped" << std::endl;

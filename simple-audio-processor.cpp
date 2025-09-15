@@ -187,28 +187,34 @@ std::vector<float> SimpleAudioProcessor::decode_rtp_audio(const RTPAudioPacket& 
 std::vector<float> SimpleAudioProcessor::convert_g711_ulaw(const std::vector<uint8_t>& data) {
     const auto& table = G711Tables::get_ulaw_table();
     std::vector<float> samples;
-    samples.reserve(data.size() * 2); // Upsample 8kHz to 16kHz
-    
-    for (uint8_t byte : data) {
-        float sample = table[byte];
-        samples.push_back(sample); // Original sample
-        samples.push_back(sample); // Duplicate for 16kHz
+    samples.reserve(data.size() * 2); // Upsample 8kHz -> 16kHz
+
+    if (data.empty()) return samples;
+
+    for (size_t i = 0; i < data.size(); ++i) {
+        float s = table[data[i]];
+        float next = (i + 1 < data.size()) ? table[data[i + 1]] : s;
+        samples.push_back(s);
+        samples.push_back(0.5f * (s + next)); // Linear interpolation sample
     }
-    
+
     return samples;
 }
 
 std::vector<float> SimpleAudioProcessor::convert_g711_alaw(const std::vector<uint8_t>& data) {
     const auto& table = G711Tables::get_alaw_table();
     std::vector<float> samples;
-    samples.reserve(data.size() * 2);
-    
-    for (uint8_t byte : data) {
-        float sample = table[byte];
-        samples.push_back(sample);
-        samples.push_back(sample); // Upsample to 16kHz
+    samples.reserve(data.size() * 2); // Upsample 8kHz -> 16kHz
+
+    if (data.empty()) return samples;
+
+    for (size_t i = 0; i < data.size(); ++i) {
+        float s = table[data[i]];
+        float next = (i + 1 < data.size()) ? table[data[i + 1]] : s;
+        samples.push_back(s);
+        samples.push_back(0.5f * (s + next));
     }
-    
+
     return samples;
 }
 
@@ -232,10 +238,13 @@ std::vector<float> SimpleAudioProcessor::convert_g711_ulaw_static(const std::vec
     std::vector<float> samples;
     samples.reserve(data.size() * 2);
 
-    for (uint8_t byte : data) {
-        float sample = table[byte];
-        samples.push_back(sample);
-        samples.push_back(sample); // Upsample to 16kHz
+    if (data.empty()) return samples;
+
+    for (size_t i = 0; i < data.size(); ++i) {
+        float s = table[data[i]];
+        float next = (i + 1 < data.size()) ? table[data[i + 1]] : s;
+        samples.push_back(s);
+        samples.push_back(0.5f * (s + next));
     }
 
     return samples;
@@ -246,10 +255,13 @@ std::vector<float> SimpleAudioProcessor::convert_g711_alaw_static(const std::vec
     std::vector<float> samples;
     samples.reserve(data.size() * 2);
 
-    for (uint8_t byte : data) {
-        float sample = table[byte];
-        samples.push_back(sample);
-        samples.push_back(sample); // Upsample to 16kHz
+    if (data.empty()) return samples;
+
+    for (size_t i = 0; i < data.size(); ++i) {
+        float s = table[data[i]];
+        float next = (i + 1 < data.size()) ? table[data[i + 1]] : s;
+        samples.push_back(s);
+        samples.push_back(0.5f * (s + next));
     }
 
     return samples;

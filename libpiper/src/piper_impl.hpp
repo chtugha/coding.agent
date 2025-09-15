@@ -10,7 +10,7 @@
 
 // Third-party includes
 #include <nlohmann/json.hpp>
-#include <onnxruntime/onnxruntime_cxx_api.h>
+#include <onnxruntime_cxx_api.h>
 
 // Unicode normalization and ranges (simplified for this implementation)
 namespace una {

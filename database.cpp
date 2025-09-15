@@ -18,6 +18,10 @@ bool Database::init(const std::string& db_path) {
         return false;
     }
 
+    // Set busy timeout to mitigate database locked errors under concurrent access
+    sqlite3_busy_timeout(db_, 3000);
+    sqlite3_exec(db_, "PRAGMA busy_timeout=3000;", nullptr, nullptr, nullptr);
+
     // Enable WAL mode for better performance
     sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
@@ -133,6 +137,8 @@ bool Database::create_tables() {
 }
 
 int Database::get_or_create_caller(const std::string& phone_number) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     if (phone_number.empty()) {
         // Create anonymous caller
         const char* sql = "INSERT INTO callers (phone_number, created_at, last_call) VALUES (NULL, ?, ?)";
@@ -163,7 +169,16 @@ int Database::get_or_create_caller(const std::string& phone_number) {
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             int caller_id = sqlite3_column_int(stmt, 0);
             sqlite3_finalize(stmt);
-            update_caller_last_call(caller_id);
+            // Inline last_call update to avoid nested locks
+            const char* upd_sql = "UPDATE callers SET last_call = ? WHERE id = ?";
+            sqlite3_stmt* upd;
+            if (sqlite3_prepare_v2(db_, upd_sql, -1, &upd, nullptr) == SQLITE_OK) {
+                std::string ts = get_current_timestamp();
+                sqlite3_bind_text(upd, 1, ts.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_int(upd, 2, caller_id);
+                sqlite3_step(upd);
+                sqlite3_finalize(upd);
+            }
             return caller_id;
         }
     }
@@ -188,6 +203,8 @@ int Database::get_or_create_caller(const std::string& phone_number) {
 }
 
 bool Database::update_caller_last_call(int caller_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "UPDATE callers SET last_call = ? WHERE id = ?";
     sqlite3_stmt* stmt;
 
@@ -244,6 +261,8 @@ std::string Database::get_current_timestamp() {
 // SIP Line Management
 int Database::create_sip_line(const std::string& username, const std::string& password,
                              const std::string& server_ip, int server_port) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = R"(
         INSERT INTO sip_lines (username, password, server_ip, server_port)
         VALUES (?, ?, ?, ?)
@@ -274,6 +293,8 @@ int Database::create_sip_line(const std::string& username, const std::string& pa
 }
 
 std::vector<SipLineConfig> Database::get_all_sip_lines() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     std::vector<SipLineConfig> lines;
 
     const char* sql = R"(
@@ -312,6 +333,8 @@ std::vector<SipLineConfig> Database::get_all_sip_lines() {
 }
 
 bool Database::update_sip_line_status(int line_id, const std::string& status) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "UPDATE sip_lines SET status = ? WHERE line_id = ?";
 
     sqlite3_stmt* stmt;
@@ -332,6 +355,8 @@ bool Database::update_sip_line_status(int line_id, const std::string& status) {
 }
 
 bool Database::toggle_sip_line(int line_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "UPDATE sip_lines SET enabled = NOT enabled WHERE line_id = ?";
 
     sqlite3_stmt* stmt;
@@ -351,6 +376,8 @@ bool Database::toggle_sip_line(int line_id) {
 }
 
 bool Database::delete_sip_line(int line_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "DELETE FROM sip_lines WHERE line_id = ?";
 
     sqlite3_stmt* stmt;
@@ -370,6 +397,8 @@ bool Database::delete_sip_line(int line_id) {
 }
 
 int Database::get_system_speed() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'system_speed'";
     sqlite3_stmt* stmt;
 
@@ -386,13 +415,16 @@ int Database::get_system_speed() {
 }
 
 bool Database::set_system_speed(int speed) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "UPDATE system_config SET value = ?, updated_at = ? WHERE key = 'system_speed'";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         std::string timestamp = get_current_timestamp();
-        sqlite3_bind_text(stmt, 1, std::to_string(speed).c_str(), -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, timestamp.c_str(), -1, SQLITE_STATIC);
+        std::string speed_str = std::to_string(speed);
+        sqlite3_bind_text(stmt, 1, speed_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, timestamp.c_str(), -1, SQLITE_TRANSIENT);
 
         bool success = sqlite3_step(stmt) == SQLITE_DONE;
         sqlite3_finalize(stmt);
@@ -403,6 +435,8 @@ bool Database::set_system_speed(int speed) {
 }
 
 std::vector<Caller> Database::get_all_callers() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     std::vector<Caller> callers;
     const char* sql = "SELECT id, phone_number, created_at, last_call FROM callers ORDER BY last_call DESC";
     sqlite3_stmt* stmt;
@@ -430,6 +464,8 @@ std::vector<Caller> Database::get_all_callers() {
 
 // Call Management Implementation
 bool Database::create_call(const std::string& call_id, int caller_id, int line_id, const std::string& phone_number) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "INSERT INTO calls (call_id, caller_id, line_id, phone_number, start_time, status) VALUES (?, ?, ?, ?, ?, 'active')";
     sqlite3_stmt* stmt;
 
@@ -456,6 +492,8 @@ bool Database::create_call(const std::string& call_id, int caller_id, int line_i
 }
 
 bool Database::end_call(const std::string& call_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "UPDATE calls SET end_time = ?, status = 'ended' WHERE call_id = ?";
     sqlite3_stmt* stmt;
 
@@ -479,6 +517,8 @@ bool Database::end_call(const std::string& call_id) {
 }
 
 bool Database::append_transcription(const std::string& call_id, const std::string& text) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "UPDATE calls SET transcription = transcription || ? WHERE call_id = ?";
     sqlite3_stmt* stmt;
 
@@ -502,6 +542,8 @@ bool Database::append_transcription(const std::string& call_id, const std::strin
 }
 
 bool Database::append_llama_response(const std::string& call_id, const std::string& text) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "UPDATE calls SET llama_response = llama_response || ? WHERE call_id = ?";
     sqlite3_stmt* stmt;
 
@@ -526,6 +568,8 @@ bool Database::append_llama_response(const std::string& call_id, const std::stri
 
 
 Call Database::get_call(const std::string& call_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     Call call;
     const char* sql = "SELECT id, call_id, caller_id, line_id, phone_number, start_time, end_time, transcription, llama_response, status FROM calls WHERE call_id = ?";
     sqlite3_stmt* stmt;
@@ -563,6 +607,8 @@ Call Database::get_call(const std::string& call_id) {
 
 // Whisper service management methods
 bool Database::get_whisper_service_enabled() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'whisper_service_enabled'";
     sqlite3_stmt* stmt;
     bool enabled = false;
@@ -579,6 +625,8 @@ bool Database::get_whisper_service_enabled() {
 }
 
 bool Database::set_whisper_service_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('whisper_service_enabled', ?, CURRENT_TIMESTAMP)";
     sqlite3_stmt* stmt;
 
@@ -593,6 +641,8 @@ bool Database::set_whisper_service_enabled(bool enabled) {
 }
 
 std::string Database::get_whisper_model_path() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     // Safety check for database connection
     if (!db_) {
         std::cerr << "❌ Database connection is null in get_whisper_model_path()" << std::endl;
@@ -623,11 +673,13 @@ std::string Database::get_whisper_model_path() {
 }
 
 bool Database::set_whisper_model_path(const std::string& model_path) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('whisper_model_path', ?, CURRENT_TIMESTAMP)";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_TRANSIENT);
         int result = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         return result == SQLITE_DONE;
@@ -637,6 +689,8 @@ bool Database::set_whisper_model_path(const std::string& model_path) {
 }
 
 std::string Database::get_whisper_service_status() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'whisper_service_status'";
     sqlite3_stmt* stmt;
     std::string status = "stopped"; // default
@@ -655,11 +709,13 @@ std::string Database::get_whisper_service_status() {
 }
 
 bool Database::set_whisper_service_status(const std::string& status) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('whisper_service_status', ?, CURRENT_TIMESTAMP)";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_TRANSIENT);
         int result = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         return result == SQLITE_DONE;
@@ -670,6 +726,8 @@ bool Database::set_whisper_service_status(const std::string& status) {
 
 // LLaMA service management methods
 bool Database::get_llama_service_enabled() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'llama_service_enabled'";
     sqlite3_stmt* stmt;
     bool enabled = false;
@@ -686,6 +744,8 @@ bool Database::get_llama_service_enabled() {
 }
 
 bool Database::set_llama_service_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('llama_service_enabled', ?, CURRENT_TIMESTAMP)";
     sqlite3_stmt* stmt;
 
@@ -700,6 +760,8 @@ bool Database::set_llama_service_enabled(bool enabled) {
 }
 
 std::string Database::get_llama_model_path() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     if (!db_) {
         std::cerr << "❌ Database connection is null in get_llama_model_path()" << std::endl;
         return "models/llama-7b-q4_0.gguf";
@@ -723,11 +785,13 @@ std::string Database::get_llama_model_path() {
 }
 
 bool Database::set_llama_model_path(const std::string& model_path) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('llama_model_path', ?, CURRENT_TIMESTAMP)";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 1, model_path.c_str(), -1, SQLITE_TRANSIENT);
         int result = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         return result == SQLITE_DONE;
@@ -737,6 +801,8 @@ bool Database::set_llama_model_path(const std::string& model_path) {
 }
 
 std::string Database::get_llama_service_status() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'llama_service_status'";
     sqlite3_stmt* stmt;
     std::string status = "stopped";
@@ -755,11 +821,13 @@ std::string Database::get_llama_service_status() {
 }
 
 bool Database::set_llama_service_status(const std::string& status) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('llama_service_status', ?, CURRENT_TIMESTAMP)";
     sqlite3_stmt* stmt;
 
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_TRANSIENT);
         int result = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         return result == SQLITE_DONE;
@@ -770,6 +838,8 @@ bool Database::set_llama_service_status(const std::string& status) {
 
 // Piper service management methods
 bool Database::get_piper_service_enabled() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'piper_service_enabled'";
     sqlite3_stmt* stmt;
 
@@ -786,6 +856,7 @@ bool Database::get_piper_service_enabled() {
 }
 
 bool Database::set_piper_service_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
     // Begin transaction
     if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
         return false;
@@ -813,6 +884,8 @@ bool Database::set_piper_service_enabled(bool enabled) {
 }
 
 std::string Database::get_piper_model_path() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'piper_model_path'";
     sqlite3_stmt* stmt;
 
@@ -829,6 +902,7 @@ std::string Database::get_piper_model_path() {
 }
 
 bool Database::set_piper_model_path(const std::string& model_path) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
     // Begin transaction
     if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
         return false;
@@ -856,6 +930,8 @@ bool Database::set_piper_model_path(const std::string& model_path) {
 }
 
 std::string Database::get_piper_espeak_data_path() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'piper_espeak_data_path'";
     sqlite3_stmt* stmt;
 
@@ -872,6 +948,7 @@ std::string Database::get_piper_espeak_data_path() {
 }
 
 bool Database::set_piper_espeak_data_path(const std::string& espeak_data_path) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
     // Begin transaction
     if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
         return false;
@@ -899,6 +976,8 @@ bool Database::set_piper_espeak_data_path(const std::string& espeak_data_path) {
 }
 
 std::string Database::get_piper_service_status() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
     const char* sql = "SELECT value FROM system_config WHERE key = 'piper_service_status'";
     sqlite3_stmt* stmt;
 
@@ -915,6 +994,7 @@ std::string Database::get_piper_service_status() {
 }
 
 bool Database::set_piper_service_status(const std::string& status) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
     // Begin transaction
     if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
         return false;
@@ -944,6 +1024,7 @@ bool Database::set_piper_service_status(const std::string& status) {
 // Atomic Piper configuration update (transaction-safe)
 bool Database::set_piper_service_config_atomic(bool enabled, const std::string& model_path,
                                               const std::string& espeak_path, const std::string& status) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
     // Begin transaction
     if (sqlite3_exec(db_, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) != SQLITE_OK) {
         return false;

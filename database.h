@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <mutex>
 #include <sqlite3.h>
 
 struct Caller {
@@ -104,6 +105,7 @@ public:
 
 private:
     sqlite3* db_;
+    mutable std::mutex db_mutex_;  // Thread safety for database operations
     bool create_tables();
     std::string generate_uuid();
     std::string get_current_timestamp();

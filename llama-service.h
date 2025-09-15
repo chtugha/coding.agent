@@ -41,21 +41,21 @@ class LlamaSession {
 public:
     LlamaSession(const std::string& call_id, const LlamaSessionConfig& config);
     ~LlamaSession();
-    
+
     bool initialize();
     std::string process_text(const std::string& input_text);
     std::string get_latest_response() const { return latest_response_; }
-    
+
     void mark_activity() { last_activity_ = std::chrono::steady_clock::now(); }
     std::chrono::steady_clock::time_point get_last_activity() const { return last_activity_; }
-    
+
     bool is_active() const { return is_active_.load(); }
     void set_active(bool active) { is_active_.store(active); }
 
 private:
     std::string call_id_;
     LlamaSessionConfig config_;
-    
+
     // LLaMA context and model
     llama_model* model_;
     llama_context* ctx_;
@@ -70,7 +70,7 @@ private:
     std::atomic<bool> is_active_;
     std::chrono::steady_clock::time_point last_activity_;
     std::mutex session_mutex_;
-    
+
     // Internal methods
     bool initialize_llama_context();
     void cleanup_llama_context();
@@ -101,6 +101,12 @@ private:
 
     // Database connection
     std::unique_ptr<Database> database_;
+
+    // Eager warm load to avoid lazy loading on first request
+    llama_model* warm_model_ = nullptr;
+    llama_context* warm_ctx_ = nullptr;
+    bool warm_loaded_ = false;
+
 
     // Session management
     std::unordered_map<std::string, std::unique_ptr<LlamaSession>> sessions_;

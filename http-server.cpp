@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
     // Whisper service removed - runs as independent service
 
     // Create HTTP server for web interface only (no Whisper service)
-    g_server = std::make_unique<SimpleHttpServer>(port, &database);
+    g_server = std::make_unique<SimpleHttpServer>(port, &database, db_path);
     std::cout << "✅ HTTP server initialized (web interface only)" << std::endl;
     
     // Start server

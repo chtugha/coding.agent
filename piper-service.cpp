@@ -7,12 +7,14 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <algorithm>
 #include <chrono>
 #include <thread>
 #include <random>
 #include <cmath>
 #include <fstream>
+#include <sys/stat.h>
 
 // Include Piper C API
 extern "C" {
@@ -21,9 +23,9 @@ extern "C" {
 
 // PiperSession Implementation
 PiperSession::PiperSession(const std::string& call_id, const PiperSessionConfig& config)
-    : call_id_(call_id), config_(config), synthesizer_(nullptr), active_(false), 
+    : call_id_(call_id), config_(config), synthesizer_(nullptr), active_(false),
       synthesis_in_progress_(false), total_text_processed_(0), total_audio_generated_(0) {
-    
+
     if (!initialize_synthesizer()) {
         std::cout << "❌ Failed to initialize Piper synthesizer for call " << call_id << std::endl;
     } else {
@@ -37,33 +39,58 @@ PiperSession::~PiperSession() {
 }
 
 bool PiperSession::initialize_synthesizer() {
-    std::string config_path = config_.config_path;
-    if (config_path.empty()) {
-        config_path = config_.model_path + ".json";
-    }
+    try {
+        std::string config_path = config_.config_path;
+        if (config_path.empty()) {
+            config_path = config_.model_path + ".json";
+        }
 
-    synthesizer_ = piper_create(
-        config_.model_path.c_str(),
-        config_path.c_str(),
-        config_.espeak_data_path.c_str()
-    );
+        // Validate config file exists and is non-empty to avoid JSON parse errors inside libpiper
+        struct stat st{};
+        if (stat(config_path.c_str(), &st) != 0 || st.st_size == 0) {
+            std::cout << "❌ Piper config JSON missing or empty: " << config_path << std::endl;
+            return false;
+        }
 
-    if (!synthesizer_) {
-        std::cout << "❌ Failed to create Piper synthesizer" << std::endl;
+        synthesizer_ = piper_create(
+            config_.model_path.c_str(),
+            config_path.c_str(),
+            config_.espeak_data_path.c_str()
+        );
+
+        if (!synthesizer_) {
+            std::cout << "❌ Failed to create Piper synthesizer" << std::endl;
+            return false;
+        }
+
+        active_ = true;
+        std::cout << "🎤 Piper synthesizer initialized for call " << call_id_ << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cout << "❌ Exception initializing Piper synthesizer: " << e.what() << std::endl;
+        return false;
+    } catch (...) {
+        std::cout << "❌ Unknown error initializing Piper synthesizer" << std::endl;
         return false;
     }
-
-    active_ = true;
-    std::cout << "🎤 Piper synthesizer initialized for call " << call_id_ << std::endl;
-    return true;
 }
 
 void PiperSession::cleanup_synthesizer() {
-    if (synthesizer_) {
-        piper_free(synthesizer_);
+    try {
+        if (synthesizer_) {
+            piper_free(synthesizer_);
+            synthesizer_ = nullptr;
+        }
+        active_ = false;
+    } catch (const std::exception& e) {
+        std::cout << "⚠️ Exception during synthesizer cleanup: " << e.what() << std::endl;
         synthesizer_ = nullptr;
+        active_ = false;
+    } catch (...) {
+        std::cout << "⚠️ Unknown error during synthesizer cleanup" << std::endl;
+        synthesizer_ = nullptr;
+        active_ = false;
     }
-    active_ = false;
 }
 
 bool PiperSession::synthesize_text(const std::string& text) {
@@ -72,7 +99,7 @@ bool PiperSession::synthesize_text(const std::string& text) {
     }
 
     std::lock_guard<std::mutex> lock(synthesis_mutex_);
-    
+
     // Set up synthesis options
     piper_synthesize_options options = piper_default_synthesize_options(synthesizer_);
     options.speaker_id = config_.speaker_id;
@@ -89,11 +116,11 @@ bool PiperSession::synthesize_text(const std::string& text) {
 
     synthesis_in_progress_ = true;
     total_text_processed_ += text.length();
-    
+
     if (config_.verbose) {
         std::cout << "🎤 Started synthesis for call " << call_id_ << ": \"" << text << "\"" << std::endl;
     }
-    
+
     return true;
 }
 
@@ -103,10 +130,10 @@ bool PiperSession::get_next_audio_chunk(std::vector<float>& audio_samples, int& 
     }
 
     std::lock_guard<std::mutex> lock(synthesis_mutex_);
-    
+
     piper_audio_chunk chunk;
     int result = piper_synthesize_next(synthesizer_, &chunk);
-    
+
     if (result == PIPER_DONE) {
         synthesis_in_progress_ = false;
         is_last = true;
@@ -116,18 +143,17 @@ bool PiperSession::get_next_audio_chunk(std::vector<float>& audio_samples, int& 
         return false;
     }
 
-    // Copy audio data
-    audio_samples.resize(chunk.num_samples);
-    std::copy(chunk.samples, chunk.samples + chunk.num_samples, audio_samples.begin());
+    // Copy audio data efficiently
+    audio_samples.assign(chunk.samples, chunk.samples + chunk.num_samples);
     sample_rate = chunk.sample_rate;
     is_last = chunk.is_last;
-    
+
     total_audio_generated_ += chunk.num_samples;
-    
+
     if (chunk.is_last) {
         synthesis_in_progress_ = false;
     }
-    
+
     return true;
 }
 
@@ -153,14 +179,98 @@ bool StandalonePiperService::start(int tcp_port) {
     std::cout << "📁 Model: " << default_config_.model_path << std::endl;
     std::cout << "📁 eSpeak data: " << default_config_.espeak_data_path << std::endl;
 
+    // Mark starting in DB (optional)
+    if (database_) {
+        try {
+            database_->set_piper_service_status("starting");
+        } catch (const std::exception& e) {
+            std::cout << "⚠️ Database error setting status: " << e.what() << std::endl;
+        } catch (...) {
+            std::cout << "⚠️ Unknown database error setting status" << std::endl;
+        }
+    }
+
+    // Eager warm preload of synthesizer to avoid lazy init on first call
+    std::cout << "\u23f3 Preloading Piper synthesizer..." << std::endl;
+    auto t0 = std::chrono::steady_clock::now();
+    std::string cfg = default_config_.config_path.empty() ? (default_config_.model_path + ".json") : default_config_.config_path;
+
+    // Validate config file exists and is non-empty
+    struct stat st{};
+    if (stat(cfg.c_str(), &st) != 0 || st.st_size == 0) {
+        std::cout << "\u274c Piper config JSON missing or empty: " << cfg << std::endl;
+        if (database_) {
+            try {
+                database_->set_piper_service_status("error");
+            } catch (...) {
+                // Ignore database errors during error handling
+            }
+        }
+        return false;
+    }
+
+    try {
+        warm_synth_ = piper_create(
+            default_config_.model_path.c_str(),
+            cfg.c_str(),
+            default_config_.espeak_data_path.c_str()
+        );
+        if (!warm_synth_) {
+            std::cout << "\u274c Failed to preload Piper synthesizer" << std::endl;
+            if (database_) {
+                try {
+                    database_->set_piper_service_status("error");
+                } catch (...) {
+                    // Ignore database errors during error handling
+                }
+            }
+            return false;
+        }
+    } catch (const std::exception& e) {
+        std::cout << "\u274c Exception during Piper synthesizer preload: " << e.what() << std::endl;
+        if (database_) {
+            try {
+                database_->set_piper_service_status("error");
+            } catch (...) {
+                // Ignore database errors during error handling
+            }
+        }
+        return false;
+    } catch (...) {
+        std::cout << "\u274c Unknown error during Piper synthesizer preload" << std::endl;
+        if (database_) {
+            try {
+                database_->set_piper_service_status("error");
+            } catch (...) {
+                // Ignore database errors during error handling
+            }
+        }
+        return false;
+    }
+    warm_loaded_ = true;
+    auto t1 = std::chrono::steady_clock::now();
+    std::cout << "\u2705 Piper synthesizer preloaded in "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count()
+              << " ms" << std::endl;
+
     running_.store(true);
     server_thread_ = std::thread(&StandalonePiperService::run_tcp_server, this, tcp_port);
+
+    if (database_) {
+        try {
+            database_->set_piper_service_status("running");
+        } catch (const std::exception& e) {
+            std::cout << "⚠️ Database error setting running status: " << e.what() << std::endl;
+        } catch (...) {
+            std::cout << "⚠️ Unknown database error setting running status" << std::endl;
+        }
+    }
 
     return true;
 }
 
 void StandalonePiperService::stop() {
-    if (!running_.load()) return;
+    if (!running_.load() && !warm_loaded_) return;
 
     std::cout << "🛑 Stopping Piper service..." << std::endl;
     running_.store(false);
@@ -180,18 +290,55 @@ void StandalonePiperService::stop() {
     cleanup_tcp_threads();
     cleanup_inactive_sessions();
 
+    // Free warm preload
+    if (warm_synth_) {
+        try {
+            piper_free(warm_synth_);
+            warm_synth_ = nullptr;
+            warm_loaded_ = false;
+        } catch (const std::exception& e) {
+            std::cout << "⚠️ Exception during warm synthesizer cleanup: " << e.what() << std::endl;
+            warm_synth_ = nullptr;
+            warm_loaded_ = false;
+        } catch (...) {
+            std::cout << "⚠️ Unknown error during warm synthesizer cleanup" << std::endl;
+            warm_synth_ = nullptr;
+            warm_loaded_ = false;
+        }
+    }
+
+    if (database_) {
+        try {
+            database_->set_piper_service_status("stopped");
+        } catch (const std::exception& e) {
+            std::cout << "⚠️ Database error setting stopped status: " << e.what() << std::endl;
+        } catch (...) {
+            std::cout << "⚠️ Unknown database error setting stopped status" << std::endl;
+        }
+    }
+
     std::cout << "✅ Piper service stopped" << std::endl;
 }
 
 bool StandalonePiperService::init_database(const std::string& db_path) {
-    database_ = std::make_unique<Database>();
-    if (!database_->init(db_path)) {
-        std::cout << "❌ Failed to initialize database at " << db_path << std::endl;
+    try {
+        database_ = std::make_unique<Database>();
+        if (!database_->init(db_path)) {
+            std::cout << "⚠️ Database initialization failed at " << db_path << " - continuing without database" << std::endl;
+            database_.reset();
+            return false;
+        }
+        std::cout << "💾 Piper service connected to DB: " << db_path << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cout << "⚠️ Database exception: " << e.what() << " - continuing without database" << std::endl;
+        database_.reset();
+        return false;
+    } catch (...) {
+        std::cout << "⚠️ Unknown database error - continuing without database" << std::endl;
         database_.reset();
         return false;
     }
-    std::cout << "💾 Piper service connected to DB: " << db_path << std::endl;
-    return true;
 }
 
 void StandalonePiperService::set_output_endpoint(const std::string& host, int port) {
@@ -200,9 +347,22 @@ void StandalonePiperService::set_output_endpoint(const std::string& host, int po
     std::cout << "🔌 Piper output endpoint set to " << host << ":" << port << std::endl;
 }
 
+void StandalonePiperService::set_max_concurrency(size_t n) {
+    size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+    size_t bounded = std::max<size_t>(1, std::min<size_t>(hw, n));
+    {
+        std::lock_guard<std::mutex> lk(synth_gate_mutex_);
+        max_concurrent_synthesis_ = bounded;
+        // If current is above new max, subsequent completions will reduce it; we don't forcibly cancel.
+    }
+    if (default_config_.verbose) {
+        std::cout << "⚙️ Max synthesis concurrency set to " << bounded << " (hw=" << hw << ")" << std::endl;
+    }
+}
+
 bool StandalonePiperService::create_session(const std::string& call_id) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
-    
+
     if (sessions_.find(call_id) != sessions_.end()) {
         std::cout << "⚠️ Piper session already exists for call " << call_id << std::endl;
         return true;
@@ -215,21 +375,21 @@ bool StandalonePiperService::create_session(const std::string& call_id) {
 
     sessions_[call_id] = std::move(session);
     total_sessions_created_++;
-    
+
     std::cout << "✅ Created Piper session for call " << call_id << std::endl;
     return true;
 }
 
 bool StandalonePiperService::destroy_session(const std::string& call_id) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
-    
+
     auto it = sessions_.find(call_id);
     if (it != sessions_.end()) {
         sessions_.erase(it);
         std::cout << "🗑️ Destroyed Piper session for call " << call_id << std::endl;
         return true;
     }
-    
+
     return false;
 }
 
@@ -240,44 +400,96 @@ PiperSession* StandalonePiperService::get_session(const std::string& call_id) {
 }
 
 std::string StandalonePiperService::process_text_for_call(const std::string& call_id, const std::string& text) {
-    PiperSession* session = get_session(call_id);
-    if (!session) {
-        std::cout << "❌ No Piper session found for call " << call_id << std::endl;
-        return "";
-    }
+    PiperSession* session = nullptr;
 
-    if (!session->synthesize_text(text)) {
-        std::cout << "❌ Failed to synthesize text for call " << call_id << std::endl;
-        return "";
-    }
-
-    // Process all audio chunks and send to audio processor
+    // Process all audio chunks and send to audio processor (resilient mode)
     std::vector<float> audio_samples;
-    int sample_rate;
+    int sample_rate = 0;
     bool is_last = false;
     size_t total_samples = 0;
+    bool audio_output_available = false;
 
-    while (session->get_next_audio_chunk(audio_samples, sample_rate, is_last)) {
-        if (!audio_samples.empty()) {
-            if (connect_audio_output_for_call(call_id)) {
-                send_audio_to_processor(call_id, audio_samples, sample_rate);
-                total_samples += audio_samples.size();
+    bool permit_acquired = false;
+
+    do {
+        try {
+            session = get_session(call_id);
+            if (!session) {
+                std::cout << "❌ No Piper session found for call " << call_id << std::endl;
+                break;
             }
+
+            // Concurrency gate: limit number of concurrent syntheses
+            {
+                std::unique_lock<std::mutex> lk(synth_gate_mutex_);
+                synth_gate_cv_.wait(lk, [&]{ return current_synthesis_ < max_concurrent_synthesis_; });
+                ++current_synthesis_;
+                permit_acquired = true;
+            }
+
+            if (!session->synthesize_text(text)) {
+                std::cout << "❌ Failed to synthesize text for call " << call_id << std::endl;
+                break;
+            }
+        } catch (const std::exception& e) {
+            std::cout << "❌ Exception processing text for call " << call_id << ": " << e.what() << std::endl;
+            break;
+        } catch (...) {
+            std::cout << "❌ Unknown error processing text for call " << call_id << std::endl;
+            break;
         }
-        
-        if (is_last) break;
+
+        try {
+            while (session && session->get_next_audio_chunk(audio_samples, sample_rate, is_last)) {
+                if (!audio_samples.empty()) {
+                    // Try to establish audio output connection (non-blocking)
+                    if (!audio_output_available) {
+                        audio_output_available = try_connect_audio_output_for_call(call_id);
+                    }
+
+                    // Send audio if connection is available, otherwise silently discard
+                    if (audio_output_available) {
+                        if (!send_audio_to_processor(call_id, audio_samples, sample_rate)) {
+                            // Connection lost, mark as unavailable for retry
+                            audio_output_available = false;
+                            close_audio_output_for_call(call_id);
+                            if (default_config_.verbose) {
+                                std::cout << "⚠️ Audio output lost for call " << call_id << ", continuing synthesis" << std::endl;
+                            }
+                        }
+                    }
+                    total_samples += audio_samples.size();
+                }
+
+                if (is_last) break;
+            }
+        } catch (const std::exception& e) {
+            std::cout << "\u26a0\ufe0f Exception in audio processing loop for call " << call_id << ": " << e.what() << std::endl;
+        } catch (...) {
+            std::cout << "\u26a0\ufe0f Unknown error in audio processing loop for call " << call_id << std::endl;
+        }
+    } while(false);
+
+    // Release concurrency permit if held
+    if (permit_acquired) {
+        std::lock_guard<std::mutex> lk(synth_gate_mutex_);
+        if (current_synthesis_ > 0) --current_synthesis_;
+        synth_gate_cv_.notify_one();
     }
 
-    total_text_processed_ += text.length();
-    total_audio_generated_ += total_samples;
+    // Update stats and build response
+    if (total_samples > 0) {
+        total_text_processed_ += text.length();
+        total_audio_generated_ += total_samples;
+    }
 
     std::ostringstream response;
     response << "Synthesized " << total_samples << " audio samples at " << sample_rate << "Hz for: " << text;
-    
+
     if (default_config_.verbose) {
         std::cout << "🎤 " << response.str() << std::endl;
     }
-    
+
     return response.str();
 }
 
@@ -336,6 +548,12 @@ void StandalonePiperService::run_tcp_server(int port) {
             continue;
         }
 
+        // Prevent SIGPIPE on client socket (macOS)
+        {
+            int on = 1;
+            setsockopt(client_socket, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        }
+
         std::string call_id;
         if (!read_tcp_hello(client_socket, call_id)) {
             std::cout << "❌ Failed to read TCP HELLO" << std::endl;
@@ -345,7 +563,23 @@ void StandalonePiperService::run_tcp_server(int port) {
 
         create_session(call_id);
 
-        call_tcp_threads_[call_id] = std::thread(&StandalonePiperService::handle_tcp_text_stream, this, call_id, client_socket);
+        // Avoid abort due to overwriting an existing joinable thread for the same call_id
+        std::thread old_th;
+        {
+            std::lock_guard<std::mutex> lk(call_threads_mutex_);
+            auto it_th = call_tcp_threads_.find(call_id);
+            if (it_th != call_tcp_threads_.end()) {
+                old_th = std::move(it_th->second);
+                call_tcp_threads_.erase(it_th);
+            }
+        }
+        if (old_th.joinable()) {
+            old_th.join();
+        }
+        {
+            std::lock_guard<std::mutex> lk(call_threads_mutex_);
+            call_tcp_threads_[call_id] = std::thread(&StandalonePiperService::handle_tcp_text_stream, this, call_id, client_socket);
+        }
     }
 }
 
@@ -371,9 +605,15 @@ void StandalonePiperService::handle_tcp_text_stream(const std::string& call_id, 
         if (!response.empty()) {
             // 1) Write to DB if available
             if (database_) {
-                // Store Piper response in database (could extend database schema)
-                // For now, we'll just log it
-                std::cout << "💾 Piper response for call " << call_id << ": " << response << std::endl;
+                try {
+                    // Store Piper response in database (could extend database schema)
+                    // For now, we'll just log it
+                    std::cout << "💾 Piper response for call " << call_id << ": " << response << std::endl;
+                } catch (const std::exception& e) {
+                    std::cout << "⚠️ Database error logging response: " << e.what() << std::endl;
+                } catch (...) {
+                    std::cout << "⚠️ Unknown database error logging response" << std::endl;
+                }
             }
 
             // 2) Send response back to LLaMA service (optional)
@@ -415,22 +655,38 @@ bool StandalonePiperService::read_tcp_text_chunk(int socket, std::string& text) 
 
 bool StandalonePiperService::send_tcp_response(int socket, const std::string& response) {
     uint32_t l = htonl((uint32_t)response.size());
-    if (send(socket, &l, 4, 0) != 4) return false;
-    if (!response.empty() && send(socket, response.data(), response.size(), 0) != (ssize_t)response.size()) return false;
+    if (send(socket, &l, 4, MSG_NOSIGNAL) != 4) return false;
+    if (!response.empty() && send(socket, response.data(), response.size(), MSG_NOSIGNAL) != (ssize_t)response.size()) return false;
     return true;
 }
 
 bool StandalonePiperService::send_tcp_bye(int socket) {
     uint32_t bye = 0xFFFFFFFF;
-    return send(socket, &bye, 4, 0) == 4;
+    return send(socket, &bye, 4, MSG_NOSIGNAL) == 4;
 }
 
 bool StandalonePiperService::connect_audio_output_for_call(const std::string& call_id) {
-    if (output_sockets_.count(call_id)) return true;
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        if (output_sockets_.count(call_id)) return true;
+    }
 
     int port = calculate_audio_processor_port(call_id);
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return false;
+
+    // Set connection timeout to avoid hanging
+    struct timeval timeout;
+    timeout.tv_sec = 2;  // 2 second timeout
+    // Prevent SIGPIPE on audio socket (macOS)
+    {
+        int on = 1;
+        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    }
+
+    timeout.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -445,26 +701,105 @@ bool StandalonePiperService::connect_audio_output_for_call(const std::string& ca
 
     // Send HELLO(call_id)
     uint32_t n = htonl((uint32_t)call_id.size());
-    if (send(s, &n, 4, 0) != 4) { close(s); return false; }
-    if (send(s, call_id.data(), call_id.size(), 0) != (ssize_t)call_id.size()) { close(s); return false; }
+    if (send(s, &n, 4, MSG_NOSIGNAL) != 4) { close(s); return false; }
+    if (send(s, call_id.data(), call_id.size(), MSG_NOSIGNAL) != (ssize_t)call_id.size()) { close(s); return false; }
+    // Prevent SIGPIPE on audio socket (macOS)
+    {
+        int on = 1;
+        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    }
 
-    output_sockets_[call_id] = s;
+
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        output_sockets_[call_id] = s;
+    }
     std::cout << "🔗 Connected audio output for call " << call_id << " to " << output_host_ << ":" << port << std::endl;
     return true;
 }
 
-bool StandalonePiperService::send_audio_to_processor(const std::string& call_id, const std::vector<float>& audio_samples, int sample_rate) {
-    auto it = output_sockets_.find(call_id);
-    if (it == output_sockets_.end()) return false;
+bool StandalonePiperService::try_connect_audio_output_for_call(const std::string& call_id) {
+    // Non-blocking version that doesn't log connection failures
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        if (output_sockets_.count(call_id)) return true;
+    }
 
-    int s = it->second;
+    int port = calculate_audio_processor_port(call_id);
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return false;
+    // Prevent SIGPIPE on audio socket (macOS)
+    {
+        int on = 1;
+        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    }
+
+
+    // Set shorter timeout for resilient mode
+    struct timeval timeout;
+    timeout.tv_sec = 1;  // 1 second timeout for resilient mode
+    timeout.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr(output_host_.c_str());
+
+    if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(s);
+        return false;  // Silent failure for resilient mode
+    }
+
+    // Send HELLO(call_id)
+    uint32_t n = htonl((uint32_t)call_id.size());
+    if (send(s, &n, 4, MSG_NOSIGNAL) != 4) { close(s); return false; }
+    if (send(s, call_id.data(), call_id.size(), MSG_NOSIGNAL) != (ssize_t)call_id.size()) { close(s); return false; }
+
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        output_sockets_[call_id] = s;
+    }
+    if (default_config_.verbose) {
+        std::cout << "🔗 Connected audio output for call " << call_id << " to " << output_host_ << ":" << port << std::endl;
+    }
+    return true;
+}
+
+bool StandalonePiperService::send_audio_to_processor(const std::string& call_id, const std::vector<float>& audio_samples, int sample_rate) {
+    int s = -1;
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        auto it = output_sockets_.find(call_id);
+        if (it == output_sockets_.end()) return false;
+        s = it->second;
+    }
 
     // Convert float samples to bytes for transmission
     size_t byte_count = audio_samples.size() * sizeof(float);
     uint32_t l = htonl((uint32_t)byte_count);
 
-    if (send(s, &l, 4, 0) != 4) return false;
-    if (!audio_samples.empty() && send(s, audio_samples.data(), byte_count, 0) != (ssize_t)byte_count) return false;
+    // Robust send with connection failure detection
+    if (send(s, &l, 4, MSG_NOSIGNAL) != 4) {
+        // Connection failed - remove from active sockets
+        {
+            std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+            output_sockets_.erase(call_id);
+        }
+        close(s);
+        return false;
+    }
+
+    if (!audio_samples.empty() && send(s, audio_samples.data(), byte_count, MSG_NOSIGNAL) != (ssize_t)byte_count) {
+        // Connection failed - remove from active sockets
+        {
+            std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+            output_sockets_.erase(call_id);
+        }
+        close(s);
+        return false;
+    }
 
     if (default_config_.verbose) {
         std::cout << "🔊 Sent " << audio_samples.size() << " audio samples (" << sample_rate << "Hz) to audio processor for call " << call_id << std::endl;
@@ -474,11 +809,18 @@ bool StandalonePiperService::send_audio_to_processor(const std::string& call_id,
 }
 
 void StandalonePiperService::close_audio_output_for_call(const std::string& call_id) {
-    auto it = output_sockets_.find(call_id);
-    if (it != output_sockets_.end()) {
-        send_tcp_bye(it->second);
-        close(it->second);
-        output_sockets_.erase(it);
+    int s = -1;
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        auto it = output_sockets_.find(call_id);
+        if (it != output_sockets_.end()) {
+            s = it->second;
+            output_sockets_.erase(it);
+        }
+    }
+    if (s != -1) {
+        send_tcp_bye(s);
+        close(s);
         std::cout << "🔌 Closed audio output for call " << call_id << std::endl;
     }
 }
@@ -506,17 +848,26 @@ void StandalonePiperService::cleanup_inactive_sessions() {
 }
 
 void StandalonePiperService::cleanup_tcp_threads() {
-    for (auto& [call_id, thread] : call_tcp_threads_) {
-        if (thread.joinable()) {
-            thread.join();
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard<std::mutex> lk(call_threads_mutex_);
+        for (auto& kv : call_tcp_threads_) {
+            threads.emplace_back(std::move(kv.second));
         }
+        call_tcp_threads_.clear();
     }
-    call_tcp_threads_.clear();
+    for (auto& t : threads) {
+        if (t.joinable()) t.join();
+    }
 
     // Close all output sockets
-    for (auto& [call_id, socket] : output_sockets_) {
-        send_tcp_bye(socket);
-        close(socket);
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        for (auto& [call_id, socket] : output_sockets_) {
+            // Close under lock to avoid races; send bye best-effort
+            send_tcp_bye(socket);
+            close(socket);
+        }
+        output_sockets_.clear();
     }
-    output_sockets_.clear();
 }

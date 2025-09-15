@@ -32,7 +32,7 @@ struct HttpResponse {
 
 class SimpleHttpServer {
 public:
-    SimpleHttpServer(int port, Database* database = nullptr);
+    SimpleHttpServer(int port, Database* database = nullptr, const std::string& db_path = "whisper_talk.db");
     ~SimpleHttpServer();
 
     bool start();
@@ -96,4 +96,5 @@ private:
 
     // Database connection
     Database* database_;
+    std::string db_path_;
 };

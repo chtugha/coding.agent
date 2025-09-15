@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/whisper/Documents/augment-projects/clean-repo/whisper-service'
+relocations:     []
+...

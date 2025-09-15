@@ -10,6 +10,29 @@
 // Real whisper.cpp integration
 #include "whisper-cpp/include/whisper.h"
 
+// Robust I/O helpers to avoid partial reads/writes on TCP
+static bool read_exact_fd(int fd, void* buf, size_t nbytes) {
+    uint8_t* p = static_cast<uint8_t*>(buf);
+    size_t off = 0;
+    while (off < nbytes) {
+        ssize_t m = recv(fd, p + off, nbytes - off, 0);
+        if (m <= 0) return false;
+        off += static_cast<size_t>(m);
+    }
+    return true;
+}
+
+static bool write_all_fd(int fd, const void* buf, size_t nbytes) {
+    const uint8_t* p = static_cast<const uint8_t*>(buf);
+    size_t off = 0;
+    while (off < nbytes) {
+        ssize_t m = send(fd, p + off, nbytes - off, 0);
+        if (m <= 0) return false;
+        off += static_cast<size_t>(m);
+    }
+    return true;
+}
+
 // WhisperSession Implementation
 WhisperSession::WhisperSession(const std::string& call_id, const WhisperSessionConfig& config)
     : call_id_(call_id), ctx_(nullptr), is_active_(true), config_(config) {
@@ -139,11 +162,31 @@ bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const s
         return false;
     }
 
-    running_.store(true);
+    // Mark service as starting
+    database_->set_whisper_service_status("starting");
 
-    // Start service discovery loop
+    // Eagerly load Whisper model to avoid lazy load on first TCP connection
+    std::cout << "⏳ Preloading Whisper model: " << config_.model_path << std::endl;
+    auto t0 = std::chrono::steady_clock::now();
+    whisper_context_params cparams = whisper_context_default_params();
+    cparams.use_gpu = config_.use_gpu;
+    warm_ctx_ = whisper_init_from_file_with_params(config_.model_path.c_str(), cparams);
+    if (!warm_ctx_) {
+        std::cout << "❌ Whisper preload failed for model: " << config_.model_path << std::endl;
+        database_->set_whisper_service_status("error");
+        return false;
+    }
+    warm_loaded_ = true;
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    std::cout << "✅ Whisper model preloaded in " << ms << " ms" << std::endl;
+
+    // Only now mark running and launch discovery
+    running_.store(true);
     discovery_thread_ = std::thread(&StandaloneWhisperService::run_service_loop, this);
 
+    // Update DB and log
+    database_->set_whisper_service_status("running");
     std::cout << "🎤 Standalone Whisper Service started" << std::endl;
     std::cout << "📡 Model: " << config.model_path << std::endl;
     std::cout << "💾 Database: " << db_path << std::endl;
@@ -153,7 +196,7 @@ bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const s
 }
 
 void StandaloneWhisperService::stop() {
-    if (!running_.load()) return;
+    if (!running_.load() && !warm_loaded_) return;
 
     running_.store(false);
 
@@ -185,6 +228,17 @@ void StandaloneWhisperService::stop() {
 
     if (discovery_thread_.joinable()) {
         discovery_thread_.join();
+    }
+
+    // Free preloaded model context
+    if (warm_ctx_) {
+        whisper_free(warm_ctx_);
+        warm_ctx_ = nullptr;
+        warm_loaded_ = false;
+    }
+
+    if (database_) {
+        database_->set_whisper_service_status("stopped");
     }
 
     std::cout << "🛑 Standalone Whisper Service stopped" << std::endl;
@@ -399,7 +453,7 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
 
 bool StandaloneWhisperService::read_tcp_hello(int socket, std::string& call_id) {
     uint32_t length;
-    if (recv(socket, &length, 4, 0) != 4) {
+    if (!read_exact_fd(socket, &length, 4)) {
         return false;
     }
 
@@ -409,7 +463,7 @@ bool StandaloneWhisperService::read_tcp_hello(int socket, std::string& call_id) 
     }
 
     std::vector<char> buffer(length + 1);
-    if (recv(socket, buffer.data(), length, 0) != (ssize_t)length) {
+    if (!read_exact_fd(socket, buffer.data(), length)) {
         return false;
     }
 
@@ -422,9 +476,7 @@ bool StandaloneWhisperService::read_tcp_hello(int socket, std::string& call_id) 
 
 bool StandaloneWhisperService::read_tcp_audio_chunk(int socket, std::vector<float>& audio_samples) {
     uint32_t length;
-    ssize_t received = recv(socket, &length, 4, 0);
-
-    if (received != 4) {
+    if (!read_exact_fd(socket, &length, 4)) {
         return false;
     }
 
@@ -436,7 +488,7 @@ bool StandaloneWhisperService::read_tcp_audio_chunk(int socket, std::vector<floa
         return false;
     }
 
-    if (length == 0 || length > 1000000) {
+    if (length == 0 || length > 2000000) { // up to ~30s of 16kHz float32
         return false;
     }
 
@@ -444,7 +496,7 @@ bool StandaloneWhisperService::read_tcp_audio_chunk(int socket, std::vector<floa
     size_t float_count = length / sizeof(float);
     audio_samples.resize(float_count);
 
-    if (recv(socket, audio_samples.data(), length, 0) != (ssize_t)length) {
+    if (!read_exact_fd(socket, audio_samples.data(), length)) {
         return false;
     }
 
@@ -456,12 +508,12 @@ bool StandaloneWhisperService::send_tcp_transcription(int socket, const std::str
     uint32_t length = htonl(transcription.length());
 
     // Send length prefix
-    if (send(socket, &length, 4, 0) != 4) {
+    if (!write_all_fd(socket, &length, 4)) {
         return false;
     }
 
     // Send transcription text
-    if (send(socket, transcription.c_str(), transcription.length(), 0) != (ssize_t)transcription.length()) {
+    if (!transcription.empty() && !write_all_fd(socket, transcription.c_str(), transcription.length())) {
         return false;
     }
 
@@ -510,13 +562,13 @@ bool StandaloneWhisperService::send_llama_text(const std::string& call_id, const
 
     int s = it->second;
     uint32_t l = htonl((uint32_t)text.size());
-    if (send(s, &l, 4, 0) != 4) return false;
-    if (!text.empty() && send(s, text.data(), text.size(), 0) != (ssize_t)text.size()) return false;
+    if (!write_all_fd(s, &l, 4)) return false;
+    if (!text.empty() && !write_all_fd(s, text.data(), text.size())) return false;
     return true;
 }
 
 void StandaloneWhisperService::send_tcp_bye(int socket) {
     uint32_t bye_marker = 0xFFFFFFFF;
-    send(socket, &bye_marker, 4, 0);
+    write_all_fd(socket, &bye_marker, 4);
     std::cout << "📡 TCP BYE sent" << std::endl;
 }

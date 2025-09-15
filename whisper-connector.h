@@ -53,38 +53,37 @@ private:
     void update_connection_status();
 };
 
-// Background mechanism for routing Piper audio to RTP
+// Background mechanism for routing Piper audio to RTP (sessionless)
 class PiperConnector {
 public:
     PiperConnector();
     ~PiperConnector();
-    
-    // Connection management  
+
+    // Connection management
     bool start();
     void stop();
     bool is_sip_client_connected() const { return sip_connected_.load(); }
-    
-    // Audio routing
-    void send_piper_audio(const std::string& session_id, const std::vector<uint8_t>& audio_data);
-    void set_sip_client_callback(std::function<void(const std::string&, const std::vector<uint8_t>&)> callback);
-    
+
+    // Audio routing (sessionless)
+    void send_piper_audio(const std::vector<uint8_t>& audio_data);
+    void set_sip_client_callback(std::function<void(const std::vector<uint8_t>&)> callback);
+
 private:
     struct PiperAudio {
-        std::string session_id;
         std::vector<uint8_t> audio_data;
     };
-    
+
     std::atomic<bool> running_;
     std::atomic<bool> sip_connected_;
-    
+
     // Background processing
     std::thread worker_thread_;
     std::queue<PiperAudio> audio_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    
-    // SIP client connection
-    std::function<void(const std::string&, const std::vector<uint8_t>&)> sip_callback_;
+
+    // SIP client connection (sessionless)
+    std::function<void(const std::vector<uint8_t>&)> sip_callback_;
 
     // Jitter buffer for smooth outgoing audio
     std::unique_ptr<RTPPacketBuffer> outgoing_jitter_buffer_;

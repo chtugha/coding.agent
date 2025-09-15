@@ -49,6 +49,24 @@ include_directories(
     ${ESPEAKNG_INSTALL_DIR}/include
 )
 
+# ---- nlohmann_json (header-only) detection ----
+# Allow passing -DNLOHMANN_JSON_INCLUDE_DIR from the build system, otherwise try common locations
+if(NOT DEFINED NLOHMANN_JSON_INCLUDE_DIR)
+    find_path(NLOHMANN_JSON_INCLUDE_DIR
+        NAMES nlohmann/json.hpp
+        HINTS $ENV{NLOHMANN_JSON_INCLUDE_DIR}
+        PATHS
+            ${CMAKE_PREFIX_PATH}/include
+            /opt/homebrew/include
+            /usr/local/include
+            /usr/include
+    )
+endif()
+
+if(NOT NLOHMANN_JSON_INCLUDE_DIR)
+    message(FATAL_ERROR "nlohmann/json.hpp not found. Install nlohmann-json (e.g., brew install nlohmann-json) or pass -DNLOHMANN_JSON_INCLUDE_DIR=/path/to/include")
+endif()
+
 # ---- onnxruntime ---
 
 # Look for onnxruntime files in <root>/lib
@@ -121,6 +139,7 @@ target_include_directories(piper PUBLIC
     ${ESPEAKNG_INSTALL_DIR}/include
     ${ONNXRUNTIME_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${NLOHMANN_JSON_INCLUDE_DIR}
 )
 target_link_directories(piper PUBLIC
     ${ONNXRUNTIME_DIR}/lib

@@ -31,11 +31,59 @@ static void write_server_log(const std::string& message) {
     logfile << "[" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "] " << message << std::endl;
     logfile.close();
 }
+#include <limits.h>
+
+// Helper: repository root from current working directory
+static std::string repo_root() {
+    char buf[PATH_MAX];
+    if (getcwd(buf, sizeof(buf)) != nullptr) return std::string(buf);
+    return std::string(".");
+}
+
+static bool dir_exists(const std::string& p) {
+    struct stat st{};
+    return (stat(p.c_str(), &st) == 0) && S_ISDIR(st.st_mode);
+}
+
+static bool file_executable(const std::string& p) {
+    struct stat st{};
+    if (stat(p.c_str(), &st) != 0) return false;
+    if (!S_ISREG(st.st_mode)) return false;
+    return access(p.c_str(), X_OK) == 0;
+}
+
+static std::string build_dyld_path() {
+    std::vector<std::string> parts;
+    std::string root = repo_root();
+    auto add_if = [&](const std::string& p){ if (dir_exists(p)) parts.push_back(p); };
+    add_if(root + "/whisper-cpp/build/src");
+    add_if(root + "/llama-cpp/build/bin");
+    add_if(root + "/libpiper/build");
+    // vendor ONNX Runtime lib
+    std::string ort_root = root + "/libpiper/lib";
+    if (DIR* d = opendir(ort_root.c_str())) {
+        struct dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            std::string name = ent->d_name;
+            if (name.rfind("onnxruntime-", 0) == 0) {
+                std::string libdir = ort_root + "/" + name + "/lib";
+                if (dir_exists(libdir)) { parts.push_back(libdir); break; }
+            }
+        }
+        closedir(d);
+    }
+    const char* old = getenv("DYLD_LIBRARY_PATH");
+    std::ostringstream oss;
+    for (size_t i = 0; i < parts.size(); ++i) { if (i) oss << ":"; oss << parts[i]; }
+    if (old && *old) { if (!parts.empty()) oss << ":"; oss << old; }
+    return oss.str();
+}
+
 
 // Chunked upload code removed - using streaming approach only
 
-SimpleHttpServer::SimpleHttpServer(int port, Database* database)
-    : port_(port), server_socket_(-1), running_(false), database_(database) {}
+SimpleHttpServer::SimpleHttpServer(int port, Database* database, const std::string& db_path)
+    : port_(port), server_socket_(-1), running_(false), database_(database), db_path_(db_path) {}
 
 SimpleHttpServer::~SimpleHttpServer() {
     stop();
@@ -50,31 +98,31 @@ bool SimpleHttpServer::start() {
         return false;
     }
     write_server_log("SERVER: Socket created successfully");
-    
+
     // Allow socket reuse
     int opt = 1;
     setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    
+
     struct sockaddr_in address;
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(port_);
-    
+
     if (bind(server_socket_, (struct sockaddr*)&address, sizeof(address)) < 0) {
         std::cerr << "Failed to bind to port " << port_ << std::endl;
         close(server_socket_);
         return false;
     }
-    
+
     if (listen(server_socket_, 10) < 0) {
         std::cerr << "Failed to listen on socket" << std::endl;
         close(server_socket_);
         return false;
     }
-    
+
     running_ = true;
     server_thread_ = std::thread(&SimpleHttpServer::server_loop, this);
-    
+
     return true;
 }
 
@@ -93,7 +141,7 @@ void SimpleHttpServer::server_loop() {
     while (running_) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
-        
+
         int client_socket = accept(server_socket_, (struct sockaddr*)&client_addr, &client_len);
         if (client_socket < 0) {
             if (running_) {
@@ -101,7 +149,7 @@ void SimpleHttpServer::server_loop() {
             }
             continue;
         }
-        
+
         // Handle client in separate thread for simplicity
         std::thread client_thread(&SimpleHttpServer::handle_client, this, client_socket);
         client_thread.detach();
@@ -395,15 +443,15 @@ HttpResponse SimpleHttpServer::handle_streaming_upload(int client_socket, const 
 std::string SimpleHttpServer::create_response(const HttpResponse& response) {
     std::ostringstream stream;
     stream << "HTTP/1.1 " << response.status_code << " " << response.status_text << "\r\n";
-    
+
     for (const auto& header : response.headers) {
         stream << header.first << ": " << header.second << "\r\n";
     }
-    
+
     stream << "Content-Length: " << response.body.length() << "\r\n";
     stream << "\r\n";
     stream << response.body;
-    
+
     return stream.str();
 }
 
@@ -414,13 +462,13 @@ HttpResponse SimpleHttpServer::handle_request(const HttpRequest& request) {
     if (request.path.substr(0, 5) == "/api/") {
         return handle_api_request(request);
     }
-    
+
     // Static file serving
     std::string file_path = request.path;
     if (file_path == "/") {
         file_path = "/index.html";
     }
-    
+
     return serve_static_file(file_path);
 }
 
@@ -779,6 +827,10 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         // Load SIP lines on page load - use direct call for initial load
         loadSipLines();
+        // Also load service sections immediately on page load
+        loadWhisperService();
+        loadLlamaService();
+        loadPiperService();
 
         // Simple function to add SIP line
         window.addSipLine = function() {
@@ -836,6 +888,20 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         // Auto-refresh with proper cleanup and race condition prevention
         let refreshIntervals = [];
         let isRefreshing = { status: false, sip: false, whisper: false };
+
+        // Unified refresh orchestrator to prevent overlapping polls
+        function refreshAll() {
+            try {
+                safeRefreshStatus();
+                safeLoadSipLines();
+                safeLoadWhisperService();
+                // Direct calls for LLaMA and Piper (no extra gating needed)
+                loadLlamaService();
+                loadPiperService();
+            } catch (e) {
+                console.error('refreshAll error:', e);
+            }
+        }
 
         // Reset all refresh flags on page load to prevent stuck states
         function resetRefreshFlags() {
@@ -932,9 +998,8 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 });
         }
 
-        refreshIntervals.push(setInterval(safeRefreshStatus, 5000));
-        refreshIntervals.push(setInterval(safeLoadSipLines, 3000));
-        refreshIntervals.push(setInterval(safeLoadWhisperService, 5000));
+        // Single timer driving all refreshes to reduce race conditions
+        refreshIntervals.push(setInterval(refreshAll, 3000));
 
         // Cleanup intervals on page unload
         window.addEventListener('beforeunload', () => {
@@ -1055,6 +1120,8 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 if (response.ok) {
                     console.log('SIP line toggled successfully');
                     safeLoadSipLines(); // Refresh the list safely
+                    // Aggressively poll this line until it leaves 'connecting'
+                    pollSipLineUntilSettled(lineId);
                 } else {
                     alert(`Failed to toggle SIP line: ${result.error}`);
                 }
@@ -1062,6 +1129,23 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 console.error('Error toggling SIP line:', error);
                 alert('Failed to toggle SIP line');
             }
+        }
+
+        function pollSipLineUntilSettled(lineId, attempts = 30) {
+            if (attempts <= 0) return;
+            fetch('/api/sip-lines')
+                .then(r => r.json())
+                .then(data => {
+                    const lines = (data && data.sip_lines) ? data.sip_lines : [];
+                    const line = lines.find(l => l.line_id === lineId);
+                    if (!line) return;
+                    if (line.status === 'connecting') {
+                        setTimeout(() => pollSipLineUntilSettled(lineId, attempts - 1), 1000);
+                    } else {
+                        safeLoadSipLines();
+                    }
+                })
+                .catch(() => setTimeout(() => pollSipLineUntilSettled(lineId, attempts - 1), 1000));
         }
 
         async function deleteSipLine(lineId) {
@@ -1743,15 +1827,14 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         async function toggleWhisperService() {
             try {
-                const response = await fetch('/api/whisper/service/toggle', {
+                // Read current runtime status to decide explicit action
+                const svc = await fetch('/api/whisper/service').then(r => r.json());
+                const start = !(svc && svc.status === 'running');
+                const response = await fetch(`/api/whisper/service/toggle?enable=${start ? 'true' : 'false'}`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
+                    headers: { 'Content-Type': 'application/json' }
                 });
-
                 const result = await response.json();
-
                 if (response.ok) {
                     console.log('Whisper service toggled:', result);
                     loadWhisperService(); // Refresh display
@@ -1905,15 +1988,13 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         async function toggleLlamaService() {
             try {
-                const response = await fetch('/api/llama/service/toggle', {
+                const svc = await fetch('/api/llama/service').then(r => r.json());
+                const start = !(svc && svc.status === 'running');
+                const response = await fetch(`/api/llama/service/toggle?enable=${start ? 'true' : 'false'}`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
+                    headers: { 'Content-Type': 'application/json' }
                 });
-
                 const result = await response.json();
-
                 if (response.ok) {
                     console.log('LLaMA service toggled:', result);
                     loadLlamaService(); // Refresh display
@@ -2059,15 +2140,13 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
 
         async function togglePiperService() {
             try {
-                const response = await fetch('/api/piper/service/toggle', {
+                const svc = await fetch('/api/piper/service').then(r => r.json());
+                const start = !(svc && svc.status === 'running');
+                const response = await fetch(`/api/piper/service/toggle?enable=${start ? 'true' : 'false'}`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
+                    headers: { 'Content-Type': 'application/json' }
                 });
-
                 const result = await response.json();
-
                 if (response.ok) {
                     console.log('Piper service toggled:', result);
                     loadPiperService(); // Refresh display
@@ -2315,13 +2394,46 @@ HttpResponse SimpleHttpServer::api_status(const HttpRequest& request) {
         sip_status = "online";
     }
 
+    // Reflect LLaMA and Piper service status: prefer runtime probe, then sync DB
+    std::string llama_status = "offline";
+    std::string piper_status = "offline";
+    if (database_) {
+        // Probe llama-service process
+        bool llama_running = (system("pgrep -f llama-service > /dev/null 2>&1") == 0);
+        // Probe piper-service process
+        bool piper_running = (system("pgrep -f piper-service > /dev/null 2>&1") == 0);
+
+        // Read DB statuses
+        std::string llama_db = "";
+        std::string piper_db = "";
+        try { llama_db = database_->get_llama_service_status(); } catch (...) {}
+        try { piper_db = database_->get_piper_service_status(); } catch (...) {}
+
+        // Decide effective status and sync DB if mismatched
+        if (llama_running) {
+            llama_status = "online";
+            if (llama_db != "running") { database_->set_llama_service_status("running"); database_->set_llama_service_enabled(true); }
+        } else {
+            llama_status = "offline";
+            if (llama_db == "running" || llama_db == "starting") { database_->set_llama_service_status("stopped"); }
+        }
+
+        if (piper_running) {
+            piper_status = "online";
+            if (piper_db != "running") { database_->set_piper_service_status("running"); database_->set_piper_service_enabled(true); }
+        } else {
+            piper_status = "offline";
+            if (piper_db == "running" || piper_db == "starting") { database_->set_piper_service_status("stopped"); }
+        }
+    }
+
     std::string body = "{\"status\": \"online\", \"modules\": {" +
                       std::string("\"http_server\": \"online\", ") +
                       "\"database\": \"" + db_status + "\", " +
                       "\"sip_client\": \"" + sip_status + "\", " +
                       "\"whisper\": \"" + whisper_status + "\", " +
-                      "\"llama\": \"offline\", " +
-                      "\"piper\": \"offline\"}";
+                      "\"llama\": \"" + llama_status + "\", " +
+                      "\"piper\": \"" + piper_status + "\"}";
 
     // Add detailed info if requested
     if (detailed) {
@@ -2622,6 +2734,7 @@ HttpResponse SimpleHttpServer::api_sip_lines_delete(const HttpRequest& request, 
 }
 
 HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, int line_id) {
+    (void)request; // unused
     HttpResponse response;
     response.headers["Content-Type"] = "application/json";
 
@@ -2637,13 +2750,6 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
         response.status_text = "Bad Request";
         response.body = R"({"error": "Invalid line ID"})";
         return response;
-    }
-
-    // Check for specific enable/disable action
-    std::string action = "";
-    auto it = request.query_params.find("action");
-    if (it != request.query_params.end()) {
-        action = it->second;
     }
 
     // Toggle the SIP line enabled status
@@ -2664,22 +2770,16 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
         }
 
         if (line_enabled) {
-            // Line was enabled - start SIP client for this line
+            // Line was enabled - mark as connecting and start SIP client for this line
+            database_->update_sip_line_status(line_id, "connecting");
             std::cout << "🚀 Starting SIP client for enabled " << line_info << std::endl;
 
             // Start SIP client in background with specific line ID
             // Use relative path to call SIP client from same directory as HTTP server
-            std::string command = "./whisper-sip-client --line-id " + std::to_string(line_id) + " &";
-            int result = system(command.c_str());
-
-            // system() returns -1 on error, or the exit status of the command
-            if (result != -1 && WIFEXITED(result) && WEXITSTATUS(result) == 0) {
-                std::cout << "✅ SIP client started successfully for " << line_info << std::endl;
-                response.body = R"({"success": true, "message": "SIP line enabled and client started"})";
-            } else {
-                std::cout << "⚠️ SIP client start failed for " << line_info << " (result: " << result << ")" << std::endl;
-                response.body = R"({"success": true, "message": "SIP line enabled but client start failed"})";
-            }
+            std::string command = "./whisper-sip-client --db '" + db_path_ + "' --line-id " + std::to_string(line_id) + " &";
+            (void) system(command.c_str());
+            std::cout << "ℹ️ Launched SIP client for " << line_info << std::endl;
+            response.body = R"({"success": true, "message": "SIP line enabled and client launch attempted"})";
         } else {
             // Line was disabled - stop SIP client for this line
             std::cout << "🛑 SIP line disabled: " << line_info << std::endl;
@@ -2915,13 +3015,21 @@ HttpResponse SimpleHttpServer::api_whisper_service_toggle(const HttpRequest& req
         return response;
     }
 
-    // Check for specific enable/disable action
-    bool current_enabled = database_->get_whisper_service_enabled();
-    bool new_enabled = !current_enabled;
-
+    // Decide action based on actual runtime status when 'enable' is not provided
+    bool new_enabled = false;
     auto it = request.query_params.find("enable");
     if (it != request.query_params.end()) {
         new_enabled = (it->second == "true");
+    } else {
+        // Prefer runtime status over stored 'enabled' flag to avoid inversion
+        std::string status = database_->get_whisper_service_status();
+        bool is_running = (status == "running");
+        if (!is_running) {
+            // Probe process table as an extra safety net
+            int probe = system("pgrep -f whisper-service > /dev/null 2>&1");
+            if (probe == 0) is_running = true;
+        }
+        new_enabled = !is_running;
     }
 
     bool success = database_->set_whisper_service_enabled(new_enabled);
@@ -2976,11 +3084,13 @@ HttpResponse SimpleHttpServer::api_whisper_service_toggle(const HttpRequest& req
 
             // Kill existing whisper service processes
             std::cout << "🎤 Stopping existing whisper service..." << std::endl;
-            system("pkill -TERM -f whisper-service");
+            system("pkill -TERM -f whisper-service; pkill -TERM -f whisper-service-local");
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-            // Start new whisper service with configured model
-            std::string start_command = "./whisper-service --model \"" + model_path + "\" &";
+            // Start new whisper service with configured model (use bin/, with fallback)
+            std::string whisper_bin = repo_root() + "/bin/whisper-service";
+            if (!file_executable(whisper_bin)) whisper_bin = repo_root() + "/whisper-service";
+            std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + whisper_bin + " --model \"" + model_path + "\" &";
             std::cout << "🎤 Starting whisper service: " << start_command << std::endl;
             int start_result = system(start_command.c_str());
 
@@ -3000,7 +3110,7 @@ HttpResponse SimpleHttpServer::api_whisper_service_toggle(const HttpRequest& req
             std::cout << "🎤 Whisper service disabled - stopping service..." << std::endl;
 
             // Kill existing whisper service processes
-            system("pkill -TERM -f whisper-service");
+            system("pkill -TERM -f whisper-service; pkill -TERM -f whisper-service-local");
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             database_->set_whisper_service_status("stopped");
         }
@@ -3313,11 +3423,13 @@ HttpResponse SimpleHttpServer::api_whisper_restart(const HttpRequest& request) {
 
         // Kill existing whisper service processes
         std::cout << "🎤 Stopping existing whisper service..." << std::endl;
-        system("pkill -TERM -f whisper-service");
+        system("pkill -TERM -f whisper-service; pkill -TERM -f whisper-service-local");
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-        // Start new whisper service with selected model
-        std::string start_command = "./whisper-service --model \"" + model_path + "\" &";
+        // Start new whisper service with selected model (use bin/, with fallback)
+        std::string whisper_bin = repo_root() + "/bin/whisper-service";
+        if (!file_executable(whisper_bin)) whisper_bin = repo_root() + "/whisper-service";
+        std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + whisper_bin + " --model \"" + model_path + "\" &";
         int start_result = system(start_command.c_str());
 
         if (start_result == 0) {
@@ -3370,10 +3482,19 @@ HttpResponse SimpleHttpServer::api_llama_service_get(const HttpRequest& request)
         status = database_->get_llama_service_status();
     } catch (const std::exception& e) {
         std::cout << "❌ Database error in api_llama_service_get: " << e.what() << std::endl;
-        // Use default values set above
     } catch (...) {
         std::cout << "❌ Unknown database error in api_llama_service_get" << std::endl;
-        // Use default values set above
+    }
+
+    // Probe runtime process and reconcile status
+    bool runtime_running = (system("pgrep -f llama-service > /dev/null 2>&1") == 0);
+    if (runtime_running && status != "running") {
+        database_->set_llama_service_status("running");
+        database_->set_llama_service_enabled(true);
+        status = "running";
+    } else if (!runtime_running && (status == "running" || status == "starting")) {
+        database_->set_llama_service_status("stopped");
+        status = "stopped";
     }
 
     response.status_code = 200;
@@ -3451,13 +3572,19 @@ HttpResponse SimpleHttpServer::api_llama_service_toggle(const HttpRequest& reque
         return response;
     }
 
-    // Check for specific enable/disable action
-    bool current_enabled = database_->get_llama_service_enabled();
-    bool new_enabled = !current_enabled;
-
+    // Decide action based on actual runtime status when 'enable' is not provided
+    bool new_enabled = false;
     auto it = request.query_params.find("enable");
     if (it != request.query_params.end()) {
         new_enabled = (it->second == "true");
+    } else {
+        std::string status = database_->get_llama_service_status();
+        bool is_running = (status == "running");
+        if (!is_running) {
+            int probe = system("pgrep -f llama-service > /dev/null 2>&1");
+            if (probe == 0) is_running = true;
+        }
+        new_enabled = !is_running;
     }
 
     bool success = database_->set_llama_service_enabled(new_enabled);
@@ -3515,8 +3642,10 @@ HttpResponse SimpleHttpServer::api_llama_service_toggle(const HttpRequest& reque
             system("pkill -TERM -f llama-service");
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-            // Start new llama service with configured model
-            std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 --out-host 127.0.0.1 --out-port 8090 &";
+            // Start new llama service with configured model (use bin/, with fallback)
+            std::string llama_bin = repo_root() + "/bin/llama-service";
+            if (!file_executable(llama_bin)) llama_bin = repo_root() + "/llama-service";
+            std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + llama_bin + " -m \"" + model_path + "\" -d whisper_talk.db -p 8083 --out-host 127.0.0.1 --out-port 8090 &";
             std::cout << "🦙 Starting llama service: " << start_command << std::endl;
             int start_result = system(start_command.c_str());
 
@@ -3673,7 +3802,9 @@ HttpResponse SimpleHttpServer::api_llama_restart(const HttpRequest& request) {
         database_->set_llama_model_path(custom_model_path);
     }
 
-    std::string start_command = "./llama-service -m \"" + model_path + "\" -d whisper_talk.db -p 8083 --out-host 127.0.0.1 --out-port 8090 &";
+    std::string llama_bin = repo_root() + "/bin/llama-service";
+    if (!file_executable(llama_bin)) llama_bin = repo_root() + "/llama-service";
+    std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + llama_bin + " -m \"" + model_path + "\" -d whisper_talk.db -p 8083 --out-host 127.0.0.1 --out-port 8090 &";
     int start_result = system(start_command.c_str());
 
     if (start_result == 0) {
@@ -3718,6 +3849,17 @@ HttpResponse SimpleHttpServer::api_piper_service_get(const HttpRequest& request)
     std::string model_path = database_->get_piper_model_path();
     std::string espeak_data_path = database_->get_piper_espeak_data_path();
     std::string status = database_->get_piper_service_status();
+
+    // Probe runtime and reconcile
+    bool runtime_running = (system("pgrep -f piper-service > /dev/null 2>&1") == 0);
+    if (runtime_running && status != "running") {
+        database_->set_piper_service_status("running");
+        database_->set_piper_service_enabled(true);
+        status = "running";
+    } else if (!runtime_running && (status == "running" || status == "starting")) {
+        database_->set_piper_service_status("stopped");
+        status = "stopped";
+    }
 
     std::ostringstream json;
     json << "{"
@@ -3810,13 +3952,19 @@ HttpResponse SimpleHttpServer::api_piper_service_toggle(const HttpRequest& reque
         return response;
     }
 
-    // Check for specific enable/disable action
-    bool current_enabled = database_->get_piper_service_enabled();
-    bool new_enabled = !current_enabled;
-
+    // Decide action based on actual runtime status when 'enable' is not provided
+    bool new_enabled = false;
     auto it = request.query_params.find("enable");
     if (it != request.query_params.end()) {
         new_enabled = (it->second == "true");
+    } else {
+        std::string status = database_->get_piper_service_status();
+        bool is_running = (status == "running");
+        if (!is_running) {
+            int probe = system("pgrep -f piper-service > /dev/null 2>&1");
+            if (probe == 0) is_running = true;
+        }
+        new_enabled = !is_running;
     }
 
     database_->set_piper_service_enabled(new_enabled);
@@ -3835,8 +3983,10 @@ HttpResponse SimpleHttpServer::api_piper_service_toggle(const HttpRequest& reque
         system("pkill -f piper-service");
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-        // Start new piper service with configured model
-        std::string start_command = "./piper-service -m \"" + model_path + "\" -e \"" + espeak_data_path + "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091 &";
+        // Start new piper service with configured model (use bin/, with fallback)
+        std::string piper_bin = repo_root() + "/bin/piper-service";
+        if (!file_executable(piper_bin)) piper_bin = repo_root() + "/piper-service";
+        std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + piper_bin + " -m \"" + model_path + "\" -e \"" + espeak_data_path + "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091 &";
         std::cout << "🎤 Starting piper service: " << start_command << std::endl;
         int start_result = system(start_command.c_str());
 
@@ -3991,7 +4141,9 @@ HttpResponse SimpleHttpServer::api_piper_restart(const HttpRequest& request) {
         return response;
     }
 
-    std::string start_command = "./piper-service -m \"" + model_path + "\" -e \"" + espeak_data_path + "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091 &";
+    std::string piper_bin = repo_root() + "/bin/piper-service";
+    if (!file_executable(piper_bin)) piper_bin = repo_root() + "/piper-service";
+    std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + piper_bin + " -m \"" + model_path + "\" -e \"" + espeak_data_path + "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091 &";
     int start_result = system(start_command.c_str());
 
     if (start_result == 0) {

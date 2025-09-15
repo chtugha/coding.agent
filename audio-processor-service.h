@@ -85,10 +85,11 @@ private:
     std::function<void(const std::vector<uint8_t>&)> sip_client_callback_;
 
     // TCP socket management
-    int outgoing_tcp_socket_;  // For sending audio to external services
-    int incoming_tcp_socket_;  // For receiving audio from external services
-    int outgoing_tcp_port_;    // Port for outgoing connections (calculated from call_id)
-    int incoming_tcp_port_;    // Port for incoming connections (calculated from call_id)
+    int outgoing_listen_socket_; // Server listen socket for Whisper clients
+    int outgoing_tcp_socket_;    // Accepted client socket to send audio to Whisper
+    int incoming_tcp_socket_;    // For receiving audio from external services (e.g., Piper)
+    int outgoing_tcp_port_;      // Port for outgoing stream (calculated from call_id)
+    int incoming_tcp_port_;      // Port for incoming stream (calculated from call_id)
     std::atomic<bool> outgoing_connected_;
     std::atomic<bool> incoming_connected_;
     std::string current_call_id_;

@@ -140,14 +140,14 @@ void PiperConnector::stop() {
     std::cout << "🔊 PiperConnector stopped" << std::endl;
 }
 
-void PiperConnector::send_piper_audio(const std::string& session_id, const std::vector<uint8_t>& audio_data) {
+void PiperConnector::send_piper_audio(const std::vector<uint8_t>& audio_data) {
     if (!running_.load() || !rtp_session_) return;
 
     if (sip_connected_.load()) {
         // Create RFC 3550 compliant RTP packet from Piper audio
         RTPPacket rtp_packet = create_rtp_packet_from_audio(audio_data);
 
-        // Serialize to wire format (NO session_id or internal data)
+        // Serialize to wire format
         std::vector<uint8_t> wire_packet = rtp_packet.serialize();
 
         // Add to jitter buffer for smooth transmission
@@ -165,7 +165,7 @@ void PiperConnector::send_piper_audio(const std::string& session_id, const std::
     // else: Route to null (drop Piper stream silently)
 }
 
-void PiperConnector::set_sip_client_callback(std::function<void(const std::string&, const std::vector<uint8_t>&)> callback) {
+void PiperConnector::set_sip_client_callback(std::function<void(const std::vector<uint8_t>&)> callback) {
     sip_callback_ = callback;
     sip_connected_.store(callback != nullptr);
 }
@@ -174,18 +174,18 @@ void PiperConnector::worker_loop() {
     while (running_.load()) {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         queue_cv_.wait(lock, [this] { return !audio_queue_.empty() || !running_.load(); });
-        
+
         if (!running_.load()) break;
-        
+
         if (!audio_queue_.empty()) {
             PiperAudio audio = audio_queue_.front();
             audio_queue_.pop();
             lock.unlock();
-            
+
             // Convert to G.711 RTP and send to SIP client
             std::vector<uint8_t> g711_rtp = convert_to_g711_rtp(audio.audio_data);
             if (sip_callback_) {
-                sip_callback_(audio.session_id, g711_rtp);
+                sip_callback_(g711_rtp);
             }
         }
     }
@@ -199,7 +199,7 @@ void PiperConnector::process_jitter_buffer() {
     if (outgoing_jitter_buffer_->try_pop(buffered_audio)) {
         // Send buffered audio to SIP client
         if (sip_callback_) {
-            sip_callback_("", buffered_audio); // Empty session_id for now
+            sip_callback_(buffered_audio);
             std::cout << "📤 Sent jitter-buffered audio: " << buffered_audio.size() << " bytes" << std::endl;
         }
     }

@@ -87,6 +87,11 @@ private:
     // Database connection
     std::unique_ptr<Database> database_;
 
+
+    // Eager model preload to avoid lazy loading on first TCP connection
+    whisper_context* warm_ctx_ = nullptr;
+    bool warm_loaded_ = false;
+
     // Session management
     std::unordered_map<std::string, std::unique_ptr<WhisperSession>> sessions_;
     std::mutex sessions_mutex_;
