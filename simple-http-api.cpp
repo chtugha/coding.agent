@@ -2776,7 +2776,10 @@ HttpResponse SimpleHttpServer::api_sip_lines_toggle(const HttpRequest& request, 
 
             // Start SIP client in background with specific line ID
             // Use relative path to call SIP client from same directory as HTTP server
-            std::string command = "./sip-client --db '" + db_path_ + "' --line-id " + std::to_string(line_id) + " &";
+            std::string sip_bin = repo_root() + "/bin/sip-client";
+            if (!file_executable(sip_bin)) sip_bin = repo_root() + "/sip-client";
+            std::string command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + sip_bin +
+                                  " --db '" + db_path_ + "' --line-id " + std::to_string(line_id) + " &";
             (void) system(command.c_str());
             std::cout << "ℹ️ Launched SIP client for " << line_info << std::endl;
             response.body = R"({"success": true, "message": "SIP line enabled and client launch attempted"})";
