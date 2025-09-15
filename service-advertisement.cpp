@@ -191,8 +191,14 @@ std::string ServiceAdvertiser::create_advertisement_response() const {
     for (const auto& pair : active_streams_) {
         const auto& stream = pair.second;
         if (stream.is_active) {
-            // Minimal legacy-friendly advertisement: STREAM:<port>
-            response << "STREAM:" << stream.tcp_port << "\n";
+            // Full advertisement line expected by parsers:
+            // STREAM:call_id:port:type:sample_rate:channels
+            response << "STREAM:"
+                     << stream.call_id << ":"
+                     << stream.tcp_port << ":"
+                     << stream.stream_type << ":"
+                     << stream.sample_rate << ":"
+                     << stream.channels << "\n";
         }
     }
 

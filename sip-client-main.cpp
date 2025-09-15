@@ -1223,13 +1223,33 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
     // ACTIVATE audio processor for this call
     {
         std::lock_guard<std::mutex> lock(processors_mutex_);
-        auto proc_it = line_audio_processors_.find(line_id);
-        if (proc_it != line_audio_processors_.end()) {
+        auto it = line_audio_processors_.find(line_id);
+        if (it == line_audio_processors_.end()) {
+            // Lazy-create an audio processor for this line on demand
+            try {
+                auto ap = AudioProcessorServiceFactory::create();
+                ap->set_database(database_);
+                if (ap->start(8083 + line_id)) {
+                    ap->set_sip_client_callback([this](const std::vector<uint8_t>& audio_data) {
+                        this->stream_audio_from_piper(audio_data);
+                    });
+                    line_audio_processors_[line_id] = std::move(ap);
+                    std::cout << "✅ Audio processor created on-demand for line " << line_id << std::endl;
+                    it = line_audio_processors_.find(line_id);
+                } else {
+                    std::cout << "❌ Failed to start audio processor on-demand for line " << line_id << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cout << "❌ Exception creating audio processor on-demand for line " << line_id
+                          << ": " << e.what() << std::endl;
+            }
+        }
+        if (it != line_audio_processors_.end() && it->second) {
             // Activate with call_id for TCP connections
-            proc_it->second->activate_for_call(call_id);
+            it->second->activate_for_call(call_id);
             std::cout << "✅ Audio processor activated for line " << line_id << " (call: " << call_id << ")" << std::endl;
         } else {
-            std::cout << "❌ No audio processor found for line " << line_id << std::endl;
+            std::cout << "❌ No audio processor available for line " << line_id << " (audio will be dropped)" << std::endl;
         }
     }
 
