@@ -106,7 +106,8 @@ check_onnx_compat(){
 # --- Builders ---
 build_whisper(){
   log "Configuring whisper-cpp..."
-  cmake -S "$ROOT_DIR/whisper-cpp" -B "$ROOT_DIR/whisper-cpp/build" -DCMAKE_BUILD_TYPE=Release
+  cmake -S "$ROOT_DIR/whisper-cpp" -B "$ROOT_DIR/whisper-cpp/build" -DCMAKE_BUILD_TYPE=Release \
+    -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF
   log "Building whisper-cpp..."
   cmake --build "$ROOT_DIR/whisper-cpp/build" --config Release -j 6
 }
@@ -179,7 +180,7 @@ log "Configuring top-level project..."
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
   -DWHISPER_CPP_LIB="$WHISPER_LIB" \
   -DLLAMA_CPP_LIB="$LLAMA_LIB" \
-  -DBUILD_SIP_CLIENT=OFF
+  -DBUILD_SIP_CLIENT=ON
 
 log "Building targets..."
 cmake --build "$BUILD_DIR" --config Release -j 6

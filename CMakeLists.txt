@@ -15,6 +15,7 @@ option(BUILD_SIP_CLIENT "Build the SIP client" ON)
 # Dependencies
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Headers
 include_directories(
@@ -126,10 +127,14 @@ endif()
 if(BUILD_SIP_CLIENT)
     add_executable(sip-client
         sip-client-main.cpp
+        audio-processor-service.cpp
+        simple-audio-processor.cpp
         ${SHARED_SOURCES}
     )
-    target_link_libraries(sip-client PRIVATE Threads::Threads SQLite::SQLite3)
+    target_link_libraries(sip-client PRIVATE Threads::Threads SQLite::SQLite3 OpenSSL::SSL OpenSSL::Crypto)
 endif()
+
+
 
 # Install
 if(BUILD_HTTP_SERVER)
