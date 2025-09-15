@@ -3986,7 +3986,16 @@ HttpResponse SimpleHttpServer::api_piper_service_toggle(const HttpRequest& reque
         // Start new piper service with configured model (use bin/, with fallback)
         std::string piper_bin = repo_root() + "/bin/piper-service";
         if (!file_executable(piper_bin)) piper_bin = repo_root() + "/piper-service";
-        std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + piper_bin + " -m \"" + model_path + "\" -e \"" + espeak_data_path + "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091 &";
+        // Optional max concurrency from query params (supports max_concurrency or max-concurrency)
+        std::string mc_flag;
+        auto mc_it = request.query_params.find("max_concurrency");
+        if (mc_it == request.query_params.end()) mc_it = request.query_params.find("max-concurrency");
+        if (mc_it != request.query_params.end() && !mc_it->second.empty()) {
+            mc_flag = " --max-concurrency " + mc_it->second;
+        }
+        std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + piper_bin +
+                                    " -m \"" + model_path + "\" -e \"" + espeak_data_path +
+                                    "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091" + mc_flag + " &";
         std::cout << "🎤 Starting piper service: " << start_command << std::endl;
         int start_result = system(start_command.c_str());
 
@@ -4143,7 +4152,23 @@ HttpResponse SimpleHttpServer::api_piper_restart(const HttpRequest& request) {
 
     std::string piper_bin = repo_root() + "/bin/piper-service";
     if (!file_executable(piper_bin)) piper_bin = repo_root() + "/piper-service";
-    std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + piper_bin + " -m \"" + model_path + "\" -e \"" + espeak_data_path + "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091 &";
+    // Optional max concurrency in JSON body: "max_concurrency": N
+    std::string mc_flag;
+    if (!request.body.empty()) {
+        size_t mc_pos = request.body.find("\"max_concurrency\":");
+        if (mc_pos != std::string::npos) {
+            // Read numeric value after the colon
+            size_t val_start = request.body.find_first_of("0123456789", mc_pos);
+            if (val_start != std::string::npos) {
+                size_t val_end = request.body.find_first_not_of("0123456789", val_start);
+                std::string mc_val = request.body.substr(val_start, val_end - val_start);
+                if (!mc_val.empty()) mc_flag = " --max-concurrency " + mc_val;
+            }
+        }
+    }
+    std::string start_command = "DYLD_LIBRARY_PATH='" + build_dyld_path() + "' " + piper_bin +
+                                " -m \"" + model_path + "\" -e \"" + espeak_data_path +
+                                "\" -d whisper_talk.db -p 8090 --out-host 127.0.0.1 --out-port 8091" + mc_flag + " &";
     int start_result = system(start_command.c_str());
 
     if (start_result == 0) {

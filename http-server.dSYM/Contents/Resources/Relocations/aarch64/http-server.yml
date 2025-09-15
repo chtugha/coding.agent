@@ -1,5 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     '/Users/whisper/Documents/augment-projects/clean-repo/http-server'
-relocations:     []
-...

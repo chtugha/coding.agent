@@ -50,3 +50,15 @@ compile_commands.json
 # Temporary download directory
 /tmp/whisper-cpp-*
 llama-cpp/
+
+
+# Binaries and symbol files
+bin/
+*.dSYM/
+
+# Downloads and vendor archives
+download/
+
+# Local logs and temp
+server_debug.log
+tmp_coreml/
