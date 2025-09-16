@@ -593,6 +593,8 @@ void StandalonePiperService::handle_tcp_text_stream(const std::string& call_id, 
         }
 
         if (text == "BYE") {
+            // Proactively close audio output before tearing down session
+            close_audio_output_for_call(call_id);
             break;
         }
 
@@ -616,9 +618,9 @@ void StandalonePiperService::handle_tcp_text_stream(const std::string& call_id, 
                 }
             }
 
-            // 2) Send response back to LLaMA service (optional)
-            if (!send_tcp_response(socket, response)) {
-                std::cout << "⚠️ Failed to send response back on inbound socket for call " << call_id << std::endl;
+            // 2) Only reply on inbound socket in dev mode (no audio processor configured)
+            if (output_host_.empty() || output_port_ <= 0) {
+                (void)send_tcp_response(socket, response);
             }
         }
     }
