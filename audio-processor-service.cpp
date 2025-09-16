@@ -461,6 +461,29 @@ std::vector<uint8_t> AudioProcessorService::convert_float_to_g711_ulaw(const std
     return result;
 }
 
+// Simple linear resampler from arbitrary src_rate to dst_rate (mono)
+static std::vector<float> resample_linear(const std::vector<float>& in, int src_rate, int dst_rate) {
+    if (in.empty() || src_rate <= 0 || dst_rate <= 0) return {};
+    if (src_rate == dst_rate) return in;
+    size_t out_n = (size_t) std::max(1.0, (double) in.size() * (double) dst_rate / (double) src_rate);
+    std::vector<float> out(out_n);
+    if (in.size() == 1) {
+        std::fill(out.begin(), out.end(), in[0]);
+        return out;
+    }
+    double ratio = (double) src_rate / (double) dst_rate;
+    for (size_t i = 0; i < out_n; ++i) {
+        double src_pos = i * ratio;
+        size_t i0 = (size_t) std::floor(src_pos);
+        if (i0 >= in.size() - 1) { out[i] = in.back(); continue; }
+        size_t i1 = i0 + 1;
+        double t = src_pos - (double) i0;
+        out[i] = (float) ((1.0 - t) * in[i0] + t * in[i1]);
+    }
+    return out;
+}
+
+
 // TCP Socket Implementation
 bool AudioProcessorService::setup_outgoing_tcp_socket(const std::string& call_id) {
     // Create a listening server socket for Whisper to connect to
@@ -723,9 +746,7 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
             while (running_.load() && incoming_connected_.load()) {
                 uint32_t chunk_length;
                 ssize_t received = recv(client_socket, &chunk_length, 4, 0);
-
                 if (received != 4) break;
-
                 chunk_length = ntohl(chunk_length);
 
                 // Check for BYE message
@@ -734,13 +755,32 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
                     break;
                 }
 
+                // Read sample rate (Hz) sent before payload
+                uint32_t sr_net = 0;
+                if (recv(client_socket, &sr_net, 4, 0) != 4) break;
+                int sample_rate = (int) ntohl(sr_net);
+                if (sample_rate <= 0) sample_rate = 16000; // fallback
+
                 if (chunk_length > 0 && chunk_length < 1000000) { // Reasonable limit
-                    std::vector<uint8_t> audio_data(chunk_length);
-                    if (recv(client_socket, audio_data.data(), chunk_length, 0) == (ssize_t)chunk_length) {
-                        // Convert to G.711 and send to SIP client
-                        if (sip_client_callback_) {
-                            sip_client_callback_(audio_data);
-                            std::cout << "📤 TCP audio forwarded to SIP client: " << chunk_length << " bytes" << std::endl;
+                    std::vector<uint8_t> payload(chunk_length);
+                    if (recv(client_socket, payload.data(), chunk_length, 0) == (ssize_t)chunk_length) {
+                        if ((chunk_length % 4) == 0) {
+                            // Interpret as float32 PCM, resample to 8kHz, convert to G.711 μ-law
+                            size_t n = chunk_length / 4;
+                            std::vector<float> samples(n);
+                            std::memcpy(samples.data(), payload.data(), chunk_length);
+                            std::vector<float> out8k = resample_linear(samples, sample_rate, 8000);
+                            std::vector<uint8_t> g711 = convert_float_to_g711_ulaw(out8k);
+                            if (sip_client_callback_) {
+                                sip_client_callback_(g711);
+                                std::cout << "📤 TCP TTS forwarded to SIP (float->G711): " << g711.size() << " bytes @8kHz" << std::endl;
+                            }
+                        } else {
+                            // Already byte payload (assume G.711 μ-law), forward as-is
+                            if (sip_client_callback_) {
+                                sip_client_callback_(payload);
+                                std::cout << "📤 TCP TTS forwarded to SIP (bytes passthrough): " << chunk_length << " bytes" << std::endl;
+                            }
                         }
                     }
                 }

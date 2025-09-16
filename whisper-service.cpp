@@ -322,7 +322,7 @@ void StandaloneWhisperService::run_service_loop() {
 void StandaloneWhisperService::discover_and_connect_streams() {
     auto streams = service_discovery_->discover_streams("127.0.0.1", 13000);
 
-    std::cout << "🔍 Discovered " << streams.size() << " audio streams" << std::endl;
+    // std::cout << "🔍 Discovered " << streams.size() << " audio streams" << std::endl;  // suppressed to reduce console spam
 
     for (const auto& stream : streams) {
         // Check if we're already connected to this stream

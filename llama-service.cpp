@@ -199,7 +199,7 @@ bool LlamaSession::prime_system_prompt() {
         }
     }
     if (sid < 0) sid = -sid;
-    seq_id_ = sid % 256; // must be < n_seq_max configured in warm ctx
+    seq_id_ = sid % 64; // must be < n_seq_max configured in warm ctx (64 on this build)
 
     // Clear any prior state for this sequence and prime with system prompt
     llama_memory_t mem = llama_get_memory(ctx_);
@@ -388,7 +388,7 @@ bool StandaloneLlamaService::start(int tcp_port) {
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = default_config_.n_ctx;
     ctx_params.n_threads = default_config_.n_threads;
-    ctx_params.n_seq_max = 256; // allow many independent sequences in shared warm context
+    ctx_params.n_seq_max = 64; // capped by current llama.cpp build (n_seq_max <= 64)
     warm_ctx_ = llama_init_from_model(warm_model_, ctx_params);
     if (!warm_ctx_) {
         std::cout << "❌ Failed to create LLaMA context" << std::endl;

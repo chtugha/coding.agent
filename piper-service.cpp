@@ -779,10 +779,19 @@ bool StandalonePiperService::send_audio_to_processor(const std::string& call_id,
     // Convert float samples to bytes for transmission
     size_t byte_count = audio_samples.size() * sizeof(float);
     uint32_t l = htonl((uint32_t)byte_count);
+    uint32_t sr = htonl((uint32_t)sample_rate);
 
     // Robust send with connection failure detection
     if (send(s, &l, 4, MSG_NOSIGNAL) != 4) {
-        // Connection failed - remove from active sockets
+        {
+            std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+            output_sockets_.erase(call_id);
+        }
+        close(s);
+        return false;
+    }
+    // Send sample rate (Hz) as 4-byte field before payload
+    if (send(s, &sr, 4, MSG_NOSIGNAL) != 4) {
         {
             std::lock_guard<std::mutex> lock(output_sockets_mutex_);
             output_sockets_.erase(call_id);
@@ -792,7 +801,6 @@ bool StandalonePiperService::send_audio_to_processor(const std::string& call_id,
     }
 
     if (!audio_samples.empty() && send(s, audio_samples.data(), byte_count, MSG_NOSIGNAL) != (ssize_t)byte_count) {
-        // Connection failed - remove from active sockets
         {
             std::lock_guard<std::mutex> lock(output_sockets_mutex_);
             output_sockets_.erase(call_id);
@@ -802,7 +810,7 @@ bool StandalonePiperService::send_audio_to_processor(const std::string& call_id,
     }
 
     if (default_config_.verbose) {
-        std::cout << "🔊 Sent " << audio_samples.size() << " audio samples (" << sample_rate << "Hz) to audio processor for call " << call_id << std::endl;
+        std::cout << "🔊 Sent " << audio_samples.size() << " samples (" << sample_rate << "Hz) to audio processor for call " << call_id << std::endl;
     }
 
     return true;
