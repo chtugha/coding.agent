@@ -34,6 +34,10 @@ struct LlamaSessionConfig {
     bool flash_attn = false;
     std::string person_name = "User";
     std::string bot_name = "Assistant";
+    // Shared warm context/model (optional). When set, sessions reuse these and do not free them.
+    llama_model* shared_model = nullptr;
+    llama_context* shared_ctx = nullptr;
+    std::mutex* shared_mutex = nullptr; // serialize llama_decode across sessions when shared_ctx is used
 };
 
 // Individual LLaMA session for each call
@@ -62,6 +66,8 @@ private:
     llama_sampler* sampler_;
     llama_batch* batch_;
     const llama_vocab* vocab_;
+    bool ctx_shared_ = false;         // true if using shared warm_ctx_/warm_model_
+    std::mutex* shared_mutex_ = nullptr; // non-owning, provided by service when sharing
 
     // Session state
     std::vector<int> session_tokens_;
@@ -71,9 +77,17 @@ private:
     std::chrono::steady_clock::time_point last_activity_;
     std::mutex session_mutex_;
 
+
+    // Incremental decoding state (KV reuse)
+    int seq_id_ = 0;     // llama sequence id for this session
+    int n_past_ = 0;     // number of tokens already stored in KV for this seq
+    bool primed_ = false; // whether the system prompt has been fed into KV
+
     // Internal methods
     bool initialize_llama_context();
     void cleanup_llama_context();
+    bool prime_system_prompt();
+
     std::string generate_response(const std::string& prompt);
     std::string format_conversation_prompt(const std::string& user_input);
 };
@@ -106,6 +120,7 @@ private:
     llama_model* warm_model_ = nullptr;
     llama_context* warm_ctx_ = nullptr;
     bool warm_loaded_ = false;
+    std::mutex warm_mutex_; // serialize shared llama context across sessions
 
 
     // Session management

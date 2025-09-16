@@ -154,37 +154,20 @@ void AudioProcessorService::stop() {
 
 void AudioProcessorService::process_audio(const RTPAudioPacket& packet) {
     if (!running_.load() || !active_.load() || !audio_processor_) {
-        // Processor sleeping - drop audio packets silently
         return;
     }
 
-    // Process audio directly without session management
-    std::thread([this, packet]() {
-        // Decode RTP packet to audio samples
-        std::vector<float> audio_samples;
+    // Directly forward the RTP packet to the internal processor (avoid double conversion)
 
-        // Use shared G.711 conversion from SimpleAudioProcessor
-        if (packet.payload_type == 0) { // G.711 μ-law
-            audio_samples = SimpleAudioProcessor::convert_g711_ulaw_static(packet.audio_data);
-        } else if (packet.payload_type == 8) { // G.711 A-law
-            audio_samples = SimpleAudioProcessor::convert_g711_alaw_static(packet.audio_data);
-        } else {
-            return; // Unsupported codec
+    {
+        std::string cid;
+        {
+            std::lock_guard<std::mutex> lock(tcp_mutex_);
+            cid = current_call_id_;
         }
-
-        if (!audio_samples.empty()) {
-            // Add to single jitter buffer
-            AudioChunkData chunk_data("", audio_samples); // No session ID needed
-
-            std::lock_guard<std::mutex> lock(buffers_mutex_);
-            if (incoming_audio_buffer_) {
-                incoming_audio_buffer_->push(chunk_data);
-            }
-        }
-    }).detach();
-
-    // Process buffered audio
-    process_buffered_audio();
+        if (cid.empty()) cid = "global";
+        audio_processor_->process_audio(cid, packet);
+    }
     total_packets_processed_.fetch_add(1);
 }
 
@@ -324,6 +307,9 @@ void AudioProcessorService::deactivate_after_call() {
         std::cout << "😴 DEACTIVATING Audio Processor - Call ended" << std::endl;
 
         // Send BYE and close TCP connections
+        // Prepare to remove advertisement after releasing tcp_mutex_
+        std::string call_id_to_remove;
+
         {
             std::lock_guard<std::mutex> lock(tcp_mutex_);
 
@@ -349,24 +335,38 @@ void AudioProcessorService::deactivate_after_call() {
                 std::cout << "🔌 Incoming TCP connection closed (port " << incoming_tcp_port_ << ")" << std::endl;
             }
 
-            // Join TCP threads if they exist
-            if (outgoing_tcp_thread_.joinable()) {
-                outgoing_tcp_thread_.join();
-            }
-            if (incoming_tcp_thread_.joinable()) {
-                incoming_tcp_thread_.join();
-            }
-
-            // Remove stream advertisement
-            if (service_advertiser_ && !current_call_id_.empty()) {
-                service_advertiser_->remove_stream_advertisement(current_call_id_);
-            }
+            // Save ID for post-unlock removal
+            call_id_to_remove = current_call_id_;
 
             // Reset ports
             outgoing_tcp_port_ = -1;
             incoming_tcp_port_ = -1;
             current_call_id_.clear();
         }
+
+        // Remove stream advertisement (try both raw and sanitized ids) after sockets are down
+        if (service_advertiser_ && !call_id_to_remove.empty()) {
+            bool removed = service_advertiser_->remove_stream_advertisement(call_id_to_remove);
+            if (!removed) {
+                std::string sanitized = call_id_to_remove;
+                for (char &ch : sanitized) if (ch == ':') ch = '_';
+                removed = service_advertiser_->remove_stream_advertisement(sanitized);
+            }
+            if (removed) {
+                std::cout << "📢 Stream advertisement removed for call " << call_id_to_remove << std::endl;
+            } else {
+                std::cout << "⚠️ No stream advertisement entry found to remove for call " << call_id_to_remove << std::endl;
+            }
+        }
+
+        // Join TCP threads outside of tcp_mutex_
+        if (outgoing_tcp_thread_.joinable()) {
+            outgoing_tcp_thread_.join();
+        }
+        if (incoming_tcp_thread_.joinable()) {
+            incoming_tcp_thread_.join();
+        }
+
 
         active_.store(false);
         std::cout << "💤 Audio Processor SLEEPING - TCP sockets closed, advertisement removed" << std::endl;
@@ -386,12 +386,19 @@ void AudioProcessorService::process_buffered_audio() {
         packet.sequence_number = 0;
         packet.timestamp = 0;
 
-        // Convert float samples back to G.711 for compatibility
         packet.audio_data = convert_float_to_g711_ulaw(chunk_data.samples);
 
         // Process through existing audio processor (no session management)
         if (audio_processor_) {
-            audio_processor_->process_audio("default", packet);  // Use default session ID
+            {
+                std::string cid;
+                {
+                    std::lock_guard<std::mutex> lock(tcp_mutex_);
+                    cid = current_call_id_;
+                }
+                if (cid.empty()) cid = "global";
+                audio_processor_->process_audio(cid, packet);
+            }
         }
     }
 }
@@ -618,6 +625,10 @@ void AudioProcessorService::handle_outgoing_tcp_connection() {
                 std::cout << "🔌 Outgoing TCP listen socket closed during accept, exiting handler" << std::endl;
                 break;
             }
+            if (errno == 53) { // macOS EPROTO during shutdown
+                // benign during teardown; skip noisy error
+                continue;
+            }
             if (running_.load()) {
                 std::cout << "❌ Failed to accept outgoing TCP client (errno: " << errno << ")" << std::endl;
             }
@@ -677,6 +688,10 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
             if (errno == EBADF || errno == EINVAL) {
                 std::cout << "🔌 Incoming TCP socket closed during accept, exiting handler" << std::endl;
                 break;
+            }
+            if (errno == 53) { // macOS EPROTO during shutdown
+                // benign during teardown
+                continue;
             }
 
             if (running_.load()) {

@@ -301,11 +301,11 @@ int main(int argc, char** argv) {
     } else {
         std::cout << "   Target: All enabled lines" << std::endl;
     }
-    
+
     // Setup signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-    
+
     // Initialize database
     Database database;
     if (!database.init(db_path)) {
@@ -313,7 +313,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "✅ Database initialized" << std::endl;
-    
+
     // Create SIP client
     g_sip_client = std::make_unique<SimpleSipClient>();
     if (!g_sip_client->init(&database, specific_line_id)) {
@@ -321,7 +321,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "✅ SIP client initialized" << std::endl;
-    
+
     // Start SIP client
     if (!g_sip_client->start()) {
         std::cerr << "❌ Failed to start SIP client!" << std::endl;
@@ -329,12 +329,12 @@ int main(int argc, char** argv) {
     }
     std::cout << "🚀 SIP client started and ready for calls" << std::endl;
     std::cout << "Press Ctrl+C to stop..." << std::endl;
-    
+
     // Main loop
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Fast response
     }
-    
+
     std::cout << "🛑 Shutting down SIP client..." << std::endl;
     if (g_sip_client) {
         g_sip_client->stop();
@@ -345,7 +345,7 @@ int main(int argc, char** argv) {
     }
     database.close();
     std::cout << "✅ SIP client stopped cleanly" << std::endl;
-    
+
     return 0;
 }
 
@@ -1214,6 +1214,11 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
         return;
     }
     std::cout << "📞 Call record created in database: " << call_id << std::endl;
+    // Resolve numeric call id from database row id for consistent port mapping
+    Call db_call = database_->get_call(call_id);
+    int call_num_id = db_call.id > 0 ? db_call.id : 0;
+    std::string call_num_id_str = std::to_string(call_num_id);
+
 
     // Step 3: Activate audio processor for this line (no session needed)
     std::cout << "🎵 ACTIVATING audio processor for line " << line_id << " (sessionless)" << std::endl;
@@ -1245,9 +1250,9 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
             }
         }
         if (it != line_audio_processors_.end() && it->second) {
-            // Activate with call_id for TCP connections
-            it->second->activate_for_call(call_id);
-            std::cout << "✅ Audio processor activated for line " << line_id << " (call: " << call_id << ")" << std::endl;
+            // Activate with numeric call id for TCP connections and port mapping
+            it->second->activate_for_call(call_num_id_str);
+            std::cout << "✅ Audio processor activated for line " << line_id << " (SIP Call-ID: " << call_id << ", call_num_id: " << call_num_id_str << ")" << std::endl;
         } else {
             std::cout << "❌ No audio processor available for line " << line_id << " (audio will be dropped)" << std::endl;
         }

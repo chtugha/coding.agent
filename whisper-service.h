@@ -26,6 +26,10 @@ struct WhisperSessionConfig {
     float temperature;
     bool no_timestamps;
     bool translate;
+
+    // Shared context (optional): if provided, sessions will reuse this and not load/free models
+    whisper_context* shared_ctx = nullptr;
+    std::mutex* shared_mutex = nullptr; // serialize access across sessions when shared_ctx is used
 };
 
 class WhisperSession {
@@ -51,6 +55,10 @@ private:
     std::atomic<bool> is_active_;
     std::chrono::steady_clock::time_point last_activity_;
     std::mutex session_mutex_;
+
+    // Indicates whether ctx_ is shared (owned by service) or owned by this session
+    bool ctx_shared_ = false;
+    std::mutex* shared_mutex_ = nullptr;
 
     WhisperSessionConfig config_;
 
@@ -91,6 +99,7 @@ private:
     // Eager model preload to avoid lazy loading on first TCP connection
     whisper_context* warm_ctx_ = nullptr;
     bool warm_loaded_ = false;
+    std::mutex warm_mutex_;
 
     // Session management
     std::unordered_map<std::string, std::unique_ptr<WhisperSession>> sessions_;

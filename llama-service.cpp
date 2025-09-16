@@ -72,15 +72,51 @@ bool LlamaSession::initialize() {
     is_active_.store(true);
     mark_activity();
 
+
+    // Prime the system prompt into the KV cache for this session
+    if (!prime_system_prompt()) {
+        std::cout << "⚠️ Failed to prime system prompt for call " << call_id_ << std::endl;
+    }
+
     std::cout << "✅ LLaMA session initialized for call " << call_id_ << std::endl;
     return true;
 }
 
 bool LlamaSession::initialize_llama_context() {
-    // Initialize LLaMA backend
+    // If service provided a shared warm context/model, reuse them
+    if (config_.shared_ctx && config_.shared_model) {
+        ctx_ = config_.shared_ctx;
+        model_ = config_.shared_model;
+        shared_mutex_ = config_.shared_mutex;
+        ctx_shared_ = true;
+
+        // Cache vocab pointer
+        vocab_ = llama_model_get_vocab(model_);
+
+        // Initialize sampler
+        auto sampler_params = llama_sampler_chain_default_params();
+        sampler_ = llama_sampler_chain_init(sampler_params);
+
+        if (config_.temperature > 0.0f) {
+            llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(config_.top_k));
+            llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(config_.top_p, 1));
+            llama_sampler_chain_add(sampler_, llama_sampler_init_temp(config_.temperature));
+            llama_sampler_chain_add(sampler_, llama_sampler_init_dist(0));
+        } else {
+            llama_sampler_chain_add(sampler_, llama_sampler_init_greedy());
+        }
+
+        // Initialize batch
+        batch_ = new llama_batch;
+        *batch_ = llama_batch_init(config_.n_ctx, 0, 1);
+
+        std::cout << "🔁 Reusing preloaded LLaMA model/context for call " << call_id_ << std::endl;
+        return true;
+    }
+
+    // Otherwise, create a private context/model for this session (fallback)
     llama_backend_init();
 
-    // Load model
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = config_.use_gpu ? config_.n_gpu_layers : 0;
 
@@ -90,11 +126,9 @@ bool LlamaSession::initialize_llama_context() {
         return false;
     }
 
-    // Create context
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = config_.n_ctx;
     ctx_params.n_threads = config_.n_threads;
-    // ctx_params.flash_attn not available in this llama.cpp version; ignoring config_.flash_attn
 
     ctx_ = llama_init_from_model(model_, ctx_params);
     if (!ctx_) {
@@ -104,10 +138,8 @@ bool LlamaSession::initialize_llama_context() {
         return false;
     }
 
-    // Cache vocab pointer
     vocab_ = llama_model_get_vocab(model_);
 
-    // Initialize sampler
     auto sampler_params = llama_sampler_chain_default_params();
     sampler_ = llama_sampler_chain_init(sampler_params);
 
@@ -120,7 +152,6 @@ bool LlamaSession::initialize_llama_context() {
         llama_sampler_chain_add(sampler_, llama_sampler_init_greedy());
     }
 
-    // Initialize batch
     batch_ = new llama_batch;
     *batch_ = llama_batch_init(config_.n_ctx, 0, 1);
 
@@ -139,22 +170,76 @@ void LlamaSession::cleanup_llama_context() {
         sampler_ = nullptr;
     }
 
-    if (ctx_) {
-        llama_free(ctx_);
+    // Do not free shared context/model owned by the service
+    if (!ctx_shared_) {
+        if (ctx_) {
+            llama_free(ctx_);
+            ctx_ = nullptr;
+        }
+        if (model_) {
+            llama_model_free(model_);
+            model_ = nullptr;
+        }
+    } else {
         ctx_ = nullptr;
-    }
-
-    if (model_) {
-        llama_model_free(model_);
         model_ = nullptr;
     }
 }
+
+bool LlamaSession::prime_system_prompt() {
+    if (!ctx_ || !batch_) return false;
+
+    // Derive a stable sequence ID from call_id_
+    int sid = 0;
+    try {
+        sid = std::stoi(call_id_);
+    } catch (const std::exception&) {
+        for (unsigned char c : call_id_) {
+            sid = (int)((sid * 131u) + c) & 0x7fffffff; // simple hash
+        }
+    }
+    if (sid < 0) sid = -sid;
+    seq_id_ = sid % 256; // must be < n_seq_max configured in warm ctx
+
+    // Clear any prior state for this sequence and prime with system prompt
+    llama_memory_t mem = llama_get_memory(ctx_);
+    llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
+
+    // Tokenize the system prompt with BOS
+    std::vector<llama_token> tokens = tokenize_text(ctx_, conversation_history_, true);
+    n_past_ = 0;
+
+    if (!tokens.empty()) {
+        batch_->n_tokens = tokens.size();
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            batch_->token[i] = tokens[i];
+            batch_->pos[i] = n_past_ + (int)i;
+            batch_->n_seq_id[i] = 1;
+            batch_->seq_id[i][0] = seq_id_;
+            batch_->logits[i] = i == tokens.size() - 1;
+        }
+        if (llama_decode(ctx_, *batch_) != 0) {
+            return false;
+        }
+        n_past_ += (int)tokens.size();
+    }
+
+    primed_ = true;
+    return true;
+}
+
 
 std::string LlamaSession::process_text(const std::string& input_text) {
     std::lock_guard<std::mutex> lock(session_mutex_);
 
     if (!is_active_.load() || !ctx_) {
         return "";
+    }
+
+    // When using shared warm context, serialize llama_decode across sessions
+    std::unique_lock<std::mutex> shared_lock;
+    if (shared_mutex_) {
+        shared_lock = std::unique_lock<std::mutex>(*shared_mutex_);
     }
 
     mark_activity();
@@ -179,7 +264,8 @@ std::string LlamaSession::process_text(const std::string& input_text) {
 }
 
 std::string LlamaSession::format_conversation_prompt(const std::string& user_input) {
-    std::string prompt = conversation_history_;
+    // For incremental decoding with KV reuse, only append the new turn
+    std::string prompt;
     prompt += config_.person_name + ": " + user_input + "\n";
     prompt += config_.bot_name + ": ";
     return prompt;
@@ -190,38 +276,43 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
         return "";
     }
 
-    // Tokenize prompt
-    std::vector<llama_token> tokens = tokenize_text(ctx_, prompt, true);
+    // Ensure the system prompt has been primed once
+    if (!primed_) {
+        if (!prime_system_prompt()) {
+            std::cout << "❌ Failed to prime system prompt for call " << call_id_ << std::endl;
+            return "";
+        }
+    }
 
+    // Tokenize only the new turn (no BOS for incremental appends)
+    std::vector<llama_token> tokens = tokenize_text(ctx_, prompt, false);
     if (tokens.empty()) {
         return "";
     }
 
-    // Prepare batch
+    // Append the new prompt tokens at the current position for this sequence
     batch_->n_tokens = tokens.size();
     for (size_t i = 0; i < tokens.size(); i++) {
         batch_->token[i] = tokens[i];
-        batch_->pos[i] = i;
+        batch_->pos[i] = n_past_ + (int)i;
         batch_->n_seq_id[i] = 1;
-        batch_->seq_id[i][0] = 0;
+        batch_->seq_id[i][0] = seq_id_;
         batch_->logits[i] = i == tokens.size() - 1;
     }
 
-    // Process prompt
     if (llama_decode(ctx_, *batch_) != 0) {
         std::cout << "❌ Failed to decode prompt for call " << call_id_ << std::endl;
         return "";
     }
+    n_past_ += (int)tokens.size();
 
     // Generate response tokens
     std::string response;
-    int n_past = tokens.size();
-
     for (int i = 0; i < config_.max_tokens; i++) {
         // Sample next token
         llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
 
-        // Check for end of sequence
+        // End of sequence
         if (id == llama_vocab_eos(vocab_)) {
             break;
         }
@@ -230,30 +321,28 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
         std::string token_text = token_to_piece(ctx_, id);
         response += token_text;
 
-        // Check for conversation end (simple heuristic)
+        // Stop when the model starts the next user turn
         if (response.find("\n" + config_.person_name + ":") != std::string::npos) {
-            // Remove the user prompt part
             size_t pos = response.find("\n" + config_.person_name + ":");
             response = response.substr(0, pos);
             break;
         }
 
-        // Prepare next iteration
+        // Feed the generated token back
         batch_->n_tokens = 1;
         batch_->token[0] = id;
-        batch_->pos[0] = n_past;
+        batch_->pos[0] = n_past_;
         batch_->n_seq_id[0] = 1;
-        batch_->seq_id[0][0] = 0;
+        batch_->seq_id[0][0] = seq_id_;
         batch_->logits[0] = true;
 
         if (llama_decode(ctx_, *batch_) != 0) {
             break;
         }
-
-        n_past++;
+        n_past_++;
     }
 
-    // Clean up response
+    // Cleanup response
     response = std::regex_replace(response, std::regex("^\\s+"), "");
     response = std::regex_replace(response, std::regex("\\s+$"), "");
 
@@ -299,6 +388,7 @@ bool StandaloneLlamaService::start(int tcp_port) {
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = default_config_.n_ctx;
     ctx_params.n_threads = default_config_.n_threads;
+    ctx_params.n_seq_max = 256; // allow many independent sequences in shared warm context
     warm_ctx_ = llama_init_from_model(warm_model_, ctx_params);
     if (!warm_ctx_) {
         std::cout << "❌ Failed to create LLaMA context" << std::endl;
@@ -370,7 +460,15 @@ bool StandaloneLlamaService::create_session(const std::string& call_id) {
         return true;
     }
 
-    auto session = std::make_unique<LlamaSession>(call_id, default_config_);
+    // Use a copy of default config and inject shared warm context/model
+    LlamaSessionConfig cfg = default_config_;
+    if (warm_loaded_ && warm_model_ && warm_ctx_) {
+        cfg.shared_model = warm_model_;
+        cfg.shared_ctx = warm_ctx_;
+        cfg.shared_mutex = &warm_mutex_;
+    }
+
+    auto session = std::make_unique<LlamaSession>(call_id, cfg);
     if (!session->initialize()) {
         return false;
     }
@@ -496,9 +594,11 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
             continue;
         }
 
+        std::cout << "📝 Incoming text [" << call_id << "]: " << text << std::endl;
         std::string response = process_text_for_call(call_id, text);
 
         if (!response.empty()) {
+            std::cout << "💬 Response [" << call_id << "]: " << response << std::endl;
             // 1) Write to DB (separate field)
             if (database_) {
                 database_->append_llama_response(call_id, response);

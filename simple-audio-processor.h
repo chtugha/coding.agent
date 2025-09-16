@@ -79,8 +79,8 @@ private:
     bool should_send_chunk_sessionless();
     std::vector<float> prepare_whisper_chunk(const std::vector<float>& audio);
 
-    // Advanced chunking with system speed
-    std::vector<std::vector<float>> create_chunks_from_pcm(const std::vector<float>& pcm_data, int system_speed);
+    // Advanced chunking with system speed (consumes from pcm_data as chunks are created)
+    std::vector<std::vector<float>> create_chunks_from_pcm(std::vector<float>& pcm_data, int system_speed);
     bool detect_silence_gap(const std::vector<float>& audio_segment, float threshold = 0.01f);
     std::vector<float> pad_chunk_to_target_size(const std::vector<float>& chunk, size_t target_size);
     int get_system_speed_from_database();

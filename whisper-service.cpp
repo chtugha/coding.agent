@@ -39,6 +39,22 @@ WhisperSession::WhisperSession(const std::string& call_id, const WhisperSessionC
 
     last_activity_ = std::chrono::steady_clock::now();
 
+    // Reuse shared preloaded context if provided
+    if (config_.shared_ctx) {
+        ctx_ = config_.shared_ctx;
+        shared_mutex_ = config_.shared_mutex;
+        ctx_shared_ = true;
+        if (!ctx_) {
+            std::cout << "❌ Shared whisper context is null" << std::endl;
+            is_active_.store(false);
+            return;
+        }
+        std::cout << "🔁 Reusing preloaded Whisper model for call " << call_id << std::endl;
+        std::cout << "✅ Whisper session created for call " << call_id << std::endl;
+        return;
+    }
+
+    // Fallback: load per-session (should not happen in normal operation)
     if (!initialize_whisper_context()) {
         std::cout << "❌ Failed to initialize whisper context for call " << call_id << std::endl;
         is_active_.store(false);
@@ -77,7 +93,7 @@ bool WhisperSession::initialize_whisper_context() {
 }
 
 void WhisperSession::cleanup_whisper_context() {
-    if (ctx_) {
+    if (ctx_ && !ctx_shared_) {
         whisper_free(ctx_);
         ctx_ = nullptr;
     }
@@ -92,8 +108,17 @@ bool WhisperSession::process_audio_chunk(const std::vector<float>& audio_samples
         return true; // Nothing to process
     }
 
-    std::lock_guard<std::mutex> lock(session_mutex_);
+    // Update activity timestamp
     mark_activity();
+
+    // Serialize access to shared whisper context if needed
+    std::unique_lock<std::mutex> shared_lock;
+    if (shared_mutex_) {
+        shared_lock = std::unique_lock<std::mutex>(*shared_mutex_);
+    }
+
+    // Session-local lock for updating session state
+    std::lock_guard<std::mutex> session_lock(session_mutex_);
 
     // Create real whisper parameters
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
@@ -105,12 +130,22 @@ bool WhisperSession::process_audio_chunk(const std::vector<float>& audio_samples
     wparams.print_progress = false;
     wparams.print_realtime = false;
 
+    // Diagnostics before inference
+    double secs_in = static_cast<double>(audio_samples.size()) / 16000.0;
+    double sumsq_in = 0.0; for (float v : audio_samples) { double d=v; sumsq_in += d*d; }
+    double rms_in = audio_samples.empty() ? 0.0 : std::sqrt(sumsq_in / (double)audio_samples.size());
+    std::cout << " Whisper inference start [" << call_id_ << "]: samples=" << audio_samples.size()
+              << ", ~" << secs_in << " s, RMS=" << rms_in
+              << ", threads=" << wparams.n_threads
+              << ", lang=" << (wparams.language ? wparams.language : "auto") << std::endl;
+
     // Process audio chunk directly with whisper
     int result = whisper_full(ctx_, wparams, audio_samples.data(), audio_samples.size());
 
     if (result == 0) {
         // Extract transcription
         const int n_segments = whisper_full_n_segments(ctx_);
+        std::cout << " Whisper inference done [" << call_id_ << "]: segments=" << n_segments << std::endl;
         std::string transcription;
 
         for (int i = 0; i < n_segments; ++i) {
@@ -331,7 +366,12 @@ bool StandaloneWhisperService::create_session(const std::string& call_id) {
         return false; // Session already exists
     }
 
-    auto session = std::make_unique<WhisperSession>(call_id, config_);
+    // Provide shared preloaded context to the session
+    WhisperSessionConfig cfg = config_;
+    cfg.shared_ctx = warm_ctx_;
+    cfg.shared_mutex = &warm_mutex_;
+
+    auto session = std::make_unique<WhisperSession>(call_id, cfg);
     if (!session->is_active()) {
         return false;
     }
@@ -388,9 +428,7 @@ void StandaloneWhisperService::cleanup_inactive_sessions() {
 
 void StandaloneWhisperService::log_session_stats() const {
     // Note: Can't lock const mutex, so just read size without lock for stats
-    if (!sessions_.empty()) {
-        std::cout << "📊 Active whisper sessions: " << sessions_.size() << std::endl;
-    }
+    std::cout << "📊 Active whisper sessions: " << sessions_.size() << std::endl;
 }
 
 void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_id, int socket) {
@@ -440,6 +478,7 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
                         }
 
                         // Forward to LLaMA service via dedicated TCP connection
+                        std::cout << "➡️ Forwarding to LLaMA [" << call_id << "]: " << transcription << std::endl;
                         send_llama_text(call_id, transcription);
                     }
                 }
@@ -448,7 +487,19 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
     }
 
     send_tcp_bye(socket);
+    // Close socket and remove from map
+    close(socket);
+    {
+        std::lock_guard<std::mutex> tlock(tcp_mutex_);
+        auto it = call_tcp_sockets_.find(call_id);
+        if (it != call_tcp_sockets_.end()) {
+            call_tcp_sockets_.erase(it);
+        }
+    }
+    // Destroy whisper session and downstream connection(s)
+    destroy_session(call_id);
     std::cout << "🎧 TCP audio handler ended for call " << call_id << std::endl;
+    log_session_stats();
 }
 
 bool StandaloneWhisperService::read_tcp_hello(int socket, std::string& call_id) {
@@ -500,7 +551,13 @@ bool StandaloneWhisperService::read_tcp_audio_chunk(int socket, std::vector<floa
         return false;
     }
 
-    std::cout << "📤 TCP audio chunk received: " << float_count << " samples" << std::endl;
+    // Simple stats for visibility
+    double sumsq = 0.0;
+    for (size_t i = 0; i < float_count; ++i) { double v = audio_samples[i]; sumsq += (double)v * (double)v; }
+    double rms = float_count ? std::sqrt(sumsq / (double)float_count) : 0.0;
+    double approx_sr = 16000.0; // pipeline default
+    double secs = float_count / approx_sr;
+    std::cout << "📤 TCP audio chunk received: " << float_count << " samples (~" << secs << " s), RMS=" << rms << std::endl;
     return true;
 }
 

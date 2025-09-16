@@ -105,7 +105,14 @@ void SimpleAudioProcessor::stop() {
 }
 
 void SimpleAudioProcessor::start_session(const AudioSessionParams& params) {
-    // Sessionless: No-op, just log for compatibility
+    // Sessionless: reset buffers/state at call start to avoid cross-call residue
+    {
+        std::lock_guard<std::mutex> lock(audio_buffer_mutex_);
+        global_audio_buffer_.clear();
+        has_speech_ = false;
+    }
+    chunk_start_time_ = std::chrono::steady_clock::now();
+
     std::cout << "🎵 Audio processor ready (sessionless mode)"
               << " (line " << params.line_id << ", caller: " << params.caller_phone << ", call: " << params.call_id << ")" << std::endl;
 }
@@ -126,6 +133,7 @@ void SimpleAudioProcessor::process_audio(const std::string& call_id, const RTPAu
     // Fast audio decoding
     std::vector<float> audio_samples = decode_rtp_audio(packet);
     if (audio_samples.empty()) return;
+
 
     std::lock_guard<std::mutex> lock(audio_buffer_mutex_);
 
@@ -153,12 +161,7 @@ void SimpleAudioProcessor::process_audio(const std::string& call_id, const RTPAu
         std::cout << "📤 Sent dynamic chunk: " << chunk.size() << " samples (speed=" << system_speed << ") for call: " << call_id << std::endl;
     }
 
-    // Clear processed audio from buffer
-    if (!chunks.empty()) {
-        global_audio_buffer_.clear();
-        has_speech_ = false;
-        chunk_start_time_ = std::chrono::steady_clock::now();
-    }
+    // Processed samples are removed inside create_chunks_from_pcm; keep remainder in buffer
 }
 
 std::vector<float> SimpleAudioProcessor::decode_rtp_audio(const RTPAudioPacket& packet) {
@@ -314,56 +317,103 @@ void SimpleAudioProcessor::send_audio_chunk_sessionless() {
     std::cout << "📤 Sent audio chunk: " << whisper_chunk.size() << " samples (sessionless)" << std::endl;
 }
 
-std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(const std::vector<float>& pcm_data, int system_speed) {
+std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(std::vector<float>& pcm_data, int system_speed) {
     std::vector<std::vector<float>> chunks;
-
     if (pcm_data.empty()) return chunks;
 
     // System speed determines chunking strategy:
     // 1 = slow (max audio per chunk)
-    // 5 = fast (word-level chunks)
+    // 5 = fast (word-level-ish chunks)
 
-    size_t window_size = 160; // 20ms at 8kHz (typical word boundary)
+    size_t window_size = 320; // 20ms at 16 kHz
     size_t min_chunk_size = window_size * (6 - system_speed); // Inverse relationship
+    int window_ms = static_cast<int>(1000.0 * window_size / std::max(1, sample_rate_));
+    int hangover_ms = 200; // keep ~200ms after last speech to avoid cutting words
+    int hangover_windows = std::max(1, hangover_ms / std::max(1, window_ms));
+
+    // Hysteresis thresholds to avoid rapid toggling
+    float vad_start_threshold = std::max(0.001f, vad_threshold_ * 1.5f);
+    float vad_stop_threshold  = std::max(0.0005f, vad_threshold_ * 0.5f);
+    int speech_required = 2;   // require N consecutive speech windows to start
+    int silence_required = 3;  // require N consecutive silence windows (post-hangover) to end
+
+    // Target chunk size derived from configuration (defaults to ~3s)
+    size_t target_size = static_cast<size_t>(std::max(1, sample_rate_) * (chunk_duration_ms_ / 1000.0f));
+    if (target_size == 0) target_size = 16000 * 3;
 
     std::vector<float> current_chunk;
     bool in_speech = false;
+    int silence_windows = 0;
+    int consec_speech = 0;
+    int consec_silence = 0;
+    size_t consumed_until = 0; // index in pcm_data consumed by emitted chunks
 
     for (size_t i = 0; i < pcm_data.size(); i += window_size) {
         size_t end = std::min(i + window_size, pcm_data.size());
         std::vector<float> window(pcm_data.begin() + i, pcm_data.begin() + end);
 
-        bool has_speech = !detect_silence_gap(window, SILENCE_THRESHOLD);
+        float win_rms = calculate_energy(window);
+        bool speech_now = in_speech ? (win_rms > vad_stop_threshold) : (win_rms > vad_start_threshold);
 
-        if (has_speech) {
-            // Add speech to current chunk
-            current_chunk.insert(current_chunk.end(), window.begin(), window.end());
+        if (speech_now) {
+            consec_speech++;
+            consec_silence = 0;
+        } else {
+            consec_silence++;
+            consec_speech = 0;
+        }
+
+        if (!in_speech && consec_speech >= speech_required) {
             in_speech = true;
-        } else if (in_speech) {
-            // End of speech - create chunk if minimum size reached
-            if (current_chunk.size() >= min_chunk_size) {
-                // Pad to target size
-                std::vector<float> padded_chunk = pad_chunk_to_target_size(current_chunk, TARGET_CHUNK_SIZE);
-                chunks.push_back(padded_chunk);
-                current_chunk.clear();
-                in_speech = false;
-            } else {
-                // Add silence to continue building chunk
-                current_chunk.insert(current_chunk.end(), window.begin(), window.end());
+            silence_windows = 0;
+            // VAD: speech start (suppressed)
+        }
+
+        if (in_speech) {
+            // Always accumulate while in speech (and during hangover)
+            current_chunk.insert(current_chunk.end(), window.begin(), window.end());
+
+            if (!speech_now) {
+                // During hangover, keep a few windows to avoid cutting words
+                silence_windows++;
+                if (silence_windows >= hangover_windows) {
+                    // After hangover, require additional consecutive silence windows
+                    if (consec_silence >= silence_required && current_chunk.size() >= min_chunk_size) {
+                        float chunk_rms = calculate_energy(current_chunk);
+                        double secs = static_cast<double>(current_chunk.size()) / std::max(1, sample_rate_);
+                        std::cout << "📦 Chunk created (end_of_speech): " << current_chunk.size()
+                                  << " samples (~" << secs << " s), meanRMS=" << chunk_rms << std::endl;
+                        chunks.push_back(pad_chunk_to_target_size(current_chunk, target_size));
+                        current_chunk.clear();
+                        in_speech = false;
+                        silence_windows = 0;
+                        consec_silence = 0;
+                        consumed_until = end;
+                        std::cout << "🔴 VAD: speech end (hangover=" << hangover_ms << " ms)" << std::endl;
+                    }
+                }
             }
         }
 
         // Force chunk creation if too large
-        if (current_chunk.size() >= TARGET_CHUNK_SIZE) {
-            chunks.push_back(pad_chunk_to_target_size(current_chunk, TARGET_CHUNK_SIZE));
+        if (current_chunk.size() >= target_size) {
+            float chunk_rms = calculate_energy(current_chunk);
+            double secs = static_cast<double>(current_chunk.size()) / std::max(1, sample_rate_);
+            std::cout << "📦 Chunk created (max_size): " << current_chunk.size()
+                      << " samples (~" << secs << " s), meanRMS=" << chunk_rms << std::endl;
+            chunks.push_back(pad_chunk_to_target_size(current_chunk, target_size));
             current_chunk.clear();
             in_speech = false;
+            silence_windows = 0;
+            consec_silence = 0;
+            consec_speech = 0;
+            consumed_until = end;
         }
     }
 
-    // Handle remaining audio
-    if (!current_chunk.empty()) {
-        chunks.push_back(pad_chunk_to_target_size(current_chunk, TARGET_CHUNK_SIZE));
+    // Do not force end_of_input emission here; keep remainder in pcm_data for next call
+    if (consumed_until > 0 && consumed_until <= pcm_data.size()) {
+        pcm_data.erase(pcm_data.begin(), pcm_data.begin() + consumed_until);
     }
 
     return chunks;

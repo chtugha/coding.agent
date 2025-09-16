@@ -826,11 +826,15 @@ void StandalonePiperService::close_audio_output_for_call(const std::string& call
 }
 
 int StandalonePiperService::calculate_audio_processor_port(const std::string& call_id) {
-    // Calculate port based on call_id hash, similar to audio processor logic
-    // This should match the audio processor's incoming port calculation
-    std::hash<std::string> hasher;
-    size_t hash = hasher(call_id);
-    return output_port_ + (hash % 1000);  // Spread across 1000 ports
+    // Must match AudioProcessorService::calculate_incoming_port(call_id)
+    if (call_id.empty()) return 9002;
+    int call_id_num = 0;
+    try {
+        call_id_num = std::stoi(call_id);
+    } catch (...) {
+        call_id_num = 0;
+    }
+    return 9002 + call_id_num;
 }
 
 void StandalonePiperService::cleanup_inactive_sessions() {
