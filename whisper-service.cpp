@@ -216,6 +216,24 @@ bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const s
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     std::cout << "✅ Whisper model preloaded in " << ms << " ms" << std::endl;
 
+    // Warm-up inference to compile GPU kernels and allocate graphs
+    try {
+        std::vector<float> silence(16000, 0.0f); // ~1s @16kHz
+        whisper_full_params wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        wp.no_timestamps = true;
+        wp.print_progress = false;
+        wp.print_realtime = false;
+        int wres = whisper_full(warm_ctx_, wp, silence.data(), silence.size());
+        if (wres == 0) {
+            std::cout << "✅ Whisper warm-up inference completed" << std::endl;
+        } else {
+            std::cout << "⚠️ Whisper warm-up failed (non-fatal)" << std::endl;
+        }
+    } catch (...) {
+        std::cout << "⚠️ Whisper warm-up threw exception (non-fatal)" << std::endl;
+    }
+
+
     // Only now mark running and launch discovery
     running_.store(true);
     discovery_thread_ = std::thread(&StandaloneWhisperService::run_service_loop, this);
@@ -295,7 +313,7 @@ void StandaloneWhisperService::run_service_loop() {
         cleanup_inactive_sessions();
 
         // Log session statistics
-        log_session_stats();
+        // log_session_stats();  // suppressed to reduce console spam
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
@@ -428,7 +446,7 @@ void StandaloneWhisperService::cleanup_inactive_sessions() {
 
 void StandaloneWhisperService::log_session_stats() const {
     // Note: Can't lock const mutex, so just read size without lock for stats
-    std::cout << "📊 Active whisper sessions: " << sessions_.size() << std::endl;
+    // std::cout << "📊 Active whisper sessions: " << sessions_.size() << std::endl;  // suppressed
 }
 
 void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_id, int socket) {
@@ -499,7 +517,7 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
     // Destroy whisper session and downstream connection(s)
     destroy_session(call_id);
     std::cout << "🎧 TCP audio handler ended for call " << call_id << std::endl;
-    log_session_stats();
+    // log_session_stats();  // suppressed to reduce console spam
 }
 
 bool StandaloneWhisperService::read_tcp_hello(int socket, std::string& call_id) {

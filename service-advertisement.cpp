@@ -174,7 +174,7 @@ void ServiceAdvertiser::handle_discovery_request(int client_socket) {
         buffer[received] = '\0';
         std::string request(buffer);
         
-        std::cout << "📢 Discovery request: " << request << std::endl;
+        // std::cout << "📢 Discovery request: " << request << std::endl;  // suppressed to reduce console spam
         
         // Send advertisement response
         std::string response = create_advertisement_response();

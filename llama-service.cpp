@@ -403,6 +403,48 @@ bool StandaloneLlamaService::start(int tcp_port) {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     std::cout << "✅ LLaMA model preloaded in " << ms << " ms" << std::endl;
 
+    // Warm-up decode/generate to compile GPU kernels and allocate graphs
+    try {
+        const std::string warm_prompt = std::string("System: You are a helpful assistant.\n") +
+                                        "User: hi\n" +
+                                        "" + default_config_.bot_name + ": ";
+        std::vector<llama_token> toks = tokenize_text(warm_ctx_, warm_prompt, /*add_bos*/ true);
+        if (!toks.empty()) {
+            llama_batch tmp = llama_batch_init(default_config_.n_ctx, 0, 1);
+            // feed prompt tokens
+            tmp.n_tokens = (int)toks.size();
+            for (int i = 0; i < tmp.n_tokens; ++i) {
+                tmp.token[i] = toks[i];
+                tmp.pos[i] = i;
+                tmp.n_seq_id[i] = 1;
+                tmp.seq_id[i][0] = 0;
+                tmp.logits[i] = (i == tmp.n_tokens - 1);
+            }
+            (void)llama_decode(warm_ctx_, tmp);
+
+            // sample a couple of tokens and feed back
+            auto sp = llama_sampler_chain_init(llama_sampler_chain_default_params());
+            llama_sampler_chain_add(sp, llama_sampler_init_greedy());
+            int n_past = (int)toks.size();
+            for (int i = 0; i < 2; ++i) {
+                llama_token id = llama_sampler_sample(sp, warm_ctx_, -1);
+                tmp.n_tokens = 1;
+                tmp.token[0] = id;
+                tmp.pos[0] = n_past;
+                tmp.n_seq_id[0] = 1;
+                tmp.seq_id[0][0] = 0;
+                tmp.logits[0] = true;
+                (void)llama_decode(warm_ctx_, tmp);
+                n_past++;
+            }
+            llama_sampler_free(sp);
+            std::cout << "✅ LLaMA warm-up completed" << std::endl;
+        }
+    } catch (...) {
+        std::cout << "⚠️ LLaMA warm-up threw exception (non-fatal)" << std::endl;
+    }
+
+
     // Now mark running and start server
     running_.store(true);
     server_thread_ = std::thread(&StandaloneLlamaService::run_tcp_server, this, tcp_port);

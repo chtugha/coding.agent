@@ -660,7 +660,7 @@ void SimpleSipClient::sip_listener_loop() {
 
         // Debug: Show listener is active every 30 seconds
         if (loop_count % 30 == 0) {
-            std::cout << "👂 SIP listener active (waiting for packets on port " << sip_listen_port_ << ")..." << std::endl;
+            // std::cout << "👂 SIP listener active (waiting for packets on port " << sip_listen_port_ << ")..." << std::endl;  // suppressed
         }
 
         // Check for IP changes every 60 seconds
