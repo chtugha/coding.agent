@@ -342,6 +342,17 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
         n_past_++;
     }
 
+
+    // Additional safety: trim if model echoed a new user turn without newline or duplicated tag
+    size_t pos_any = response.find(config_.person_name + ":");
+    if (pos_any != std::string::npos) {
+        response = response.substr(0, pos_any);
+    }
+    size_t pos_dupe = response.find(config_.person_name + config_.person_name + ":");
+    if (pos_dupe != std::string::npos) {
+        response = response.substr(0, pos_dupe);
+    }
+
     // Cleanup response
     response = std::regex_replace(response, std::regex("^\\s+"), "");
     response = std::regex_replace(response, std::regex("\\s+$"), "");
@@ -629,6 +640,8 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
         }
 
         if (text == "BYE") {
+            // Proactively close downstream (Piper) on BYE before tearing down session
+            close_output_for_call(call_id);
             break;
         }
 
@@ -645,15 +658,14 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
             if (database_) {
                 database_->append_llama_response(call_id, response);
             }
-            // 2) Send to output endpoint if configured
+            // 2) Send to output endpoint (Piper) if configured
             if (!output_host_.empty() && output_port_ > 0) {
                 if (connect_output_for_call(call_id)) {
                     send_output_text(call_id, response);
                 }
-            }
-            // 3) Also reply over inbound socket for optional consumers (non-whisper route)
-            if (!send_tcp_response(socket, response)) {
-                std::cout << "⚠️ Failed to send response back on inbound socket for call " << call_id << std::endl;
+            } else {
+                // No downstream configured: reply on inbound socket (dev mode)
+                (void)send_tcp_response(socket, response);
             }
         }
     }
