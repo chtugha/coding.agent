@@ -62,3 +62,7 @@ download/
 # Local logs and temp
 server_debug.log
 tmp_coreml/
+
+# Prebuilt Piper binary managed by build script
+third_party/piper-prebuilt/
+
