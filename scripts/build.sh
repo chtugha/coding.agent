@@ -12,6 +12,7 @@ log(){ printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 # Flags and options
 WITH_DEPS="auto"   # auto|0|1  -> auto builds deps if missing
 WITH_PIPER=1        # build libpiper by default (we intelligently detect ONNXRuntime)
+WITH_PIPER_PREBUILT="auto" # auto|0|1 -> manage/download prebuilt Piper binary for runtime (macOS arm64)
 FORCE_DEPS=0        # 1 to rebuild deps even if present
 ONNXRUNTIME_DIR_ENV="${ONNXRUNTIME_DIR:-}"
 ONNXRUNTIME_DIR_OPT=""
@@ -19,13 +20,15 @@ ONNXRUNTIME_DIR_OPT=""
 print_help(){ cat <<USAGE
 Usage: scripts/build.sh [options]
 Options:
-  --with-deps          Build whisper-cpp and llama-cpp if missing (default: auto)
-  --no-deps            Do not attempt to build third-party dependencies
-  --with-piper         Build libpiper (default)
-  --no-piper           Skip building libpiper
-  --force-deps         Force rebuild of third-party dependencies
-  --onnxruntime-dir P  Use an existing ONNX Runtime installation at directory P (must have include/ and lib/)
-  -h, --help           Show this help
+  --with-deps              Build whisper-cpp and llama-cpp if missing (default: auto)
+  --no-deps                Do not attempt to build third-party dependencies
+  --with-piper             Build libpiper (default)
+  --no-piper               Skip building libpiper
+  --with-prebuilt-piper    Ensure latest prebuilt Piper binary is downloaded (default: auto on macOS arm64)
+  --no-prebuilt-piper      Skip prebuilt Piper binary management
+  --force-deps             Force rebuild of third-party dependencies
+  --onnxruntime-dir P      Use an existing ONNX Runtime installation at directory P (must have include/ and lib/)
+  -h, --help               Show this help
 USAGE
 }
 
@@ -36,6 +39,8 @@ while [[ $# -gt 0 ]]; do
     --no-deps)   WITH_DEPS=0; shift ;;
     --with-piper) WITH_PIPER=1; shift ;;
     --no-piper)   WITH_PIPER=0; shift ;;
+    --with-prebuilt-piper) WITH_PIPER_PREBUILT=1; shift ;;
+    --no-prebuilt-piper)   WITH_PIPER_PREBUILT=0; shift ;;
     --force-deps) FORCE_DEPS=1; shift ;;
     --onnxruntime-dir)
       ONNXRUNTIME_DIR_OPT="$2"; shift 2 ;;
@@ -148,8 +153,91 @@ build_piper(){
   else
     cmake -S "$ROOT_DIR/libpiper" -B "$ROOT_DIR/libpiper/build" -DCMAKE_BUILD_TYPE=Release
   fi
+
+
   log "Building libpiper..."
   cmake --build "$ROOT_DIR/libpiper/build" --config Release -j 4
+}
+# --- Prebuilt Piper management (macOS arm64) ---
+ensure_prebuilt_piper(){
+  local os uname_m asset_name api_url latest_tag asset_url tmp tgz out_dir bin_dir version_file
+  os="$(uname -s)"; uname_m="$(uname -m)"
+  if [[ "$os" != "Darwin" || "$uname_m" != "arm64" ]]; then
+    log "Prebuilt Piper management skipped (platform: $os/$uname_m)"
+    return 0
+  fi
+
+  # Allow override to force skip
+  if [[ "$WITH_PIPER_PREBUILT" = "0" ]]; then
+    log "Skipping prebuilt Piper per --no-prebuilt-piper"
+    return 0
+  fi
+
+
+  asset_name="piper_macos_aarch64.tar.gz"
+  api_url="https://api.github.com/repos/rhasspy/piper/releases/latest"
+  bin_dir="$ROOT_DIR/bin"
+  out_dir="$ROOT_DIR/third_party/piper-prebuilt"
+  version_file="$out_dir/version.txt"
+  mkdir -p "$out_dir" "$bin_dir"
+
+  # Discover latest release tag and asset URL
+  latest_tag="$(curl -sL "$api_url" | sed -n 's/.*"tag_name"\s*:\s*"\([^"]\+\)".*/\1/p' | head -n1)"
+  asset_url="$(curl -sL "$api_url" | awk -v n="$asset_name" '
+    BEGIN{RS="},"; FS="\n"}
+    $0 ~ /"name"\s*:\s*""n""/ {
+      if ($0 ~ /browser_download_url/) {
+        match($0, /"browser_download_url"\s*:\s*"([^"]+)"/, a);
+        print a[1];
+      }
+    }' | head -n1)"
+
+  # Fallback to known release if API rate-limited or asset not found
+  if [[ -z "$latest_tag" || -z "$asset_url" ]]; then
+    latest_tag="2023.11.14-2"
+    asset_url="https://github.com/rhasspy/piper/releases/download/${latest_tag}/${asset_name}"
+    log "GitHub API unavailable; falling back to Piper $latest_tag"
+  else
+    log "Latest Piper release: $latest_tag"
+  fi
+
+  # Skip if up-to-date and binary present
+  if [[ -f "$out_dir/piper" && -f "$version_file" ]] && grep -q "$latest_tag" "$version_file"; then
+    cp -f "$out_dir/piper" "$bin_dir/piper-prebuilt" 2>/dev/null || true
+    chmod +x "$bin_dir/piper-prebuilt" || true
+    log "Prebuilt Piper already up-to-date ($latest_tag)"
+    return 0
+  fi
+
+  tmp="$(mktemp -d)"; tgz="$tmp/piper.tar.gz"
+  log "Downloading prebuilt Piper: $asset_url"
+  if ! curl -L "$asset_url" -o "$tgz"; then
+    log "ERROR: Failed to download prebuilt Piper"
+    rm -rf "$tmp"
+    return 1
+  fi
+  log "Extracting prebuilt Piper..."
+  tar -xzf "$tgz" -C "$tmp" || { log "ERROR: Extract failed"; rm -rf "$tmp"; return 1; }
+  # Find the binary named 'piper' in extracted directory
+  local extracted_bin
+  extracted_bin="$(find "$tmp" -type f -name piper -perm +111 2>/dev/null | head -n1)"
+  if [[ -z "$extracted_bin" ]]; then
+    # Try common path
+    extracted_bin="$(find "$tmp" -type f -name piper 2>/dev/null | head -n1)"
+  fi
+  if [[ -z "$extracted_bin" ]]; then
+    log "ERROR: Could not locate 'piper' binary in archive"
+    rm -rf "$tmp"
+    return 1
+  fi
+  mkdir -p "$out_dir"
+  cp -f "$extracted_bin" "$out_dir/piper"
+  chmod +x "$out_dir/piper"
+  echo "$latest_tag" > "$version_file"
+  cp -f "$out_dir/piper" "$bin_dir/piper-prebuilt"
+  chmod +x "$bin_dir/piper-prebuilt"
+  rm -rf "$tmp"
+  log "Installed prebuilt Piper $latest_tag to $out_dir and $bin_dir/piper-prebuilt"
 }
 
 # --- Dependency build policy ---
@@ -168,6 +256,9 @@ if [[ "$WITH_PIPER" = 1 ]]; then
 fi
 
 # Verify artifacts exist
+# Ensure prebuilt Piper binary is available (macOS arm64 only; safe no-op elsewhere)
+ensure_prebuilt_piper || true
+
 if [[ ! -f "$WHISPER_LIB" ]]; then
   log "ERROR: libwhisper not found at $WHISPER_LIB"; exit 1
 fi
