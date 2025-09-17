@@ -327,6 +327,12 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
             response = response.substr(0, pos);
             break;
         }
+        // Prefer low-latency replies: if we completed a sentence and have some content, stop early
+        if (response.size() >= 80 && (token_text.find('.') != std::string::npos ||
+                                      token_text.find('!') != std::string::npos ||
+                                      token_text.find('?') != std::string::npos)) {
+            break;
+        }
 
         // Feed the generated token back
         batch_->n_tokens = 1;

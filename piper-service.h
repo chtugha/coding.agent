@@ -23,7 +23,7 @@ struct PiperSessionConfig {
     std::string config_path = "";  // Auto-generated from model_path + .json
     std::string espeak_data_path = "espeak-ng-data";
     int speaker_id = 0;
-    float length_scale = 1.0f;
+    float length_scale = 0.90f; // slightly faster speech for low latency
     float noise_scale = 0.667f;
     float noise_w_scale = 0.8f;
     bool verbose = false;

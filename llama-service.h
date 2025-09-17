@@ -26,7 +26,7 @@ struct LlamaSessionConfig {
     int n_threads = 4;
     int n_ctx = 2048;
     int n_gpu_layers = 999;
-    int max_tokens = 512;
+    int max_tokens = 64; // cap assistant response for low latency TTS
     float temperature = 0.3f;
     float top_p = 0.8f;
     int top_k = 5;
