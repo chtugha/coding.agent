@@ -4,9 +4,12 @@
 
 #include "database.h"
 #include "audio-processor-interface.h"
-#include "audio-processor-service.h"
+
+#include "shmem_audio_channel.h"
 #include <iostream>
 #include <unordered_map>
+#include <fstream>
+#include <atomic>
 #include <chrono>
 #include <signal.h>
 #include <thread>
@@ -26,6 +29,12 @@
 #include <ctime>
 #include <openssl/evp.h>
 #include <openssl/md5.h>
+
+#include <spawn.h>
+#include <sys/wait.h>
+#include <mach-o/dyld.h>
+#include <limits.h>
+extern char **environ;
 
 
 // Simple SIP client configuration
@@ -78,8 +87,128 @@ std::string calculate_md5(const std::string& input) {
     return ss.str();
 }
 
-// Forward declaration
-class AudioProcessorService;
+
+// G.711 codec conversion using direct lookup tables (ITU-T G.711)
+// Direct table conversion avoids double quantization errors from μ-law→linear→A-law
+
+// Direct A-law to μ-law conversion table (ITU-T G.711) - avoids double quantization
+static const uint8_t alaw_to_ulaw_table[256] = {
+    42, 43, 40, 41, 46, 47, 44, 45, 34, 35, 32, 33, 38, 39, 36, 37,
+    58, 59, 56, 57, 62, 63, 60, 61, 50, 51, 48, 49, 54, 55, 52, 53,
+    10, 11,  8,  9, 14, 15, 12, 13,  2,  3,  0,  1,  6,  7,  4,  5,
+    26, 27, 24, 25, 30, 31, 28, 29, 18, 19, 16, 17, 22, 23, 20, 21,
+   106,107,104,105,110,111,108,109, 98, 99, 96, 97,102,103,100,101,
+   122,123,120,121,126,127,124,125,114,115,112,113,118,119,116,117,
+    74, 75, 72, 73, 78, 79, 76, 77, 66, 67, 64, 65, 70, 71, 68, 69,
+    90, 91, 88, 89, 94, 95, 92, 93, 82, 83, 80, 81, 86, 87, 84, 85,
+   170,171,168,169,174,175,172,173,162,163,160,161,166,167,164,165,
+   186,187,184,185,190,191,188,189,178,179,176,177,182,183,180,181,
+   138,139,136,137,142,143,140,141,130,131,128,129,134,135,132,133,
+   154,155,152,153,158,159,156,157,146,147,144,145,150,151,148,149,
+   234,235,232,233,238,239,236,237,226,227,224,225,230,231,228,229,
+   250,251,248,249,254,255,252,253,242,243,240,241,246,247,244,245,
+   202,203,200,201,206,207,204,205,194,195,192,193,198,199,196,197,
+   218,219,216,217,222,223,220,221,210,211,208,209,214,215,212,213
+};
+
+static std::vector<uint8_t> convert_alaw_to_ulaw(const std::vector<uint8_t>& in_alaw) {
+    std::vector<uint8_t> out_ulaw;
+    out_ulaw.reserve(in_alaw.size());
+    for (uint8_t a : in_alaw) {
+        out_ulaw.push_back(alaw_to_ulaw_table[a]);
+    }
+    return out_ulaw;
+}
+
+
+// Direct μ-law to A-law conversion table (ITU-T G.711) - avoids double quantization
+static const uint8_t ulaw_to_alaw_table[256] = {
+    42, 43, 40, 41, 46, 47, 44, 45, 34, 35, 32, 33, 38, 39, 36, 37,
+    58, 59, 56, 57, 62, 63, 60, 61, 50, 51, 48, 49, 54, 55, 52, 53,
+    10, 11,  8,  9, 14, 15, 12, 13,  2,  3,  0,  1,  6,  7,  4,  5,
+    26, 27, 24, 25, 30, 31, 28, 29, 18, 19, 16, 17, 22, 23, 20, 21,
+   106,107,104,105,110,111,108,109, 98, 99, 96, 97,102,103,100,101,
+   122,123,120,121,126,127,124,125,114,115,112,113,118,119,116,117,
+    74, 75, 72, 73, 78, 79, 76, 77, 66, 67, 64, 65, 70, 71, 68, 69,
+    90, 91, 88, 89, 94, 95, 92, 93, 82, 83, 80, 81, 86, 87, 84, 85,
+   170,171,168,169,174,175,172,173,162,163,160,161,166,167,164,165,
+   186,187,184,185,190,191,188,189,178,179,176,177,182,183,180,181,
+   138,139,136,137,142,143,140,141,130,131,128,129,134,135,132,133,
+   154,155,152,153,158,159,156,157,146,147,144,145,150,151,148,149,
+   234,235,232,233,238,239,236,237,226,227,224,225,230,231,228,229,
+   250,251,248,249,254,255,252,253,242,243,240,241,246,247,244,245,
+   202,203,200,201,206,207,204,205,194,195,192,193,198,199,196,197,
+   218,219,216,217,222,223,220,221,210,211,208,209,214,215,212,213
+};
+
+static std::vector<uint8_t> convert_ulaw_to_alaw(const std::vector<uint8_t>& in_ulaw) {
+    std::vector<uint8_t> out_alaw;
+    out_alaw.reserve(in_ulaw.size());
+    for (uint8_t u : in_ulaw) {
+        out_alaw.push_back(ulaw_to_alaw_table[u]);
+    }
+    return out_alaw;
+}
+
+// Load μ-law mono 8kHz WAV data as raw bytes (for silence/testing)
+static std::vector<uint8_t> load_ulaw_wav_bytes(const std::string& path) {
+    std::vector<uint8_t> data;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return data;
+
+    auto read_u32 = [&](uint32_t& v){ f.read(reinterpret_cast<char*>(&v), 4); return bool(f); };
+    auto read_u16 = [&](uint16_t& v){ f.read(reinterpret_cast<char*>(&v), 2); return bool(f); };
+
+    char riff[4]; f.read(riff, 4); if (strncmp(riff, "RIFF", 4) != 0) return {};
+    uint32_t overall_size; if (!read_u32(overall_size)) return {};
+    char wave[4]; f.read(wave, 4); if (strncmp(wave, "WAVE", 4) != 0) return {};
+
+    uint16_t audio_format = 0, num_channels = 0, bits_per_sample = 0;
+    uint32_t sample_rate = 0;
+    bool have_fmt = false;
+    bool have_data = false;
+    uint32_t data_size = 0;
+    std::streampos data_pos = 0;
+
+    while (f && (!have_fmt || !have_data)) {
+        char chunk_id[4]; if (!f.read(chunk_id, 4)) break;
+        uint32_t chunk_size; if (!read_u32(chunk_size)) break;
+        if (strncmp(chunk_id, "fmt ", 4) == 0) {
+            if (!read_u16(audio_format)) break; // 1=PCM, 6=A-law, 7=μ-law
+            if (!read_u16(num_channels)) break;
+            if (!read_u32(sample_rate)) break;
+            uint32_t byte_rate; if (!read_u32(byte_rate)) break;
+            uint16_t block_align; if (!read_u16(block_align)) break;
+            if (!read_u16(bits_per_sample)) break;
+            // skip any extra fmt bytes
+            if (chunk_size > 16) f.seekg(chunk_size - 16, std::ios::cur);
+            have_fmt = true;
+        } else if (strncmp(chunk_id, "data", 4) == 0) {
+            data_size = chunk_size;
+            data_pos = f.tellg();
+            f.seekg(chunk_size, std::ios::cur);
+            have_data = true;
+        } else {
+            f.seekg(chunk_size, std::ios::cur);
+        }
+    }
+
+    if (!have_fmt || !have_data) return {};
+    if (!(audio_format == 7 && num_channels == 1 && sample_rate == 8000 && bits_per_sample == 8)) {
+        // Only μ-law mono 8kHz 8-bit is supported for simplicity
+        return {};
+    }
+
+    data.resize(data_size);
+    f.clear();
+    f.seekg(data_pos);
+    f.read(reinterpret_cast<char*>(data.data()), data_size);
+    if (!f) return {};
+    return data;
+}
+
+
+// Forward declaration removed - using split-processor service
 
 class SimpleSipClient {
 public:
@@ -108,8 +237,7 @@ public:
     void end_call(const std::string& call_id);
 
     // Audio streaming (sessionless)
-    void process_rtp_audio(const std::string& call_id, const RTPAudioPacket& packet);
-    void stream_audio_from_piper(const std::vector<uint8_t>& audio_data);
+    void stream_audio_from_piper(const std::string& call_id, const std::vector<uint8_t>& audio_data);
     void send_rtp_packets_to_pbx(const std::string& call_id, const std::vector<uint8_t>& g711_data, int local_rtp_port);
     void send_rtp_packets_to_pbx_sessionless(const std::vector<uint8_t>& g711_data, int local_rtp_port);
     void send_g711_as_rtp_packets(int rtp_sock, const std::vector<uint8_t>& g711_data,
@@ -120,8 +248,10 @@ public:
     int get_actual_sip_port();
     void send_bye_response(const std::string& call_id, const std::string& from, const std::string& to,
                           const std::string& via, int cseq, const struct sockaddr_in& dest_addr);
-    void send_rtp_audio(const std::string& call_id, const std::vector<uint8_t>& audio_data,
-                       int local_rtp_port, const std::string& dest_ip, int dest_port);
+
+    // Outbound scheduler
+    void start_outbound_stream_for_call(const std::string& call_id, int local_rtp_port);
+
 
     // Network configuration
     std::string detect_local_ip();
@@ -141,9 +271,36 @@ private:
     std::vector<std::thread> rtp_threads_;
     std::mutex rtp_threads_mutex_;
 
-    // Per-line audio processors (simple)
-    std::unordered_map<int, std::unique_ptr<AudioProcessorService>> line_audio_processors_;
-    std::mutex processors_mutex_;
+    // Shared memory channels per call
+
+    // Child process management for audio processors
+    std::unordered_map<std::string, pid_t> inbound_proc_pids_;
+    std::unordered_map<std::string, pid_t> outbound_proc_pids_;
+
+    // Process helpers
+    std::string get_executable_dir();
+    bool spawn_processor(const std::string& exe_path, const std::vector<std::string>& args, pid_t& out_pid);
+    void launch_audio_processors_for_call(const std::string& call_id, int call_num_id);
+    void terminate_audio_processors_for_call(const std::string& call_id);
+
+    std::unordered_map<std::string, std::shared_ptr<ShmAudioChannel>> inbound_channels_;  // SIP -> InboundProc (producer)
+    std::unordered_map<std::string, std::shared_ptr<ShmAudioChannel>> outbound_channels_; // OutboundProc -> SIP (consumer)
+    std::unordered_map<std::string, std::thread> outbound_threads_;
+    std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> outbound_running_;
+    // Processor monitor per call
+    std::unordered_map<std::string, std::thread> proc_monitor_threads_;
+    std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> proc_monitor_running_;
+    std::unordered_map<std::string, int> inbound_backoff_ms_;
+    std::unordered_map<std::string, int> outbound_backoff_ms_;
+
+    void start_processor_monitor_for_call(const std::string& call_id, int call_num_id);
+    void stop_processor_monitor_for_call(const std::string& call_id);
+
+    std::mutex shmem_mutex_;
+
+    // Current active call context (sessionless simple)
+    std::string current_call_id_;
+    int current_call_num_id_ = 0;
 
     // Sessionless audio routing
     std::unordered_map<std::string, int> call_id_to_rtp_port_; // call_id -> rtp_port (temporary)
@@ -152,9 +309,22 @@ private:
     // RTP transmission state
     std::unordered_map<std::string, uint16_t> rtp_sequence_; // call_id -> sequence number
     std::unordered_map<std::string, uint32_t> rtp_timestamp_; // call_id -> timestamp
+    std::unordered_map<std::string, uint32_t> rtp_ssrc_;      // call_id -> SSRC (randomized per call)
     std::unordered_map<std::string, std::pair<std::string, int>> rtp_destinations_; // call_id -> (ip, port)
     std::unordered_map<int, int> rtp_port_to_socket_; // rtp_port -> socket_fd (for symmetric RTP)
+    std::unordered_map<std::string, int> rtp_selected_pt_; // call_id -> payload type (0=PCMU, 8=PCMA)
     std::mutex rtp_state_mutex_;
+
+    // Outbound TTS de-dup (drop identical payloads within a short window)
+    uint64_t last_tts_hash_ = 0;
+    size_t last_tts_size_ = 0;
+    std::chrono::steady_clock::time_point last_tts_time_;
+    std::mutex tts_dedup_mutex_;
+
+    // Optional WAV-based silence source for testing
+    std::vector<uint8_t> silence_wav_;
+    size_t silence_wav_pos_ = 0;
+
 
     // SIP networking
     int sip_listen_socket_;
@@ -190,7 +360,6 @@ private:
 
     // Main loops
     void sip_management_loop();
-    void sip_message_listener();
     void connection_monitor_loop();
 
     // SIP line connection management
@@ -354,6 +523,32 @@ SimpleSipClient::SimpleSipClient() : database_(nullptr), running_(false),
                                    sip_listen_socket_(-1), sip_listen_port_(0), local_ip_("") {
     // Auto-detect local IP on startup
     update_local_ip();
+    // Optional: load μ-law WAV for silence/testing
+    // Priority 1: auto-detect file next to the binary: SIP_SILENCE_WAV.wav
+    {
+        std::string dir = get_executable_dir();
+        std::string auto_wav = dir + "/SIP_SILENCE_WAV.wav";
+        std::ifstream test(auto_wav, std::ios::binary);
+        if (test.good()) {
+            silence_wav_ = load_ulaw_wav_bytes(auto_wav);
+            if (!silence_wav_.empty()) {
+                std::cout << "🎧 Loaded silence WAV (μ-law 8kHz): " << auto_wav << ", bytes=" << silence_wav_.size() << std::endl;
+            } else {
+                std::cout << "⚠️ Found SIP_SILENCE_WAV.wav but failed to load or unsupported format: " << auto_wav << std::endl;
+            }
+        } else {
+            // Priority 2: environment variable (legacy support)
+            const char* wav_path = std::getenv("SIP_SILENCE_WAV");
+            if (wav_path && *wav_path) {
+                silence_wav_ = load_ulaw_wav_bytes(wav_path);
+                if (!silence_wav_.empty()) {
+                    std::cout << "🎧 Loaded silence WAV (μ-law 8kHz): " << wav_path << ", bytes=" << silence_wav_.size() << std::endl;
+                } else {
+                    std::cout << "⚠️ Failed to load silence WAV or unsupported format: " << wav_path << std::endl;
+                }
+            }
+        }
+    }
 }
 
 SimpleSipClient::~SimpleSipClient() {
@@ -394,55 +589,9 @@ bool SimpleSipClient::init(Database* database, int specific_line_id) {
 }
 
 bool SimpleSipClient::init_audio_processors() {
-    // Optional: Try to create audio processors for enabled lines
-    // If this fails, SIP client will still work but drop audio
-
-    if (!database_) {
-        std::cout << "⚠️ No database available, audio processors disabled" << std::endl;
-        return true; // Still allow SIP client to run
-    }
-
-    auto sip_lines = database_->get_all_sip_lines();
-
-    for (const auto& line : sip_lines) {
-        if (line.enabled) {
-            try {
-                // Create audio processor for this line
-                auto audio_processor = AudioProcessorServiceFactory::create();
-                audio_processor->set_database(database_);
-
-                // Start the audio processor (but it will sleep until activated)
-                if (audio_processor->start(8083 + line.line_id)) {
-                    // Set up connection callback for outgoing audio (sessionless)
-                    audio_processor->set_sip_client_callback(
-                        [this](const std::vector<uint8_t>& audio_data) {
-                            this->stream_audio_from_piper(audio_data);
-                        }
-                    );
-
-                    // Connect database for system speed configuration
-                    audio_processor->set_database(database_);
-
-                    line_audio_processors_[line.line_id] = std::move(audio_processor);
-                    std::cout << "✅ Audio processor created for SIP line " << line.line_id << " (database connected)" << std::endl;
-                } else {
-                    std::cout << "⚠️ Failed to start audio processor for SIP line " << line.line_id
-                              << " (audio will be dropped)" << std::endl;
-                }
-            } catch (const std::exception& e) {
-                std::cout << "⚠️ Exception creating audio processor for line " << line.line_id
-                          << ": " << e.what() << " (audio will be dropped)" << std::endl;
-            }
-        }
-    }
-
-    if (line_audio_processors_.empty()) {
-        std::cout << "⚠️ No audio processors available - SIP client will run but drop all audio" << std::endl;
-    } else {
-        std::cout << "✅ Initialized " << line_audio_processors_.size() << " audio processors" << std::endl;
-    }
-
-    return true; // Always return true - SIP client can run without audio processors
+    // Using shared-memory processors; no in-process processors to initialize
+    std::cout << "🧠 Using shared-memory audio processors (no in-process processors)" << std::endl;
+    return true;
 }
 
 
@@ -610,6 +759,13 @@ void SimpleSipClient::setup_rtp_listener(int rtp_port) {
                     uint32_t timestamp = (rtp_data[4] << 24) | (rtp_data[5] << 16) |
                                        (rtp_data[6] << 8) | rtp_data[7];
 
+                    // On first parsed RTP, mirror PT for outbound sessionless stream if it is PCMU(0) or PCMA(8)
+                    if (packet_count == 1 && (payload_type == 0 || payload_type == 8)) {
+                        std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+                        rtp_selected_pt_["default"] = payload_type;
+                        std::cout << "🎯 Selected outbound RTP PT based on inbound: " << (int)payload_type << (payload_type==0?" (PCMU)":" (PCMA)") << std::endl;
+                    }
+
                     // Extract audio payload (skip 12-byte RTP header)
                     std::vector<uint8_t> audio_payload(rtp_data + 12, rtp_data + received);
 
@@ -620,15 +776,20 @@ void SimpleSipClient::setup_rtp_listener(int rtp_port) {
                     route_rtp_to_processor(packet);
                 }
             } else if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                // Real error (not timeout)
+                // Transient UDP error (not timeout) — keep socket alive and continue
                 if (running_) {
-                    std::cout << "❌ RTP receiver error on port " << rtp_port << ": " << strerror(errno) << std::endl;
+                    std::cout << "❌ RTP receiver error on port " << rtp_port << ": " << strerror(errno) << " — continuing" << std::endl;
                 }
-                break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
             }
             // received == 0 or timeout - continue loop to check running_ flag
         }
 
+        {
+            std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+            rtp_port_to_socket_.erase(rtp_port);
+        }
         close(rtp_sock);
         std::cout << "🔌 RTP receiver thread ended for port " << rtp_port << std::endl;
         });
@@ -889,14 +1050,16 @@ void SimpleSipClient::send_sip_response(int code, const std::string& reason, con
         }
 
         // Add SDP for audio with DTMF support (RFC 4733 compliant)
+        // Offer both PCMU(0) and PCMA(8) to match PBX preference
         std::string sdp =
             "v=0\r\n"
             "o=whisper 123456 654321 IN IP4 " + local_ip_ + "\r\n"
             "s=Whisper Talk Session\r\n"
             "c=IN IP4 " + local_ip_ + "\r\n"
             "t=0 0\r\n"
-            "m=audio " + std::to_string(rtp_port) + " RTP/AVP 0 101\r\n"
+            "m=audio " + std::to_string(rtp_port) + " RTP/AVP 0 8 101\r\n"
             "a=rtpmap:0 PCMU/8000\r\n"
+            "a=rtpmap:8 PCMA/8000\r\n"
             "a=rtpmap:101 telephone-event/8000\r\n"
             "a=fmtp:101 0-15\r\n"
             "a=sendrecv\r\n";
@@ -989,16 +1152,8 @@ void SimpleSipClient::handle_bye(const std::string& message, const struct sockad
         database_->end_call(call_id);
     }
 
-    // Deactivate audio processor (sessionless)
-    int line_id = (specific_line_id_ != -1) ? specific_line_id_ : 1;
-    {
-        std::lock_guard<std::mutex> proc_lock(processors_mutex_);
-        auto proc_it = line_audio_processors_.find(line_id);
-        if (proc_it != line_audio_processors_.end() && proc_it->second) {
-            proc_it->second->deactivate_after_call();
-            std::cout << "😴 Audio processor deactivated for line " << line_id << std::endl;
-        }
-    }
+    // SHM-based cleanup for this call
+    end_call(call_id);
 
     std::cout << "✅ BYE processed successfully (sessionless)" << std::endl;
 }
@@ -1220,43 +1375,40 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
     std::string call_num_id_str = std::to_string(call_num_id);
 
 
-    // Step 3: Activate audio processor for this line (no session needed)
-    std::cout << "🎵 ACTIVATING audio processor for line " << line_id << " (sessionless)" << std::endl;
-
-    // No session registration needed - direct audio processor activation
-
-    // ACTIVATE audio processor for this call
+    // Step 3: Set up shared-memory channels for this call
     {
-        std::lock_guard<std::mutex> lock(processors_mutex_);
-        auto it = line_audio_processors_.find(line_id);
-        if (it == line_audio_processors_.end()) {
-            // Lazy-create an audio processor for this line on demand
-            try {
-                auto ap = AudioProcessorServiceFactory::create();
-                ap->set_database(database_);
-                if (ap->start(8083 + line_id)) {
-                    ap->set_sip_client_callback([this](const std::vector<uint8_t>& audio_data) {
-                        this->stream_audio_from_piper(audio_data);
-                    });
-                    line_audio_processors_[line_id] = std::move(ap);
-                    std::cout << "✅ Audio processor created on-demand for line " << line_id << std::endl;
-                    it = line_audio_processors_.find(line_id);
-                } else {
-                    std::cout << "❌ Failed to start audio processor on-demand for line " << line_id << std::endl;
-                }
-            } catch (const std::exception& e) {
-                std::cout << "❌ Exception creating audio processor on-demand for line " << line_id
-                          << ": " << e.what() << std::endl;
-            }
-        }
-        if (it != line_audio_processors_.end() && it->second) {
-            // Activate with numeric call id for TCP connections and port mapping
-            it->second->activate_for_call(call_num_id_str);
-            std::cout << "✅ Audio processor activated for line " << line_id << " (SIP Call-ID: " << call_id << ", call_num_id: " << call_num_id_str << ")" << std::endl;
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        current_call_id_ = call_id;
+        current_call_num_id_ = call_num_id;
+
+        // Inbound channel: SIP -> InboundAudioProcessor (producer)
+        auto in_ch = std::make_shared<ShmAudioChannel>();
+        std::string in_name = "/ap_in_" + std::to_string(call_num_id);
+        if (in_ch->create_or_open(in_name, static_cast<uint32_t>(call_num_id), 2048, 512, /*create=*/true)) {
+            in_ch->set_role_producer(true);
+            inbound_channels_[call_id] = in_ch;
+            std::cout << "✅ Inbound SHM ready: " << in_name << std::endl;
         } else {
-            std::cout << "❌ No audio processor available for line " << line_id << " (audio will be dropped)" << std::endl;
+            std::cout << "❌ Failed to open inbound SHM: " << in_name << std::endl;
+        }
+
+        // Outbound channel: OutboundAudioProcessor -> SIP (consumer)
+        auto out_ch = std::make_shared<ShmAudioChannel>();
+        std::string out_name = "/ap_out_" + std::to_string(call_num_id);
+        if (out_ch->create_or_open(out_name, static_cast<uint32_t>(call_num_id), 2048, 512, /*create=*/true)) {
+            out_ch->set_role_consumer(true);
+            outbound_channels_[call_id] = out_ch;
+            std::cout << "✅ Outbound SHM ready: " << out_name << std::endl;
+        } else {
+            std::cout << "❌ Failed to open outbound SHM: " << out_name << std::endl;
         }
     }
+
+    // Auto-launch standalone audio processors for this call (sessionless) - OUTSIDE the lock
+    launch_audio_processors_for_call(call_id, call_num_id);
+
+    // Start monitor to auto-relaunch processors on crash - OUTSIDE the lock
+    start_processor_monitor_for_call(call_id, call_num_id);
 
     // Sessionless: Simple RTP port registration using call_id
     if (!call_id.empty()) {
@@ -1272,14 +1424,11 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
             }
         }
 
-        // Start RTP keepalive (sessionless)
+        // Start outbound stream scheduler for this call
         if (rtp_port > 0) {
-            std::lock_guard<std::mutex> lock(rtp_threads_mutex_);
-            rtp_threads_.emplace_back([call_id]() {
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-                std::cout << "🎵 Starting RTP keepalive for call " << call_id << std::endl;
-                // TODO: implement sessionless RTP keepalive
-            });
+
+
+            start_outbound_stream_for_call(call_id, rtp_port);
         }
     }
 
@@ -1296,30 +1445,53 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
 void SimpleSipClient::end_call(const std::string& call_id) {
     std::cout << "📞 Ending call: " << call_id << " (sessionless)" << std::endl;
 
-    // Simple cleanup - no session management needed
-    int line_id = (specific_line_id_ != -1) ? specific_line_id_ : 1;
+    // Stop monitor and terminate per-call audio processor child processes
+    stop_processor_monitor_for_call(call_id);
+    terminate_audio_processors_for_call(call_id);
 
     {
-        std::lock_guard<std::mutex> proc_lock(processors_mutex_);
-        auto proc_it = line_audio_processors_.find(line_id);
-        if (proc_it != line_audio_processors_.end()) {
-            // Simple cleanup - no session management
-            std::cout << "✅ Audio processor ready for next call on line " << line_id << std::endl;
-        } else {
-            std::cout << "⚠️ No audio processor found for line " << line_id << std::endl;
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        auto rf = outbound_running_.find(call_id);
+        if (rf != outbound_running_.end() && rf->second) {
+            rf->second->store(false);
+        }
+    }
+    // Join outbound thread outside of lock to avoid deadlock
+    std::thread to_join;
+    {
+
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        auto th = outbound_threads_.find(call_id);
+        if (th != outbound_threads_.end()) {
+            to_join = std::move(th->second);
+            outbound_threads_.erase(th);
+        }
+    }
+    if (to_join.joinable()) to_join.join();
+    {
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        inbound_channels_.erase(call_id);
+        outbound_channels_.erase(call_id);
+        outbound_running_.erase(call_id);
+    }
+
+    // Reset current call context if matching
+    {
+        std::lock_guard<std::mutex> lock(audio_routing_mutex_);
+        if (current_call_id_ == call_id) {
+            current_call_id_.clear();
+            current_call_num_id_ = 0;
         }
     }
 
-    // Simple cleanup - no session management needed
     std::cout << "🧹 Call cleanup complete (sessionless)" << std::endl;
-
     std::cout << "✅ Call ended successfully" << std::endl;
 }
 
 // Removed: process_rtp_audio - replaced with direct sessionless routing
 
-void SimpleSipClient::stream_audio_from_piper(const std::vector<uint8_t>& audio_data) {
-    std::cout << "🔊 Streaming " << audio_data.size() << " bytes of audio from Piper (sessionless)" << std::endl;
+void SimpleSipClient::stream_audio_from_piper(const std::string& call_id, const std::vector<uint8_t>& audio_data) {
+    std::cout << "🔊 Streaming " << audio_data.size() << " bytes of audio from Piper for call " << call_id << std::endl;
 
     // Sessionless: Use current line's RTP port if available
     int rtp_port = -1;
@@ -1338,9 +1510,51 @@ void SimpleSipClient::stream_audio_from_piper(const std::vector<uint8_t>& audio_
         return;
     }
 
-    // SIP client just handles RTP transmission - no audio conversion
-    // The processor already converted Piper audio to G.711 format
-    send_rtp_packets_to_pbx_sessionless(audio_data, rtp_port);
+    // Choose outbound codec/PT based on inbound RTP (mirror 0=PCMU or 8=PCMA)
+    int selected_pt = 0; // default PCMU
+    {
+        std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+        auto it = rtp_selected_pt_.find("default");
+        if (it != rtp_selected_pt_.end() && (it->second == 0 || it->second == 8)) {
+            selected_pt = it->second;
+        }
+    }
+
+    std::vector<uint8_t> out_data;
+    if (selected_pt == 8) {
+        // Convert incoming µ-law to A-law to match PBX expectation
+        out_data = convert_ulaw_to_alaw(audio_data);
+        std::cout << "🎚️ Converted µ-law->A-law for outbound RTP (PT=8)" << std::endl;
+    } else {
+        out_data = audio_data;
+    }
+
+    // De-duplicate: drop identical payloads within 10 seconds window
+    auto fnv1a64 = [](const std::vector<uint8_t>& d) -> uint64_t {
+        uint64_t h = 1469598103934665603ull; // FNV offset basis
+        for (uint8_t b : d) {
+            h ^= (uint64_t)b;
+            h *= 1099511628211ull; // FNV prime
+        }
+        return h;
+    };
+    const uint64_t h = fnv1a64(out_data);
+    {
+        std::lock_guard<std::mutex> lk(tts_dedup_mutex_);
+        auto now = std::chrono::steady_clock::now();
+        if (h == last_tts_hash_ && out_data.size() == last_tts_size_ &&
+            last_tts_time_.time_since_epoch().count() != 0 &&
+            std::chrono::duration_cast<std::chrono::seconds>(now - last_tts_time_).count() < 10) {
+            std::cout << "⚠️ Dropped duplicate TTS payload (same hash/size within 10s)" << std::endl;
+            return;
+        }
+        last_tts_hash_ = h;
+        last_tts_size_ = out_data.size();
+        last_tts_time_ = now;
+    }
+
+    // Send using proper call_id for RTP state management
+    send_rtp_packets_to_pbx(call_id, out_data, rtp_port);
 }
 
 // SIP Line Management Implementation
@@ -1355,6 +1569,210 @@ void SimpleSipClient::load_sip_lines_from_database(bool verbose) {
                       << " @ " << line.server_ip << ":" << line.server_port
                       << " (status: " << line.status << ")" << std::endl;
         }
+    }
+}
+
+
+// ==== Child process helpers: auto-launch/terminate audio processors per call ====
+std::string SimpleSipClient::get_executable_dir() {
+    char buf[PATH_MAX];
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) != 0) {
+        return ".";
+    }
+    char resolved[PATH_MAX];
+    if (!realpath(buf, resolved)) {
+        return ".";
+    }
+    std::string full(resolved);
+    auto pos = full.find_last_of('/');
+    if (pos == std::string::npos) return ".";
+    return full.substr(0, pos);
+}
+
+bool SimpleSipClient::spawn_processor(const std::string& exe_path, const std::vector<std::string>& args, pid_t& out_pid) {
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(exe_path.c_str()));
+    for (const auto& s : args) argv.push_back(const_cast<char*>(s.c_str()));
+    argv.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    int rc = posix_spawn(&out_pid, exe_path.c_str(), &actions, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) {
+        std::cout << "❌ Failed to spawn '" << exe_path << "': " << strerror(rc) << std::endl;
+        return false;
+    }
+    return true;
+}
+
+void SimpleSipClient::launch_audio_processors_for_call(const std::string& call_id, int call_num_id) {
+    // Avoid duplicate launches
+    if (inbound_proc_pids_.count(call_id) || outbound_proc_pids_.count(call_id)) {
+        return;
+    }
+    std::string dir = get_executable_dir();
+    std::string inbound_path = dir + "/inbound-audio-processor";
+    std::string outbound_path = dir + "/outbound-audio-processor";
+
+    std::vector<std::string> args = {"--call-id", std::to_string(call_num_id)};
+
+    pid_t pid;
+    if (spawn_processor(inbound_path, args, pid)) {
+        inbound_proc_pids_[call_id] = pid;
+        std::cout << "🚀 Started inbound-audio-processor (PID " << pid << ") for call " << call_id << std::endl;
+    } else {
+        std::cout << "⚠️ Could not start inbound-audio-processor for call " << call_id << std::endl;
+    }
+    if (spawn_processor(outbound_path, args, pid)) {
+        outbound_proc_pids_[call_id] = pid;
+        std::cout << "🚀 Started outbound-audio-processor (PID " << pid << ") for call " << call_id << std::endl;
+    } else {
+        std::cout << "⚠️ Could not start outbound-audio-processor for call " << call_id << std::endl;
+    }
+}
+
+void SimpleSipClient::terminate_audio_processors_for_call(const std::string& call_id) {
+    auto terminate_one = [&](std::unordered_map<std::string, pid_t>& map, const char* name) {
+        auto it = map.find(call_id);
+        if (it == map.end()) return;
+        pid_t pid = it->second;
+        if (pid > 0) {
+            kill(pid, SIGTERM);
+            // Wait up to ~1s for graceful exit
+            for (int i = 0; i < 20; ++i) {
+                if (waitpid(pid, nullptr, WNOHANG) > 0) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (waitpid(pid, nullptr, WNOHANG) == 0) {
+                kill(pid, SIGKILL);
+                waitpid(pid, nullptr, 0);
+            }
+            std::cout << "🛑 Stopped " << name << " (PID " << pid << ") for call " << call_id << std::endl;
+        }
+        map.erase(it);
+    };
+
+    terminate_one(inbound_proc_pids_, "inbound-audio-processor");
+    terminate_one(outbound_proc_pids_, "outbound-audio-processor");
+}
+
+void SimpleSipClient::start_processor_monitor_for_call(const std::string& call_id, int call_num_id) {
+    {
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        if (proc_monitor_threads_.find(call_id) != proc_monitor_threads_.end()) return;
+        proc_monitor_running_[call_id] = std::make_shared<std::atomic<bool>>(true);
+        if (inbound_backoff_ms_.find(call_id) == inbound_backoff_ms_.end()) inbound_backoff_ms_[call_id] = 250;
+        if (outbound_backoff_ms_.find(call_id) == outbound_backoff_ms_.end()) outbound_backoff_ms_[call_id] = 250;
+    }
+
+    auto running_flag = proc_monitor_running_[call_id];
+
+    proc_monitor_threads_[call_id] = std::thread([this, call_id, call_num_id, running_flag]() {
+        const int backoff_min = 250;
+        const int backoff_max = 5000;
+        while (running_ && running_flag->load()) {
+            // Check inbound processor
+            bool need_respawn_inbound = false;
+            {
+                std::lock_guard<std::mutex> lock(shmem_mutex_);
+                auto pit = inbound_proc_pids_.find(call_id);
+                if (pit != inbound_proc_pids_.end()) {
+                    pid_t pid = pit->second;
+                    int status = 0;
+                    if (pid <= 0 || waitpid(pid, &status, WNOHANG) > 0) {
+                        inbound_proc_pids_.erase(pit);
+                        need_respawn_inbound = true;
+                    }
+                } else {
+                    need_respawn_inbound = true;
+                }
+            }
+            if (need_respawn_inbound) {
+                int delay = inbound_backoff_ms_[call_id];
+                std::cout << "⚠️ inbound-audio-processor not running for call " << call_id
+                          << ", retrying in " << delay << " ms" << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                std::string dir = get_executable_dir();
+                std::string inbound_path = dir + "/inbound-audio-processor";
+                std::vector<std::string> args = {"--call-id", std::to_string(call_num_id)};
+                pid_t newpid;
+                if (spawn_processor(inbound_path, args, newpid)) {
+                    std::lock_guard<std::mutex> l2(shmem_mutex_);
+                    inbound_proc_pids_[call_id] = newpid;
+                    inbound_backoff_ms_[call_id] = backoff_min;
+                    std::cout << "🚀 Relaunched inbound-audio-processor (PID " << newpid << ") for call " << call_id << std::endl;
+                } else {
+                    std::lock_guard<std::mutex> l2(shmem_mutex_);
+                    inbound_backoff_ms_[call_id] = std::min(backoff_max, inbound_backoff_ms_[call_id] * 2);
+                }
+            }
+
+            // Check outbound processor
+            bool need_respawn_outbound = false;
+            {
+                std::lock_guard<std::mutex> lock(shmem_mutex_);
+                auto pit = outbound_proc_pids_.find(call_id);
+                if (pit != outbound_proc_pids_.end()) {
+                    pid_t pid = pit->second;
+                    int status = 0;
+                    if (pid <= 0 || waitpid(pid, &status, WNOHANG) > 0) {
+                        outbound_proc_pids_.erase(pit);
+                        need_respawn_outbound = true;
+                    }
+                } else {
+                    need_respawn_outbound = true;
+                }
+            }
+            if (need_respawn_outbound) {
+                int delay = outbound_backoff_ms_[call_id];
+                std::cout << "⚠️ outbound-audio-processor not running for call " << call_id
+                          << ", retrying in " << delay << " ms" << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                std::string dir = get_executable_dir();
+                std::string outbound_path = dir + "/outbound-audio-processor";
+                std::vector<std::string> args = {"--call-id", std::to_string(call_num_id)};
+                pid_t newpid;
+                if (spawn_processor(outbound_path, args, newpid)) {
+                    std::lock_guard<std::mutex> l2(shmem_mutex_);
+                    outbound_proc_pids_[call_id] = newpid;
+                    outbound_backoff_ms_[call_id] = backoff_min;
+                    std::cout << "🚀 Relaunched outbound-audio-processor (PID " << newpid << ") for call " << call_id << std::endl;
+                } else {
+                    std::lock_guard<std::mutex> l2(shmem_mutex_);
+                    outbound_backoff_ms_[call_id] = std::min(backoff_max, outbound_backoff_ms_[call_id] * 2);
+                }
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        std::cout << "Processor monitor thread exiting for call " << call_id << std::endl;
+    });
+}
+
+void SimpleSipClient::stop_processor_monitor_for_call(const std::string& call_id) {
+    std::shared_ptr<std::atomic<bool>> flag;
+    std::thread to_join;
+    {
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        auto it = proc_monitor_running_.find(call_id);
+        if (it != proc_monitor_running_.end()) {
+            flag = it->second;
+            if (flag) flag->store(false);
+        }
+        auto th = proc_monitor_threads_.find(call_id);
+        if (th != proc_monitor_threads_.end()) {
+            to_join = std::move(th->second);
+            proc_monitor_threads_.erase(th);
+        }
+    }
+    if (to_join.joinable()) to_join.join();
+    {
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        proc_monitor_running_.erase(call_id);
+        inbound_backoff_ms_.erase(call_id);
+        outbound_backoff_ms_.erase(call_id);
     }
 }
 
@@ -2035,35 +2453,49 @@ std::string SimpleSipClient::create_digest_response_with_qop(const std::string& 
 // Removed: session registration functions - using sessionless routing
 
 void SimpleSipClient::route_rtp_to_processor(const RTPAudioPacket& packet) {
-    // Sessionless: Direct routing to audio processor
-    std::lock_guard<std::mutex> lock(processors_mutex_);
-
-    // For single-line mode, use the specific line's processor
-    int line_id = (specific_line_id_ != -1) ? specific_line_id_ : 1;
-    auto proc_it = line_audio_processors_.find(line_id);
-
-    if (proc_it != line_audio_processors_.end() && proc_it->second->is_running()) {
-        // Route directly to processor (no session needed)
-        proc_it->second->process_audio(packet);
+    // Intelligent switch: write to SHM if connected; else drop to /dev/null
+    std::string call_id;
+    {
+        std::lock_guard<std::mutex> lock(audio_routing_mutex_);
+        call_id = current_call_id_.empty() ? std::string("default") : current_call_id_;
     }
-    // else: Drop packet silently (processor not connected)
+
+    std::shared_ptr<ShmAudioChannel> ch;
+    {
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        auto it = inbound_channels_.find(call_id);
+        if (it != inbound_channels_.end()) ch = it->second;
+    }
+
+    if (ch) {
+        // Normalize inbound bytes to -law for SHM so InboundProcessor can assume PT=0
+        if (packet.payload_type == 8) {
+            auto ulaw = convert_alaw_to_ulaw(packet.audio_data);
+            (void)ch->write_frame(ulaw.data(), ulaw.size());
+        } else {
+            (void)ch->write_frame(packet.audio_data.data(), packet.audio_data.size());
+        }
+    }
+    // else: drop silently
 }
 
 void SimpleSipClient::send_rtp_packets_to_pbx(const std::string& call_id, const std::vector<uint8_t>& g711_data, int local_rtp_port) {
-    std::cout << "📤 Sending " << g711_data.size() << " bytes of G.711 audio to PBX for call: " << call_id << std::endl;
-
     // Get destination from captured RTP source address
     std::string dest_ip;
     int dest_port;
 
     {
         std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+        // Try call_id first, then fall back to "default" for sessionless operation
         auto it = rtp_destinations_.find(call_id);
+        if (it == rtp_destinations_.end()) {
+            it = rtp_destinations_.find("default");
+        }
         if (it != rtp_destinations_.end()) {
             dest_ip = it->second.first;
             dest_port = it->second.second;
         } else {
-            std::cout << "❌ No RTP destination found for call: " << call_id << std::endl;
+            // Silently skip until first inbound RTP packet arrives and stores destination
             return;
         }
     }
@@ -2083,6 +2515,29 @@ void SimpleSipClient::send_rtp_packets_to_pbx(const std::string& call_id, const 
         return;
     }
 
+    // Decide outbound payload type (mirror inbound if known)
+    int selected_pt = 0; // 0=PCMU default
+    {
+        std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+        auto it = rtp_selected_pt_.find(call_id);
+        if (it != rtp_selected_pt_.end() && (it->second == 0 || it->second == 8)) {
+            selected_pt = it->second;
+        } else {
+            auto it2 = rtp_selected_pt_.find("default");
+            if (it2 != rtp_selected_pt_.end() && (it2->second == 0 || it2->second == 8)) {
+                selected_pt = it2->second;
+            }
+        }
+    }
+
+    // Convert to match PT if needed: our SHM bytes are μ-law by convention
+    std::vector<uint8_t> out_bytes;
+    if (selected_pt == 8) {
+        out_bytes = convert_ulaw_to_alaw(g711_data);
+    } else {
+        out_bytes = g711_data;
+    }
+
     // Set up destination address
     struct sockaddr_in dest_addr;
     memset(&dest_addr, 0, sizeof(dest_addr));
@@ -2091,78 +2546,48 @@ void SimpleSipClient::send_rtp_packets_to_pbx(const std::string& call_id, const 
     inet_pton(AF_INET, dest_ip.c_str(), &dest_addr.sin_addr);
 
     // Send G.711 data as RTP packets (160 bytes per packet = 20ms)
-    send_g711_as_rtp_packets(rtp_sock, g711_data, dest_addr, call_id);
+    send_g711_as_rtp_packets(rtp_sock, out_bytes, dest_addr, call_id);
 
     // Don't close socket - it's shared with RTP receiver for symmetric RTP
-    std::cout << "🎵 Sent RTP packets from port " << local_rtp_port << " to " << dest_ip << ":" << dest_port << std::endl;
 }
 
 void SimpleSipClient::send_rtp_packets_to_pbx_sessionless(const std::vector<uint8_t>& g711_data, int local_rtp_port) {
-    (void)local_rtp_port; // Unused parameter
-    std::cout << "📤 Sending " << g711_data.size() << " bytes of G.711 audio to PBX (sessionless)" << std::endl;
-
-    // Use first available destination (simplified for sessionless)
-    // Get PBX IP from the first enabled SIP line in database
-    std::string dest_ip = "127.0.0.1";  // Fallback
+    // Use symmetric RTP destination captured from inbound RTP
+    std::string dest_ip;
+    int dest_port = -1;
     {
-        std::lock_guard<std::mutex> lock(sip_lines_mutex_);
-        for (const auto& line : sip_lines_) {
-            if (line.enabled) {
-                dest_ip = line.server_ip;
-                break;
-            }
+        std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+        auto it = rtp_destinations_.find("default");
+        if (it != rtp_destinations_.end()) {
+            dest_ip = it->second.first;
+            dest_port = it->second.second;
         }
     }
-    int dest_port = 5004;  // Default RTP port
-
-    // Create RTP socket
-    int rtp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (rtp_sock < 0) {
-        std::cout << "❌ Failed to create RTP socket" << std::endl;
+    if (dest_ip.empty() || dest_port <= 0) {
         return;
     }
 
-    // Set up destination address
-    struct sockaddr_in dest_addr;
-    memset(&dest_addr, 0, sizeof(dest_addr));
+    // Reuse the existing RTP socket bound for receive (symmetric RTP)
+    int rtp_sock = -1;
+    {
+        std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+        auto it = rtp_port_to_socket_.find(local_rtp_port);
+        if (it != rtp_port_to_socket_.end()) {
+            rtp_sock = it->second;
+        }
+    }
+    if (rtp_sock < 0) {
+        return;
+    }
+
+    // Destination address
+    struct sockaddr_in dest_addr{};
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(dest_port);
     inet_pton(AF_INET, dest_ip.c_str(), &dest_addr.sin_addr);
 
-    // Send G.711 data as RTP packets (simplified - no session tracking)
-    const size_t RTP_PAYLOAD_SIZE = 160; // 160 bytes = 20ms of G.711 audio
-    static uint16_t sequence_num = rand() % 65536;
-    static uint32_t timestamp = rand();
-
-    // Send in chunks
-    for (size_t offset = 0; offset < g711_data.size(); offset += RTP_PAYLOAD_SIZE) {
-        size_t chunk_size = std::min(RTP_PAYLOAD_SIZE, g711_data.size() - offset);
-
-        // Create RTP header (simplified)
-        uint8_t rtp_packet[12 + 160];  // Fixed size: 12 byte header + max 160 byte payload
-        rtp_packet[0] = 0x80; // Version 2, no padding, no extension, no CSRC
-        rtp_packet[1] = 0x00; // PCMU payload type
-        rtp_packet[2] = (sequence_num >> 8) & 0xFF;
-        rtp_packet[3] = sequence_num & 0xFF;
-        rtp_packet[4] = (timestamp >> 24) & 0xFF;
-        rtp_packet[5] = (timestamp >> 16) & 0xFF;
-        rtp_packet[6] = (timestamp >> 8) & 0xFF;
-        rtp_packet[7] = timestamp & 0xFF;
-        // SSRC (bytes 8-11) left as zero
-
-        // Copy payload
-        memcpy(rtp_packet + 12, g711_data.data() + offset, chunk_size);
-
-        // Send packet
-        sendto(rtp_sock, rtp_packet, 12 + chunk_size, 0,
-               (struct sockaddr*)&dest_addr, sizeof(dest_addr));
-
-        sequence_num++;
-        timestamp += 160;
-    }
-
-    close(rtp_sock);
-    std::cout << "🎵 Sent RTP packets (sessionless) to " << dest_ip << ":" << dest_port << std::endl;
+    // Send using the same packetization/timing as call-bound path, keyed by "default"
+    send_g711_as_rtp_packets(rtp_sock, g711_data, dest_addr, "default");
 }
 
 void SimpleSipClient::send_g711_as_rtp_packets(int rtp_sock, const std::vector<uint8_t>& g711_data,
@@ -2183,6 +2608,22 @@ void SimpleSipClient::send_g711_as_rtp_packets(int rtp_sock, const std::vector<u
         timestamp = rtp_timestamp_[call_id];
     }
 
+    // Decide outbound payload type (mirror inbound if known)
+    int payload_type = 0; // 0=PCMU default
+    {
+        std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+        auto it = rtp_selected_pt_.find(call_id);
+        if (it != rtp_selected_pt_.end() && (it->second == 0 || it->second == 8)) {
+            payload_type = it->second;
+        } else {
+            // Fallback to sessionless default if using "default" key
+            auto it2 = rtp_selected_pt_.find("default");
+            if (it2 != rtp_selected_pt_.end() && (it2->second == 0 || it2->second == 8)) {
+                payload_type = it2->second;
+            }
+        }
+    }
+
     // Send G.711 data in 160-byte chunks (20ms packets)
     for (size_t offset = 0; offset < g711_data.size(); offset += RTP_PAYLOAD_SIZE) {
         size_t chunk_size = std::min(RTP_PAYLOAD_SIZE, g711_data.size() - offset);
@@ -2192,17 +2633,32 @@ void SimpleSipClient::send_g711_as_rtp_packets(int rtp_sock, const std::vector<u
 
         // RTP Header (12 bytes)
         rtp_packet[0] = 0x80; // Version=2, Padding=0, Extension=0, CC=0
-        rtp_packet[1] = 0x00; // Marker=0, Payload Type=0 (G.711 μ-law)
+        rtp_packet[1] = (uint8_t)(payload_type & 0x7F); // Marker=0, Payload Type mirrored (0=PCMU, 8=PCMA)
         rtp_packet[2] = (sequence_num >> 8) & 0xFF;
         rtp_packet[3] = sequence_num & 0xFF;
         rtp_packet[4] = (timestamp >> 24) & 0xFF;
         rtp_packet[5] = (timestamp >> 16) & 0xFF;
         rtp_packet[6] = (timestamp >> 8) & 0xFF;
         rtp_packet[7] = timestamp & 0xFF;
-        rtp_packet[8] = 0x12; // SSRC (arbitrary)
-        rtp_packet[9] = 0x34;
-        rtp_packet[10] = 0x56;
-        rtp_packet[11] = 0x78;
+        // SSRC: randomize per call-id the first time
+        uint32_t ssrc;
+        {
+            std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+            auto itss = rtp_ssrc_.find(call_id);
+            if (itss == rtp_ssrc_.end()) {
+                uint32_t rnd = ((uint32_t)rand() << 16) ^ (uint32_t)rand();
+                if (rnd == 0) rnd = 0x12345678; // avoid zero SSRC
+                rtp_ssrc_[call_id] = rnd;
+                ssrc = rnd;
+                std::cout << " SSRC initialized for call " << call_id << ": 0x" << std::hex << ssrc << std::dec << std::endl;
+            } else {
+                ssrc = itss->second;
+            }
+        }
+        rtp_packet[8]  = (uint8_t)((ssrc >> 24) & 0xFF);
+        rtp_packet[9]  = (uint8_t)((ssrc >> 16) & 0xFF);
+        rtp_packet[10] = (uint8_t)((ssrc >> 8) & 0xFF);
+        rtp_packet[11] = (uint8_t)(ssrc & 0xFF);
 
         // Copy G.711 payload
         memcpy(rtp_packet + 12, g711_data.data() + offset, chunk_size);
@@ -2220,8 +2676,8 @@ void SimpleSipClient::send_g711_as_rtp_packets(int rtp_sock, const std::vector<u
         sequence_num++;
         timestamp += TIMESTAMP_INCREMENT;
 
-        // Small delay between packets (20ms)
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        // Minimal pacing to prevent overwhelming the PBX (1ms instead of 20ms)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     // Update call RTP state
@@ -2260,21 +2716,8 @@ void SimpleSipClient::send_rtp_keepalive_packets() {
     }
 
     for (int rtp_port : active_rtp_ports) {
-        // Check if processor is connected for current line
-        int line_id = (specific_line_id_ != -1) ? specific_line_id_ : 1;
-        bool processor_connected = false;
-
-        {
-            std::lock_guard<std::mutex> lock(processors_mutex_);
-            auto proc_it = line_audio_processors_.find(line_id);
-            processor_connected = (proc_it != line_audio_processors_.end() && proc_it->second->is_running());
-        }
-
-        // Send silence if no processor connected
-        if (!processor_connected) {
-            send_silence_rtp_packet_sessionless(rtp_port);
-        }
-        // If processor is connected, it should be generating its own RTP from Piper
+        // Always send a keepalive silence packet; outbound thread will send real audio when available
+        send_silence_rtp_packet_sessionless(rtp_port);
     }
 }
 
@@ -2290,6 +2733,61 @@ int SimpleSipClient::get_actual_sip_port() {
     // Fallback to stored port if getsockname fails
     return sip_listen_port_;
 }
+
+void SimpleSipClient::start_outbound_stream_for_call(const std::string& call_id, int local_rtp_port) {
+    std::shared_ptr<ShmAudioChannel> channel;
+    {
+        std::lock_guard<std::mutex> lock(shmem_mutex_);
+        if (outbound_threads_.find(call_id) != outbound_threads_.end()) return;
+        auto ch_it = outbound_channels_.find(call_id);
+        if (ch_it == outbound_channels_.end()) {
+            std::cout << "WARNING: No outbound SHM channel for call " << call_id << std::endl;
+            return;
+        }
+        channel = ch_it->second;
+        outbound_running_[call_id] = std::make_shared<std::atomic<bool>>(true);
+    }
+
+    auto running_flag = outbound_running_[call_id];
+
+    outbound_threads_[call_id] = std::thread([this, call_id, local_rtp_port, channel, running_flag]() {
+        using namespace std::chrono;
+        const auto packet_interval = milliseconds(20);
+        auto next_time = steady_clock::now();
+        std::vector<uint8_t> frame;
+
+        while (running_ && running_flag->load()) {
+            bool sent = false;
+            if (channel->read_frame(frame)) {
+                if (!frame.empty()) {
+                    // Forward G.711 bytes as RTP to PBX
+                    this->send_rtp_packets_to_pbx(call_id, frame, local_rtp_port);
+                    sent = true;
+                }
+            }
+
+            if (!sent) {
+                // Send 20ms of silence to keep RTP alive
+                std::vector<uint8_t> silence(160, 0xFF); // \u03bc-law silence
+                if (!silence_wav_.empty()) {
+                    // Use WAV content as source; wrap around
+                    silence.resize(160);
+                    for (size_t i = 0; i < 160; ++i) {
+                        silence[i] = silence_wav_[silence_wav_pos_];
+                        silence_wav_pos_ = (silence_wav_pos_ + 1) % silence_wav_.size();
+                    }
+                }
+                this->send_rtp_packets_to_pbx(call_id, silence, local_rtp_port);
+            }
+
+            next_time += packet_interval;
+            std::this_thread::sleep_until(next_time);
+        }
+
+        std::cout << "Outbound stream thread exiting for call " << call_id << std::endl;
+    });
+}
+
 
 void SimpleSipClient::send_bye_response(const std::string& call_id, const std::string& from, const std::string& to,
                                        const std::string& via, int cseq, const struct sockaddr_in& dest_addr) {

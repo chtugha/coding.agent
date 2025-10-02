@@ -20,7 +20,7 @@ class AudioProcessorService {
 public:
     AudioProcessorService();
     ~AudioProcessorService();
-    
+
     // Service lifecycle
     bool start(int port = 8083);
     void stop();
@@ -30,18 +30,18 @@ public:
     void activate_for_call(const std::string& call_id = "");   // Wake up processor for incoming call
     void deactivate_after_call(); // Put processor to sleep after call ends
     bool is_active() const { return active_.load(); }
-    
+
     // Configuration
     void set_database(Database* database);
     // Whisper service methods removed - clean output connector only
-    
+
     // Audio processing interface for SIP clients (session management removed)
     void process_audio(const RTPAudioPacket& packet);
 
     // Connection management (session management removed)
-    void set_sip_client_callback(std::function<void(const std::vector<uint8_t>&)> callback);
+    void set_sip_client_callback(std::function<void(const std::string&, const std::vector<uint8_t>&)> callback);
     void handle_outgoing_audio(const std::vector<uint8_t>& audio_data);
-    
+
     // Status
     struct ServiceStatus {
         bool is_running;
@@ -50,21 +50,21 @@ public:
         std::string whisper_endpoint;
     };
     ServiceStatus get_status() const;
-    
+
 private:
     // Audio processor implementation
     class ServiceAudioInterface : public SipAudioInterface {
     public:
         ServiceAudioInterface(AudioProcessorService* service);
-        
+
         void send_to_whisper(const std::string& call_id, const std::vector<float>& audio_samples) override;
         void on_audio_processing_error(const std::string& call_id, const std::string& error) override;
         void on_audio_chunk_ready(const std::string& call_id, size_t chunk_size_samples) override;
-        
+
     private:
         AudioProcessorService* service_;
     };
-    
+
     std::unique_ptr<AudioProcessor> audio_processor_;
     std::unique_ptr<ServiceAudioInterface> audio_interface_;
 
@@ -74,7 +74,7 @@ private:
     std::atomic<bool> running_;
     std::atomic<bool> active_;  // true = processing calls, false = sleeping
     int service_port_;
-    
+
     // Configuration
     Database* database_;
 
@@ -82,7 +82,7 @@ private:
     std::atomic<size_t> total_packets_processed_;
 
     // Connection to SIP client (session management removed)
-    std::function<void(const std::vector<uint8_t>&)> sip_client_callback_;
+    std::function<void(const std::string&, const std::vector<uint8_t>&)> sip_client_callback_;
 
     // TCP socket management
     int outgoing_listen_socket_; // Server listen socket for Whisper clients
@@ -95,6 +95,11 @@ private:
     std::string current_call_id_;
     std::mutex tcp_mutex_;
 
+    // Deduplication state for incoming TTS chunks (per call)
+    std::unordered_map<std::string, uint32_t> last_chunk_id_;
+    std::mutex last_chunk_id_mutex_;
+
+
     // TCP connection threads
     std::thread outgoing_tcp_thread_;
     std::thread incoming_tcp_thread_;
@@ -106,7 +111,7 @@ private:
     std::unique_ptr<AudioChunkBuffer> incoming_audio_buffer_;
     std::unique_ptr<RTPPacketBuffer> outgoing_audio_buffer_;
     std::mutex buffers_mutex_;
-    
+
     // Internal methods (session management removed)
     void handle_whisper_transcription(const std::vector<float>& audio_samples);
     bool check_sip_client_connection();
@@ -144,6 +149,6 @@ public:
         FAST,
         DEBUG
     };
-    
+
     static std::unique_ptr<AudioProcessorService> create();
 };

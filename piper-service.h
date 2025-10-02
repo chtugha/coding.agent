@@ -136,6 +136,8 @@ private:
     std::string output_host_ = "127.0.0.1";
     int output_port_ = 8091;  // Base port for audio processor connections
     std::unordered_map<std::string, int> output_sockets_;
+    // Per-call monotonic chunk counters (to deduplicate on reconnect)
+    std::unordered_map<std::string, uint32_t> chunk_counters_;
     std::mutex output_sockets_mutex_;
 
     // Statistics

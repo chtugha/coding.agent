@@ -52,8 +52,17 @@ void G711Tables::initialize_tables() {
     
     for (int i = 0; i < 256; ++i) {
         ulaw_table_[i] = ulaw_decode[i] / 32768.0f;
-        // Simplified A-law (for demo - real A-law needs proper table)
-        alaw_table_[i] = ((i & 0x80) ? -1.0f : 1.0f) * ((i & 0x7F) / 127.0f);
+        // Proper ITU-T G.711 A-law decode
+        uint8_t a = static_cast<uint8_t>(i) ^ 0x55; // complement per spec
+        int sign = a & 0x80;
+        int exp  = (a & 0x70) >> 4;
+        int mant = a & 0x0F;
+        int sample = (mant << 4) + 8; // add rounding bias
+        if (exp != 0) {
+            sample = (sample + 0x100) << (exp - 1);
+        }
+        if (sign) sample = -sample;
+        alaw_table_[i] = static_cast<float>(sample) / 32768.0f;
     }
     
     tables_initialized_ = true;
@@ -446,12 +455,7 @@ std::vector<float> SimpleAudioProcessor::pad_chunk_to_target_size(const std::vec
 }
 
 int SimpleAudioProcessor::get_system_speed_from_database() {
-    // Get system speed from database
-    if (database_) {
-        return database_->get_system_speed();
-    }
-
-    // Fallback to default if no database connection
+    // Processors are standalone and DB-free; always use default system speed
     return DEFAULT_SYSTEM_SPEED;
 }
 

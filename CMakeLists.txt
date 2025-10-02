@@ -127,12 +127,34 @@ endif()
 if(BUILD_SIP_CLIENT)
     add_executable(sip-client
         sip-client-main.cpp
-        audio-processor-service.cpp
-        simple-audio-processor.cpp
+        shmem_audio_channel.cpp
         ${SHARED_SOURCES}
     )
     target_link_libraries(sip-client PRIVATE Threads::Threads SQLite::SQLite3 OpenSSL::SSL OpenSSL::Crypto)
 endif()
+
+# Standalone audio processor binaries (no DB, SHM-based)
+add_executable(inbound-audio-processor
+    inbound-audio-processor-main.cpp
+    inbound-audio-processor.cpp
+    base-audio-processor.cpp
+    simple-audio-processor.cpp
+    shmem_audio_channel.cpp
+    service-advertisement.cpp
+)
+
+target_link_libraries(inbound-audio-processor PRIVATE Threads::Threads)
+
+add_executable(outbound-audio-processor
+    outbound-audio-processor-main.cpp
+    outbound-audio-processor.cpp
+    base-audio-processor.cpp
+    simple-audio-processor.cpp
+    shmem_audio_channel.cpp
+    service-advertisement.cpp
+)
+
+target_link_libraries(outbound-audio-processor PRIVATE Threads::Threads)
 
 
 
@@ -152,4 +174,5 @@ endif()
 if(BUILD_SIP_CLIENT)
     install(TARGETS sip-client RUNTIME DESTINATION bin)
 endif()
-
+install(TARGETS inbound-audio-processor RUNTIME DESTINATION bin)
+install(TARGETS outbound-audio-processor RUNTIME DESTINATION bin)

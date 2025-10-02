@@ -5,6 +5,7 @@
 #include <cstring>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/time.h>
@@ -137,7 +138,14 @@ bool PiperSession::get_next_audio_chunk(std::vector<float>& audio_samples, int& 
     if (result == PIPER_DONE) {
         synthesis_in_progress_ = false;
         is_last = true;
-        return chunk.num_samples > 0;
+        // CRITICAL FIX: Copy final chunk data before returning
+        if (chunk.num_samples > 0) {
+            audio_samples.assign(chunk.samples, chunk.samples + chunk.num_samples);
+            sample_rate = chunk.sample_rate;
+            total_audio_generated_ += chunk.num_samples;
+            return true;
+        }
+        return false;
     } else if (result != PIPER_OK) {
         synthesis_in_progress_ = false;
         return false;
@@ -440,22 +448,23 @@ std::string StandalonePiperService::process_text_for_call(const std::string& cal
         }
 
         try {
+            // Establish audio output connection once before synthesis loop
+            if (!audio_output_available) {
+                audio_output_available = try_connect_audio_output_for_call(call_id);
+            }
+
             while (session && session->get_next_audio_chunk(audio_samples, sample_rate, is_last)) {
                 if (!audio_samples.empty()) {
-                    // Try to establish audio output connection (non-blocking)
-                    if (!audio_output_available) {
-                        audio_output_available = try_connect_audio_output_for_call(call_id);
-                    }
-
                     // Send audio if connection is available, otherwise silently discard
                     if (audio_output_available) {
                         if (!send_audio_to_processor(call_id, audio_samples, sample_rate)) {
-                            // Connection lost, mark as unavailable for retry
+                            // Connection lost, mark as unavailable
                             audio_output_available = false;
                             close_audio_output_for_call(call_id);
                             if (default_config_.verbose) {
-                                std::cout << "⚠️ Audio output lost for call " << call_id << ", continuing synthesis" << std::endl;
+                                std::cout << "⚠️ Audio output lost for call " << call_id << ", synthesis aborted" << std::endl;
                             }
+                            break; // Stop synthesis on connection loss
                         }
                     }
                     total_samples += audio_samples.size();
@@ -464,9 +473,9 @@ std::string StandalonePiperService::process_text_for_call(const std::string& cal
                 if (is_last) break;
             }
         } catch (const std::exception& e) {
-            std::cout << "\u26a0\ufe0f Exception in audio processing loop for call " << call_id << ": " << e.what() << std::endl;
+            std::cout << "❌ Exception in audio processing loop for call " << call_id << ": " << e.what() << std::endl;
         } catch (...) {
-            std::cout << "\u26a0\ufe0f Unknown error in audio processing loop for call " << call_id << std::endl;
+            std::cout << "❌ Unknown error in audio processing loop for call " << call_id << std::endl;
         }
     } while(false);
 
@@ -700,6 +709,11 @@ bool StandalonePiperService::connect_audio_output_for_call(const std::string& ca
         std::cout << "⚠️ Failed to connect to audio processor on port " << port << " for call " << call_id << std::endl;
         return false;
     }
+    // Low-latency: disable Nagle
+    {
+        int flag = 1;
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    }
 
     // Send HELLO(call_id)
     uint32_t n = htonl((uint32_t)call_id.size());
@@ -753,6 +767,11 @@ bool StandalonePiperService::try_connect_audio_output_for_call(const std::string
         close(s);
         return false;  // Silent failure for resilient mode
     }
+    // Low-latency: disable Nagle
+    {
+        int flag = 1;
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    }
 
     // Send HELLO(call_id)
     uint32_t n = htonl((uint32_t)call_id.size());
@@ -770,6 +789,17 @@ bool StandalonePiperService::try_connect_audio_output_for_call(const std::string
 }
 
 bool StandalonePiperService::send_audio_to_processor(const std::string& call_id, const std::vector<float>& audio_samples, int sample_rate) {
+    if (audio_samples.empty()) {
+        return true; // Nothing to send
+    }
+
+    // Reserve a monotonically increasing chunk id per call
+    uint32_t chunk_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        chunk_id = ++chunk_counters_[call_id];
+    }
+
     int s = -1;
     {
         std::lock_guard<std::mutex> lock(output_sockets_mutex_);
@@ -778,43 +808,45 @@ bool StandalonePiperService::send_audio_to_processor(const std::string& call_id,
         s = it->second;
     }
 
-    // Convert float samples to bytes for transmission
+    if (s < 0) return false;
+
+    // Send in one atomic operation to prevent partial sends
     size_t byte_count = audio_samples.size() * sizeof(float);
     uint32_t l = htonl((uint32_t)byte_count);
     uint32_t sr = htonl((uint32_t)sample_rate);
+    uint32_t id = htonl(chunk_id);
 
-    // Robust send with connection failure detection
-    if (send(s, &l, 4, MSG_NOSIGNAL) != 4) {
-        {
-            std::lock_guard<std::mutex> lock(output_sockets_mutex_);
-            output_sockets_.erase(call_id);
-        }
-        close(s);
-        return false;
-    }
-    // Send sample rate (Hz) as 4-byte field before payload
-    if (send(s, &sr, 4, MSG_NOSIGNAL) != 4) {
-        {
-            std::lock_guard<std::mutex> lock(output_sockets_mutex_);
-            output_sockets_.erase(call_id);
-        }
-        close(s);
-        return false;
-    }
+    // Build complete packet in memory first
+    std::vector<uint8_t> packet(12 + byte_count);
+    std::memcpy(packet.data(), &l, 4);
+    std::memcpy(packet.data() + 4, &sr, 4);
+    std::memcpy(packet.data() + 8, &id, 4);
+    std::memcpy(packet.data() + 12, audio_samples.data(), byte_count);
 
-    if (!audio_samples.empty() && send(s, audio_samples.data(), byte_count, MSG_NOSIGNAL) != (ssize_t)byte_count) {
+    // Send complete packet atomically - NO RETRY to prevent duplication
+    ssize_t sent = send(s, packet.data(), packet.size(), MSG_NOSIGNAL);
+    if (sent != (ssize_t)packet.size()) {
+        // Connection failed, close and remove
         {
             std::lock_guard<std::mutex> lock(output_sockets_mutex_);
-            output_sockets_.erase(call_id);
+            auto it = output_sockets_.find(call_id);
+            if (it != output_sockets_.end()) {
+                close(it->second);
+                output_sockets_.erase(it);
+            }
+            // Also remove chunk counter for this call
+            auto it2 = chunk_counters_.find(call_id);
+            if (it2 != chunk_counters_.end()) {
+                chunk_counters_.erase(it2);
+            }
         }
-        close(s);
         return false;
     }
 
     if (default_config_.verbose) {
-        std::cout << "🔊 Sent " << audio_samples.size() << " samples (" << sample_rate << "Hz) to audio processor for call " << call_id << std::endl;
+        std::cout << "🔊 Sent chunk#" << chunk_id << " (" << audio_samples.size() << " samples @" << sample_rate
+                  << "Hz) to audio processor for call " << call_id << std::endl;
     }
-
     return true;
 }
 

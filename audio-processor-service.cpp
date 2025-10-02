@@ -249,7 +249,7 @@ bool AudioProcessorService::check_sip_client_connection() {
     return sip_client_callback_ != nullptr;
 }
 
-void AudioProcessorService::set_sip_client_callback(std::function<void(const std::vector<uint8_t>&)> callback) {
+void AudioProcessorService::set_sip_client_callback(std::function<void(const std::string&, const std::vector<uint8_t>&)> callback) {
     sip_client_callback_ = callback;
 }
 
@@ -416,7 +416,7 @@ void AudioProcessorService::process_outgoing_buffer() {
         if (sip_client_connected) {
             // Route to SIP client for RTP transmission
             if (sip_client_callback_) {
-                sip_client_callback_(audio_data);
+                sip_client_callback_(current_call_id_, audio_data);
             }
         }
         // else: Route to null (drop Piper stream silently)
@@ -430,36 +430,80 @@ void AudioProcessorService::process_outgoing_buffer() {
 // Removed: convert_g711_alaw_to_float - using shared function from SimpleAudioProcessor
 
 std::vector<uint8_t> AudioProcessorService::convert_float_to_g711_ulaw(const std::vector<float>& samples) {
+    // Correct G.711 μ-law encoder (maps 0 PCM to 0xFF silence, PT=0)
+    static const int16_t BIAS = 0x84;    // 132
+    static const int16_t CLIP = 32635;
+    static const uint8_t exp_lut[256] = {
+        0,0,1,1,2,2,2,2,3,3,3,3,3,3,3,3,
+        4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,
+        5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+        5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+    };
+
+    auto linear_to_ulaw = [&](int16_t pcm) -> uint8_t {
+        int sign = (pcm >> 8) & 0x80;
+        if (sign) pcm = -pcm;
+        if (pcm > CLIP) pcm = CLIP;
+        pcm = pcm + BIAS;
+        int exponent = exp_lut[(pcm >> 7) & 0xFF];
+        int mantissa = (pcm >> (exponent + 3)) & 0x0F;
+        uint8_t ulaw = ~(uint8_t)(sign | (exponent << 4) | mantissa);
+        return ulaw;
+    };
+
     std::vector<uint8_t> result;
     result.reserve(samples.size());
-
-    // Linear PCM to G.711 μ-law conversion (simplified)
-    for (float sample : samples) {
-        // Clamp to [-1.0, 1.0]
-        sample = std::max(-1.0f, std::min(1.0f, sample));
-        int16_t pcm_sample = static_cast<int16_t>(sample * 32767.0f);
-
-        // Simple μ-law encoding (this is a simplified version)
-        uint8_t ulaw_byte = 0;
-        if (pcm_sample < 0) {
-            ulaw_byte = 0x7F;
-            pcm_sample = -pcm_sample;
-        }
-
-        // Find the appropriate μ-law value (simplified)
-        if (pcm_sample >= 8159) ulaw_byte |= 0x70;
-        else if (pcm_sample >= 4063) ulaw_byte |= 0x60;
-        else if (pcm_sample >= 2015) ulaw_byte |= 0x50;
-        else if (pcm_sample >= 991) ulaw_byte |= 0x40;
-        else if (pcm_sample >= 479) ulaw_byte |= 0x30;
-        else if (pcm_sample >= 223) ulaw_byte |= 0x20;
-        else if (pcm_sample >= 95) ulaw_byte |= 0x10;
-
-        result.push_back(ulaw_byte);
+    for (float s : samples) {
+        // Clamp to [-1,1] and convert to 16-bit PCM
+        float clamped = std::max(-1.0f, std::min(1.0f, s));
+        int16_t pcm = (int16_t) std::lrintf(clamped * 32767.0f);
+        result.push_back(linear_to_ulaw(pcm));
     }
-
     return result;
 }
+
+// Proper anti-aliasing low-pass filter for telephony (4kHz cutoff for 8kHz Nyquist)
+static std::vector<float> lowpass_telephony(const std::vector<float>& in, int src_rate) {
+    if (in.empty() || src_rate <= 8000) return in;
+
+    // Calculate filter parameters for 4kHz cutoff
+    double cutoff_ratio = 4000.0 / (src_rate * 0.5); // Normalized cutoff frequency
+    if (cutoff_ratio >= 1.0) return in; // No filtering needed
+
+    // Simple but effective 7-tap FIR low-pass filter
+    // Coefficients for ~4kHz cutoff (calculated for telephony)
+    const std::vector<float> coeffs = {
+        0.02f, 0.12f, 0.22f, 0.28f, 0.22f, 0.12f, 0.02f
+    };
+
+    std::vector<float> out(in.size());
+    const int half_len = 3; // (7-1)/2
+
+    for (size_t i = 0; i < in.size(); ++i) {
+        float sum = 0.0f;
+        for (int j = -half_len; j <= half_len; ++j) {
+            int idx = (int)i + j;
+            float sample = (idx < 0) ? in[0] :
+                          (idx >= (int)in.size()) ? in.back() : in[idx];
+            sum += sample * coeffs[j + half_len];
+        }
+        out[i] = sum;
+    }
+    return out;
+}
+
 
 // Simple linear resampler from arbitrary src_rate to dst_rate (mono)
 static std::vector<float> resample_linear(const std::vector<float>& in, int src_rate, int dst_rate) {
@@ -728,13 +772,25 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
 
         // Handle this connection in a separate thread
         std::thread([this, client_socket]() {
+            // Helper to read exactly n bytes
+            auto read_exact = [&](void* buf, size_t n) -> bool {
+                uint8_t* p = static_cast<uint8_t*>(buf);
+                size_t off = 0;
+                while (off < n) {
+                    ssize_t r = recv(client_socket, p + off, n - off, 0);
+                    if (r <= 0) return false;
+                    off += static_cast<size_t>(r);
+                }
+                return true;
+            };
+
             // Read HELLO message first
-            uint32_t length;
-            if (recv(client_socket, &length, 4, 0) == 4) {
+            uint32_t length = 0;
+            if (read_exact(&length, 4)) {
                 length = ntohl(length);
                 if (length > 0 && length < 1000) {
                     std::vector<char> call_id_buffer(length + 1);
-                    if (recv(client_socket, call_id_buffer.data(), length, 0) == (ssize_t)length) {
+                    if (read_exact(call_id_buffer.data(), length)) {
                         call_id_buffer[length] = '\0';
                         current_call_id_ = std::string(call_id_buffer.data());
                         std::cout << "📡 TCP HELLO received for call: " << current_call_id_ << std::endl;
@@ -744,9 +800,8 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
 
             // Process incoming audio data
             while (running_.load() && incoming_connected_.load()) {
-                uint32_t chunk_length;
-                ssize_t received = recv(client_socket, &chunk_length, 4, 0);
-                if (received != 4) break;
+                uint32_t chunk_length = 0;
+                if (!read_exact(&chunk_length, 4)) break;
                 chunk_length = ntohl(chunk_length);
 
                 // Check for BYE message
@@ -755,33 +810,83 @@ void AudioProcessorService::handle_incoming_tcp_connection() {
                     break;
                 }
 
-                // Read sample rate (Hz) sent before payload
+                // Read sample rate (Hz) and chunk id before payload
                 uint32_t sr_net = 0;
-                if (recv(client_socket, &sr_net, 4, 0) != 4) break;
+                if (!read_exact(&sr_net, 4)) break;
                 int sample_rate = (int) ntohl(sr_net);
                 if (sample_rate <= 0) sample_rate = 16000; // fallback
 
-                if (chunk_length > 0 && chunk_length < 1000000) { // Reasonable limit
-                    std::vector<uint8_t> payload(chunk_length);
-                    if (recv(client_socket, payload.data(), chunk_length, 0) == (ssize_t)chunk_length) {
-                        if ((chunk_length % 4) == 0) {
-                            // Interpret as float32 PCM, resample to 8kHz, convert to G.711 μ-law
-                            size_t n = chunk_length / 4;
-                            std::vector<float> samples(n);
-                            std::memcpy(samples.data(), payload.data(), chunk_length);
-                            std::vector<float> out8k = resample_linear(samples, sample_rate, 8000);
-                            std::vector<uint8_t> g711 = convert_float_to_g711_ulaw(out8k);
-                            if (sip_client_callback_) {
-                                sip_client_callback_(g711);
-                                std::cout << "📤 TCP TTS forwarded to SIP (float->G711): " << g711.size() << " bytes @8kHz" << std::endl;
+                uint32_t chunk_id_net = 0;
+                if (!read_exact(&chunk_id_net, 4)) break;
+                uint32_t chunk_id = ntohl(chunk_id_net);
+
+                // Accept larger chunks (up to 32 MB)
+                const uint32_t MAX_CHUNK = 32 * 1024 * 1024;
+                if (chunk_length > 0 && chunk_length <= MAX_CHUNK) {
+                    // Duplicate/out-of-order detection
+                    {
+                        std::lock_guard<std::mutex> lk(last_chunk_id_mutex_);
+                        uint32_t &last = last_chunk_id_[current_call_id_];
+                        if (chunk_id <= last) {
+                            // Drain and drop duplicate
+                            const size_t BUF = 4096;
+                            std::vector<uint8_t> tmp(BUF);
+                            uint32_t rem = chunk_length;
+                            while (rem > 0) {
+                                size_t to_read = std::min<uint32_t>(rem, BUF);
+                                if (!read_exact(tmp.data(), to_read)) break;
+                                rem -= (uint32_t) to_read;
                             }
-                        } else {
-                            // Already byte payload (assume G.711 μ-law), forward as-is
-                            if (sip_client_callback_) {
-                                sip_client_callback_(payload);
-                                std::cout << "📤 TCP TTS forwarded to SIP (bytes passthrough): " << chunk_length << " bytes" << std::endl;
-                            }
+                            std::cout << "⚠️ Dropped duplicate/out-of-order TTS chunk id " << chunk_id << " (last=" << last << ") for call " << current_call_id_ << std::endl;
+                            continue;
                         }
+                    }
+
+                    std::vector<uint8_t> payload(chunk_length);
+                    if (!read_exact(payload.data(), chunk_length)) break;
+
+                    bool forwarded = false;
+                    if ((chunk_length % 4) == 0) {
+                        // Interpret as float32 PCM, optional prefilter, resample to 8kHz, convert to G.711 μ-law
+                        size_t n = chunk_length / 4;
+                        std::vector<float> samples(n);
+                        std::memcpy(samples.data(), payload.data(), chunk_length);
+                        // Apply proper anti-aliasing filter before downsampling
+                        if (sample_rate > 8000) {
+                            extern std::vector<float> lowpass_telephony(const std::vector<float>& in, int src_rate);
+                            samples = lowpass_telephony(samples, sample_rate);
+                        }
+                        std::vector<float> out8k = resample_linear(samples, sample_rate, 8000);
+                        std::vector<uint8_t> g711 = convert_float_to_g711_ulaw(out8k);
+                        if (sip_client_callback_) {
+                            sip_client_callback_(current_call_id_, g711);
+                            forwarded = true;
+                            std::cout << "📤 TCP TTS forwarded to SIP (float->G711): " << g711.size() << " bytes @8kHz, src_rate=" << sample_rate << ", id=" << chunk_id << std::endl;
+                        }
+                    } else {
+                        // Already byte payload (assume G.711 μ-law), forward as-is
+                        if (sip_client_callback_) {
+                            sip_client_callback_(current_call_id_, payload);
+                            forwarded = true;
+                            std::cout << "📤 TCP TTS forwarded to SIP (bytes passthrough): " << chunk_length << " bytes, id=" << chunk_id << std::endl;
+                        }
+                    }
+
+                    if (forwarded) {
+                        std::lock_guard<std::mutex> lk(last_chunk_id_mutex_);
+                        uint32_t &last = last_chunk_id_[current_call_id_];
+                        last = std::max(last, chunk_id);
+                    }
+                } else {
+                    std::cout << "⚠️ TTS chunk too large (" << chunk_length << " bytes) — dropping" << std::endl;
+                    // Drain the payload to keep stream in sync
+                    const size_t BUF = 4096;
+                    std::vector<uint8_t> tmp(BUF);
+                    uint32_t rem = chunk_length;
+                    while (rem > 0) {
+                        size_t to_read = std::min<uint32_t>(rem, BUF);
+                        if (!read_exact(tmp.data(), to_read)) break;
+                        rem -= (uint32_t) to_read;
                     }
                 }
             }
