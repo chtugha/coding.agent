@@ -6,6 +6,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fstream>
+#include <sys/time.h>
+
 
 OutboundAudioProcessor::OutboundAudioProcessor()
     : piper_tcp_socket_(-1)
@@ -69,41 +71,19 @@ void OutboundAudioProcessor::activate_for_call(const std::string& call_id) {
 
     if (!active_.load()) return;
 
-    // Setup TCP socket for Piper connection
-    bool ok = setup_piper_tcp_socket(call_id);
-    if (!ok) {
-        std::cout << "⚠️ Failed to set up Piper TCP listener for call " << call_id << " — continuing without TTS return path" << std::endl;
-        return;
-    }
+    // Determine Kokoro (Piper) TCP port (server lives in Kokoro now)
+    piper_tcp_port_ = calculate_piper_port(call_id);
 
-    // Start continuous registration polling
+    // Start UDP registration listener and, upon REGISTER, connect to Kokoro
     start_registration_polling(call_id);
 
-    std::cout << "✅ Outbound Audio Processor ACTIVE - Piper stream ready for call " << call_id << " on port " << piper_tcp_port_ << std::endl;
+    std::cout << "✅ Outbound Audio Processor ACTIVE - will connect to Kokoro on port " << piper_tcp_port_ << " for call " << call_id << std::endl;
 }
 
 void OutboundAudioProcessor::deactivate_after_call() {
     // Stop registration polling
     stop_registration_polling();
 
-    // Send BYE message to Piper service
-    if (!current_call_id_.empty()) {
-        int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (udp_sock >= 0) {
-            struct sockaddr_in piper_addr;
-            memset(&piper_addr, 0, sizeof(piper_addr));
-            piper_addr.sin_family = AF_INET;
-            piper_addr.sin_port = htons(13001);
-            piper_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-            std::string bye_msg = "BYE:" + current_call_id_;
-            sendto(udp_sock, bye_msg.c_str(), bye_msg.length(), 0,
-                   (struct sockaddr*)&piper_addr, sizeof(piper_addr));
-            close(udp_sock);
-
-            std::cout << "📤 Sent BYE message to Piper service for call_id " << current_call_id_ << std::endl;
-        }
-    }
 
     BaseAudioProcessor::deactivate_after_call();
 
@@ -530,48 +510,114 @@ void OutboundAudioProcessor::stop_registration_polling() {
 }
 
 void OutboundAudioProcessor::registration_polling_thread(const std::string& call_id) {
-    struct sockaddr_in piper_addr;
-    memset(&piper_addr, 0, sizeof(piper_addr));
-    piper_addr.sin_family = AF_INET;
-    piper_addr.sin_port = htons(13001);
-    piper_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    // Listen for UDP REGISTER from Kokoro on 13000 + call
+    int offset = calculate_port_offset(call_id);
+    int udp_port = 13000 + offset;
 
-    std::string reg_msg = "REGISTER:" + call_id;
-
-    auto start_time = std::chrono::steady_clock::now();
-    int attempt = 0;
-
-    while (registration_running_.load() && running_.load() && active_.load()) {
-        // Check if already connected
-        if (piper_connected_.load()) {
-            std::cout << "✅ TTS service connected for call " << call_id << " - stopping registration polling" << std::endl;
-            break;
-        }
-
-        // Send REGISTER message
-        int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (udp_sock >= 0) {
-            sendto(udp_sock, reg_msg.c_str(), reg_msg.length(), 0,
-                   (struct sockaddr*)&piper_addr, sizeof(piper_addr));
-            close(udp_sock);
-
-            attempt++;
-            std::cout << "📤 Sent REGISTER #" << attempt << " for call_id " << call_id << std::endl;
-        }
-
-        // Determine sleep interval: 200ms for first second, then 1 second
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start_time).count();
-
-        int sleep_ms = (elapsed < 1000) ? 200 : 1000;
-
-        // Sleep with periodic checks for early termination
-        for (int i = 0; i < sleep_ms / 100 && registration_running_.load(); i++) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
+    int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_sock < 0) {
+        std::cout << "❌ Failed to create UDP socket for REGISTER listener" << std::endl;
+        return;
     }
 
-    std::cout << "🛑 Registration polling stopped for call " << call_id << " after " << attempt << " attempts" << std::endl;
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(udp_port);
+
+    if (bind(udp_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cout << "❌ Failed to bind UDP REGISTER listener to port " << udp_port << std::endl;
+        close(udp_sock);
+        return;
+    }
+
+    std::cout << "📡 Outbound waiting for REGISTER on UDP port " << udp_port << " for call " << call_id << std::endl;
+
+    // Wait for REGISTER then connect to Kokoro (server on 9002+call)
+    char buf[256];
+    while (registration_running_.load() && running_.load() && active_.load() && !piper_connected_.load()) {
+        struct timeval tv{1,0};
+        setsockopt(udp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        struct sockaddr_in src{}; socklen_t slen = sizeof(src);
+        ssize_t n = recvfrom(udp_sock, buf, sizeof(buf)-1, 0, (struct sockaddr*)&src, &slen);
+        if (n <= 0) continue;
+        buf[n] = '\0';
+        std::string msg(buf);
+        if (msg.rfind("REGISTER:", 0) != 0) continue;
+        std::string received = msg.substr(9);
+        if (received != call_id) continue;
+
+        // Connect to Kokoro server at 127.0.0.1:piper_tcp_port_
+        int s = -1;
+        for (int attempt = 1; attempt <= 10 && registration_running_.load() && running_.load() && active_.load(); ++attempt) {
+            s = socket(AF_INET, SOCK_STREAM, 0);
+            if (s < 0) break;
+            struct sockaddr_in dst{};
+            dst.sin_family = AF_INET;
+            dst.sin_addr.s_addr = inet_addr("127.0.0.1");
+            dst.sin_port = htons(piper_tcp_port_);
+            if (connect(s, (struct sockaddr*)&dst, sizeof(dst)) == 0) break;
+            close(s); s = -1;
+            int sleep_ms = (attempt <= 5) ? 200 : 1000;
+            if (attempt == 1 || attempt == 5 || attempt == 9) {
+                std::cout << "⚠️ Kokoro connect attempt " << attempt << "/10 failed — retrying in " << sleep_ms << "ms" << std::endl;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+        }
+        if (s < 0) {
+            std::cout << "❌ Failed to connect to Kokoro server on port " << piper_tcp_port_ << std::endl;
+            continue;
+        }
+
+        // Send HELLO(call_id)
+        uint32_t nlen = htonl(static_cast<uint32_t>(call_id.size()));
+        if (write(s, &nlen, 4) != 4 || write(s, call_id.data(), call_id.size()) != (ssize_t)call_id.size()) {
+            std::cout << "❌ Failed to send HELLO to Kokoro" << std::endl;
+            close(s);
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(piper_mutex_);
+            piper_tcp_socket_ = s;
+            piper_connected_.store(true);
+        }
+        std::cout << "🔗 Connected to Kokoro on port " << piper_tcp_port_ << " for call " << call_id << std::endl;
+
+        // Read incoming audio stream until disconnect
+        while (running_.load() && piper_connected_.load()) {
+            uint32_t chunk_length = 0, sample_rate = 0, chunk_id = 0;
+            if (!read_exact_from_socket(s, &chunk_length, 4) ||
+                !read_exact_from_socket(s, &sample_rate, 4) ||
+                !read_exact_from_socket(s, &chunk_id, 4)) {
+                break;
+            }
+            chunk_length = ntohl(chunk_length);
+            sample_rate = ntohl(sample_rate);
+            chunk_id = ntohl(chunk_id);
+            if (chunk_length == 0) {
+                std::cout << "📡 TCP BYE received from Kokoro" << std::endl;
+                break;
+            }
+            if (chunk_length > 10 * 1024 * 1024) {
+                std::cout << "⚠️ Kokoro chunk too large (" << chunk_length << ") — dropping" << std::endl;
+                break;
+            }
+            std::vector<uint8_t> payload(chunk_length);
+            if (!read_exact_from_socket(s, payload.data(), chunk_length)) break;
+            process_piper_audio_chunk(payload, sample_rate, chunk_id);
+        }
+
+        close(s);
+        {
+            std::lock_guard<std::mutex> lock(piper_mutex_);
+            piper_tcp_socket_ = -1;
+        }
+        piper_connected_.store(false);
+        std::cout << "🔌 Disconnected from Kokoro" << std::endl;
+    }
+
+    close(udp_sock);
+    std::cout << "🛑 Registration listener stopped for call " << call_id << std::endl;
 }
 
 // Unused functions removed for performance optimization

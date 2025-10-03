@@ -234,6 +234,7 @@ std::string LlamaSession::process_text(const std::string& input_text) {
     std::lock_guard<std::mutex> lock(session_mutex_);
 
     if (!is_active_.load() || !ctx_) {
+        std::cout << "❌ [" << call_id_ << "] Session inactive or no context" << std::endl;
         return "";
     }
 
@@ -274,6 +275,7 @@ std::string LlamaSession::format_conversation_prompt(const std::string& user_inp
 
 std::string LlamaSession::generate_response(const std::string& prompt) {
     if (!ctx_ || !sampler_ || !batch_) {
+        std::cout << "❌ [" << call_id_ << "] Missing context/sampler/batch" << std::endl;
         return "";
     }
 
@@ -290,6 +292,7 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
     // Tokenize only the new turn (no BOS for incremental appends)
     std::vector<llama_token> tokens = tokenize_text(ctx_, prompt, false);
     if (tokens.empty()) {
+        std::cout << "❌ [" << call_id_ << "] Tokenization returned empty" << std::endl;
         return "";
     }
 
@@ -661,6 +664,16 @@ void StandaloneLlamaService::run_tcp_server(int port) {
             continue;
         }
 
+        // Prevent duplicate text handlers per call_id
+        {
+            auto it = call_tcp_threads_.find(call_id);
+            if (it != call_tcp_threads_.end() && it->second.joinable()) {
+                std::cout << "⚠️ LLaMA text handler already running for call " << call_id << ", rejecting duplicate connection" << std::endl;
+                close(client_socket);
+                continue;
+            }
+        }
+
         create_session(call_id);
 
         call_tcp_threads_[call_id] = std::thread(&StandaloneLlamaService::handle_tcp_text_stream, this, call_id, client_socket);
@@ -714,26 +727,49 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
     std::cout << "📤 Ended LLaMA text handler for call " << call_id << std::endl;
 }
 
+static bool recv_all(int socket, void* buf, size_t nbytes) {
+    char* p = static_cast<char*>(buf);
+    size_t total = 0;
+    while (total < nbytes) {
+        ssize_t r = recv(socket, p + total, nbytes - total, 0);
+        if (r <= 0) return false;
+        total += (size_t)r;
+    }
+    return true;
+}
+
 bool StandaloneLlamaService::read_tcp_hello(int socket, std::string& call_id) {
-    uint32_t length = 0;
-    if (recv(socket, &length, 4, 0) != 4) return false;
-    length = ntohl(length);
+    uint32_t length_be = 0;
+    if (!recv_all(socket, &length_be, 4)) {
+        std::cout << "❌ Failed to read HELLO length from Whisper" << std::endl;
+        return false;
+    }
+    uint32_t length = ntohl(length_be);
     if (length == 0 || length > 4096) return false;
     std::string buf(length, '\0');
-    if (recv(socket, buf.data(), length, 0) != (ssize_t)length) return false;
+    if (!recv_all(socket, buf.data(), length)) {
+        std::cout << "❌ Failed to read HELLO payload from Whisper (" << length << " bytes)" << std::endl;
+        return false;
+    }
     call_id = buf;
     std::cout << "👋 HELLO from whisper for call_id=" << call_id << std::endl;
     return true;
 }
 
 bool StandaloneLlamaService::read_tcp_text_chunk(int socket, std::string& text) {
-    uint32_t length = 0;
-    if (recv(socket, &length, 4, 0) != 4) return false;
-    length = ntohl(length);
+    uint32_t length_be = 0;
+    if (!recv_all(socket, &length_be, 4)) {
+        std::cout << "❌ Failed to read text length from Whisper (client disconnected?)" << std::endl;
+        return false;
+    }
+    uint32_t length = ntohl(length_be);
     if (length == 0xFFFFFFFF) { text = "BYE"; return true; }
     if (length == 0 || length > 10*1024*1024) return false;
     text.resize(length);
-    if (recv(socket, text.data(), length, 0) != (ssize_t)length) return false;
+    if (!recv_all(socket, text.data(), length)) {
+        std::cout << "❌ Failed to read text payload from Whisper (" << length << " bytes)" << std::endl;
+        return false;
+    }
     return true;
 }
 
