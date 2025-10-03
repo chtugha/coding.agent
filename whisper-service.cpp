@@ -350,6 +350,8 @@ void StandaloneWhisperService::registration_listener_thread() {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
+    std::cout << "📡 Whisper registration listener thread started" << std::endl;
+
     while (registration_running_.load()) {
         // Ensure client_len is reset before each recvfrom (per POSIX semantics)
         client_len = sizeof(client_addr);
@@ -366,6 +368,7 @@ void StandaloneWhisperService::registration_listener_thread() {
         if (n > 0) {
             buffer[n] = '\0';
             std::string message(buffer);
+            std::cout << "📨 Whisper received UDP message: '" << message << "' (" << n << " bytes)" << std::endl;
 
             try {
                 // Parse message: "REGISTER:<call_id>" or "BYE:<call_id>"
@@ -422,8 +425,12 @@ void StandaloneWhisperService::registration_listener_thread() {
                 std::cout << "⚠️ Registration parse/handle error: '" << message << "' : " << e.what() << std::endl;
                 // continue loop
             }
+        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            std::cout << "⚠️ recvfrom error: " << strerror(errno) << std::endl;
         }
     }
+
+    std::cout << "📡 Whisper registration listener thread exiting" << std::endl;
 }
 
 void StandaloneWhisperService::run_service_loop() {
