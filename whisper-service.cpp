@@ -597,26 +597,29 @@ bool StandaloneWhisperService::connect_to_audio_stream(const AudioStreamInfo& st
 }
 
 bool StandaloneWhisperService::create_session(const std::string& call_id) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
 
-    if (sessions_.find(call_id) != sessions_.end()) {
-        return false; // Session already exists
-    }
+        if (sessions_.find(call_id) != sessions_.end()) {
+            return false; // Session already exists
+        }
 
-    // Provide shared preloaded context to the session
-    WhisperSessionConfig cfg = config_;
-    cfg.shared_ctx = warm_ctx_;
-    cfg.shared_mutex = &warm_mutex_;
+        // Provide shared preloaded context to the session
+        WhisperSessionConfig cfg = config_;
+        cfg.shared_ctx = warm_ctx_;
+        cfg.shared_mutex = &warm_mutex_;
 
-    auto session = std::make_unique<WhisperSession>(call_id, cfg);
-    if (!session->is_active()) {
-        return false;
-    }
+        auto session = std::make_unique<WhisperSession>(call_id, cfg);
+        if (!session->is_active()) {
+            return false;
+        }
 
-    sessions_[call_id] = std::move(session);
-    std::cout << "🎤 Created whisper session for call " << call_id << std::endl;
+        sessions_[call_id] = std::move(session);
+        std::cout << "🎤 Created whisper session for call " << call_id << std::endl;
+    } // Release sessions_mutex_ before connecting to LLaMA
 
     // Immediately connect to LLaMA service to eliminate first-transcription delay
+    // This is done OUTSIDE the sessions_mutex_ lock to avoid holding it during network I/O
     if (connect_llama_for_call(call_id)) {
         std::cout << "🔗 Pre-connected to LLaMA service for call " << call_id << std::endl;
     } else {
@@ -674,6 +677,12 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
     std::string received_call_id;
     if (!read_tcp_hello(socket, received_call_id)) {
         std::cout << "❌ Failed to read TCP HELLO for call " << call_id << std::endl;
+        // Cleanup on early exit
+        close(socket);
+        {
+            std::lock_guard<std::mutex> lock(tcp_mutex_);
+            call_tcp_sockets_.erase(call_id);
+        }
         return;
     }
 
