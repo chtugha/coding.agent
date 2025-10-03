@@ -361,7 +361,6 @@ void StandaloneWhisperService::registration_listener_thread() {
         if (n > 0) {
             buffer[n] = '\0';
             std::string message(buffer);
-            std::cout << "📨 Whisper received UDP message: '" << message << "' (" << n << " bytes)" << std::endl;
 
             try {
                 // Parse message: "REGISTER:<call_id>" or "BYE:<call_id>"
@@ -404,12 +403,30 @@ void StandaloneWhisperService::registration_listener_thread() {
 
                         // Spawn connection attempt in separate thread to avoid blocking registration listener
                         std::thread([this, stream, call_id]() {
-                            if (connect_to_audio_stream(stream)) {
-                                create_session(call_id);
-                                std::cout << "✅ Successfully connected and created session for call " << call_id << std::endl;
-                            } else {
-                                std::cout << "⚠️ Failed to connect to inbound processor for call " << call_id << std::endl;
-                                // Remove placeholder on failure so it can retry
+                            try {
+                                if (connect_to_audio_stream(stream)) {
+                                    create_session(call_id);
+                                    std::cout << "✅ Successfully connected and created session for call " << call_id << std::endl;
+                                } else {
+                                    std::cout << "⚠️ Failed to connect to inbound processor for call " << call_id << std::endl;
+                                    // Remove placeholder on failure so it can retry
+                                    std::lock_guard<std::mutex> lock(tcp_mutex_);
+                                    auto it = call_tcp_sockets_.find(call_id);
+                                    if (it != call_tcp_sockets_.end() && it->second == -1) {
+                                        call_tcp_sockets_.erase(it);
+                                    }
+                                }
+                            } catch (const std::exception& e) {
+                                std::cout << "❌ Connection thread exception for call " << call_id << ": " << e.what() << std::endl;
+                                // Remove placeholder on exception
+                                std::lock_guard<std::mutex> lock(tcp_mutex_);
+                                auto it = call_tcp_sockets_.find(call_id);
+                                if (it != call_tcp_sockets_.end() && it->second == -1) {
+                                    call_tcp_sockets_.erase(it);
+                                }
+                            } catch (...) {
+                                std::cout << "❌ Unknown exception in connection thread for call " << call_id << std::endl;
+                                // Remove placeholder on exception
                                 std::lock_guard<std::mutex> lock(tcp_mutex_);
                                 auto it = call_tcp_sockets_.find(call_id);
                                 if (it != call_tcp_sockets_.end() && it->second == -1) {
