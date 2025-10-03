@@ -192,7 +192,7 @@ void InboundAudioProcessor::deactivate_after_call() {
         }
         whisper_connected_.store(false);
     }
-    
+
     // Join TCP thread
     if (whisper_tcp_thread_.joinable()) {
         whisper_tcp_thread_.join();
@@ -209,6 +209,8 @@ void InboundAudioProcessor::deactivate_after_call() {
             service_advertiser_->remove_stream_advertisement(call_id);
         }
     }
+
+    std::cout << "😴 Audio Processor deactivated" << std::endl;
 }
 
 BaseAudioProcessor::ProcessorStatus InboundAudioProcessor::get_status() const {

@@ -552,19 +552,11 @@ bool StandaloneWhisperService::destroy_session(const std::string& call_id) {
     if (it != sessions_.end()) {
         sessions_.erase(it);
 
-        // Close LLaMA socket for this call if open
-        {
-            std::lock_guard<std::mutex> tlock(tcp_mutex_);
-            auto lit = llama_sockets_.find(call_id);
-            if (lit != llama_sockets_.end()) {
-                uint32_t bye = 0xFFFFFFFF;
-                send(lit->second, &bye, 4, 0);
-                close(lit->second);
-                llama_sockets_.erase(lit);
-            }
-        }
+        // DO NOT close LLaMA socket - keep it open for next call
+        // The socket is per-call_id and will be reused or cleaned up on service stop
+        // This enables sessionless architecture where TCP connections persist across calls
 
-        std::cout << "🗑️ Destroyed whisper session for call " << call_id << std::endl;
+        std::cout << "🗑️ Destroyed whisper session for call " << call_id << " (keeping LLaMA connection open)" << std::endl;
         return true;
     }
 
@@ -659,7 +651,7 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
             call_tcp_sockets_.erase(it);
         }
     }
-    // Destroy whisper session and downstream connection(s)
+    // Destroy whisper session but keep LLaMA connection open for next call
     destroy_session(call_id);
     std::cout << "🎧 TCP audio handler ended for call " << call_id << std::endl;
     // log_session_stats();  // suppressed to reduce console spam

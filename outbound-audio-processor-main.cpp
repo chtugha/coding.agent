@@ -16,6 +16,8 @@ void signal_handler(int signal) {
     std::cout << "\n🛑 Received signal " << signal << ", shutting down outbound audio processor..." << std::endl;
 
     if (g_processor) {
+        // Gracefully notify Piper and close sockets before stopping
+        g_processor->deactivate_after_call();
         g_processor->stop();
     }
 

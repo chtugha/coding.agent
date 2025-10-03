@@ -599,7 +599,12 @@ bool StandaloneLlamaService::destroy_session(const std::string& call_id) {
     }
 
     sessions_.erase(it);
-    std::cout << "🗑️ Destroyed LLaMA session for call " << call_id << std::endl;
+
+    // DO NOT close Kokoro socket - keep it open for next call
+    // The socket is per-call_id and will be reused or cleaned up on service stop
+    // This enables sessionless architecture where TCP connections persist across calls
+
+    std::cout << "🗑️ Destroyed LLaMA session for call " << call_id << " (keeping Kokoro connection open)" << std::endl;
     return true;
 }
 
@@ -709,8 +714,8 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
         }
 
         if (text == "BYE") {
-            // Proactively close downstream (Piper) on BYE before tearing down session
-            close_output_for_call(call_id);
+            // DO NOT close Kokoro connection - keep it open for next call
+            // Just break the read loop and clean up this Whisper connection
             break;
         }
 
@@ -727,7 +732,7 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
             if (database_) {
                 database_->append_llama_response(call_id, response);
             }
-            // 2) Send to output endpoint (Piper) if configured
+            // 2) Send to output endpoint (Kokoro) if configured
             if (!output_host_.empty() && output_port_ > 0) {
                 if (connect_output_for_call(call_id)) {
                     send_output_text(call_id, response);
@@ -741,9 +746,11 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
 
     send_tcp_bye(socket);
     close(socket);
+
+    // Destroy session but keep Kokoro connection open for next call
     destroy_session(call_id);
-    close_output_for_call(call_id);
-    std::cout << "📤 Ended LLaMA text handler for call " << call_id << std::endl;
+
+    std::cout << "📤 Ended LLaMA text handler for call " << call_id << " (keeping Kokoro connection open)" << std::endl;
 }
 
 static bool recv_all(int socket, void* buf, size_t nbytes) {

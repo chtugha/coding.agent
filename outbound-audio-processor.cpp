@@ -84,6 +84,20 @@ void OutboundAudioProcessor::deactivate_after_call() {
     // Stop registration polling
     stop_registration_polling();
 
+    // Send BYE to Piper/Kokoro registration listener (UDP 13001)
+    if (!current_call_id_.empty()) {
+        int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (udp_sock >= 0) {
+            struct sockaddr_in piper_addr{};
+            piper_addr.sin_family = AF_INET;
+            piper_addr.sin_port = htons(13001);
+            piper_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+            std::string bye_msg = std::string("BYE:") + current_call_id_;
+            sendto(udp_sock, bye_msg.c_str(), (int)bye_msg.size(), 0, (struct sockaddr*)&piper_addr, sizeof(piper_addr));
+            close(udp_sock);
+            std::cout << "📤 Sent BYE message to Piper service for call_id " << current_call_id_ << std::endl;
+        }
+    }
 
     BaseAudioProcessor::deactivate_after_call();
 

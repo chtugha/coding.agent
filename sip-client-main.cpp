@@ -1445,6 +1445,37 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
 void SimpleSipClient::end_call(const std::string& call_id) {
     std::cout << "📞 Ending call: " << call_id << " (sessionless)" << std::endl;
 
+    // Proactively notify services to tear down per-call resources before killing processors
+    int call_num_id = 0;
+    if (database_) {
+        try {
+            Call db_call = database_->get_call(call_id);
+            call_num_id = db_call.id > 0 ? db_call.id : 0;
+        } catch (...) {
+            call_num_id = 0;
+        }
+    }
+    if (call_num_id > 0) {
+        auto send_udp_bye = [](int port, int id, const char* name) {
+            int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (udp_sock >= 0) {
+                struct sockaddr_in addr{};
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(port);
+                addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+                std::string msg = std::string("BYE:") + std::to_string(id);
+                sendto(udp_sock, msg.c_str(), (int)msg.size(), 0, (struct sockaddr*)&addr, sizeof(addr));
+                close(udp_sock);
+                std::cout << "📤 Sent BYE to " << name << " for call_id " << id << " on UDP " << port << std::endl;
+            }
+        };
+        // Whisper (inbound) uses 13000; Piper (outbound) uses 13001
+        send_udp_bye(13000, call_num_id, "Whisper");
+        send_udp_bye(13001, call_num_id, "Piper");
+    } else {
+        std::cout << "⚠️ Could not resolve numeric call_id for BYE; skipping service notifications" << std::endl;
+    }
+
     // Stop monitor and terminate per-call audio processor child processes
     stop_processor_monitor_for_call(call_id);
     terminate_audio_processors_for_call(call_id);
