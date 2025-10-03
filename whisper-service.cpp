@@ -403,6 +403,10 @@ void StandaloneWhisperService::registration_listener_thread() {
 
                     if (connect_to_audio_stream(stream)) {
                         create_session(call_id);
+                        std::cout << "✅ Successfully connected and created session for call " << call_id << std::endl;
+                    } else {
+                        std::cout << "⚠️ Failed to connect to inbound processor for call " << call_id
+                                  << " - will retry on next REGISTER" << std::endl;
                     }
                 } else if (message.rfind("BYE:", 0) == 0) {
                     std::string call_id = message.substr(4);
