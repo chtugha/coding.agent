@@ -296,6 +296,25 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
         return "";
     }
 
+    // Ensure KV cache capacity: if near limit, clear and re-prime to avoid scheduler slot exhaustion
+    const int safety_margin = 16;
+    const int reserve_for_gen = config_.max_tokens;
+    if (n_past_ + (int)tokens.size() + reserve_for_gen >= config_.n_ctx - safety_margin) {
+        std::cout << "⚠️  [" << call_id_ << "] KV near capacity (n_past=" << n_past_
+                  << ", add=" << tokens.size() << ", gen=" << reserve_for_gen
+                  << ", n_ctx=" << config_.n_ctx << ") — clearing cache and re-priming" << std::endl;
+        // Remove all tokens for this session's sequence from KV to free slots
+        llama_memory_t mem = llama_get_memory(ctx_);
+        llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
+        n_past_ = 0;
+        primed_ = false;
+        conversation_history_.clear();
+        if (!prime_system_prompt()) {
+            std::cout << "❌ Failed to re-prime after KV clear for call " << call_id_ << std::endl;
+            return "";
+        }
+    }
+
     auto tokenize_time = std::chrono::high_resolution_clock::now();
     auto tokenize_ms = std::chrono::duration_cast<std::chrono::milliseconds>(tokenize_time - start_time).count();
 

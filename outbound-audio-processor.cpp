@@ -247,13 +247,20 @@ bool OutboundAudioProcessor::load_and_set_silence_wav2(const std::string& wav_pa
 
 void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
     std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-    // Cap buffer to avoid unbounded latency (keep last ~32kB)
-    constexpr size_t kMaxBytes = 160 * 200; // ~4s of audio at 20ms frames
-    if (out_buffer_.size() > kMaxBytes) {
-        out_buffer_.clear();
-        std::cout << "⚠️ Outbound buffer overflow, dropping queued audio to keep up" << std::endl;
+    // Cap buffer to avoid unbounded latency (keep ~12s @20ms frames); drop oldest to preserve continuity
+    constexpr size_t kMaxBytes = 160 * 600; // 600 frames * 160 bytes/frame ≈ 12s
+    if (!g711.empty()) {
+        // Trim oldest if this insert would exceed cap
+        if (out_buffer_.size() + g711.size() > kMaxBytes) {
+            size_t overflow = (out_buffer_.size() + g711.size()) - kMaxBytes;
+            overflow = std::min(overflow, out_buffer_.size());
+            if (overflow > 0) {
+                out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + overflow);
+                std::cout << "⚠️ Outbound buffer trimmed " << overflow << " bytes to keep up" << std::endl;
+            }
+        }
+        out_buffer_.insert(out_buffer_.end(), g711.begin(), g711.end());
     }
-    out_buffer_.insert(out_buffer_.end(), g711.begin(), g711.end());
 }
 
 void OutboundAudioProcessor::make_silence_frame_(std::vector<uint8_t>& frame) {
