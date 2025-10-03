@@ -401,13 +401,16 @@ void StandaloneWhisperService::registration_listener_thread() {
                     std::cout << "🔗 Whisper connecting to inbound audio stream: " << call_id
                               << " on port " << inbound_port << std::endl;
 
-                    if (connect_to_audio_stream(stream)) {
-                        create_session(call_id);
-                        std::cout << "✅ Successfully connected and created session for call " << call_id << std::endl;
-                    } else {
-                        std::cout << "⚠️ Failed to connect to inbound processor for call " << call_id
-                                  << " - will retry on next REGISTER" << std::endl;
-                    }
+                    // Spawn connection attempt in separate thread to avoid blocking registration listener
+                    std::thread([this, stream, call_id]() {
+                        if (connect_to_audio_stream(stream)) {
+                            create_session(call_id);
+                            std::cout << "✅ Successfully connected and created session for call " << call_id << std::endl;
+                        } else {
+                            std::cout << "⚠️ Failed to connect to inbound processor for call " << call_id
+                                      << " - will retry on next REGISTER" << std::endl;
+                        }
+                    }).detach();
                 } else if (message.rfind("BYE:", 0) == 0) {
                     std::string call_id = message.substr(4);
                     while (!call_id.empty() && isspace(static_cast<unsigned char>(call_id.back()))) call_id.pop_back();
