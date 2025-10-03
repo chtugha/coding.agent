@@ -122,7 +122,7 @@ private:
 
     // TCP connection management (audio input)
     std::unordered_map<std::string, int> call_tcp_sockets_;
-    std::unordered_map<std::string, std::thread> call_tcp_threads_;
+    // Note: TCP handler threads are detached and manage their own lifecycle
 
     // TCP connection management (to LLaMA per call)
     std::string llama_host_ = "127.0.0.1";

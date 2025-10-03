@@ -270,14 +270,7 @@ void StandaloneWhisperService::stop() {
             }
         }
         call_tcp_sockets_.clear();
-
-        // Join all TCP threads
-        for (auto& pair : call_tcp_threads_) {
-            if (pair.second.joinable()) {
-                pair.second.join();
-            }
-        }
-        call_tcp_threads_.clear();
+        // Note: TCP handler threads are detached and will exit when sockets close
     }
 
     // Destroy all sessions
@@ -578,9 +571,9 @@ bool StandaloneWhisperService::connect_to_audio_stream(const AudioStreamInfo& st
         std::lock_guard<std::mutex> lock(tcp_mutex_);
         call_tcp_sockets_[stream_info.call_id] = sock;
 
-        // Start TCP handler thread
-        call_tcp_threads_[stream_info.call_id] = std::thread(
-            &StandaloneWhisperService::handle_tcp_audio_stream, this, stream_info.call_id, sock);
+        // Start TCP handler thread and detach it (thread will clean itself up)
+        std::thread handler_thread(&StandaloneWhisperService::handle_tcp_audio_stream, this, stream_info.call_id, sock);
+        handler_thread.detach();
     }
 
     return true;
