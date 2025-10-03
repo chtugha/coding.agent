@@ -305,6 +305,12 @@ void StandaloneWhisperService::start_registration_listener() {
         return;
     }
 
+    // Set SO_REUSEADDR to allow quick restart
+    int reuse = 1;
+    if (setsockopt(registration_socket_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        std::cerr << "⚠️ Failed to set SO_REUSEADDR on registration socket" << std::endl;
+    }
+
     // Bind to port 13000
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
