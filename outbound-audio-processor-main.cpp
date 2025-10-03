@@ -124,7 +124,8 @@ int main(int argc, char* argv[]) {
 
         std::cout << "✅ Outbound Audio Processor started successfully" << std::endl;
         std::cout << "📤 Ready to process Piper → Phone audio streams" << std::endl;
-        std::cout << "📡 Piper TCP listener: port " << (9002) << " + call_id" << std::endl;
+        std::cout << "📡 Outbound waiting for REGISTER on UDP port " << (13000 + call_id)
+                  << "; will connect to Kokoro TCP " << (9002 + call_id) << std::endl;
         std::cout << "🔌 Outbound SHM channel: " << name << std::endl;
 
     } catch (const std::exception& e) {

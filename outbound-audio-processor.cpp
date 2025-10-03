@@ -505,7 +505,7 @@ void OutboundAudioProcessor::start_registration_polling(const std::string& call_
     registration_running_.store(true);
     registration_thread_ = std::thread(&OutboundAudioProcessor::registration_polling_thread, this, call_id);
 
-    std::cout << "🔄 Started registration polling for call " << call_id << std::endl;
+    std::cout << "🔄 Started registration listener for call " << call_id << std::endl;
 }
 
 void OutboundAudioProcessor::stop_registration_polling() {
