@@ -169,6 +169,7 @@ bool PiperSession::get_next_audio_chunk(std::vector<float>& audio_samples, int& 
 StandalonePiperService::StandalonePiperService(const PiperSessionConfig& default_config)
     : default_config_(default_config), server_socket_(-1), running_(false),
       total_sessions_created_(0), total_text_processed_(0), total_audio_generated_(0) {
+    service_discovery_ = std::make_unique<ServiceDiscovery>();
     std::cout << "🎤 Piper service initialized" << std::endl;
 }
 
@@ -264,6 +265,12 @@ bool StandalonePiperService::start(int tcp_port) {
     running_.store(true);
     server_thread_ = std::thread(&StandalonePiperService::run_tcp_server, this, tcp_port);
 
+    // NOTE: Discovery loop disabled - using UDP registration mechanism instead
+    // discovery_thread_ = std::thread(&StandalonePiperService::run_discovery_loop, this);
+
+    // Start registration listener
+    start_registration_listener();
+
     if (database_) {
         try {
             database_->set_piper_service_status("running");
@@ -274,6 +281,8 @@ bool StandalonePiperService::start(int tcp_port) {
         }
     }
 
+    std::cout << "🔍 Listening for audio processor registrations on UDP port 13001..." << std::endl;
+
     return true;
 }
 
@@ -282,6 +291,9 @@ void StandalonePiperService::stop() {
 
     std::cout << "🛑 Stopping Piper service..." << std::endl;
     running_.store(false);
+
+    // Stop registration listener
+    stop_registration_listener();
 
     // Close server socket
     if (server_socket_ >= 0) {
@@ -292,6 +304,11 @@ void StandalonePiperService::stop() {
     // Wait for server thread
     if (server_thread_.joinable()) {
         server_thread_.join();
+    }
+
+    // Wait for discovery thread
+    if (discovery_thread_.joinable()) {
+        discovery_thread_.join();
     }
 
     // Clean up sessions and threads
@@ -326,6 +343,89 @@ void StandalonePiperService::stop() {
     }
 
     std::cout << "✅ Piper service stopped" << std::endl;
+}
+
+void StandalonePiperService::start_registration_listener() {
+    // Create UDP socket for registration messages
+    registration_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (registration_socket_ < 0) {
+        std::cerr << "❌ Failed to create registration UDP socket" << std::endl;
+        return;
+    }
+
+    // Bind to port 13001 (Piper uses 13001, Whisper uses 13000)
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(13001);
+
+    if (bind(registration_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "❌ Failed to bind registration UDP socket to port 13001" << std::endl;
+        close(registration_socket_);
+        registration_socket_ = -1;
+        return;
+    }
+
+    registration_running_.store(true);
+    registration_thread_ = std::thread(&StandalonePiperService::registration_listener_thread, this);
+
+    std::cout << "📡 Piper registration listener started on UDP port 13001" << std::endl;
+}
+
+void StandalonePiperService::stop_registration_listener() {
+    registration_running_.store(false);
+
+    if (registration_socket_ >= 0) {
+        close(registration_socket_);
+        registration_socket_ = -1;
+    }
+
+    if (registration_thread_.joinable()) {
+        registration_thread_.join();
+    }
+}
+
+void StandalonePiperService::registration_listener_thread() {
+    char buffer[256];
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    while (registration_running_.load()) {
+        // Set timeout on socket
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(registration_socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        ssize_t n = recvfrom(registration_socket_, buffer, sizeof(buffer) - 1, 0,
+                             (struct sockaddr*)&client_addr, &client_len);
+
+        if (n > 0) {
+            buffer[n] = '\0';
+            std::string message(buffer);
+
+            // Parse message: "REGISTER:<call_id>" or "BYE:<call_id>"
+            if (message.find("REGISTER:") == 0) {
+                std::string call_id = message.substr(9);
+
+                std::cout << "📥 Received REGISTER for call_id " << call_id
+                          << " - outbound processor is ready" << std::endl;
+
+                // Note: We don't connect here. The connection will be established
+                // automatically when try_connect_audio_output_for_call() is called
+                // during synthesis. This is the correct sessionless design.
+            }
+            else if (message.find("BYE:") == 0) {
+                std::string call_id = message.substr(4);
+                std::cout << "📤 Received BYE for call_id " << call_id << std::endl;
+
+                // Clean up any existing connections and sessions
+                close_audio_output_for_call(call_id);
+                destroy_session(call_id);
+            }
+        }
+    }
 }
 
 bool StandalonePiperService::init_database(const std::string& db_path) {
@@ -735,57 +835,97 @@ bool StandalonePiperService::connect_audio_output_for_call(const std::string& ca
 }
 
 bool StandalonePiperService::try_connect_audio_output_for_call(const std::string& call_id) {
-    // Non-blocking version that doesn't log connection failures
+    // Check if already connected
     {
         std::lock_guard<std::mutex> lock(output_sockets_mutex_);
         if (output_sockets_.count(call_id)) return true;
     }
 
     int port = calculate_audio_processor_port(call_id);
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return false;
-    // Prevent SIGPIPE on audio socket (macOS)
-    {
-        int on = 1;
-        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    const int max_attempts = 10;
+
+    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) {
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            return false;
+        }
+
+        // Prevent SIGPIPE on audio socket (macOS)
+        {
+            int on = 1;
+            setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        }
+
+        // Set shorter timeout for resilient mode
+        struct timeval timeout;
+        timeout.tv_sec = 1;  // 1 second timeout for resilient mode
+        timeout.tv_usec = 0;
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = inet_addr(output_host_.c_str());
+
+        if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                if (attempt == 1 || attempt == 5 || attempt == max_attempts - 1) {
+                    std::cout << "⚠️ Connection attempt " << attempt << "/" << max_attempts
+                              << " failed for call " << call_id << " - retrying in " << sleep_ms << "ms" << std::endl;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            std::cout << "❌ Failed to connect to audio processor for call " << call_id
+                      << " after " << max_attempts << " attempts" << std::endl;
+            return false;
+        }
+
+        // Low-latency: disable Nagle
+        {
+            int flag = 1;
+            setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        }
+
+        // Send HELLO(call_id)
+        uint32_t n = htonl((uint32_t)call_id.size());
+        if (send(s, &n, 4, MSG_NOSIGNAL) != 4) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            return false;
+        }
+        if (send(s, call_id.data(), call_id.size(), MSG_NOSIGNAL) != (ssize_t)call_id.size()) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+            output_sockets_[call_id] = s;
+        }
+        std::cout << "🔗 Connected audio output for call " << call_id << " to " << output_host_
+                  << ":" << port << " (attempt " << attempt << ")" << std::endl;
+        return true;
     }
 
-
-    // Set shorter timeout for resilient mode
-    struct timeval timeout;
-    timeout.tv_sec = 1;  // 1 second timeout for resilient mode
-    timeout.tv_usec = 0;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = inet_addr(output_host_.c_str());
-
-    if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(s);
-        return false;  // Silent failure for resilient mode
-    }
-    // Low-latency: disable Nagle
-    {
-        int flag = 1;
-        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-    }
-
-    // Send HELLO(call_id)
-    uint32_t n = htonl((uint32_t)call_id.size());
-    if (send(s, &n, 4, MSG_NOSIGNAL) != 4) { close(s); return false; }
-    if (send(s, call_id.data(), call_id.size(), MSG_NOSIGNAL) != (ssize_t)call_id.size()) { close(s); return false; }
-
-    {
-        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
-        output_sockets_[call_id] = s;
-    }
-    if (default_config_.verbose) {
-        std::cout << "🔗 Connected audio output for call " << call_id << " to " << output_host_ << ":" << port << std::endl;
-    }
-    return true;
+    return false;
 }
 
 bool StandalonePiperService::send_audio_to_processor(const std::string& call_id, const std::vector<float>& audio_samples, int sample_rate) {
@@ -868,7 +1008,7 @@ void StandalonePiperService::close_audio_output_for_call(const std::string& call
 }
 
 int StandalonePiperService::calculate_audio_processor_port(const std::string& call_id) {
-    // Must match AudioProcessorService::calculate_incoming_port(call_id)
+    // Fallback: Must match AudioProcessorService::calculate_incoming_port(call_id)
     if (call_id.empty()) return 9002;
     int call_id_num = 0;
     try {
@@ -877,6 +1017,117 @@ int StandalonePiperService::calculate_audio_processor_port(const std::string& ca
         call_id_num = 0;
     }
     return 9002 + call_id_num;
+}
+
+void StandalonePiperService::run_discovery_loop() {
+    last_discovery_ = std::chrono::steady_clock::now();
+
+    while (running_.load()) {
+        auto now = std::chrono::steady_clock::now();
+
+        // Discover new streams every 5 seconds
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discovery_).count() > 5000) {
+            discover_and_connect_streams();
+            last_discovery_ = now;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    }
+}
+
+void StandalonePiperService::discover_and_connect_streams() {
+    // DIRECT CONNECTION MODE: Check database for active calls and connect directly
+    // Port calculation: 9002 + call_num_id (from database row ID)
+
+    if (!database_) return;
+
+    // Get all active calls from database
+    auto active_calls = database_->get_active_calls();
+
+    for (const auto& call : active_calls) {
+        std::string call_id_str = std::to_string(call.id);
+
+        // Check if we're already connected to this stream
+        {
+            std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+            if (output_sockets_.find(call_id_str) != output_sockets_.end()) {
+                continue; // Already connected
+            }
+        }
+
+        // Calculate outbound processor port: 9002 + call_num_id
+        int outbound_port = 9002 + call.id;
+
+        // Create stream info for direct connection
+        AudioStreamInfo stream;
+        stream.call_id = call_id_str;
+        stream.tcp_port = outbound_port;
+        stream.stream_type = "outbound";
+        stream.sample_rate = 8000;
+        stream.channels = 1;
+
+        std::cout << "🔗 Piper connecting to outbound audio stream: " << call_id_str
+                  << " on port " << outbound_port << std::endl;
+
+        connect_to_audio_stream(stream);
+    }
+}
+
+bool StandalonePiperService::connect_to_audio_stream(const AudioStreamInfo& stream_info) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) {
+        std::cout << "❌ Failed to create socket for call " << stream_info.call_id << std::endl;
+        return false;
+    }
+
+    // Set connection timeout
+    struct timeval timeout;
+    timeout.tv_sec = 2;
+    timeout.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    // Prevent SIGPIPE
+    int on = 1;
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    server_addr.sin_port = htons(stream_info.tcp_port);
+
+    if (connect(s, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        std::cout << "❌ Failed to connect to audio stream " << stream_info.call_id
+                  << " on port " << stream_info.tcp_port << std::endl;
+        close(s);
+        return false;
+    }
+
+    // Disable Nagle for low latency
+    int flag = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+    // Send HELLO(call_id)
+    uint32_t n = htonl((uint32_t)stream_info.call_id.size());
+    if (send(s, &n, 4, MSG_NOSIGNAL) != 4) {
+        close(s);
+        return false;
+    }
+    if (send(s, stream_info.call_id.data(), stream_info.call_id.size(), MSG_NOSIGNAL) != (ssize_t)stream_info.call_id.size()) {
+        close(s);
+        return false;
+    }
+
+    std::cout << "🔗 Connected audio output for call " << stream_info.call_id
+              << " to 127.0.0.1:" << stream_info.tcp_port << std::endl;
+
+    // Store connection
+    {
+        std::lock_guard<std::mutex> lock(output_sockets_mutex_);
+        output_sockets_[stream_info.call_id] = s;
+    }
+
+    return true;
 }
 
 void StandalonePiperService::cleanup_inactive_sessions() {

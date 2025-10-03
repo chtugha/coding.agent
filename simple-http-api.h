@@ -92,6 +92,11 @@ private:
     HttpResponse api_piper_models_get(const HttpRequest& request);
     HttpResponse api_piper_restart(const HttpRequest& request);
 
+    // Kokoro service endpoints
+    HttpResponse api_kokoro_service_get(const HttpRequest& request);
+    HttpResponse api_kokoro_service_toggle(const HttpRequest& request);
+    HttpResponse api_kokoro_voices_get(const HttpRequest& request);
+
     std::string get_mime_type(const std::string& extension);
 
     // Database connection

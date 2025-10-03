@@ -56,6 +56,7 @@ public:
     bool append_llama_response(const std::string& call_id, const std::string& text);
 
     Call get_call(const std::string& call_id);
+    std::vector<Call> get_active_calls(); // Get all calls with status='active'
 
     // Session management removed
 
@@ -102,6 +103,14 @@ public:
     // Atomic Piper configuration update (transaction-safe)
     bool set_piper_service_config_atomic(bool enabled, const std::string& model_path,
                                         const std::string& espeak_path, const std::string& status);
+
+    // Kokoro service management
+    bool get_kokoro_service_enabled();
+    bool set_kokoro_service_enabled(bool enabled);
+    std::string get_kokoro_voice();
+    bool set_kokoro_voice(const std::string& voice);
+    std::string get_kokoro_service_status(); // "running", "stopped", "error"
+    bool set_kokoro_service_status(const std::string& status);
 
 private:
     sqlite3* db_;

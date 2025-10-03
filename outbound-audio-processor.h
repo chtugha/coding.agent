@@ -73,6 +73,10 @@ private:
     std::thread piper_tcp_thread_;
     std::mutex piper_mutex_;
 
+    // Registration polling
+    std::atomic<bool> registration_running_;
+    std::thread registration_thread_;
+
     // Deduplication state for incoming TTS chunks (per call)
     std::unordered_map<std::string, uint32_t> last_chunk_id_;
     std::mutex chunk_dedup_mutex_;
@@ -100,4 +104,9 @@ private:
 
     // Port calculation
     int calculate_piper_port(const std::string& call_id);
+
+    // Registration polling
+    void start_registration_polling(const std::string& call_id);
+    void stop_registration_polling();
+    void registration_polling_thread(const std::string& call_id);
 };

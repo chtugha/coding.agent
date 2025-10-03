@@ -11,6 +11,7 @@ OutboundAudioProcessor::OutboundAudioProcessor()
     : piper_tcp_socket_(-1)
     , piper_tcp_port_(-1)
     , piper_connected_(false)
+    , registration_running_(false)
 {
 }
 
@@ -23,25 +24,20 @@ bool OutboundAudioProcessor::start(int base_port) {
 
     base_port_ = base_port;
 
-    // Start service advertiser
-    service_advertiser_ = std::make_unique<ServiceAdvertiser>();
-    if (!service_advertiser_->start(13001 + base_port)) {
-        std::cout << "❌ Failed to start outbound service advertiser" << std::endl;
-        return false;
-    }
-
     running_.store(true);
     active_.store(false); // Start in sleeping state
 
     std::cout << "😴 Outbound Audio Processor started (SLEEPING) on base port " << base_port << std::endl;
     std::cout << "📡 TCP sockets will be created dynamically based on call_id" << std::endl;
-    std::cout << "📢 Service advertiser running on port " << (13001 + base_port) << std::endl;
 
     return true;
 }
 
 void OutboundAudioProcessor::stop() {
     BaseAudioProcessor::stop();
+
+    // Stop registration polling
+    stop_registration_polling();
 
     // Stop output scheduler first
     stop_output_scheduler_();
@@ -80,10 +76,35 @@ void OutboundAudioProcessor::activate_for_call(const std::string& call_id) {
         return;
     }
 
-    std::cout << "✅ Outbound Audio Processor ACTIVE - Piper stream ready for call " << call_id << std::endl;
+    // Start continuous registration polling
+    start_registration_polling(call_id);
+
+    std::cout << "✅ Outbound Audio Processor ACTIVE - Piper stream ready for call " << call_id << " on port " << piper_tcp_port_ << std::endl;
 }
 
 void OutboundAudioProcessor::deactivate_after_call() {
+    // Stop registration polling
+    stop_registration_polling();
+
+    // Send BYE message to Piper service
+    if (!current_call_id_.empty()) {
+        int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (udp_sock >= 0) {
+            struct sockaddr_in piper_addr;
+            memset(&piper_addr, 0, sizeof(piper_addr));
+            piper_addr.sin_family = AF_INET;
+            piper_addr.sin_port = htons(13001);
+            piper_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+            std::string bye_msg = "BYE:" + current_call_id_;
+            sendto(udp_sock, bye_msg.c_str(), bye_msg.length(), 0,
+                   (struct sockaddr*)&piper_addr, sizeof(piper_addr));
+            close(udp_sock);
+
+            std::cout << "📤 Sent BYE message to Piper service for call_id " << current_call_id_ << std::endl;
+        }
+    }
+
     BaseAudioProcessor::deactivate_after_call();
 
     // Stop output scheduler
@@ -102,6 +123,18 @@ void OutboundAudioProcessor::deactivate_after_call() {
     // Join TCP thread
     if (piper_tcp_thread_.joinable()) {
         piper_tcp_thread_.join();
+    }
+
+    // Remove service advertisement
+    if (service_advertiser_) {
+        std::string call_id;
+        {
+            std::lock_guard<std::mutex> lock(call_mutex_);
+            call_id = current_call_id_;
+        }
+        if (!call_id.empty()) {
+            service_advertiser_->remove_stream_advertisement(call_id);
+        }
     }
 }
 std::vector<uint8_t> OutboundAudioProcessor::process_float_mono_to_ulaw(const std::vector<float>& mono, uint32_t sample_rate) {
@@ -245,7 +278,10 @@ void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
 
 void OutboundAudioProcessor::make_silence_frame_(std::vector<uint8_t>& frame) {
     frame.resize(160, 0xFF); // μ-law silence
-    if (!silence_wav2_.empty()) {
+
+    // Only play test WAV if Piper is NOT connected
+    // Once Piper connects, we play actual silence until Piper audio arrives
+    if (!piper_connected_.load() && !silence_wav2_.empty()) {
         for (size_t i = 0; i < 160; ++i) {
             frame[i] = silence_wav2_[silence_wav2_pos_];
             silence_wav2_pos_ = (silence_wav2_pos_ + 1) % silence_wav2_.size();
@@ -395,7 +431,8 @@ void OutboundAudioProcessor::handle_piper_tcp_connection() {
                 break;
             }
 
-            if (chunk_length > 1024 * 1024) {
+            // Allow up to 10MB chunks (long sentences can generate large audio)
+            if (chunk_length > 10 * 1024 * 1024) {
                 std::cout << "⚠️ Piper chunk too large (" << chunk_length << " bytes) — dropping" << std::endl;
                 break;
             }
@@ -472,6 +509,69 @@ void OutboundAudioProcessor::process_piper_audio_chunk(const std::vector<uint8_t
         enqueue_g711_(payload);
         std::cout << "📤 Piper TTS enqueued (bytes passthrough): " << payload.size() << " bytes, id=" << chunk_id << std::endl;
     }
+}
+
+// Registration polling implementation
+void OutboundAudioProcessor::start_registration_polling(const std::string& call_id) {
+    stop_registration_polling(); // Stop any existing polling
+
+    registration_running_.store(true);
+    registration_thread_ = std::thread(&OutboundAudioProcessor::registration_polling_thread, this, call_id);
+
+    std::cout << "🔄 Started registration polling for call " << call_id << std::endl;
+}
+
+void OutboundAudioProcessor::stop_registration_polling() {
+    registration_running_.store(false);
+
+    if (registration_thread_.joinable()) {
+        registration_thread_.join();
+    }
+}
+
+void OutboundAudioProcessor::registration_polling_thread(const std::string& call_id) {
+    struct sockaddr_in piper_addr;
+    memset(&piper_addr, 0, sizeof(piper_addr));
+    piper_addr.sin_family = AF_INET;
+    piper_addr.sin_port = htons(13001);
+    piper_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    std::string reg_msg = "REGISTER:" + call_id;
+
+    auto start_time = std::chrono::steady_clock::now();
+    int attempt = 0;
+
+    while (registration_running_.load() && running_.load() && active_.load()) {
+        // Check if already connected
+        if (piper_connected_.load()) {
+            std::cout << "✅ TTS service connected for call " << call_id << " - stopping registration polling" << std::endl;
+            break;
+        }
+
+        // Send REGISTER message
+        int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (udp_sock >= 0) {
+            sendto(udp_sock, reg_msg.c_str(), reg_msg.length(), 0,
+                   (struct sockaddr*)&piper_addr, sizeof(piper_addr));
+            close(udp_sock);
+
+            attempt++;
+            std::cout << "📤 Sent REGISTER #" << attempt << " for call_id " << call_id << std::endl;
+        }
+
+        // Determine sleep interval: 200ms for first second, then 1 second
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+
+        int sleep_ms = (elapsed < 1000) ? 200 : 1000;
+
+        // Sleep with periodic checks for early termination
+        for (int i = 0; i < sleep_ms / 100 && registration_running_.load(); i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    std::cout << "🛑 Registration polling stopped for call " << call_id << " after " << attempt << " attempts" << std::endl;
 }
 
 // Unused functions removed for performance optimization

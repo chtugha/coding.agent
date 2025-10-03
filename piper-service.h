@@ -1,6 +1,7 @@
 #pragma once
 
 #include "database.h"
+#include "service-advertisement.h"
 #include <string>
 #include <memory>
 #include <unordered_map>
@@ -11,6 +12,7 @@
 #include <queue>
 #include <vector>
 #include <cstdint>
+#include <chrono>
 
 // Forward declarations for Piper C API
 struct piper_synthesizer;
@@ -111,6 +113,10 @@ private:
     // Database connection
     std::unique_ptr<Database> database_;
 
+    // Service discovery for finding outbound audio processors
+    std::unique_ptr<ServiceDiscovery> service_discovery_;
+    std::chrono::steady_clock::time_point last_discovery_;
+
     // Eager warm preload to ensure synthesizer is ready on startup
     piper_synthesizer* warm_synth_ = nullptr;
     bool warm_loaded_ = false;
@@ -129,6 +135,7 @@ private:
     int server_socket_;
     std::atomic<bool> running_;
     std::thread server_thread_;
+    std::thread discovery_thread_;
     std::unordered_map<std::string, std::thread> call_tcp_threads_;
     std::mutex call_threads_mutex_;
 
@@ -147,6 +154,17 @@ private:
 
     // Internal methods
     void run_tcp_server(int port);
+    void run_discovery_loop();
+    void discover_and_connect_streams();
+    bool connect_to_audio_stream(const AudioStreamInfo& stream_info);
+
+    // Registration listener (UDP-based)
+    void start_registration_listener();
+    void stop_registration_listener();
+    void registration_listener_thread();
+    int registration_socket_ = -1;
+    std::thread registration_thread_;
+    std::atomic<bool> registration_running_{false};
     void handle_tcp_text_stream(const std::string& call_id, int socket);
     bool read_tcp_hello(int socket, std::string& call_id);
     bool read_tcp_text_chunk(int socket, std::string& text);

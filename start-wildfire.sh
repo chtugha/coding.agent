@@ -110,6 +110,7 @@ cleanup_processes() {
   terminate_pattern "$ROOT_DIR/whisper-service|(^|/)whisper-service( |$)"
   terminate_pattern "$ROOT_DIR/llama-service|(^|/)llama-service( |$)"
   terminate_pattern "$ROOT_DIR/piper-service|(^|/)piper-service( |$)"
+  terminate_pattern "kokoro_service.py"
 }
 
 # -----------------------
@@ -134,7 +135,10 @@ reset_database_states() {
 BEGIN TRANSACTION;
 -- Reset service status keys to stopped
 UPDATE system_config SET value = "stopped", updated_at = CURRENT_TIMESTAMP
- WHERE key IN ("whisper_service_status", "llama_service_status", "piper_service_status");
+ WHERE key IN ("whisper_service_status", "llama_service_status", "piper_service_status", "kokoro_service_status");
+-- Reset service enabled flags to false
+UPDATE system_config SET value = "false", updated_at = CURRENT_TIMESTAMP
+ WHERE key IN ("kokoro_service_enabled");
 -- Reset SIP line statuses and disable lines by default
 UPDATE sip_lines SET status = "disconnected";
 UPDATE sip_lines SET enabled = 0;

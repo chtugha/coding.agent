@@ -739,6 +739,47 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         </div>
 
         <div class="card">
+            <h2>🎙️ Kokoro TTS Service (PyTorch)</h2>
+            <div id="kokoroServiceContainer">
+                <div class="status-grid">
+                    <div class="status-item">
+                        <h3>Service Status</h3>
+                        <div id="kokoroStatus" class="status-offline">● Stopped</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Current Voice</h3>
+                        <div id="kokoroVoice" style="padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+                            Loading...
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Available Voices</h3>
+                        <div id="kokoroVoiceList" style="max-height: 150px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 5px;">
+                            Loading voices...
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Performance</h3>
+                        <div id="kokoroPerformance" style="padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+                            Device: MPS (Apple Silicon)<br>
+                            Speed: 10-20x faster than Piper<br>
+                            Quality: 24kHz, 82M parameters
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <button id="kokoroToggleBtn" class="refresh-btn" onclick="toggleKokoroService()">
+                        Start Service
+                    </button>
+                    <button id="kokoroChangeVoiceBtn" class="refresh-btn" onclick="changeKokoroVoice()" style="margin-left: 10px; background: #17a2b8; color: #fff;" disabled>
+                        Change Voice
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>API Endpoints</h2>
             <ul>
                 <li><a href="/api/status">/api/status</a> - System status</li>
@@ -752,6 +793,9 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 <li><a href="/api/piper/service">/api/piper/service</a> - Piper TTS service info</li>
                 <li><strong>POST</strong> /api/piper/service/toggle - Start/stop service</li>
                 <li><a href="/api/piper/models">/api/piper/models</a> - Available Piper models</li>
+                <li><a href="/api/kokoro/service">/api/kokoro/service</a> - Kokoro TTS service info</li>
+                <li><strong>POST</strong> /api/kokoro/service/toggle - Start/stop service</li>
+                <li><a href="/api/kokoro/voices">/api/kokoro/voices</a> - Available Kokoro voices</li>
             </ul>
         </div>
     </div>
@@ -831,6 +875,7 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
         loadWhisperService();
         loadLlamaService();
         loadPiperService();
+        loadKokoroService();
 
         // Simple function to add SIP line
         window.addSipLine = function() {
@@ -895,9 +940,10 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
                 safeRefreshStatus();
                 safeLoadSipLines();
                 safeLoadWhisperService();
-                // Direct calls for LLaMA and Piper (no extra gating needed)
+                // Direct calls for LLaMA, Piper, and Kokoro (no extra gating needed)
                 loadLlamaService();
                 loadPiperService();
+                loadKokoroService();
             } catch (e) {
                 console.error('refreshAll error:', e);
             }
@@ -2159,10 +2205,148 @@ HttpResponse SimpleHttpServer::serve_static_file(const std::string& path) {
             }
         }
 
+        // Kokoro TTS service functions
+        async function loadKokoroService() {
+            try {
+                const serviceResponse = await fetch('/api/kokoro/service');
+                const serviceData = await serviceResponse.json();
+
+                const statusDiv = document.getElementById('kokoroStatus');
+                const toggleBtn = document.getElementById('kokoroToggleBtn');
+                const changeVoiceBtn = document.getElementById('kokoroChangeVoiceBtn');
+                const voiceDiv = document.getElementById('kokoroVoice');
+
+                if (serviceData.enabled && serviceData.status === 'running') {
+                    statusDiv.className = 'status-online';
+                    statusDiv.textContent = '● Running';
+                    toggleBtn.textContent = 'Stop Service';
+                    toggleBtn.style.background = '#dc3545';
+                    changeVoiceBtn.disabled = false;
+                } else {
+                    statusDiv.className = 'status-offline';
+                    statusDiv.textContent = '● Stopped';
+                    toggleBtn.textContent = 'Start Service';
+                    toggleBtn.style.background = '#28a745';
+                    changeVoiceBtn.disabled = true;
+                }
+
+                // Display current voice
+                voiceDiv.textContent = `Voice: ${serviceData.voice || 'af_sky'}`;
+
+                // Load available voices
+                const voicesResponse = await fetch('/api/kokoro/voices');
+                const voicesData = await voicesResponse.json();
+                const voiceList = document.getElementById('kokoroVoiceList');
+
+                if (voicesData.voices && voicesData.voices.length > 0) {
+                    voiceList.innerHTML = voicesData.voices.map(voice => {
+                        const isSelected = voice.id === serviceData.voice;
+                        return `<div style="padding: 5px; cursor: pointer; background: ${isSelected ? '#e3f2fd' : 'transparent'};"
+                                     onclick="selectKokoroVoice('${voice.id}')"
+                                     id="voice-${voice.id}">
+                                    ${isSelected ? '✓ ' : ''}${voice.name}
+                                </div>`;
+                    }).join('');
+                } else {
+                    voiceList.innerHTML = '<div style="padding: 5px;">No voices available</div>';
+                }
+
+            } catch (error) {
+                console.error('Error loading Kokoro service:', error);
+                document.getElementById('kokoroStatus').textContent = '● Error';
+            }
+        }
+
+        let selectedKokoroVoice = null;
+
+        function selectKokoroVoice(voiceId) {
+            selectedKokoroVoice = voiceId;
+            console.log('Selected Kokoro voice:', voiceId);
+
+            // Update UI to show selection
+            const voiceList = document.getElementById('kokoroVoiceList');
+            const allVoices = voiceList.querySelectorAll('div[id^="voice-"]');
+            allVoices.forEach(div => {
+                const id = div.id.replace('voice-', '');
+                if (id === voiceId) {
+                    div.style.background = '#e3f2fd';
+                    if (!div.textContent.startsWith('✓')) {
+                        div.textContent = '✓ ' + div.textContent;
+                    }
+                } else {
+                    div.style.background = 'transparent';
+                    div.textContent = div.textContent.replace('✓ ', '');
+                }
+            });
+        }
+
+        async function changeKokoroVoice() {
+            if (!selectedKokoroVoice) {
+                alert('Please select a voice first');
+                return;
+            }
+
+            if (!confirm(`Restart Kokoro service with voice: ${selectedKokoroVoice}?`)) {
+                return;
+            }
+
+            try {
+                // Stop service
+                await fetch('/api/kokoro/service/toggle?enable=false', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                // Wait a moment
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // Start with new voice
+                const response = await fetch(`/api/kokoro/service/toggle?enable=true&voice=${selectedKokoroVoice}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    console.log('Kokoro voice changed:', result);
+                    selectedKokoroVoice = null;
+                    loadKokoroService(); // Refresh display
+                } else {
+                    alert(`Failed to change voice: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error changing voice:', error);
+                alert('Failed to change voice');
+            }
+        }
+
+        async function toggleKokoroService() {
+            try {
+                const svc = await fetch('/api/kokoro/service').then(r => r.json());
+                const start = !(svc && svc.status === 'running');
+                const response = await fetch(`/api/kokoro/service/toggle?enable=${start ? 'true' : 'false'}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    console.log('Kokoro service toggled:', result);
+                    loadKokoroService(); // Refresh display
+                } else {
+                    alert(`Failed to toggle Kokoro service: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error toggling Kokoro service:', error);
+                alert('Failed to toggle Kokoro service');
+            }
+        }
+
         // Load initial data - use direct call for initial load
         loadWhisperService();
         loadLlamaService();
         loadPiperService();
+        loadKokoroService();
     </script>
 </body>
 </html>)HTML";
@@ -2333,6 +2517,18 @@ HttpResponse SimpleHttpServer::handle_api_request(const HttpRequest& request) {
     } else if (request.path == "/api/piper/restart") {
         if (request.method == "POST") {
             return api_piper_restart(request);
+        }
+    } else if (request.path == "/api/kokoro/service") {
+        if (request.method == "GET") {
+            return api_kokoro_service_get(request);
+        }
+    } else if (request.path == "/api/kokoro/service/toggle") {
+        if (request.method == "POST") {
+            return api_kokoro_service_toggle(request);
+        }
+    } else if (request.path == "/api/kokoro/voices") {
+        if (request.method == "GET") {
+            return api_kokoro_voices_get(request);
         }
     } else if (request.path == "/api/upload-stream") {
         if (request.method == "POST") {
@@ -4184,6 +4380,166 @@ HttpResponse SimpleHttpServer::api_piper_restart(const HttpRequest& request) {
         response.body = R"({"error": "Failed to restart Piper service"})";
     }
 
+    return response;
+}
+
+// Kokoro service API endpoints
+HttpResponse SimpleHttpServer::api_kokoro_service_get(const HttpRequest& /* request */) {
+    HttpResponse response;
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    bool enabled = database_->get_kokoro_service_enabled();
+    std::string status = database_->get_kokoro_service_status();
+    std::string voice = database_->get_kokoro_voice();
+
+    // Check if process is actually running
+    int probe = system("pgrep -f kokoro_service.py > /dev/null 2>&1");
+    bool is_running = (probe == 0);
+
+    // Update status if mismatch
+    if (is_running && status != "running") {
+        database_->set_kokoro_service_status("running");
+        status = "running";
+    } else if (!is_running && status == "running") {
+        database_->set_kokoro_service_status("stopped");
+        status = "stopped";
+    }
+
+    std::ostringstream json;
+    json << "{"
+         << "\"enabled\": " << (enabled ? "true" : "false") << ","
+         << "\"status\": \"" << status << "\","
+         << "\"voice\": \"" << voice << "\","
+         << "\"tcp_port\": 8090,"
+         << "\"udp_port\": 13001,"
+         << "\"device\": \"mps\""
+         << "}";
+
+    response.body = json.str();
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_kokoro_service_toggle(const HttpRequest& request) {
+    HttpResponse response;
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.headers["Content-Type"] = "application/json";
+
+    if (!database_) {
+        response.status_code = 500;
+        response.status_text = "Internal Server Error";
+        response.body = R"({"error": "Database not available"})";
+        return response;
+    }
+
+    // Decide action based on actual runtime status when 'enable' is not provided
+    bool new_enabled = false;
+    auto it = request.query_params.find("enable");
+    if (it != request.query_params.end()) {
+        new_enabled = (it->second == "true");
+    } else {
+        std::string status = database_->get_kokoro_service_status();
+        bool is_running = (status == "running");
+        if (!is_running) {
+            int probe = system("pgrep -f kokoro_service.py > /dev/null 2>&1");
+            if (probe == 0) is_running = true;
+        }
+        new_enabled = !is_running;
+    }
+
+    database_->set_kokoro_service_enabled(new_enabled);
+
+    std::string action = new_enabled ? "enabled" : "disabled";
+    std::string status = new_enabled ? "running" : "stopped";
+
+    database_->set_kokoro_service_status(status);
+
+    if (new_enabled) {
+        // Start Kokoro service
+        std::string voice = database_->get_kokoro_voice();
+
+        // Kill any existing kokoro service
+        system("pkill -f kokoro_service.py");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+        // Get optional voice parameter
+        auto voice_it = request.query_params.find("voice");
+        if (voice_it != request.query_params.end() && !voice_it->second.empty()) {
+            voice = voice_it->second;
+            database_->set_kokoro_voice(voice);
+        }
+
+        // Start new kokoro service from bin/
+        std::string kokoro_bin = repo_root() + "/bin/kokoro-service";
+        // Use tee to send output to both console and log file for real-time visibility
+        std::string start_command = "KOKORO_VOICE='" + voice + "' " + kokoro_bin + " 2>&1 | tee -a /tmp/kokoro_service.log &";
+
+        std::cout << "🎤 Starting Kokoro service: " << start_command << std::endl;
+        int start_result = system(start_command.c_str());
+
+        if (start_result == 0) {
+            // Wait a moment for service to start
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+            // Verify it's running
+            int probe = system("pgrep -f kokoro_service.py > /dev/null 2>&1");
+            if (probe == 0) {
+                database_->set_kokoro_service_status("running");
+                response.body = R"({"success": true, "message": "Kokoro service started", "enabled": true})";
+            } else {
+                database_->set_kokoro_service_enabled(false);
+                database_->set_kokoro_service_status("error");
+                response.status_code = 500;
+                response.status_text = "Internal Server Error";
+                response.body = R"({"error": "Kokoro service failed to start - check /tmp/kokoro_service.log"})";
+            }
+        } else {
+            database_->set_kokoro_service_enabled(false);
+            database_->set_kokoro_service_status("error");
+            response.status_code = 500;
+            response.status_text = "Internal Server Error";
+            response.body = R"({"error": "Failed to execute Kokoro start script"})";
+        }
+    } else {
+        // Stop Kokoro service
+        system("pkill -f kokoro_service.py");
+        database_->set_kokoro_service_status("stopped");
+        response.body = R"({"success": true, "message": "Kokoro service stopped", "enabled": false})";
+    }
+
+    return response;
+}
+
+HttpResponse SimpleHttpServer::api_kokoro_voices_get(const HttpRequest& /* request */) {
+    HttpResponse response;
+    response.status_code = 200;
+    response.status_text = "OK";
+    response.headers["Content-Type"] = "application/json";
+
+    // List of available Kokoro voices
+    std::ostringstream json;
+    json << "{\"voices\": [";
+    json << "{\"id\": \"af_sky\", \"name\": \"Sky (American Female)\", \"language\": \"en-US\"},";
+    json << "{\"id\": \"af_bella\", \"name\": \"Bella (American Female)\", \"language\": \"en-US\"},";
+    json << "{\"id\": \"af_sarah\", \"name\": \"Sarah (American Female)\", \"language\": \"en-US\"},";
+    json << "{\"id\": \"am_adam\", \"name\": \"Adam (American Male)\", \"language\": \"en-US\"},";
+    json << "{\"id\": \"am_michael\", \"name\": \"Michael (American Male)\", \"language\": \"en-US\"},";
+    json << "{\"id\": \"bf_emma\", \"name\": \"Emma (British Female)\", \"language\": \"en-GB\"},";
+    json << "{\"id\": \"bf_isabella\", \"name\": \"Isabella (British Female)\", \"language\": \"en-GB\"},";
+    json << "{\"id\": \"bm_george\", \"name\": \"George (British Male)\", \"language\": \"en-GB\"},";
+    json << "{\"id\": \"bm_lewis\", \"name\": \"Lewis (British Male)\", \"language\": \"en-GB\"}";
+    json << "]}";
+
+    response.body = json.str();
     return response;
 }
 

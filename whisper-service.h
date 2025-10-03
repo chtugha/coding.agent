@@ -83,6 +83,11 @@ public:
     void discover_and_connect_streams();
     bool connect_to_audio_stream(const AudioStreamInfo& stream_info);
 
+    // Registration listener (UDP-based)
+    void start_registration_listener();
+    void stop_registration_listener();
+    void registration_listener_thread();
+
     // Session management
     bool create_session(const std::string& call_id);
     bool destroy_session(const std::string& call_id);
@@ -109,6 +114,11 @@ private:
     std::unique_ptr<ServiceDiscovery> service_discovery_;
     std::thread discovery_thread_;
     std::chrono::steady_clock::time_point last_discovery_;
+
+    // Registration listener (UDP)
+    int registration_socket_ = -1;
+    std::thread registration_thread_;
+    std::atomic<bool> registration_running_{false};
 
     // TCP connection management (audio input)
     std::unordered_map<std::string, int> call_tcp_sockets_;
@@ -145,7 +155,7 @@ struct WhisperServiceArgs {
     std::string database_path = "whisper_talk.db";
     std::string discovery_host = "127.0.0.1";
     int discovery_port = 13000;
-    int n_threads = 4;
+    int n_threads = 8;  // Optimized for M4 (10 cores: 4 performance + 6 efficiency)
     bool use_gpu = true;
     std::string language = "en";
     float temperature = 0.0f;

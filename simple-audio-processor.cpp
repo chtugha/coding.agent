@@ -1,5 +1,6 @@
 #include "simple-audio-processor.h"
 #include <iostream>
+#include <iomanip>
 #include <algorithm>
 #include <cmath>
 
@@ -335,7 +336,10 @@ std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(std
     // 5 = fast (word-level-ish chunks)
 
     size_t window_size = 320; // 20ms at 16 kHz
-    size_t min_chunk_size = window_size * (6 - system_speed); // Inverse relationship
+
+    // Minimum chunk size: 0.5 seconds to avoid processing very short utterances
+    size_t min_chunk_size = std::max(static_cast<size_t>(sample_rate_ * 0.5), window_size * (6 - system_speed));
+
     int window_ms = static_cast<int>(1000.0 * window_size / std::max(1, sample_rate_));
     int hangover_ms = 200; // keep ~200ms after last speech to avoid cutting words
     int hangover_windows = std::max(1, hangover_ms / std::max(1, window_ms));
@@ -346,9 +350,9 @@ std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(std
     int speech_required = 2;   // require N consecutive speech windows to start
     int silence_required = 3;  // require N consecutive silence windows (post-hangover) to end
 
-    // Target chunk size derived from configuration (defaults to ~3s)
-    size_t target_size = static_cast<size_t>(std::max(1, sample_rate_) * (chunk_duration_ms_ / 1000.0f));
-    if (target_size == 0) target_size = 16000 * 3;
+    // Maximum chunk size (3 seconds) - used as fallback to prevent unbounded growth
+    size_t max_chunk_size = static_cast<size_t>(std::max(1, sample_rate_) * (chunk_duration_ms_ / 1000.0f));
+    if (max_chunk_size == 0) max_chunk_size = 16000 * 3;
 
     std::vector<float> current_chunk;
     bool in_speech = false;
@@ -391,26 +395,28 @@ std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(std
                         float chunk_rms = calculate_energy(current_chunk);
                         double secs = static_cast<double>(current_chunk.size()) / std::max(1, sample_rate_);
                         std::cout << "📦 Chunk created (end_of_speech): " << current_chunk.size()
-                                  << " samples (~" << secs << " s), meanRMS=" << chunk_rms << std::endl;
-                        chunks.push_back(pad_chunk_to_target_size(current_chunk, target_size));
+                                  << " samples (~" << std::fixed << std::setprecision(2) << secs << " s), meanRMS=" << chunk_rms << std::endl;
+                        // Send chunk immediately without padding - reduces latency!
+                        chunks.push_back(current_chunk);
                         current_chunk.clear();
                         in_speech = false;
                         silence_windows = 0;
                         consec_silence = 0;
                         consumed_until = end;
-                        std::cout << "🔴 VAD: speech end (hangover=" << hangover_ms << " ms)" << std::endl;
+                        std::cout << "🔴 VAD: speech end detected (hangover=" << hangover_ms << " ms) - sending immediately" << std::endl;
                     }
                 }
             }
         }
 
-        // Force chunk creation if too large
-        if (current_chunk.size() >= target_size) {
+        // Force chunk creation if maximum size reached (3-second fallback)
+        if (current_chunk.size() >= max_chunk_size) {
             float chunk_rms = calculate_energy(current_chunk);
             double secs = static_cast<double>(current_chunk.size()) / std::max(1, sample_rate_);
             std::cout << "📦 Chunk created (max_size): " << current_chunk.size()
-                      << " samples (~" << secs << " s), meanRMS=" << chunk_rms << std::endl;
-            chunks.push_back(pad_chunk_to_target_size(current_chunk, target_size));
+                      << " samples (~" << std::fixed << std::setprecision(2) << secs << " s), meanRMS=" << chunk_rms << std::endl;
+            // For max-size chunks, send as-is (already at maximum)
+            chunks.push_back(current_chunk);
             current_chunk.clear();
             in_speech = false;
             silence_windows = 0;

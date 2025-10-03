@@ -238,12 +238,15 @@ bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const s
     running_.store(true);
     discovery_thread_ = std::thread(&StandaloneWhisperService::run_service_loop, this);
 
+    // Start registration listener
+    start_registration_listener();
+
     // Update DB and log
     database_->set_whisper_service_status("running");
     std::cout << "🎤 Standalone Whisper Service started" << std::endl;
     std::cout << "📡 Model: " << config.model_path << std::endl;
     std::cout << "💾 Database: " << db_path << std::endl;
-    std::cout << "🔍 Discovering audio streams on port 13000..." << std::endl;
+    std::cout << "🔍 Listening for audio processor registrations on UDP port 13000..." << std::endl;
 
     return true;
 }
@@ -252,6 +255,9 @@ void StandaloneWhisperService::stop() {
     if (!running_.load() && !warm_loaded_) return;
 
     running_.store(false);
+
+    // Stop registration listener
+    stop_registration_listener();
 
     // Close all TCP connections
     {
@@ -297,6 +303,109 @@ void StandaloneWhisperService::stop() {
     std::cout << "🛑 Standalone Whisper Service stopped" << std::endl;
 }
 
+void StandaloneWhisperService::start_registration_listener() {
+    // Create UDP socket for registration messages
+    registration_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (registration_socket_ < 0) {
+        std::cerr << "❌ Failed to create registration UDP socket" << std::endl;
+        return;
+    }
+
+    // Bind to port 13000
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(13000);
+
+    if (bind(registration_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "❌ Failed to bind registration UDP socket to port 13000" << std::endl;
+        close(registration_socket_);
+        registration_socket_ = -1;
+        return;
+    }
+
+    registration_running_.store(true);
+    registration_thread_ = std::thread(&StandaloneWhisperService::registration_listener_thread, this);
+
+    std::cout << "📡 Whisper registration listener started on UDP port 13000" << std::endl;
+}
+
+void StandaloneWhisperService::stop_registration_listener() {
+    registration_running_.store(false);
+
+    if (registration_socket_ >= 0) {
+        close(registration_socket_);
+        registration_socket_ = -1;
+    }
+
+    if (registration_thread_.joinable()) {
+        registration_thread_.join();
+    }
+}
+
+void StandaloneWhisperService::registration_listener_thread() {
+    char buffer[256];
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    while (registration_running_.load()) {
+        // Set timeout on socket
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(registration_socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        ssize_t n = recvfrom(registration_socket_, buffer, sizeof(buffer) - 1, 0,
+                             (struct sockaddr*)&client_addr, &client_len);
+
+        if (n > 0) {
+            buffer[n] = '\0';
+            std::string message(buffer);
+
+            // Parse message: "REGISTER:<call_id>" or "BYE:<call_id>"
+            if (message.find("REGISTER:") == 0) {
+                std::string call_id = message.substr(9);
+                int call_id_num = std::stoi(call_id);
+
+                std::cout << "📥 Received REGISTER for call_id " << call_id << std::endl;
+
+                // Check if already connected (idempotent registration)
+                {
+                    std::lock_guard<std::mutex> lock(tcp_mutex_);
+                    if (call_tcp_sockets_.find(call_id) != call_tcp_sockets_.end()) {
+                        std::cout << "✅ Already connected to call " << call_id << " - ignoring duplicate REGISTER" << std::endl;
+                        continue;
+                    }
+                }
+
+                // Calculate port: 9001 + call_id
+                int inbound_port = 9001 + call_id_num;
+
+                // Create stream info and connect
+                AudioStreamInfo stream;
+                stream.call_id = call_id;
+                stream.tcp_port = inbound_port;
+                stream.stream_type = "inbound";
+                stream.sample_rate = 8000;
+                stream.channels = 1;
+
+                std::cout << "🔗 Whisper connecting to inbound audio stream: " << call_id
+                          << " on port " << inbound_port << std::endl;
+
+                if (connect_to_audio_stream(stream)) {
+                    create_session(call_id);
+                }
+            }
+            else if (message.find("BYE:") == 0) {
+                std::string call_id = message.substr(4);
+                std::cout << "📤 Received BYE for call_id " << call_id << std::endl;
+                destroy_session(call_id);
+            }
+        }
+    }
+}
+
 void StandaloneWhisperService::run_service_loop() {
     last_discovery_ = std::chrono::steady_clock::now();
 
@@ -320,24 +429,41 @@ void StandaloneWhisperService::run_service_loop() {
 }
 
 void StandaloneWhisperService::discover_and_connect_streams() {
-    auto streams = service_discovery_->discover_streams("127.0.0.1", 13000);
+    // DIRECT CONNECTION MODE: Check database for active calls and connect directly
+    // Port calculation: 9001 + call_num_id (from database row ID)
 
-    // std::cout << "🔍 Discovered " << streams.size() << " audio streams" << std::endl;  // suppressed to reduce console spam
+    if (!database_) return;
 
-    for (const auto& stream : streams) {
+    // Get all active calls from database
+    auto active_calls = database_->get_active_calls();
+
+    for (const auto& call : active_calls) {
+        std::string call_id_str = std::to_string(call.id);
+
         // Check if we're already connected to this stream
         {
             std::lock_guard<std::mutex> lock(tcp_mutex_);
-            if (call_tcp_sockets_.find(stream.call_id) != call_tcp_sockets_.end()) {
+            if (call_tcp_sockets_.find(call_id_str) != call_tcp_sockets_.end()) {
                 continue; // Already connected
             }
         }
 
-        std::cout << "🔗 Connecting to new audio stream: " << stream.call_id
-                  << " on port " << stream.tcp_port << std::endl;
+        // Calculate inbound processor port: 9001 + call_num_id
+        int inbound_port = 9001 + call.id;
+
+        // Create stream info for direct connection
+        AudioStreamInfo stream;
+        stream.call_id = call_id_str;
+        stream.tcp_port = inbound_port;
+        stream.stream_type = "inbound";
+        stream.sample_rate = 8000;
+        stream.channels = 1;
+
+        std::cout << "🔗 Whisper connecting to inbound audio stream: " << call_id_str
+                  << " on port " << inbound_port << std::endl;
 
         if (connect_to_audio_stream(stream)) {
-            create_session(stream.call_id);
+            create_session(call_id_str);
         }
     }
 }
@@ -396,6 +522,13 @@ bool StandaloneWhisperService::create_session(const std::string& call_id) {
 
     sessions_[call_id] = std::move(session);
     std::cout << "🎤 Created whisper session for call " << call_id << std::endl;
+
+    // Immediately connect to LLaMA service to eliminate first-transcription delay
+    if (connect_llama_for_call(call_id)) {
+        std::cout << "🔗 Pre-connected to LLaMA service for call " << call_id << std::endl;
+    } else {
+        std::cout << "⚠️ Failed to pre-connect to LLaMA service for call " << call_id << " (will retry on first transcription)" << std::endl;
+    }
 
     return true;
 }
@@ -599,30 +732,76 @@ bool StandaloneWhisperService::send_tcp_transcription(int socket, const std::str
 
 // LLaMA client helpers
 bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id) {
-    std::lock_guard<std::mutex> lock(tcp_mutex_);
-    if (llama_sockets_.find(call_id) != llama_sockets_.end()) return true;
-
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return false;
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(llama_port_);
-    addr.sin_addr.s_addr = inet_addr(llama_host_.c_str());
-
-    if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(s);
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(tcp_mutex_);
+        if (llama_sockets_.find(call_id) != llama_sockets_.end()) return true;
     }
 
-    // Send HELLO(call_id)
-    uint32_t n = htonl((uint32_t)call_id.size());
-    if (send(s, &n, 4, 0) != 4) { close(s); return false; }
-    if (send(s, call_id.data(), call_id.size(), 0) != (ssize_t)call_id.size()) { close(s); return false; }
+    const int max_attempts = 10;
 
-    llama_sockets_[call_id] = s;
-    std::cout << "🦙 Connected to LLaMA for call " << call_id << " at " << llama_host_ << ":" << llama_port_ << std::endl;
-    return true;
+    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) {
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            return false;
+        }
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(llama_port_);
+        addr.sin_addr.s_addr = inet_addr(llama_host_.c_str());
+
+        if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                if (attempt == 1 || attempt == 5 || attempt == max_attempts - 1) {
+                    std::cout << "⚠️ LLaMA connection attempt " << attempt << "/" << max_attempts
+                              << " failed for call " << call_id << " - retrying in " << sleep_ms << "ms" << std::endl;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            std::cout << "❌ Failed to connect to LLaMA for call " << call_id
+                      << " after " << max_attempts << " attempts" << std::endl;
+            return false;
+        }
+
+        // Send HELLO(call_id)
+        uint32_t n = htonl((uint32_t)call_id.size());
+        if (send(s, &n, 4, 0) != 4) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            return false;
+        }
+        if (send(s, call_id.data(), call_id.size(), 0) != (ssize_t)call_id.size()) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(tcp_mutex_);
+            llama_sockets_[call_id] = s;
+        }
+        std::cout << "🦙 Connected to LLaMA for call " << call_id << " at " << llama_host_
+                  << ":" << llama_port_ << " (attempt " << attempt << ")" << std::endl;
+        return true;
+    }
+
+    return false;
 }
 
 bool StandaloneWhisperService::send_llama_text(const std::string& call_id, const std::string& text) {

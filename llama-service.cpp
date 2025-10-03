@@ -64,10 +64,11 @@ bool LlamaSession::initialize() {
         return false;
     }
 
-    // Initialize conversation with system prompt
-    conversation_history_ = "Text transcript of a conversation where " + config_.person_name +
-                           " talks with an AI assistant named " + config_.bot_name + ".\n" +
-                           config_.bot_name + " is helpful, concise, and responds naturally.\n\n";
+    // Initialize conversation with system prompt - emphasize brevity for phone calls
+    conversation_history_ = "Phone conversation transcript. " + config_.person_name +
+                           " talks with " + config_.bot_name + ".\n" +
+                           config_.bot_name + " gives SHORT, DIRECT answers (1-2 sentences max). " +
+                           "No explanations unless asked. Natural phone conversation style.\n\n";
 
     is_active_.store(true);
     mark_activity();
@@ -276,6 +277,8 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
         return "";
     }
 
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     // Ensure the system prompt has been primed once
     if (!primed_) {
         if (!prime_system_prompt()) {
@@ -289,6 +292,9 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
     if (tokens.empty()) {
         return "";
     }
+
+    auto tokenize_time = std::chrono::high_resolution_clock::now();
+    auto tokenize_ms = std::chrono::duration_cast<std::chrono::milliseconds>(tokenize_time - start_time).count();
 
     // Append the new prompt tokens at the current position for this sequence
     batch_->n_tokens = tokens.size();
@@ -306,8 +312,12 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
     }
     n_past_ += (int)tokens.size();
 
+    auto decode_time = std::chrono::high_resolution_clock::now();
+    auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_time - tokenize_time).count();
+
     // Generate response tokens
     std::string response;
+    int tokens_generated = 0;
     for (int i = 0; i < config_.max_tokens; i++) {
         // Sample next token
         llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
@@ -319,6 +329,7 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
 
         // Convert token to text
         std::string token_text = token_to_piece(ctx_, id);
+        tokens_generated++;
         response += token_text;
 
         // Stop when the model starts the next user turn
@@ -348,6 +359,9 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
         n_past_++;
     }
 
+    auto generate_time = std::chrono::high_resolution_clock::now();
+    auto generate_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generate_time - decode_time).count();
+    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generate_time - start_time).count();
 
     // Additional safety: trim if model echoed a new user turn without newline or duplicated tag
     size_t pos_any = response.find(config_.person_name + ":");
@@ -362,6 +376,13 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
     // Cleanup response
     response = std::regex_replace(response, std::regex("^\\s+"), "");
     response = std::regex_replace(response, std::regex("\\s+$"), "");
+
+    // Performance logging
+    std::cout << "⏱️  LLaMA timing [" << call_id_ << "]: "
+              << "tokenize=" << tokenize_ms << "ms, "
+              << "decode=" << decode_ms << "ms, "
+              << "generate=" << generate_ms << "ms (" << tokens_generated << " tokens), "
+              << "total=" << total_ms << "ms" << std::endl;
 
     return response;
 }
@@ -534,6 +555,16 @@ bool StandaloneLlamaService::create_session(const std::string& call_id) {
 
     sessions_[call_id] = std::move(session);
     std::cout << "✅ Created LLaMA session for call " << call_id << std::endl;
+
+    // Immediately connect to TTS service (Kokoro/Piper) to eliminate first-response delay
+    if (!output_host_.empty() && output_port_ > 0) {
+        if (connect_output_for_call(call_id)) {
+            std::cout << "🔗 Pre-connected to TTS service for call " << call_id << std::endl;
+        } else {
+            std::cout << "⚠️ Failed to pre-connect to TTS service for call " << call_id << " (will retry on first response)" << std::endl;
+        }
+    }
+
     return true;
 }
 
@@ -719,29 +750,81 @@ bool StandaloneLlamaService::send_tcp_bye(int socket) {
 }
 
 bool StandaloneLlamaService::connect_output_for_call(const std::string& call_id) {
-    if (output_host_.empty() || output_port_ <= 0) return false;
-    if (output_sockets_.count(call_id)) return true;
-
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return false;
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(output_port_);
-
-
-    addr.sin_addr.s_addr = inet_addr(output_host_.c_str());
-    if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(s);
+    if (output_host_.empty() || output_port_ <= 0) {
+        std::cout << "❌ Cannot connect output for call " << call_id << ": output endpoint not configured" << std::endl;
         return false;
     }
-    // Send HELLO(call_id)
-    uint32_t n = htonl((uint32_t)call_id.size());
-    if (send(s, &n, 4, 0) != 4) { close(s); return false; }
-    if (send(s, call_id.data(), call_id.size(), 0) != (ssize_t)call_id.size()) { close(s); return false; }
+    if (output_sockets_.count(call_id)) return true;
 
-    output_sockets_[call_id] = s;
-    std::cout << "🔗 Connected output socket for call " << call_id << " to " << output_host_ << ":" << output_port_ << std::endl;
-    return true;
+    const int max_attempts = 10;
+
+    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) {
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            std::cout << "❌ Failed to create socket for call " << call_id << " after "
+                      << max_attempts << " attempts: " << strerror(errno) << std::endl;
+            return false;
+        }
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(output_port_);
+        addr.sin_addr.s_addr = inet_addr(output_host_.c_str());
+
+        if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                if (attempt == 1 || attempt == 5 || attempt == max_attempts - 1) {
+                    std::cout << "⚠️ TTS connection attempt " << attempt << "/" << max_attempts
+                              << " failed for call " << call_id << " - retrying in " << sleep_ms << "ms" << std::endl;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            std::cout << "❌ Failed to connect to " << output_host_ << ":" << output_port_
+                      << " for call " << call_id << " after " << max_attempts << " attempts: "
+                      << strerror(errno) << std::endl;
+            return false;
+        }
+
+        // Send HELLO(call_id)
+        uint32_t n = htonl((uint32_t)call_id.size());
+        if (send(s, &n, 4, 0) != 4) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            std::cout << "❌ Failed to send HELLO length for call " << call_id
+                      << " after " << max_attempts << " attempts: " << strerror(errno) << std::endl;
+            return false;
+        }
+        if (send(s, call_id.data(), call_id.size(), 0) != (ssize_t)call_id.size()) {
+            close(s);
+            if (attempt < max_attempts) {
+                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                continue;
+            }
+            std::cout << "❌ Failed to send HELLO call_id for call " << call_id
+                      << " after " << max_attempts << " attempts: " << strerror(errno) << std::endl;
+            return false;
+        }
+
+        output_sockets_[call_id] = s;
+        std::cout << "🔗 Connected output socket for call " << call_id << " to " << output_host_
+                  << ":" << output_port_ << " (attempt " << attempt << ")" << std::endl;
+        return true;
+    }
+
+    return false;
 }
 
 bool StandaloneLlamaService::send_output_text(const std::string& call_id, const std::string& text) {

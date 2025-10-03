@@ -55,6 +55,10 @@ private:
     std::atomic<bool> whisper_connected_;
     std::thread whisper_tcp_thread_;
 
+    // Registration polling
+    std::atomic<bool> registration_running_;
+    std::thread registration_thread_;
+
     // TCP server for SIP client connections
     int sip_client_listen_socket_;
     std::atomic<bool> sip_server_running_;
@@ -67,6 +71,11 @@ private:
     void forward_to_whisper(const std::vector<float>& audio_samples);
     void send_tcp_audio_chunk(int socket_fd, const std::vector<float>& audio_samples);
     bool has_whisper_connected() const;
+
+    // Registration polling
+    void start_registration_polling(const std::string& call_id);
+    void stop_registration_polling();
+    void registration_polling_thread(const std::string& call_id);
 
     // SIP client server methods
     void handle_sip_client_connections();

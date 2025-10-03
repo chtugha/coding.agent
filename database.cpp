@@ -117,6 +117,9 @@ bool Database::create_tables() {
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('piper_model_path', 'models/voice.onnx');
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('piper_espeak_data_path', 'espeak-ng-data');
         INSERT OR IGNORE INTO system_config (key, value) VALUES ('piper_service_status', 'stopped');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('kokoro_service_enabled', 'false');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('kokoro_voice', 'af_sky');
+        INSERT OR IGNORE INTO system_config (key, value) VALUES ('kokoro_service_status', 'stopped');
     )";
 
     rc = sqlite3_exec(db_, sip_lines_sql, nullptr, nullptr, &err_msg);
@@ -603,6 +606,42 @@ Call Database::get_call(const std::string& call_id) {
     return call;
 }
 
+std::vector<Call> Database::get_active_calls() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
+    std::vector<Call> calls;
+    const char* sql = "SELECT id, call_id, caller_id, line_id, phone_number, start_time, end_time, transcription, llama_response, status FROM calls WHERE status = 'active'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Call call;
+            call.id = sqlite3_column_int(stmt, 0);
+            call.call_id = (char*)sqlite3_column_text(stmt, 1);
+            call.caller_id = sqlite3_column_int(stmt, 2);
+            call.line_id = sqlite3_column_int(stmt, 3);
+            call.phone_number = (char*)sqlite3_column_text(stmt, 4);
+            call.start_time = (char*)sqlite3_column_text(stmt, 5);
+
+            const char* end_time = (char*)sqlite3_column_text(stmt, 6);
+            call.end_time = end_time ? end_time : "";
+
+            const char* transcription = (char*)sqlite3_column_text(stmt, 7);
+            call.transcription = transcription ? transcription : "";
+
+            const char* llama_resp = (char*)sqlite3_column_text(stmt, 8);
+            call.llama_response = llama_resp ? llama_resp : "";
+
+            call.status = (char*)sqlite3_column_text(stmt, 9);
+
+            calls.push_back(call);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return calls;
+}
+
 // get_caller_sessions method removed
 
 // Whisper service management methods
@@ -1086,4 +1125,107 @@ bool Database::set_piper_service_config_atomic(bool enabled, const std::string& 
     }
 
     return success;
+}
+
+// Kokoro service management methods
+bool Database::get_kokoro_service_enabled() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
+    const char* sql = "SELECT value FROM system_config WHERE key = 'kokoro_service_enabled'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            sqlite3_finalize(stmt);
+            return value == "true";
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return false;
+}
+
+bool Database::set_kokoro_service_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('kokoro_service_enabled', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, enabled ? "true" : "false", -1, SQLITE_STATIC);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_kokoro_voice() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
+    const char* sql = "SELECT value FROM system_config WHERE key = 'kokoro_voice'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            sqlite3_finalize(stmt);
+            return value;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return "af_sky"; // default voice
+}
+
+bool Database::set_kokoro_voice(const std::string& voice) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('kokoro_voice', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, voice.c_str(), -1, SQLITE_TRANSIENT);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
+}
+
+std::string Database::get_kokoro_service_status() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
+    const char* sql = "SELECT value FROM system_config WHERE key = 'kokoro_service_status'";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            sqlite3_finalize(stmt);
+            return value;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return "stopped";
+}
+
+bool Database::set_kokoro_service_status(const std::string& status) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+
+    const char* sql = "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('kokoro_service_status', ?, CURRENT_TIMESTAMP)";
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_TRANSIENT);
+        int result = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        return result == SQLITE_DONE;
+    }
+
+    return false;
 }
