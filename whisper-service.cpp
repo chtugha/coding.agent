@@ -350,7 +350,10 @@ void StandaloneWhisperService::registration_listener_thread() {
     socklen_t client_len = sizeof(client_addr);
 
     while (registration_running_.load()) {
-        // Set timeout on socket
+        // Ensure client_len is reset before each recvfrom (per POSIX semantics)
+        client_len = sizeof(client_addr);
+
+        // Set timeout on socket (1s)
         struct timeval tv;
         tv.tv_sec = 1;
         tv.tv_usec = 0;
@@ -363,44 +366,53 @@ void StandaloneWhisperService::registration_listener_thread() {
             buffer[n] = '\0';
             std::string message(buffer);
 
-            // Parse message: "REGISTER:<call_id>" or "BYE:<call_id>"
-            if (message.find("REGISTER:") == 0) {
-                std::string call_id = message.substr(9);
-                int call_id_num = std::stoi(call_id);
+            try {
+                // Parse message: "REGISTER:<call_id>" or "BYE:<call_id>"
+                if (message.rfind("REGISTER:", 0) == 0) {
+                    std::string call_id = message.substr(9);
+                    // Trim any stray whitespace
+                    while (!call_id.empty() && isspace(static_cast<unsigned char>(call_id.back()))) call_id.pop_back();
+                    while (!call_id.empty() && isspace(static_cast<unsigned char>(call_id.front()))) call_id.erase(call_id.begin());
+                    int call_id_num = std::stoi(call_id);
 
-                std::cout << "📥 Received REGISTER for call_id " << call_id << std::endl;
+                    std::cout << "📥 Received REGISTER for call_id " << call_id << std::endl;
 
-                // Check if already connected (idempotent registration)
-                {
-                    std::lock_guard<std::mutex> lock(tcp_mutex_);
-                    if (call_tcp_sockets_.find(call_id) != call_tcp_sockets_.end()) {
-                        std::cout << "✅ Already connected to call " << call_id << " - ignoring duplicate REGISTER" << std::endl;
-                        continue;
+                    // Check if already connected (idempotent registration)
+                    {
+                        std::lock_guard<std::mutex> lock(tcp_mutex_);
+                        if (call_tcp_sockets_.find(call_id) != call_tcp_sockets_.end()) {
+                            std::cout << "✅ Already connected to call " << call_id << " - ignoring duplicate REGISTER" << std::endl;
+                            continue;
+                        }
                     }
+
+                    // Calculate port: 9001 + call_id
+                    int inbound_port = 9001 + call_id_num;
+
+                    // Create stream info and connect
+                    AudioStreamInfo stream;
+                    stream.call_id = call_id;
+                    stream.tcp_port = inbound_port;
+                    stream.stream_type = "inbound";
+                    stream.sample_rate = 8000;
+                    stream.channels = 1;
+
+                    std::cout << "🔗 Whisper connecting to inbound audio stream: " << call_id
+                              << " on port " << inbound_port << std::endl;
+
+                    if (connect_to_audio_stream(stream)) {
+                        create_session(call_id);
+                    }
+                } else if (message.rfind("BYE:", 0) == 0) {
+                    std::string call_id = message.substr(4);
+                    while (!call_id.empty() && isspace(static_cast<unsigned char>(call_id.back()))) call_id.pop_back();
+                    while (!call_id.empty() && isspace(static_cast<unsigned char>(call_id.front()))) call_id.erase(call_id.begin());
+                    std::cout << "📤 Received BYE for call_id " << call_id << std::endl;
+                    destroy_session(call_id);
                 }
-
-                // Calculate port: 9001 + call_id
-                int inbound_port = 9001 + call_id_num;
-
-                // Create stream info and connect
-                AudioStreamInfo stream;
-                stream.call_id = call_id;
-                stream.tcp_port = inbound_port;
-                stream.stream_type = "inbound";
-                stream.sample_rate = 8000;
-                stream.channels = 1;
-
-                std::cout << "🔗 Whisper connecting to inbound audio stream: " << call_id
-                          << " on port " << inbound_port << std::endl;
-
-                if (connect_to_audio_stream(stream)) {
-                    create_session(call_id);
-                }
-            }
-            else if (message.find("BYE:") == 0) {
-                std::string call_id = message.substr(4);
-                std::cout << "📤 Received BYE for call_id " << call_id << std::endl;
-                destroy_session(call_id);
+            } catch (const std::exception& e) {
+                std::cout << "⚠️ Registration parse/handle error: '" << message << "' : " << e.what() << std::endl;
+                // continue loop
             }
         }
     }
