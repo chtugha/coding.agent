@@ -732,10 +732,9 @@ bool StandaloneWhisperService::send_tcp_transcription(int socket, const std::str
 
 // LLaMA client helpers
 bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id) {
-    {
-        std::lock_guard<std::mutex> lock(tcp_mutex_);
-        if (llama_sockets_.find(call_id) != llama_sockets_.end()) return true;
-    }
+    // Hold tcp_mutex_ for the entire connect + publish to prevent duplicate races
+    std::unique_lock<std::mutex> lock(tcp_mutex_);
+    if (llama_sockets_.find(call_id) != llama_sockets_.end()) return true;
 
     const int max_attempts = 10;
 
@@ -792,10 +791,8 @@ bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id
             return false;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(tcp_mutex_);
-            llama_sockets_[call_id] = s;
-        }
+        // Publish the connected socket while still under the mutex
+        llama_sockets_[call_id] = s;
         std::cout << "🦙 Connected to LLaMA for call " << call_id << " at " << llama_host_
                   << ":" << llama_port_ << " (attempt " << attempt << ")" << std::endl;
         return true;
@@ -805,19 +802,33 @@ bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id
 }
 
 bool StandaloneWhisperService::send_llama_text(const std::string& call_id, const std::string& text) {
-    std::lock_guard<std::mutex> lock(tcp_mutex_);
-    auto it = llama_sockets_.find(call_id);
-    if (it == llama_sockets_.end()) {
-        // Try to connect on demand
-        if (!connect_llama_for_call(call_id)) return false;
-        it = llama_sockets_.find(call_id);
-        if (it == llama_sockets_.end()) return false;
+    // First, try to get a socket without holding it across a potential connect
+    int s = -1;
+    {
+        std::lock_guard<std::mutex> lock(tcp_mutex_);
+        auto it = llama_sockets_.find(call_id);
+        if (it != llama_sockets_.end()) s = it->second;
     }
 
-    int s = it->second;
+    if (s < 0) {
+        if (!connect_llama_for_call(call_id)) return false;
+        std::lock_guard<std::mutex> lock(tcp_mutex_);
+        auto it2 = llama_sockets_.find(call_id);
+        if (it2 == llama_sockets_.end()) return false;
+        s = it2->second;
+    }
+
     uint32_t l = htonl((uint32_t)text.size());
-    if (!write_all_fd(s, &l, 4)) return false;
-    if (!text.empty() && !write_all_fd(s, text.data(), text.size())) return false;
+    if (!write_all_fd(s, &l, 4) || (!text.empty() && !write_all_fd(s, text.data(), text.size()))) {
+        // On failure, drop the socket so future sends can reconnect cleanly
+        std::lock_guard<std::mutex> lock(tcp_mutex_);
+        auto it3 = llama_sockets_.find(call_id);
+        if (it3 != llama_sockets_.end()) {
+            close(it3->second);
+            llama_sockets_.erase(it3);
+        }
+        return false;
+    }
     return true;
 }
 
