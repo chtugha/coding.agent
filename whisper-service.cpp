@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <cstring>
 #include <sys/stat.h>
 
@@ -487,17 +488,62 @@ bool StandaloneWhisperService::connect_to_audio_stream(const AudioStreamInfo& st
         return false;
     }
 
+    // Set socket to non-blocking mode for connection with timeout
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     server_addr.sin_port = htons(stream_info.tcp_port);
 
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        std::cout << "❌ Failed to connect to audio stream " << stream_info.call_id
-                  << " on port " << stream_info.tcp_port << std::endl;
-        close(sock);
-        return false;
+    int connect_result = connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
+
+    if (connect_result < 0) {
+        if (errno == EINPROGRESS) {
+            // Connection in progress - wait with timeout (2 seconds)
+            fd_set write_fds;
+            FD_ZERO(&write_fds);
+            FD_SET(sock, &write_fds);
+
+            struct timeval timeout;
+            timeout.tv_sec = 2;
+            timeout.tv_usec = 0;
+
+            int select_result = select(sock + 1, NULL, &write_fds, NULL, &timeout);
+
+            if (select_result > 0) {
+                // Check if connection succeeded
+                int error = 0;
+                socklen_t len = sizeof(error);
+                getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len);
+
+                if (error != 0) {
+                    std::cout << "❌ Failed to connect to audio stream " << stream_info.call_id
+                              << " on port " << stream_info.tcp_port << ": " << strerror(error) << std::endl;
+                    close(sock);
+                    return false;
+                }
+            } else if (select_result == 0) {
+                std::cout << "❌ Connection timeout for audio stream " << stream_info.call_id
+                          << " on port " << stream_info.tcp_port << std::endl;
+                close(sock);
+                return false;
+            } else {
+                std::cout << "❌ Select error for audio stream " << stream_info.call_id << std::endl;
+                close(sock);
+                return false;
+            }
+        } else {
+            std::cout << "❌ Failed to connect to audio stream " << stream_info.call_id
+                      << " on port " << stream_info.tcp_port << ": " << strerror(errno) << std::endl;
+            close(sock);
+            return false;
+        }
     }
+
+    // Set socket back to blocking mode
+    fcntl(sock, F_SETFL, flags);
 
     std::cout << "✅ Connected to audio stream " << stream_info.call_id
               << " on port " << stream_info.tcp_port << std::endl;
