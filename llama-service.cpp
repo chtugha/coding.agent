@@ -329,10 +329,40 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
     }
 
     if (llama_decode(ctx_, *batch_) != 0) {
-        std::cout << "❌ Failed to decode prompt for call " << call_id_ << std::endl;
-        return "";
+        std::cout << "⚠️  [" << call_id_ << "] Decode failed (likely KV cache full) - clearing and retrying" << std::endl;
+        // Clear KV cache for this sequence and re-prime
+        llama_memory_t mem = llama_get_memory(ctx_);
+        llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
+        n_past_ = 0;
+        primed_ = false;
+        conversation_history_.clear();
+
+        if (!prime_system_prompt()) {
+            std::cout << "❌ Failed to re-prime after decode failure for call " << call_id_ << std::endl;
+            return "";
+        }
+
+        // Retry the decode with just the current prompt
+        std::string retry_prompt = format_conversation_prompt(prompt.substr(prompt.find(":") + 2));
+        std::vector<llama_token> retry_tokens = tokenize_text(ctx_, retry_prompt, false);
+
+        batch_->n_tokens = retry_tokens.size();
+        for (size_t i = 0; i < retry_tokens.size(); i++) {
+            batch_->token[i] = retry_tokens[i];
+            batch_->pos[i] = n_past_ + (int)i;
+            batch_->n_seq_id[i] = 1;
+            batch_->seq_id[i][0] = seq_id_;
+            batch_->logits[i] = i == retry_tokens.size() - 1;
+        }
+
+        if (llama_decode(ctx_, *batch_) != 0) {
+            std::cout << "❌ Failed to decode prompt after retry for call " << call_id_ << std::endl;
+            return "";
+        }
+        n_past_ += (int)retry_tokens.size();
+    } else {
+        n_past_ += (int)tokens.size();
     }
-    n_past_ += (int)tokens.size();
 
     auto decode_time = std::chrono::high_resolution_clock::now();
     auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_time - tokenize_time).count();
