@@ -389,12 +389,20 @@ void InboundAudioProcessor::registration_polling_thread(const std::string& call_
         // Send REGISTER message
         int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (udp_sock >= 0) {
-            sendto(udp_sock, reg_msg.c_str(), reg_msg.length(), 0,
+            ssize_t sent = sendto(udp_sock, reg_msg.c_str(), reg_msg.length(), 0,
                    (struct sockaddr*)&whisper_addr, sizeof(whisper_addr));
             close(udp_sock);
 
             attempt++;
-            std::cout << "📤 Sent REGISTER #" << attempt << " for call_id " << call_id << std::endl;
+            if (sent >= 0) {
+                std::cout << "📤 Sent REGISTER #" << attempt << " for call_id " << call_id
+                          << " (" << sent << " bytes to 127.0.0.1:13000)" << std::endl;
+            } else {
+                std::cout << "❌ Failed to send REGISTER #" << attempt << " for call_id " << call_id
+                          << ": " << strerror(errno) << std::endl;
+            }
+        } else {
+            std::cout << "❌ Failed to create UDP socket for REGISTER #" << attempt << ": " << strerror(errno) << std::endl;
         }
 
         // Determine sleep interval: 200ms for first second, then 1 second

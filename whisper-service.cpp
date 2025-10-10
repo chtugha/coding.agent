@@ -305,21 +305,39 @@ void StandaloneWhisperService::start_registration_listener() {
         return;
     }
 
-    // Set SO_REUSEADDR to allow quick restart
+    // Set SO_REUSEADDR/SO_REUSEPORT to allow quick restart and avoid stray binds
     int reuse = 1;
     if (setsockopt(registration_socket_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
         std::cerr << "⚠️ Failed to set SO_REUSEADDR on registration socket" << std::endl;
     }
+#ifdef SO_REUSEPORT
+    if (setsockopt(registration_socket_, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
+        std::cerr << "⚠️ Failed to set SO_REUSEPORT on registration socket" << std::endl;
+    }
+#endif
 
-    // Bind to port 13000
+    // Increase receive buffer size to prevent packet drops
+    int rcvbuf = 256 * 1024; // 256KB
+    if (setsockopt(registration_socket_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+        std::cerr << "⚠️ Failed to set SO_RCVBUF on registration socket" << std::endl;
+    } else {
+        // Verify the actual buffer size set
+        int actual_rcvbuf = 0;
+        socklen_t optlen = sizeof(actual_rcvbuf);
+        if (getsockopt(registration_socket_, SOL_SOCKET, SO_RCVBUF, &actual_rcvbuf, &optlen) == 0) {
+            std::cout << "📊 UDP receive buffer size: " << actual_rcvbuf << " bytes" << std::endl;
+        }
+    }
+
+    // Bind to loopback on port 13000 (explicitly) to avoid interface ambiguity
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     addr.sin_port = htons(13000);
 
     if (bind(registration_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "❌ Failed to bind registration UDP socket to port 13000" << std::endl;
+        std::cerr << "❌ Failed to bind registration UDP socket to 127.0.0.1:13000" << std::endl;
         close(registration_socket_);
         registration_socket_ = -1;
         return;
@@ -349,9 +367,42 @@ void StandaloneWhisperService::registration_listener_thread() {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
-    std::cout << "📡 Whisper registration listener thread started" << std::endl;
+    std::cout << "📡 Whisper registration listener thread started (FD: " << registration_socket_ << ")" << std::endl;
 
+    int idle_ticks = 0;
+    int message_count = 0;
+    int loop_count = 0;
     while (registration_running_.load()) {
+        loop_count++;
+
+        // Verify socket is still valid
+        if (registration_socket_ < 0) {
+            std::cout << "❌ Registration socket became invalid (FD: " << registration_socket_ << "), exiting listener" << std::endl;
+            break;
+        }
+
+        // Periodic socket health check every 100 iterations
+        if (loop_count % 100 == 0) {
+            int error = 0;
+            socklen_t errlen = sizeof(error);
+            if (getsockopt(registration_socket_, SOL_SOCKET, SO_ERROR, &error, &errlen) == 0) {
+                if (error != 0) {
+                    std::cout << "⚠️ Socket error detected (FD=" << registration_socket_ << "): " << strerror(error) << std::endl;
+                }
+            }
+
+            // Check for bytes available in buffer
+            #ifdef SO_NREAD
+            int bytes_available = 0;
+            socklen_t bytes_len = sizeof(bytes_available);
+            if (getsockopt(registration_socket_, SOL_SOCKET, SO_NREAD, &bytes_available, &bytes_len) == 0) {
+                if (bytes_available > 0) {
+                    std::cout << "📊 Bytes available in UDP buffer: " << bytes_available << std::endl;
+                }
+            }
+            #endif
+        }
+
         // Ensure client_len is reset before each recvfrom (per POSIX semantics)
         client_len = sizeof(client_addr);
 
@@ -365,6 +416,10 @@ void StandaloneWhisperService::registration_listener_thread() {
                              (struct sockaddr*)&client_addr, &client_len);
 
         if (n > 0) {
+            idle_ticks = 0;
+            message_count++;
+            std::cout << "📨 UDP message #" << message_count << " received (" << n << " bytes) from "
+                      << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << std::endl;
             buffer[n] = '\0';
             std::string message(buffer);
 
@@ -452,12 +507,19 @@ void StandaloneWhisperService::registration_listener_thread() {
                 std::cout << "⚠️ Registration parse/handle error: '" << message << "' : " << e.what() << std::endl;
                 // continue loop
             }
-        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            std::cout << "⚠️ recvfrom error: " << strerror(errno) << std::endl;
+        } else if (n == 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+            // Idle tick (no message within 1s). Log every ~5s as a heartbeat.
+            if (++idle_ticks % 5 == 0) {
+                std::cout << "⏳ Whisper registration listener idle (" << idle_ticks << "s, FD=" << registration_socket_
+                          << ", running=" << registration_running_.load() << ", waiting on UDP 127.0.0.1:13000)" << std::endl;
+            }
+        } else if (n < 0) {
+            std::cout << "⚠️ recvfrom error (FD=" << registration_socket_ << "): " << strerror(errno)
+                      << " (errno=" << errno << ")" << std::endl;
         }
     }
 
-    std::cout << "📡 Whisper registration listener thread exiting" << std::endl;
+    std::cout << "📡 Whisper registration listener thread exiting (FD was: " << registration_socket_ << ")" << std::endl;
 }
 
 void StandaloneWhisperService::run_service_loop() {
@@ -466,8 +528,8 @@ void StandaloneWhisperService::run_service_loop() {
     while (running_.load()) {
         auto now = std::chrono::steady_clock::now();
 
-        // Discover new streams every 5 seconds
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discovery_).count() > 5000) {
+        // Discover new streams every 1 second (faster to recover between calls)
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discovery_).count() > 1000) {
             discover_and_connect_streams();
             last_discovery_ = now;
         }
@@ -478,7 +540,7 @@ void StandaloneWhisperService::run_service_loop() {
         // Log session statistics
         // log_session_stats();  // suppressed to reduce console spam
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 }
 
@@ -636,21 +698,42 @@ bool StandaloneWhisperService::create_session(const std::string& call_id) {
 }
 
 bool StandaloneWhisperService::destroy_session(const std::string& call_id) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
 
-    auto it = sessions_.find(call_id);
-    if (it != sessions_.end()) {
-        sessions_.erase(it);
-
-        // DO NOT close LLaMA socket - keep it open for next call
-        // The socket is per-call_id and will be reused or cleaned up on service stop
-        // This enables sessionless architecture where TCP connections persist across calls
-
-        std::cout << "🗑️ Destroyed whisper session for call " << call_id << " (keeping LLaMA connection open)" << std::endl;
-        return true;
+        auto it = sessions_.find(call_id);
+        if (it != sessions_.end()) {
+            sessions_.erase(it);
+        } else {
+            // Session not found, but still clean up TCP socket
+            std::cout << "⚠️ Session not found for call " << call_id << " during destroy" << std::endl;
+        }
     }
 
-    return false;
+    // Clean up TCP socket for this call (outside sessions_mutex_ to avoid lock ordering issues)
+    {
+        std::lock_guard<std::mutex> lock(tcp_mutex_);
+        auto tcp_it = call_tcp_sockets_.find(call_id);
+        if (tcp_it != call_tcp_sockets_.end()) {
+            int sock = tcp_it->second;
+            if (sock >= 0) {
+                close(sock);
+                std::cout << "🔌 Closed TCP socket (FD " << sock << ") for call " << call_id << std::endl;
+            }
+            call_tcp_sockets_.erase(tcp_it);
+            std::cout << "🧹 Removed call " << call_id << " from TCP sockets map" << std::endl;
+        }
+    }
+
+    // DO NOT close LLaMA socket - keep it open for next call
+    // The socket is per-call_id and will be reused or cleaned up on service stop
+    // This enables sessionless architecture where TCP connections persist across calls
+
+    // Force immediate discovery on next loop to pick up any new active calls
+    last_discovery_ = std::chrono::steady_clock::time_point{};
+
+    std::cout << "🗑️ Destroyed whisper session for call " << call_id << " (keeping LLaMA connection open)" << std::endl;
+    return true;
 }
 
 void StandaloneWhisperService::cleanup_inactive_sessions() {
