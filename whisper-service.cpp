@@ -112,80 +112,9 @@ bool WhisperSession::process_audio_chunk(const std::vector<float>& audio_samples
     // Update activity timestamp
     mark_activity();
 
-    // Append to streaming buffer
-    {
-        std::lock_guard<std::mutex> lock(session_mutex_);
-        streaming_buffer_.insert(streaming_buffer_.end(),
-                                 audio_samples.begin(),
-                                 audio_samples.end());
-
-        // Cap buffer at 10 seconds to prevent overflow
-        const size_t max_buffer_size = 10 * 16000;
-        if (streaming_buffer_.size() > max_buffer_size) {
-            std::cout << "⚠️ [" << call_id_ << "] Buffer overflow, flushing old data" << std::endl;
-            streaming_buffer_.erase(streaming_buffer_.begin(),
-                                   streaming_buffer_.begin() + (streaming_buffer_.size() - max_buffer_size));
-        }
-    }
-
-    // Process overlapping windows OR process immediately if buffer is small
-    bool processed_any = false;
-
-    // Check if we have enough for a full window
-    size_t current_buffer_size = 0;
-    {
-        std::lock_guard<std::mutex> lock(session_mutex_);
-        current_buffer_size = streaming_buffer_.size();
-    }
-
-    if (current_buffer_size >= window_size_) {
-        // We have enough for streaming inference with overlapping windows
-        while (true) {
-            std::vector<float> window;
-
-            // Extract window under session lock (fast operation)
-            {
-                std::lock_guard<std::mutex> lock(session_mutex_);
-                if (streaming_buffer_.size() < window_size_) {
-                    break; // Not enough data for full window
-                }
-
-                // Copy window
-                window.assign(streaming_buffer_.begin(),
-                             streaming_buffer_.begin() + window_size_);
-            }
-
-            // Process window (holds warm_mutex_)
-            if (process_window(window)) {
-                processed_any = true;
-            }
-
-            // Slide window by stride
-            {
-                std::lock_guard<std::mutex> lock(session_mutex_);
-                if (streaming_buffer_.size() >= stride_) {
-                    streaming_buffer_.erase(streaming_buffer_.begin(),
-                                           streaming_buffer_.begin() + stride_);
-                } else {
-                    break;
-                }
-            }
-        }
-    } else {
-        // Not enough for full window - process what we have immediately (real-time mode)
-        std::vector<float> chunk_to_process;
-        {
-            std::lock_guard<std::mutex> lock(session_mutex_);
-            chunk_to_process = streaming_buffer_;
-            streaming_buffer_.clear(); // Clear buffer after copying
-        }
-
-        if (!chunk_to_process.empty()) {
-            processed_any = process_window(chunk_to_process);
-        }
-    }
-
-    return processed_any;
+    // IMMEDIATE PROCESSING - NO BUFFERING, NO DELAYS
+    // Process the audio chunk as soon as it arrives for real-time speed
+    return process_window(audio_samples);
 }
 
 // Process a single window with whisper inference
@@ -246,17 +175,12 @@ bool WhisperSession::process_window(const std::vector<float>& window) {
         }
 
         if (!transcription.empty()) {
-            // Deduplicate with previous transcription
-            std::string new_text = deduplicate_transcription(transcription);
+            // Store transcription immediately - no deduplication delays
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            latest_transcription_ = transcription;
 
-            if (!new_text.empty()) {
-                std::lock_guard<std::mutex> lock(session_mutex_);
-                latest_transcription_ = new_text;
-                previous_transcription_ = transcription;
-
-                std::cout << "📝 [" << call_id_ << "] New text: " << new_text << std::endl;
-                return true;
-            }
+            std::cout << "📝 [" << call_id_ << "] Transcription: " << transcription << std::endl;
+            return true;
         }
     } else {
         std::cout << "❌ Whisper processing failed for call " << call_id_ << std::endl;
@@ -274,45 +198,7 @@ std::string WhisperSession::get_latest_transcription() {
     return result;
 }
 
-// Deduplicate transcription by removing common prefix with previous transcription
-std::string WhisperSession::deduplicate_transcription(const std::string& current) {
-    if (previous_transcription_.empty()) {
-        return current; // First transcription
-    }
-
-    // Find longest common prefix
-    size_t common_len = 0;
-    size_t max_len = std::min(previous_transcription_.size(), current.size());
-
-    for (size_t i = 0; i < max_len; ++i) {
-        if (previous_transcription_[i] == current[i]) {
-            common_len++;
-        } else {
-            break;
-        }
-    }
-
-    // Extract new text (everything after common prefix)
-    if (common_len < current.size()) {
-        std::string new_text = current.substr(common_len);
-
-        // Trim leading whitespace
-        size_t start = new_text.find_first_not_of(" \t\n\r");
-        if (start != std::string::npos) {
-            new_text = new_text.substr(start);
-        }
-
-        return new_text;
-    }
-
-    return ""; // No new text
-}
-
-// Get buffer size for testing
-size_t WhisperSession::get_buffer_size() const {
-    std::lock_guard<std::mutex> lock(session_mutex_);
-    return streaming_buffer_.size();
-}
+// Removed deduplication and buffer size functions - not needed for real-time speed
 
 // StandaloneWhisperService Implementation
 StandaloneWhisperService::StandaloneWhisperService()
@@ -682,7 +568,8 @@ void StandaloneWhisperService::run_service_loop() {
         // Log session statistics
         // log_session_stats();  // suppressed to reduce console spam
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Fast polling for real-time responsiveness
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
@@ -1067,8 +954,8 @@ bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id
         int s = socket(AF_INET, SOCK_STREAM, 0);
         if (s < 0) {
             if (attempt < max_attempts) {
-                int sleep_ms = (attempt <= 5) ? 200 : 1000;
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                // Fast retry - 50ms for real-time speed
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
             return false;
@@ -1082,12 +969,12 @@ bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id
         if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
             close(s);
             if (attempt < max_attempts) {
-                int sleep_ms = (attempt <= 5) ? 200 : 1000;
+                // Fast retry - 50ms for real-time speed
                 if (attempt == 1 || attempt == 5 || attempt == max_attempts - 1) {
                     std::cout << "⚠️ LLaMA connection attempt " << attempt << "/" << max_attempts
-                              << " failed for call " << call_id << " - retrying in " << sleep_ms << "ms" << std::endl;
+                              << " failed for call " << call_id << " - retrying in 50ms" << std::endl;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
             std::cout << "❌ Failed to connect to LLaMA for call " << call_id
@@ -1100,8 +987,8 @@ bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id
         if (send(s, &n, 4, 0) != 4) {
             close(s);
             if (attempt < max_attempts) {
-                int sleep_ms = (attempt <= 5) ? 200 : 1000;
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                // Fast retry - 50ms for real-time speed
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
             return false;
@@ -1109,8 +996,8 @@ bool StandaloneWhisperService::connect_llama_for_call(const std::string& call_id
         if (send(s, call_id.data(), call_id.size(), 0) != (ssize_t)call_id.size()) {
             close(s);
             if (attempt < max_attempts) {
-                int sleep_ms = (attempt <= 5) ? 200 : 1000;
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                // Fast retry - 50ms for real-time speed
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
             return false;

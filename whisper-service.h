@@ -41,10 +41,8 @@ public:
     bool process_audio_chunk(const std::vector<float>& audio_samples);
     std::string get_latest_transcription();
 
-    // Streaming inference helpers
+    // Fast inference helper - processes audio immediately
     bool process_window(const std::vector<float>& window);
-    std::string deduplicate_transcription(const std::string& current);
-    size_t get_buffer_size() const;  // For testing
 
     // Session management
     bool is_active() const { return is_active_; }
@@ -67,12 +65,7 @@ private:
 
     WhisperSessionConfig config_;
 
-    // Streaming inference state
-    std::vector<float> streaming_buffer_;
-    std::string previous_transcription_;  // For deduplication
-    size_t window_size_ = 5 * 16000;      // 5 seconds at 16kHz
-    size_t overlap_size_ = 1 * 16000;     // 1 second overlap
-    size_t stride_ = 4 * 16000;           // 4 seconds stride
+    // No buffering - process immediately for real-time speed
 
     bool initialize_whisper_context();
     void cleanup_whisper_context();
