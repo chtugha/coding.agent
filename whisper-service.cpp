@@ -128,37 +128,60 @@ bool WhisperSession::process_audio_chunk(const std::vector<float>& audio_samples
         }
     }
 
-    // Process overlapping windows
+    // Process overlapping windows OR process immediately if buffer is small
     bool processed_any = false;
-    while (true) {
-        std::vector<float> window;
 
-        // Extract window under session lock (fast operation)
-        {
-            std::lock_guard<std::mutex> lock(session_mutex_);
-            if (streaming_buffer_.size() < window_size_) {
-                break; // Not enough data for full window
+    // Check if we have enough for a full window
+    size_t current_buffer_size = 0;
+    {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        current_buffer_size = streaming_buffer_.size();
+    }
+
+    if (current_buffer_size >= window_size_) {
+        // We have enough for streaming inference with overlapping windows
+        while (true) {
+            std::vector<float> window;
+
+            // Extract window under session lock (fast operation)
+            {
+                std::lock_guard<std::mutex> lock(session_mutex_);
+                if (streaming_buffer_.size() < window_size_) {
+                    break; // Not enough data for full window
+                }
+
+                // Copy window
+                window.assign(streaming_buffer_.begin(),
+                             streaming_buffer_.begin() + window_size_);
             }
 
-            // Copy window
-            window.assign(streaming_buffer_.begin(),
-                         streaming_buffer_.begin() + window_size_);
-        }
+            // Process window (holds warm_mutex_)
+            if (process_window(window)) {
+                processed_any = true;
+            }
 
-        // Process window (holds warm_mutex_)
-        if (process_window(window)) {
-            processed_any = true;
+            // Slide window by stride
+            {
+                std::lock_guard<std::mutex> lock(session_mutex_);
+                if (streaming_buffer_.size() >= stride_) {
+                    streaming_buffer_.erase(streaming_buffer_.begin(),
+                                           streaming_buffer_.begin() + stride_);
+                } else {
+                    break;
+                }
+            }
         }
-
-        // Slide window by stride
+    } else {
+        // Not enough for full window - process what we have immediately (real-time mode)
+        std::vector<float> chunk_to_process;
         {
             std::lock_guard<std::mutex> lock(session_mutex_);
-            if (streaming_buffer_.size() >= stride_) {
-                streaming_buffer_.erase(streaming_buffer_.begin(),
-                                       streaming_buffer_.begin() + stride_);
-            } else {
-                break;
-            }
+            chunk_to_process = streaming_buffer_;
+            streaming_buffer_.clear(); // Clear buffer after copying
+        }
+
+        if (!chunk_to_process.empty()) {
+            processed_any = process_window(chunk_to_process);
         }
     }
 
