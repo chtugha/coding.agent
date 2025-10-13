@@ -840,9 +840,49 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
                             database_->append_transcription(call_id, transcription);
                         }
 
-                        // Forward to LLaMA service via dedicated TCP connection
-                        std::cout << "➡️ Forwarding to LLaMA [" << call_id << "]: " << transcription << std::endl;
-                        send_llama_text(call_id, transcription);
+                        // Filter out incomplete/short transcriptions before forwarding to LLaMA
+                        // Only forward if it's a complete sentence or meaningful phrase
+                        std::string trimmed = transcription;
+                        // Trim whitespace
+                        size_t start = trimmed.find_first_not_of(" \t\n\r");
+                        size_t end = trimmed.find_last_not_of(" \t\n\r");
+                        if (start != std::string::npos && end != std::string::npos) {
+                            trimmed = trimmed.substr(start, end - start + 1);
+                        }
+
+                        // Count words (simple space-based count)
+                        int word_count = 0;
+                        bool in_word = false;
+                        for (char c : trimmed) {
+                            if (std::isspace(c)) {
+                                in_word = false;
+                            } else if (!in_word) {
+                                word_count++;
+                                in_word = true;
+                            }
+                        }
+
+                        // Only forward if:
+                        // 1. At least 2 words (filters out "Hello?", "But they...")
+                        // 2. OR ends with punctuation (complete sentence)
+                        bool should_forward = false;
+                        if (word_count >= 2) {
+                            should_forward = true;
+                        } else if (word_count >= 1 && !trimmed.empty()) {
+                            char last_char = trimmed.back();
+                            if (last_char == '.' || last_char == '!' || last_char == '?') {
+                                should_forward = true;
+                            }
+                        }
+
+                        if (should_forward) {
+                            // Forward to LLaMA service via dedicated TCP connection
+                            std::cout << "➡️ Forwarding to LLaMA [" << call_id << "]: " << transcription << std::endl;
+                            send_llama_text(call_id, transcription);
+                        } else {
+                            std::cout << "⏭️ Skipping incomplete transcription [" << call_id << "]: " << transcription
+                                      << " (words=" << word_count << ")" << std::endl;
+                        }
                     }
                 }
             }
