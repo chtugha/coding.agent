@@ -112,14 +112,80 @@ bool WhisperSession::process_audio_chunk(const std::vector<float>& audio_samples
     // Update activity timestamp
     mark_activity();
 
+    // Append to streaming buffer
+    {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        streaming_buffer_.insert(streaming_buffer_.end(),
+                                 audio_samples.begin(),
+                                 audio_samples.end());
+
+        // Cap buffer at 10 seconds to prevent overflow
+        const size_t max_buffer_size = 10 * 16000;
+        if (streaming_buffer_.size() > max_buffer_size) {
+            std::cout << "⚠️ [" << call_id_ << "] Buffer overflow, flushing old data" << std::endl;
+            streaming_buffer_.erase(streaming_buffer_.begin(),
+                                   streaming_buffer_.begin() + (streaming_buffer_.size() - max_buffer_size));
+        }
+    }
+
+    // Process overlapping windows
+    bool processed_any = false;
+    while (true) {
+        std::vector<float> window;
+
+        // Extract window under session lock (fast operation)
+        {
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            if (streaming_buffer_.size() < window_size_) {
+                break; // Not enough data for full window
+            }
+
+            // Copy window
+            window.assign(streaming_buffer_.begin(),
+                         streaming_buffer_.begin() + window_size_);
+        }
+
+        // Process window (holds warm_mutex_)
+        if (process_window(window)) {
+            processed_any = true;
+        }
+
+        // Slide window by stride
+        {
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            if (streaming_buffer_.size() >= stride_) {
+                streaming_buffer_.erase(streaming_buffer_.begin(),
+                                       streaming_buffer_.begin() + stride_);
+            } else {
+                break;
+            }
+        }
+    }
+
+    return processed_any;
+}
+
+// Process a single window with whisper inference
+bool WhisperSession::process_window(const std::vector<float>& window) {
+    if (!is_active_.load() || !ctx_) {
+        return false;
+    }
+
     // Serialize access to shared whisper context if needed
     std::unique_lock<std::mutex> shared_lock;
+    auto t_mutex_start = std::chrono::high_resolution_clock::now();
+
     if (shared_mutex_) {
         shared_lock = std::unique_lock<std::mutex>(*shared_mutex_);
     }
 
-    // Session-local lock for updating session state
-    std::lock_guard<std::mutex> session_lock(session_mutex_);
+    auto t_mutex_acquired = std::chrono::high_resolution_clock::now();
+    auto mutex_wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        t_mutex_acquired - t_mutex_start).count();
+
+    if (mutex_wait_ms > 10) {
+        std::cout << "⏳ [" << call_id_ << "] Mutex wait: " << mutex_wait_ms << "ms" << std::endl;
+    }
 
     // Create real whisper parameters
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
@@ -132,37 +198,47 @@ bool WhisperSession::process_audio_chunk(const std::vector<float>& audio_samples
     wparams.print_realtime = false;
 
     // Diagnostics before inference
-    double secs_in = static_cast<double>(audio_samples.size()) / 16000.0;
-    double sumsq_in = 0.0; for (float v : audio_samples) { double d=v; sumsq_in += d*d; }
-    double rms_in = audio_samples.empty() ? 0.0 : std::sqrt(sumsq_in / (double)audio_samples.size());
-    std::cout << " Whisper inference start [" << call_id_ << "]: samples=" << audio_samples.size()
-              << ", ~" << secs_in << " s, RMS=" << rms_in
-              << ", threads=" << wparams.n_threads
-              << ", lang=" << (wparams.language ? wparams.language : "auto") << std::endl;
+    double secs_in = static_cast<double>(window.size()) / 16000.0;
 
-    // Process audio chunk directly with whisper
-    int result = whisper_full(ctx_, wparams, audio_samples.data(), audio_samples.size());
+    auto t_inference_start = std::chrono::high_resolution_clock::now();
+    int result = whisper_full(ctx_, wparams, window.data(), window.size());
+    auto t_inference_end = std::chrono::high_resolution_clock::now();
+
+    auto inference_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        t_inference_end - t_inference_start).count();
+
+    std::cout << "⚡ [" << call_id_ << "] Inference: " << inference_ms << "ms ("
+              << secs_in << "s audio)" << std::endl;
 
     if (result == 0) {
         // Extract transcription
         const int n_segments = whisper_full_n_segments(ctx_);
-        std::cout << " Whisper inference done [" << call_id_ << "]: segments=" << n_segments << std::endl;
         std::string transcription;
 
         for (int i = 0; i < n_segments; ++i) {
             const char* text = whisper_full_get_segment_text(ctx_, i);
-            transcription += text;
+            if (text) {
+                transcription += text;
+            }
         }
 
         if (!transcription.empty()) {
-            latest_transcription_ = transcription;
-            std::cout << "📝 [" << call_id_ << "] Transcription: " << transcription << std::endl;
-        }
+            // Deduplicate with previous transcription
+            std::string new_text = deduplicate_transcription(transcription);
 
-        return true;
+            if (!new_text.empty()) {
+                std::lock_guard<std::mutex> lock(session_mutex_);
+                latest_transcription_ = new_text;
+                previous_transcription_ = transcription;
+
+                std::cout << "📝 [" << call_id_ << "] New text: " << new_text << std::endl;
+                return true;
+            }
+        }
+    } else {
+        std::cout << "❌ Whisper processing failed for call " << call_id_ << std::endl;
     }
 
-    std::cout << "❌ Whisper processing failed for call " << call_id_ << std::endl;
     return false;
 }
 
@@ -173,6 +249,46 @@ std::string WhisperSession::get_latest_transcription() {
     std::string result = latest_transcription_;
     latest_transcription_.clear(); // Clear after reading
     return result;
+}
+
+// Deduplicate transcription by removing common prefix with previous transcription
+std::string WhisperSession::deduplicate_transcription(const std::string& current) {
+    if (previous_transcription_.empty()) {
+        return current; // First transcription
+    }
+
+    // Find longest common prefix
+    size_t common_len = 0;
+    size_t max_len = std::min(previous_transcription_.size(), current.size());
+
+    for (size_t i = 0; i < max_len; ++i) {
+        if (previous_transcription_[i] == current[i]) {
+            common_len++;
+        } else {
+            break;
+        }
+    }
+
+    // Extract new text (everything after common prefix)
+    if (common_len < current.size()) {
+        std::string new_text = current.substr(common_len);
+
+        // Trim leading whitespace
+        size_t start = new_text.find_first_not_of(" \t\n\r");
+        if (start != std::string::npos) {
+            new_text = new_text.substr(start);
+        }
+
+        return new_text;
+    }
+
+    return ""; // No new text
+}
+
+// Get buffer size for testing
+size_t WhisperSession::get_buffer_size() const {
+    std::lock_guard<std::mutex> lock(session_mutex_);
+    return streaming_buffer_.size();
 }
 
 // StandaloneWhisperService Implementation
@@ -206,6 +322,9 @@ bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const s
     auto t0 = std::chrono::steady_clock::now();
     whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = config_.use_gpu;
+    cparams.flash_attn = true;           // Enable flash attention for Metal (20-30% speedup)
+    cparams.gpu_device = 0;              // Use primary GPU
+    cparams.dtw_token_timestamps = false; // Disable timestamps for speed (5-10% speedup)
     warm_ctx_ = whisper_init_from_file_with_params(config_.model_path.c_str(), cparams);
     if (!warm_ctx_) {
         std::cout << "❌ Whisper preload failed for model: " << config_.model_path << std::endl;

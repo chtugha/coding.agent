@@ -41,6 +41,11 @@ public:
     bool process_audio_chunk(const std::vector<float>& audio_samples);
     std::string get_latest_transcription();
 
+    // Streaming inference helpers
+    bool process_window(const std::vector<float>& window);
+    std::string deduplicate_transcription(const std::string& current);
+    size_t get_buffer_size() const;  // For testing
+
     // Session management
     bool is_active() const { return is_active_; }
     void mark_activity() { last_activity_ = std::chrono::steady_clock::now(); }
@@ -54,13 +59,20 @@ private:
     std::string latest_transcription_;
     std::atomic<bool> is_active_;
     std::chrono::steady_clock::time_point last_activity_;
-    std::mutex session_mutex_;
+    mutable std::mutex session_mutex_;  // mutable for const methods
 
     // Indicates whether ctx_ is shared (owned by service) or owned by this session
     bool ctx_shared_ = false;
     std::mutex* shared_mutex_ = nullptr;
 
     WhisperSessionConfig config_;
+
+    // Streaming inference state
+    std::vector<float> streaming_buffer_;
+    std::string previous_transcription_;  // For deduplication
+    size_t window_size_ = 5 * 16000;      // 5 seconds at 16kHz
+    size_t overlap_size_ = 1 * 16000;     // 1 second overlap
+    size_t stride_ = 4 * 16000;           // 4 seconds stride
 
     bool initialize_whisper_context();
     void cleanup_whisper_context();
@@ -105,6 +117,15 @@ private:
     whisper_context* warm_ctx_ = nullptr;
     bool warm_loaded_ = false;
     std::mutex warm_mutex_;
+
+    // Performance metrics
+    struct PerformanceMetrics {
+        std::atomic<uint64_t> total_mutex_wait_ms{0};
+        std::atomic<uint64_t> total_inference_ms{0};
+        std::atomic<uint64_t> total_chunks_processed{0};
+        std::atomic<uint64_t> max_mutex_wait_ms{0};
+    };
+    PerformanceMetrics metrics_;
 
     // Session management
     std::unordered_map<std::string, std::unique_ptr<WhisperSession>> sessions_;
