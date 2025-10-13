@@ -12,6 +12,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <cerrno>
 
 // Helpers to match current llama.cpp API
 static std::vector<llama_token> tokenize_text(struct llama_context * ctx, const std::string & text, bool add_bos) {
@@ -747,13 +749,72 @@ void StandaloneLlamaService::run_tcp_server(int port) {
 void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, int socket) {
     std::cout << "📥 Starting LLaMA text handler for call " << call_id << std::endl;
 
+    // Buffer to accumulate text chunks before responding
+    std::string text_buffer;
+    auto last_text_time = std::chrono::steady_clock::now();
+    const int silence_threshold_ms = 1500; // Wait 1.5s after last text before responding
+
+    // Set socket to non-blocking mode for timeout-based reads
+    int flags = fcntl(socket, F_GETFL, 0);
+    fcntl(socket, F_SETFL, flags | O_NONBLOCK);
+
     while (running_.load()) {
         std::string text;
-        if (!read_tcp_text_chunk(socket, text)) {
-            break;
+        bool got_text = read_tcp_text_chunk(socket, text);
+
+        if (!got_text) {
+            // Check if it's a real disconnect or just no data available
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // No data available - check if we should respond to buffered text
+                auto now = std::chrono::steady_clock::now();
+                auto silence_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_text_time).count();
+
+                if (!text_buffer.empty() && silence_ms >= silence_threshold_ms) {
+                    // User has stopped speaking - respond to accumulated text
+                    std::cout << "🔇 Silence detected (" << silence_ms << "ms) - responding to: " << text_buffer << std::endl;
+                    std::string response = process_text_for_call(call_id, text_buffer);
+
+                    if (!response.empty()) {
+                        std::cout << "💬 Response [" << call_id << "]: " << response << std::endl;
+                        // 1) Write to DB (separate field)
+                        if (database_) {
+                            database_->append_llama_response(call_id, response);
+                        }
+                        // 2) Send to output endpoint (Kokoro) if configured
+                        if (!output_host_.empty() && output_port_ > 0) {
+                            if (connect_output_for_call(call_id)) {
+                                send_output_text(call_id, response);
+                            }
+                        } else {
+                            // No downstream configured: reply on inbound socket (dev mode)
+                            (void)send_tcp_response(socket, response);
+                        }
+                    }
+
+                    // Clear buffer after responding
+                    text_buffer.clear();
+                }
+
+                // Sleep briefly to avoid busy-waiting
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            } else {
+                // Real disconnect
+                break;
+            }
         }
 
         if (text == "BYE") {
+            // Process any remaining buffered text before exiting
+            if (!text_buffer.empty()) {
+                std::cout << "📝 Processing final buffered text before BYE: " << text_buffer << std::endl;
+                std::string response = process_text_for_call(call_id, text_buffer);
+                if (!response.empty() && !output_host_.empty() && output_port_ > 0) {
+                    if (connect_output_for_call(call_id)) {
+                        send_output_text(call_id, response);
+                    }
+                }
+            }
             // DO NOT close Kokoro connection - keep it open for next call
             // Just break the read loop and clean up this Whisper connection
             break;
@@ -763,25 +824,14 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
             continue;
         }
 
+        // Accumulate text in buffer
         std::cout << "📝 Incoming text [" << call_id << "]: " << text << std::endl;
-        std::string response = process_text_for_call(call_id, text);
-
-        if (!response.empty()) {
-            std::cout << "💬 Response [" << call_id << "]: " << response << std::endl;
-            // 1) Write to DB (separate field)
-            if (database_) {
-                database_->append_llama_response(call_id, response);
-            }
-            // 2) Send to output endpoint (Kokoro) if configured
-            if (!output_host_.empty() && output_port_ > 0) {
-                if (connect_output_for_call(call_id)) {
-                    send_output_text(call_id, response);
-                }
-            } else {
-                // No downstream configured: reply on inbound socket (dev mode)
-                (void)send_tcp_response(socket, response);
-            }
+        if (!text_buffer.empty()) {
+            text_buffer += " "; // Add space between chunks
         }
+        text_buffer += text;
+        last_text_time = std::chrono::steady_clock::now();
+        std::cout << "📦 Buffered text [" << call_id << "]: " << text_buffer << std::endl;
     }
 
     send_tcp_bye(socket);
