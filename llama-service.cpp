@@ -415,17 +415,27 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
     auto generate_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generate_time - decode_time).count();
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generate_time - start_time).count();
 
-    // Additional safety: trim if model echoed a new user turn without newline or duplicated tag
-    size_t pos_any = response.find(config_.person_name + ":");
-    if (pos_any != std::string::npos) {
-        response = response.substr(0, pos_any);
+    // Additional safety: trim if model echoed a new user turn
+    // Check for "User:" first
+    size_t pos_with_colon = response.find(config_.person_name + ":");
+    if (pos_with_colon != std::string::npos) {
+        response = response.substr(0, pos_with_colon);
     }
+
+    // Check for just "User" at the end (without colon)
+    size_t pos_without_colon = response.rfind(config_.person_name);
+    if (pos_without_colon != std::string::npos &&
+        pos_without_colon + config_.person_name.length() == response.length()) {
+        response = response.substr(0, pos_without_colon);
+    }
+
+    // Check for duplicated tags
     size_t pos_dupe = response.find(config_.person_name + config_.person_name + ":");
     if (pos_dupe != std::string::npos) {
         response = response.substr(0, pos_dupe);
     }
 
-    // Cleanup response
+    // Cleanup response (trim whitespace)
     response = std::regex_replace(response, std::regex("^\\s+"), "");
     response = std::regex_replace(response, std::regex("\\s+$"), "");
 
