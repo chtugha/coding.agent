@@ -83,7 +83,7 @@ const std::vector<float>& G711Tables::get_alaw_table() {
 SimpleAudioProcessor::SimpleAudioProcessor(SipAudioInterface* sip_interface)
     : sip_interface_(sip_interface), running_(false),
       has_speech_(false), sample_rate_(16000),
-      chunk_duration_ms_(3000), vad_threshold_(0.01f), silence_timeout_ms_(500), database_(nullptr) {
+      chunk_duration_ms_(1400), vad_threshold_(0.10f), silence_timeout_ms_(500), database_(nullptr) {
 
     G711Tables::initialize_tables(); // Initialize lookup tables
     last_speech_time_ = std::chrono::steady_clock::now();
@@ -335,20 +335,20 @@ std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(std
     // 1 = slow (max audio per chunk)
     // 5 = fast (word-level-ish chunks)
 
-    size_t window_size = 320; // 20ms at 16 kHz
+    size_t window_size = 160; // 10ms at 16 kHz (faster start detection)
 
     // Minimum chunk size: 0.5 seconds to avoid processing very short utterances
     size_t min_chunk_size = std::max(static_cast<size_t>(sample_rate_ * 0.5), window_size * (6 - system_speed));
 
     int window_ms = static_cast<int>(1000.0 * window_size / std::max(1, sample_rate_));
-    int hangover_ms = 200; // keep ~200ms after last speech to avoid cutting words
+    int hangover_ms = 600; // keep ~600ms after last speech to avoid cutting words
     int hangover_windows = std::max(1, hangover_ms / std::max(1, window_ms));
 
     // Hysteresis thresholds to avoid rapid toggling
-    float vad_start_threshold = std::max(0.001f, vad_threshold_ * 1.5f);
+    float vad_start_threshold = std::max(0.001f, vad_threshold_ * 1.2f); // lower start gate to catch soft onsets
     float vad_stop_threshold  = std::max(0.0005f, vad_threshold_ * 0.5f);
-    int speech_required = 2;   // require N consecutive speech windows to start
-    int silence_required = 3;  // require N consecutive silence windows (post-hangover) to end
+    int speech_required = 1;   // detect speech on first qualifying window (10ms)
+    int silence_required = 3;  // keep 3 windows post-hangover to confirm end
 
     // Maximum chunk size (3 seconds) - used as fallback to prevent unbounded growth
     size_t max_chunk_size = static_cast<size_t>(std::max(1, sample_rate_) * (chunk_duration_ms_ / 1000.0f));
@@ -396,14 +396,22 @@ std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(std
                         double secs = static_cast<double>(current_chunk.size()) / std::max(1, sample_rate_);
                         std::cout << "📦 Chunk created (end_of_speech): " << current_chunk.size()
                                   << " samples (~" << std::fixed << std::setprecision(2) << secs << " s), meanRMS=" << chunk_rms << std::endl;
-                        // Send chunk immediately without padding - reduces latency!
+                        // Send chunk immediately with overlap tail to avoid word clipping
                         chunks.push_back(current_chunk);
-                        current_chunk.clear();
+                        // Keep a larger overlap (≈200ms) as the seed for the next chunk to prevent word loss
+                        size_t overlap = (size_t)std::max(1, sample_rate_) * 20 / 100; // ~200ms
+                        std::vector<float> tail;
+                        if (current_chunk.size() > overlap) {
+                            tail.assign(current_chunk.end() - overlap, current_chunk.end());
+                        } else {
+                            tail = current_chunk;
+                        }
+                        current_chunk = tail; // start next chunk with tail as pre-roll
                         in_speech = false;
                         silence_windows = 0;
                         consec_silence = 0;
-                        consumed_until = end;
-                        std::cout << "🔴 VAD: speech end detected (hangover=" << hangover_ms << " ms) - sending immediately" << std::endl;
+                        consumed_until = (end > tail.size()) ? (end - tail.size()) : 0;
+                        std::cout << "🔴 VAD: speech end detected (hangover=" << hangover_ms << " ms) - sending immediately (overlap=" << (overlap*1000/std::max(1, sample_rate_)) << "ms)" << std::endl;
                     }
                 }
             }
@@ -415,14 +423,22 @@ std::vector<std::vector<float>> SimpleAudioProcessor::create_chunks_from_pcm(std
             double secs = static_cast<double>(current_chunk.size()) / std::max(1, sample_rate_);
             std::cout << "📦 Chunk created (max_size): " << current_chunk.size()
                       << " samples (~" << std::fixed << std::setprecision(2) << secs << " s), meanRMS=" << chunk_rms << std::endl;
-            // For max-size chunks, send as-is (already at maximum)
+            // For max-size chunks, send but keep an overlap tail to seed the next chunk
             chunks.push_back(current_chunk);
-            current_chunk.clear();
+            size_t overlap = (size_t)std::max(1, sample_rate_) * 20 / 100; // ~200ms
+            std::vector<float> tail;
+            if (current_chunk.size() > overlap) {
+                tail.assign(current_chunk.end() - overlap, current_chunk.end());
+            } else {
+                tail = current_chunk;
+            }
+            current_chunk = tail;
+            std::cout << "🔴 VAD: max chunk size reached - sending with overlap=" << (overlap*1000/std::max(1, sample_rate_)) << "ms tail" << std::endl;
             in_speech = false;
             silence_windows = 0;
             consec_silence = 0;
             consec_speech = 0;
-            consumed_until = end;
+            consumed_until = (end > tail.size()) ? (end - tail.size()) : 0;
         }
     }
 

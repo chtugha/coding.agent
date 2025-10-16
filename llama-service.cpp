@@ -11,10 +11,13 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <cerrno>
 #include <vector>
+#include <iomanip>
+
 
 // Helpers to match current llama.cpp API
 static std::vector<llama_token> tokenize_text(struct llama_context * ctx, const std::string & text, bool add_bos) {
@@ -67,11 +70,18 @@ bool LlamaSession::initialize() {
         return false;
     }
 
-    // Initialize conversation with system prompt - emphasize brevity for phone calls
-    conversation_history_ = "Phone conversation transcript. " + config_.person_name +
-                           " talks with " + config_.bot_name + ".\n" +
-                           config_.bot_name + " gives SHORT, DIRECT answers (1-2 sentences max). " +
-                           "No explanations unless asked. Natural phone conversation style.\n\n";
+    // Initialize conversation with system prompt - calm, patient, empathetic phone assistant
+    conversation_history_ = "You are " + config_.bot_name + ", a calm and patient phone assistant speaking with " + config_.person_name + ".\n\n" +
+                           "Your communication style:\n" +
+                           "- Speak naturally and conversationally, like a friendly human\n" +
+                           "- Be warm, understanding, and empathetic\n" +
+                           "- Listen carefully and respond thoughtfully\n" +
+                           "- Keep responses brief (1-2 sentences) but kind\n" +
+                           "- Never interrupt or rush the conversation\n" +
+                           "- Be polite and respectful at all times\n" +
+                           "- Avoid bureaucratic or robotic language\n" +
+                           "- Wait for the person to finish speaking before responding\n\n" +
+                           "Conversation:\n\n";
 
     is_active_.store(true);
     mark_activity();
@@ -373,7 +383,8 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
     // Generate response tokens
     std::string response;
     int tokens_generated = 0;
-    for (int i = 0; i < config_.max_tokens; i++) {
+    int max_gen = config_.max_tokens; if (max_gen > 50) max_gen = 50; // cap at 50 for ultra-fast responses
+    for (int i = 0; i < max_gen; i++) {
         // Sample next token
         llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
 
@@ -448,6 +459,15 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
               << "decode=" << decode_ms << "ms, "
               << "generate=" << generate_ms << "ms (" << tokens_generated << " tokens), "
               << "total=" << total_ms << "ms" << std::endl;
+
+    // Proactive KV management: if context grows too large, clear after this response to prevent stalls
+    if (n_past_ > (int)(config_.n_ctx * 0.75f)) {
+        llama_memory_t mem = llama_get_memory(ctx_);
+        llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
+        n_past_ = 0;
+        primed_ = false;
+        std::cout << "🧹 [" << call_id_ << "] Cleared KV after response to prevent slot exhaustion" << std::endl;
+    }
 
     return response;
 }
@@ -753,7 +773,9 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
     // Buffer to accumulate text chunks before responding
     std::string text_buffer;
     auto last_text_time = std::chrono::steady_clock::now();
-    const int silence_threshold_ms = 1000; // 1.0s of silence → respond (keeps latency low)
+    // Dynamic silence thresholds: longer if buffer does not end with punctuation
+    const int silence_threshold_ms_with_punct = 0;     // respond immediately when sentence looks complete
+    const int silence_threshold_ms_no_punct   = 1500;  // still wait longer to avoid mid-sentence replies
 
     // Set socket to non-blocking mode for timeout-based reads
     int flags = fcntl(socket, F_GETFL, 0);
@@ -790,7 +812,6 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
         }
 
         // 2) Parse complete frames from rxbuf
-        bool got_any_frame = false;
         while (rxbuf.size() >= 4) {
             uint32_t len_be = 0;
             std::memcpy(&len_be, rxbuf.data(), 4);
@@ -827,15 +848,109 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
             text_buffer += text;
             last_text_time = std::chrono::steady_clock::now();
             std::cout << "📦 Buffered text [" << call_id << "]: " << text_buffer << std::endl;
-            got_any_frame = true;
         }
 
         // 3) If silence exceeded threshold and we have buffered text → respond
         auto now = std::chrono::steady_clock::now();
         auto silence_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_text_time).count();
-        if (!text_buffer.empty() && silence_ms >= silence_threshold_ms) {
-            std::cout << "🔇 Silence detected (" << silence_ms << "ms) - responding to: " << text_buffer << std::endl;
-            std::string response = process_text_for_call(call_id, text_buffer);
+        if (!text_buffer.empty()) {
+            // Choose threshold based on whether buffer looks like a completed sentence
+            auto trim = [](std::string s) {
+                size_t a = s.find_first_not_of(" \t\n\r");
+                size_t b = s.find_last_not_of(" \t\n\r");
+                if (a == std::string::npos) return std::string();
+                return s.substr(a, b - a + 1);
+            };
+            auto to_lower = [](std::string s){ for (auto &c: s) c = (char)tolower(c); return s; };
+            auto ends_with_sentence_punct = [](const std::string& s) {
+                int i = (int)s.size() - 1;
+                // skip trailing whitespace
+                while (i >= 0 && (s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t')) --i;
+                if (i < 0) return false;
+                char c = s[i];
+                if (c == '!' || c == '?') return true;
+                if (c == '.') {
+                    // do not treat ellipsis ... as end-of-sentence
+                    int dots = 0;
+                    while (i >= 0 && s[i] == '.') { ++dots; --i; }
+                    return dots == 1; // exactly one trailing dot counts
+                }
+                return false;
+            };
+            auto word_count = [](const std::string& s){ int cnt = 0; bool in = false; for(char c: s){ if(!isspace((unsigned char)c)){ if(!in){ in = true; ++cnt; } } else { in = false; } } return cnt; };
+            auto is_backchannel = [&](const std::string& s){
+                std::string t = to_lower(trim(s));
+                if (t.empty()) return false;
+                static const char* phrases[] = {"ok", "okay", "thanks", "thank you", "yeah", "yes", "yep", "right", "sure", "alright", "got it", "i do", "i see", "wait"};
+                for (auto p : phrases) { if (t == p) return true; }
+                // also treat very short one- or two-word acks as backchannel if no question mark
+                if (word_count(t) <= 2 && t.find('?') == std::string::npos) return true;
+                return false;
+            };
+
+            bool complete_sentence = ends_with_sentence_punct(text_buffer);
+            int threshold_ms = complete_sentence ? silence_threshold_ms_with_punct : silence_threshold_ms_no_punct;
+
+            // If backchannel/very short and not a question, require a floor to avoid echoing acknowledgements
+            if (is_backchannel(text_buffer)) {
+                threshold_ms = std::max(threshold_ms, 600);
+            }
+
+            // Speaking guard: if we started TTS recently, suppress trivial acks for ~1200ms
+            auto it_last = last_tts_start_.find(call_id);
+            if (it_last != last_tts_start_.end()) {
+                auto since_tts_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - it_last->second).count();
+                if (since_tts_ms < 1200 && is_backchannel(text_buffer)) {
+                    threshold_ms = std::max(threshold_ms, 1200 - since_tts_ms);
+                }
+            }
+
+            // While TTS is speaking (estimated), do not respond yet to avoid talk-over
+auto it_until = tts_speaking_until_.find(call_id);
+if (it_until != tts_speaking_until_.end() && now < it_until->second) {
+    // Keep buffering; we will respond after TTS finishes
+    auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(it_until->second - now).count();
+    if (remaining_ms > 100) { // only log if significant time remains
+        // Suppressed log to reduce spam
+    }
+} else if (silence_ms >= threshold_ms) {
+                std::cout << "🔇 Silence detected (" << silence_ms << "ms, thr=" << threshold_ms << ") - responding to: " << text_buffer << std::endl;
+                // Deduplicate: if this utterance equals the last one we already answered, skip
+                auto norm = [&](std::string s){
+                    // lowercase + trim + collapse spaces
+                    for (auto &c: s) c = (char)tolower(c);
+                    size_t a = s.find_first_not_of(" \t\n\r");
+                    size_t b = s.find_last_not_of(" \t\n\r");
+                    s = (a==std::string::npos)? std::string() : s.substr(a, b-a+1);
+                    std::string out; out.reserve(s.size()); bool in_space=false;
+                    for(char c: s){ if (isspace((unsigned char)c)) { if(!in_space){ out.push_back(' '); in_space=true; } } else { out.push_back(c); in_space=false; } }
+                    return out;
+                };
+                std::string norm_text = norm(text_buffer);
+                {
+                    // If equal to last user utterance, clear and do not respond
+                    auto it_last = last_user_utt_.find(call_id);
+                    if (it_last != last_user_utt_.end() && it_last->second == norm_text) {
+                        text_buffer.clear();
+                        last_text_time = std::chrono::steady_clock::now();
+                        continue;
+                    }
+                }
+                // Remember current utterance
+                last_user_utt_[call_id] = norm_text;
+
+                // Check if session still exists before processing (avoid post-BYE responses)
+                {
+                    std::lock_guard<std::mutex> lock(sessions_mutex_);
+                    if (sessions_.find(call_id) == sessions_.end()) {
+                        std::cout << "⚠️  Session " << call_id << " destroyed - skipping response generation" << std::endl;
+                        text_buffer.clear();
+                        last_text_time = std::chrono::steady_clock::now();
+                        continue;
+                    }
+                }
+
+                std::string response = process_text_for_call(call_id, text_buffer);
             if (!response.empty()) {
                 std::cout << "💬 Response [" << call_id << "]: " << response << std::endl;
                 if (database_) {
@@ -843,6 +958,8 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
                 }
                 if (!output_host_.empty() && output_port_ > 0) {
                     if (connect_output_for_call(call_id)) {
+                        // t1: LLaMA send-to-Kokoro (timestamp in seconds)
+                        std::cout << "t1: LLaMA send-to-Kokoro [call " << call_id << "] ts=" << std::fixed << std::setprecision(6) << (double)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count()/1e6 << std::endl;
                         send_output_text(call_id, response);
                     }
                 } else {
@@ -853,17 +970,12 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
             // Reset timer to avoid immediate re-triggering
             last_text_time = std::chrono::steady_clock::now();
         }
+        }
 
-        // 4) On disconnect: process any remaining buffer then exit
+        // 4) On disconnect: DO NOT process remaining buffer (call ended, user hung up)
         if (disconnect_requested) {
             if (!text_buffer.empty()) {
-                std::cout << "📝 Processing final buffered text before disconnect: " << text_buffer << std::endl;
-                std::string response = process_text_for_call(call_id, text_buffer);
-                if (!response.empty() && !output_host_.empty() && output_port_ > 0) {
-                    if (connect_output_for_call(call_id)) {
-                        send_output_text(call_id, response);
-                    }
-                }
+                std::cout << "🔇 Discarding buffered text after disconnect: " << text_buffer << std::endl;
                 text_buffer.clear();
             }
             break;
@@ -967,6 +1079,10 @@ bool StandaloneLlamaService::connect_output_for_call(const std::string& call_id)
         addr.sin_port = htons(output_port_);
         addr.sin_addr.s_addr = inet_addr(output_host_.c_str());
 
+        // Disable Nagle to reduce latency to Kokoro
+        int flag = 1;
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+
         if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
             close(s);
             if (attempt < max_attempts) {
@@ -1025,6 +1141,13 @@ bool StandaloneLlamaService::send_output_text(const std::string& call_id, const 
     uint32_t l = htonl((uint32_t)text.size());
     if (send(s, &l, 4, 0) != 4) return false;
     if (!text.empty() && send(s, text.data(), text.size(), 0) != (ssize_t)text.size()) return false;
+    // Mark TTS start for this call to help suppress immediate follow-up replies to acknowledgements
+    last_tts_start_[call_id] = std::chrono::steady_clock::now();
+    // Heuristic speaking window estimation: ~16 chars/sec (faster) + 250ms margin for safety
+    double secs = std::max(0.6, (double)text.size() / 16.0) + 0.25;
+    auto until = last_tts_start_[call_id] + std::chrono::milliseconds((int)(secs * 1000));
+    tts_speaking_until_[call_id] = until;
+    std::cout << "🔒 [" << call_id << "] Half-duplex gate active for " << (int)(secs*1000) << "ms (text len=" << text.size() << ")" << std::endl;
     return true;
 }
 

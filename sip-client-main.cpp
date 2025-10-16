@@ -35,6 +35,71 @@
 #include <mach-o/dyld.h>
 #include <limits.h>
 extern char **environ;
+#include <sys/un.h>
+
+static const char* kInboundCtrlSock = "/tmp/inbound-audio-processor.ctrl";
+static const char* kOutboundCtrlSock = "/tmp/outbound-audio-processor.ctrl";
+
+static bool send_control_command(const char* path, const std::string& cmd) {
+    int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sfd < 0) { std::cout << "❌ ctrl socket() failed: " << strerror(errno) << std::endl; return false; }
+    struct sockaddr_un addr{}; addr.sun_family = AF_UNIX; std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+    if (connect(sfd, (struct sockaddr*)&addr, sizeof(addr)) != 0) { std::cout << "❌ ctrl connect(" << path << ") failed: " << strerror(errno) << std::endl; close(sfd); return false; }
+    ssize_t n = write(sfd, cmd.c_str(), cmd.size());
+    if (n < 0) { std::cout << "❌ ctrl write failed: " << strerror(errno) << std::endl; close(sfd); return false; }
+    close(sfd);
+    return true;
+}
+static bool wait_for_control_socket_ready(const char* path, int timeout_ms = 2000) {
+    const int step_ms = 50;
+    int waited = 0;
+    while (waited <= timeout_ms) {
+        int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sfd >= 0) {
+            struct sockaddr_un addr{}; addr.sun_family = AF_UNIX; std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+            if (connect(sfd, (struct sockaddr*)&addr, sizeof(addr)) == 0) { close(sfd); return true; }
+            close(sfd);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
+        waited += step_ms;
+    }
+    return false;
+}
+
+static bool send_control_command_retry(const char* path, const std::string& cmd, int retries = 5, int delay_ms = 100) {
+    for (int i = 0; i < retries; ++i) {
+        if (send_control_command(path, cmd)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+    return false;
+}
+
+static void whisper_register_notify(int call_num_id, int repeats = 5, int delay_ms = 100) {
+    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET; addr.sin_port = htons(13000);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 127.0.0.1
+    std::string msg = std::string("REGISTER:") + std::to_string(call_num_id);
+    for (int i = 1; i <= repeats; ++i) {
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s < 0) {
+            std::cout << "⚠️ [SIP->Whisper poke] Failed to create UDP socket: " << strerror(errno) << std::endl;
+            break;
+        }
+        ssize_t sent = sendto(s, msg.data(), msg.size(), 0, (struct sockaddr*)&addr, sizeof(addr));
+        if (sent < 0) {
+            std::cout << "⚠️ [SIP->Whisper poke] REGISTER send failed for call_id " << call_num_id << ": " << strerror(errno) << std::endl;
+        } else {
+            if (i == 1 || i == repeats) {
+                std::cout << "📤 [SIP->Whisper poke] Sent REGISTER (" << i << "/" << repeats << ") for call_id " << call_num_id << std::endl;
+            }
+        }
+        close(s);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+}
+
+
+
 
 
 // Simple SIP client configuration
@@ -228,7 +293,7 @@ public:
     void sip_listener_loop();
     int allocate_dynamic_port(); // Legacy method
     int allocate_rtp_port_for_call(const std::string& call_id); // Dynamic line-based allocation
-    void setup_rtp_listener(int rtp_port);
+    bool setup_rtp_listener(int rtp_port);
     bool start();
     void stop();
 
@@ -679,13 +744,23 @@ int SimpleSipClient::allocate_rtp_port_for_call(const std::string& call_id) {
     }
 }
 
-void SimpleSipClient::setup_rtp_listener(int rtp_port) {
+bool SimpleSipClient::setup_rtp_listener(int rtp_port) {
+    // If we already have a live socket/thread for this RTP port, reuse it across calls
+    {
+        std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+        auto it = rtp_port_to_socket_.find(rtp_port);
+        if (it != rtp_port_to_socket_.end() && it->second >= 0) {
+            std::cout << "✅ RTP port " << rtp_port << " already active — reusing existing socket/thread" << std::endl;
+            return true;
+        }
+    }
+
     // Create a basic UDP socket to listen on the RTP port
     // This makes the port "active" so the PBX can send audio to it
     int rtp_sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (rtp_sock < 0) {
         std::cout << "⚠️ Failed to create RTP socket for port " << rtp_port << std::endl;
-        return;
+        return false;
     }
 
     struct sockaddr_in rtp_addr;
@@ -694,10 +769,14 @@ void SimpleSipClient::setup_rtp_listener(int rtp_port) {
     rtp_addr.sin_addr.s_addr = INADDR_ANY;
     rtp_addr.sin_port = htons(rtp_port);
 
+    // Enable address reuse for rapid rebinds across calls
+    int opt = 1;
+    setsockopt(rtp_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
     if (bind(rtp_sock, (struct sockaddr*)&rtp_addr, sizeof(rtp_addr)) < 0) {
         std::cout << "⚠️ Failed to bind RTP socket to port " << rtp_port << std::endl;
         close(rtp_sock);
-        return;
+        return false;
     }
 
     // Store socket for symmetric RTP (same socket for send/receive)
@@ -794,6 +873,7 @@ void SimpleSipClient::setup_rtp_listener(int rtp_port) {
         std::cout << "🔌 RTP receiver thread ended for port " << rtp_port << std::endl;
         });
     }
+    return true;
 }
 
 void SimpleSipClient::sip_listener_loop() {
@@ -1040,8 +1120,11 @@ void SimpleSipClient::send_sip_response(int code, const std::string& reason, con
         std::cout << "🎵 Allocated call-specific RTP port: " << rtp_port << " for call " << call_id << std::endl;
 
         // Set up RTP listener on the allocated port (basic UDP socket)
-        setup_rtp_listener(rtp_port);
-        std::cout << "🎧 RTP listener set up on port " << rtp_port << " for call " << call_id << std::endl;
+        if (setup_rtp_listener(rtp_port)) {
+            std::cout << "🎧 RTP listener set up on port " << rtp_port << " for call " << call_id << std::endl;
+        } else {
+            std::cout << "❌ Failed to set up RTP listener on port " << rtp_port << " for call " << call_id << std::endl;
+        }
 
         // Store RTP port for this call_id (will be connected to session later)
         {
@@ -1201,6 +1284,16 @@ void SimpleSipClient::stop() {
     std::cout << "🛑 Stopping SIP client..." << std::endl;
     std::cout << "🛑 Setting running_ = false" << std::endl;
     running_ = false;
+
+    // Request processors shutdown (persistent model)
+    (void)wait_for_control_socket_ready(kInboundCtrlSock, 2000);
+    (void)wait_for_control_socket_ready(kOutboundCtrlSock, 2000);
+    if (!send_control_command_retry(kInboundCtrlSock, std::string("SHUTDOWN\n"))) {
+        std::cout << "\u26a0\ufe0f Failed to send SHUTDOWN to inbound-audio-processor" << std::endl;
+    }
+    if (!send_control_command_retry(kOutboundCtrlSock, std::string("SHUTDOWN\n"))) {
+        std::cout << "\u26a0\ufe0f Failed to send SHUTDOWN to outbound-audio-processor" << std::endl;
+    }
 
     // Close SIP listener socket to unblock listener thread
     std::cout << "🛑 Closing SIP listener socket..." << std::endl;
@@ -1446,15 +1539,6 @@ void SimpleSipClient::end_call(const std::string& call_id) {
     std::cout << "📞 Ending call: " << call_id << " (sessionless)" << std::endl;
 
     // Proactively notify services to tear down per-call resources before killing processors
-    int call_num_id = 0;
-    if (database_) {
-        try {
-            Call db_call = database_->get_call(call_id);
-            call_num_id = db_call.id > 0 ? db_call.id : 0;
-        } catch (...) {
-            call_num_id = 0;
-        }
-    }
     // Note: BYE notifications are now handled by audio processors
     // The inbound processor sends BYE to Whisper (UDP 13000)
     // The outbound processor sends BYE to Kokoro (UDP 13001)
@@ -1633,162 +1717,133 @@ void SimpleSipClient::launch_audio_processors_for_call(const std::string& call_i
 
     std::vector<std::string> args = {"--call-id", std::to_string(call_num_id)};
 
+    // Reuse persistent processors across calls using a shared key
+    const std::string key = "__shared__";
+
     pid_t pid;
-    if (spawn_processor(inbound_path, args, pid)) {
-        inbound_proc_pids_[call_id] = pid;
-        std::cout << "🚀 Started inbound-audio-processor (PID " << pid << ") for call " << call_id << std::endl;
-    } else {
-        std::cout << "⚠️ Could not start inbound-audio-processor for call " << call_id << std::endl;
+    if (!inbound_proc_pids_.count(key)) {
+        std::vector<std::string> noargs; // start sleeping
+        if (spawn_processor(inbound_path, noargs, pid)) {
+            inbound_proc_pids_[key] = pid;
+            std::cout << "🚀 Started inbound-audio-processor (PID " << pid << ") [shared]" << std::endl;
+        } else {
+            std::cout << "⚠️ Could not start inbound-audio-processor [shared]" << std::endl;
+        }
     }
-    if (spawn_processor(outbound_path, args, pid)) {
-        outbound_proc_pids_[call_id] = pid;
-        std::cout << "🚀 Started outbound-audio-processor (PID " << pid << ") for call " << call_id << std::endl;
-    } else {
-        std::cout << "⚠️ Could not start outbound-audio-processor for call " << call_id << std::endl;
+    if (!outbound_proc_pids_.count(key)) {
+        std::vector<std::string> noargs; // start sleeping
+        if (spawn_processor(outbound_path, noargs, pid)) {
+            outbound_proc_pids_[key] = pid;
+            std::cout << "🚀 Started outbound-audio-processor (PID " << pid << ") [shared]" << std::endl;
+        } else {
+            std::cout << "⚠️ Could not start outbound-audio-processor [shared]" << std::endl;
+        }
     }
+
+    // Wait for control sockets to be ready, then signal processors to activate for this call
+    (void)wait_for_control_socket_ready(kInboundCtrlSock, 3000);
+    (void)wait_for_control_socket_ready(kOutboundCtrlSock, 3000);
+    std::string activate = std::string("ACTIVATE ") + std::to_string(call_num_id) + "\n";
+    if (!send_control_command_retry(kInboundCtrlSock, activate)) {
+        std::cout << "❌ Failed to send ACTIVATE to inbound-audio-processor" << std::endl;
+    }
+    if (!send_control_command_retry(kOutboundCtrlSock, activate)) {
+        std::cout << "❌ Failed to send ACTIVATE to outbound-audio-processor" << std::endl;
+    }
+
+    // Additionally notify Whisper directly to accelerate connection setup (redundant safety)
+    whisper_register_notify(call_num_id);
+
 }
 
 void SimpleSipClient::terminate_audio_processors_for_call(const std::string& call_id) {
-    auto terminate_one = [&](std::unordered_map<std::string, pid_t>& map, const char* name) {
-        auto it = map.find(call_id);
-        if (it == map.end()) return;
-        pid_t pid = it->second;
-        if (pid > 0) {
-            kill(pid, SIGTERM);
-            // Wait up to ~1s for graceful exit
-            for (int i = 0; i < 20; ++i) {
-                if (waitpid(pid, nullptr, WNOHANG) > 0) break;
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-            if (waitpid(pid, nullptr, WNOHANG) == 0) {
-                kill(pid, SIGKILL);
-                waitpid(pid, nullptr, 0);
-            }
-            std::cout << "🛑 Stopped " << name << " (PID " << pid << ") for call " << call_id << std::endl;
-        }
-        map.erase(it);
-    };
+    (void)call_id; // unused with persistent processors
 
-    terminate_one(inbound_proc_pids_, "inbound-audio-processor");
-    terminate_one(outbound_proc_pids_, "outbound-audio-processor");
+    // Persistent processors: just request deactivation; do not terminate
+    if (!send_control_command_retry(kInboundCtrlSock, std::string("DEACTIVATE\n"))) {
+        std::cout << "⚠️ Failed to send DEACTIVATE to inbound-audio-processor" << std::endl;
+    }
+    if (!send_control_command_retry(kOutboundCtrlSock, std::string("DEACTIVATE\n"))) {
+        std::cout << "⚠️ Failed to send DEACTIVATE to outbound-audio-processor" << std::endl;
+    }
 }
 
 void SimpleSipClient::start_processor_monitor_for_call(const std::string& call_id, int call_num_id) {
+    (void)call_id; (void)call_num_id; // use shared monitor
+    const std::string key = "__shared__";
     {
         std::lock_guard<std::mutex> lock(shmem_mutex_);
-        if (proc_monitor_threads_.find(call_id) != proc_monitor_threads_.end()) return;
-        proc_monitor_running_[call_id] = std::make_shared<std::atomic<bool>>(true);
-        if (inbound_backoff_ms_.find(call_id) == inbound_backoff_ms_.end()) inbound_backoff_ms_[call_id] = 250;
-        if (outbound_backoff_ms_.find(call_id) == outbound_backoff_ms_.end()) outbound_backoff_ms_[call_id] = 250;
+        if (proc_monitor_threads_.find(key) != proc_monitor_threads_.end()) return;
+        proc_monitor_running_[key] = std::make_shared<std::atomic<bool>>(true);
+        inbound_backoff_ms_[key] = 250;
+        outbound_backoff_ms_[key] = 250;
     }
 
-    auto running_flag = proc_monitor_running_[call_id];
+    auto running_flag = proc_monitor_running_[key];
 
-    proc_monitor_threads_[call_id] = std::thread([this, call_id, call_num_id, running_flag]() {
+    proc_monitor_threads_[key] = std::thread([this, running_flag]() {
         const int backoff_min = 250;
         const int backoff_max = 5000;
+        const std::string key = "__shared__";
         while (running_ && running_flag->load()) {
-            // Check inbound processor
+            // Check inbound (shared)
             bool need_respawn_inbound = false;
             {
                 std::lock_guard<std::mutex> lock(shmem_mutex_);
-                auto pit = inbound_proc_pids_.find(call_id);
+                auto pit = inbound_proc_pids_.find(key);
                 if (pit != inbound_proc_pids_.end()) {
-                    pid_t pid = pit->second;
-                    int status = 0;
-                    if (pid <= 0 || waitpid(pid, &status, WNOHANG) > 0) {
-                        inbound_proc_pids_.erase(pit);
-                        need_respawn_inbound = true;
-                    }
-                } else {
-                    need_respawn_inbound = true;
-                }
+                    pid_t pid = pit->second; int status = 0;
+                    if (pid <= 0 || waitpid(pid, &status, WNOHANG) > 0) { inbound_proc_pids_.erase(pit); need_respawn_inbound = true; }
+                } else { need_respawn_inbound = true; }
             }
             if (need_respawn_inbound) {
-                int delay = inbound_backoff_ms_[call_id];
-                std::cout << "⚠️ inbound-audio-processor not running for call " << call_id
-                          << ", retrying in " << delay << " ms" << std::endl;
+                int delay = inbound_backoff_ms_[key];
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-                std::string dir = get_executable_dir();
-                std::string inbound_path = dir + "/inbound-audio-processor";
-                std::vector<std::string> args = {"--call-id", std::to_string(call_num_id)};
-                pid_t newpid;
-                if (spawn_processor(inbound_path, args, newpid)) {
+                std::string dir = get_executable_dir(); std::string inbound_path = dir + "/inbound-audio-processor";
+                std::vector<std::string> noargs; pid_t newpid;
+                if (spawn_processor(inbound_path, noargs, newpid)) {
                     std::lock_guard<std::mutex> l2(shmem_mutex_);
-                    inbound_proc_pids_[call_id] = newpid;
-                    inbound_backoff_ms_[call_id] = backoff_min;
-                    std::cout << "🚀 Relaunched inbound-audio-processor (PID " << newpid << ") for call " << call_id << std::endl;
+                    inbound_proc_pids_[key] = newpid; inbound_backoff_ms_[key] = backoff_min;
+                    std::cout << "Relaunched inbound-audio-processor (PID " << newpid << ") [shared]" << std::endl;
                 } else {
                     std::lock_guard<std::mutex> l2(shmem_mutex_);
-                    inbound_backoff_ms_[call_id] = std::min(backoff_max, inbound_backoff_ms_[call_id] * 2);
+                    inbound_backoff_ms_[key] = std::min(backoff_max, inbound_backoff_ms_[key] * 2);
                 }
             }
 
-            // Check outbound processor
+            // Check outbound (shared)
             bool need_respawn_outbound = false;
             {
                 std::lock_guard<std::mutex> lock(shmem_mutex_);
-                auto pit = outbound_proc_pids_.find(call_id);
+                auto pit = outbound_proc_pids_.find(key);
                 if (pit != outbound_proc_pids_.end()) {
-                    pid_t pid = pit->second;
-                    int status = 0;
-                    if (pid <= 0 || waitpid(pid, &status, WNOHANG) > 0) {
-                        outbound_proc_pids_.erase(pit);
-                        need_respawn_outbound = true;
-                    }
-                } else {
-                    need_respawn_outbound = true;
-                }
+                    pid_t pid = pit->second; int status = 0;
+                    if (pid <= 0 || waitpid(pid, &status, WNOHANG) > 0) { outbound_proc_pids_.erase(pit); need_respawn_outbound = true; }
+                } else { need_respawn_outbound = true; }
             }
             if (need_respawn_outbound) {
-                int delay = outbound_backoff_ms_[call_id];
-                std::cout << "⚠️ outbound-audio-processor not running for call " << call_id
-                          << ", retrying in " << delay << " ms" << std::endl;
+                int delay = outbound_backoff_ms_[key];
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-                std::string dir = get_executable_dir();
-                std::string outbound_path = dir + "/outbound-audio-processor";
-                std::vector<std::string> args = {"--call-id", std::to_string(call_num_id)};
-                pid_t newpid;
-                if (spawn_processor(outbound_path, args, newpid)) {
+                std::string dir = get_executable_dir(); std::string outbound_path = dir + "/outbound-audio-processor";
+                std::vector<std::string> noargs; pid_t newpid;
+                if (spawn_processor(outbound_path, noargs, newpid)) {
                     std::lock_guard<std::mutex> l2(shmem_mutex_);
-                    outbound_proc_pids_[call_id] = newpid;
-                    outbound_backoff_ms_[call_id] = backoff_min;
-                    std::cout << "🚀 Relaunched outbound-audio-processor (PID " << newpid << ") for call " << call_id << std::endl;
+                    outbound_proc_pids_[key] = newpid; outbound_backoff_ms_[key] = backoff_min;
+                    std::cout << "Relaunched outbound-audio-processor (PID " << newpid << ") [shared]" << std::endl;
                 } else {
                     std::lock_guard<std::mutex> l2(shmem_mutex_);
-                    outbound_backoff_ms_[call_id] = std::min(backoff_max, outbound_backoff_ms_[call_id] * 2);
+                    outbound_backoff_ms_[key] = std::min(backoff_max, outbound_backoff_ms_[key] * 2);
                 }
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        std::cout << "Processor monitor thread exiting for call " << call_id << std::endl;
+        std::cout << "Processor monitor thread exiting [shared]" << std::endl;
     });
 }
 
 void SimpleSipClient::stop_processor_monitor_for_call(const std::string& call_id) {
-    std::shared_ptr<std::atomic<bool>> flag;
-    std::thread to_join;
-    {
-        std::lock_guard<std::mutex> lock(shmem_mutex_);
-        auto it = proc_monitor_running_.find(call_id);
-        if (it != proc_monitor_running_.end()) {
-            flag = it->second;
-            if (flag) flag->store(false);
-        }
-        auto th = proc_monitor_threads_.find(call_id);
-        if (th != proc_monitor_threads_.end()) {
-            to_join = std::move(th->second);
-            proc_monitor_threads_.erase(th);
-        }
-    }
-    if (to_join.joinable()) to_join.join();
-    {
-        std::lock_guard<std::mutex> lock(shmem_mutex_);
-        proc_monitor_running_.erase(call_id);
-        inbound_backoff_ms_.erase(call_id);
-        outbound_backoff_ms_.erase(call_id);
-    }
+    (void)call_id; // keep shared monitor running until client shutdown
 }
 
 bool SimpleSipClient::test_sip_connection(const SipLineConfig& line) {
@@ -2499,6 +2554,9 @@ void SimpleSipClient::send_rtp_packets_to_pbx(const std::string& call_id, const 
     std::string dest_ip;
     int dest_port;
 
+    static int debug_counter = 0;
+    bool should_log = (++debug_counter <= 3 || debug_counter % 100 == 0);
+
     {
         std::lock_guard<std::mutex> lock(rtp_state_mutex_);
         // Try call_id first, then fall back to "default" for sessionless operation
@@ -2509,8 +2567,13 @@ void SimpleSipClient::send_rtp_packets_to_pbx(const std::string& call_id, const 
         if (it != rtp_destinations_.end()) {
             dest_ip = it->second.first;
             dest_port = it->second.second;
+            if (should_log) {
+                std::cout << "📡 RTP send #" << debug_counter << ": " << g711_data.size() << " bytes to " << dest_ip << ":" << dest_port << " (port " << local_rtp_port << ")" << std::endl;
+            }
         } else {
-            // Silently skip until first inbound RTP packet arrives and stores destination
+            if (should_log) {
+                std::cout << "⚠️  RTP send #" << debug_counter << ": No destination found for call " << call_id << " (skipping)" << std::endl;
+            }
             return;
         }
     }
@@ -2771,13 +2834,47 @@ void SimpleSipClient::start_outbound_stream_for_call(const std::string& call_id,
         auto next_time = steady_clock::now();
         std::vector<uint8_t> frame;
 
+        std::cout << "🎵 Outbound RTP thread started for call " << call_id << " on port " << local_rtp_port << std::endl;
+        int frame_count = 0;
+        int audio_frame_count = 0;
+        int silence_frame_count = 0;
+        bool was_sending_audio = false;
+
         while (running_ && running_flag->load()) {
             bool sent = false;
+            bool is_audio = false;
             if (channel->read_frame(frame)) {
                 if (!frame.empty()) {
+                    // Check if this looks like audio (not all 0xFF which is silence)
+                    bool all_silence = true;
+                    for (size_t i = 0; i < std::min(frame.size(), size_t(160)); ++i) {
+                        if (frame[i] != 0xFF) {
+                            all_silence = false;
+                            break;
+                        }
+                    }
+                    is_audio = !all_silence;
+
                     // Forward G.711 bytes as RTP to PBX
                     this->send_rtp_packets_to_pbx(call_id, frame, local_rtp_port);
                     sent = true;
+
+                    if (is_audio) {
+                        audio_frame_count++;
+                        if (!was_sending_audio) {
+                            std::cout << "🎤 Started sending AUDIO frames (was silence) on port " << local_rtp_port << std::endl;
+                            was_sending_audio = true;
+                        }
+                        if (audio_frame_count == 1 || audio_frame_count % 50 == 0) {
+                            std::cout << "🔊 Sent audio frame #" << audio_frame_count << " (" << frame.size() << " bytes) on port " << local_rtp_port << std::endl;
+                        }
+                    } else {
+                        silence_frame_count++;
+                        if (was_sending_audio) {
+                            std::cout << "🔇 Switched back to SILENCE frames (audio ended) on port " << local_rtp_port << std::endl;
+                            was_sending_audio = false;
+                        }
+                    }
                 }
             }
 
@@ -2793,13 +2890,16 @@ void SimpleSipClient::start_outbound_stream_for_call(const std::string& call_id,
                     }
                 }
                 this->send_rtp_packets_to_pbx(call_id, silence, local_rtp_port);
+                silence_frame_count++;
             }
+
+            frame_count++;
 
             next_time += packet_interval;
             std::this_thread::sleep_until(next_time);
         }
 
-        std::cout << "Outbound stream thread exiting for call " << call_id << std::endl;
+        std::cout << "Outbound stream thread exiting for call " << call_id << " (sent " << audio_frame_count << " audio frames, " << silence_frame_count << " silence frames, " << frame_count << " total)" << std::endl;
     });
 }
 

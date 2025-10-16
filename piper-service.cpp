@@ -553,11 +553,12 @@ std::string StandalonePiperService::process_text_for_call(const std::string& cal
                 audio_output_available = try_connect_audio_output_for_call(call_id);
             }
 
+            bool first_chunk = true;
             while (session && session->get_next_audio_chunk(audio_samples, sample_rate, is_last)) {
                 if (!audio_samples.empty()) {
                     // Send audio if connection is available, otherwise silently discard
                     if (audio_output_available) {
-                        if (!send_audio_to_processor(call_id, audio_samples, sample_rate)) {
+                        if (!send_audio_to_processor(call_id, audio_samples, sample_rate, first_chunk)) {
                             // Connection lost, mark as unavailable
                             audio_output_available = false;
                             close_audio_output_for_call(call_id);
@@ -566,6 +567,7 @@ std::string StandalonePiperService::process_text_for_call(const std::string& cal
                             }
                             break; // Stop synthesis on connection loss
                         }
+                        first_chunk = false;
                     }
                     total_samples += audio_samples.size();
                 }
@@ -928,17 +930,20 @@ bool StandalonePiperService::try_connect_audio_output_for_call(const std::string
     return false;
 }
 
-bool StandalonePiperService::send_audio_to_processor(const std::string& call_id, const std::vector<float>& audio_samples, int sample_rate) {
+bool StandalonePiperService::send_audio_to_processor(const std::string& call_id, const std::vector<float>& audio_samples, int sample_rate, bool start_of_utterance) {
     if (audio_samples.empty()) {
         return true; // Nothing to send
     }
 
     // Reserve a monotonically increasing chunk id per call
-    uint32_t chunk_id = 0;
+    uint32_t chunk_seq = 0;
     {
         std::lock_guard<std::mutex> lock(output_sockets_mutex_);
-        chunk_id = ++chunk_counters_[call_id];
+        chunk_seq = ++chunk_counters_[call_id];
     }
+
+    // Encode start-of-utterance in MSB of transmitted id (does not affect monotonic sequence)
+    uint32_t chunk_id = chunk_seq | (start_of_utterance ? 0x80000000u : 0u);
 
     int s = -1;
     {
@@ -984,7 +989,8 @@ bool StandalonePiperService::send_audio_to_processor(const std::string& call_id,
     }
 
     if (default_config_.verbose) {
-        std::cout << "🔊 Sent chunk#" << chunk_id << " (" << audio_samples.size() << " samples @" << sample_rate
+        std::cout << "🔊 Sent chunk#" << (chunk_seq) << (start_of_utterance? " [start]" : "")
+                  << " (" << audio_samples.size() << " samples @" << sample_rate
                   << "Hz) to audio processor for call " << call_id << std::endl;
     }
     return true;

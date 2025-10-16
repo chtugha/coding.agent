@@ -397,7 +397,6 @@ void StandaloneWhisperService::registration_listener_thread() {
 
     std::cout << "📡 Whisper registration listener thread started (FD: " << registration_socket_ << ")" << std::endl;
 
-    int idle_ticks = 0;
     int message_count = 0;
     int loop_count = 0;
     while (registration_running_.load()) {
@@ -444,7 +443,6 @@ void StandaloneWhisperService::registration_listener_thread() {
                              (struct sockaddr*)&client_addr, &client_len);
 
         if (n > 0) {
-            idle_ticks = 0;
             message_count++;
             std::cout << "📨 UDP message #" << message_count << " received (" << n << " bytes) from "
                       << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << std::endl;
@@ -536,11 +534,6 @@ void StandaloneWhisperService::registration_listener_thread() {
                 // continue loop
             }
         } else if (n == 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-            // Idle tick (no message within 1s). Log every ~5s as a heartbeat.
-            if (++idle_ticks % 5 == 0) {
-                std::cout << "⏳ Whisper registration listener idle (" << idle_ticks << "s, FD=" << registration_socket_
-                          << ", running=" << registration_running_.load() << ", waiting on UDP 127.0.0.1:13000)" << std::endl;
-            }
         } else if (n < 0) {
             std::cout << "⚠️ recvfrom error (FD=" << registration_socket_ << "): " << strerror(errno)
                       << " (errno=" << errno << ")" << std::endl;

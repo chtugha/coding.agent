@@ -67,6 +67,21 @@ class KokoroTCPService:
         self.pipeline = KPipeline(lang_code='en-us', device=self.device_str)
         print(f"✅ Kokoro model loaded")
 
+        # Warmup: synthesize multiple short phrases to fully compile GPU kernels
+        print(f"🔥 Warming up Kokoro pipeline...")
+        warmup_phrases = ["Hi.", "Hello there.", "Yes, I can help you."]
+        for phrase in warmup_phrases:
+            warmup_start = time.time()
+            try:
+                for result in self.pipeline(phrase, voice=self.voice, speed=1.0):
+                    if result.audio is not None:
+                        pass  # discard warmup audio
+                warmup_time = (time.time() - warmup_start) * 1000
+                print(f"✅ Warmup '{phrase}': {warmup_time:.0f}ms")
+            except Exception as e:
+                print(f"⚠️  Warmup failed (non-fatal): {e}")
+                break
+
         print(f"🎤 Kokoro TTS Service initialized")
         print(f"   Voice: {voice}")
         print(f"   Device: {self.device_str}")
@@ -173,6 +188,12 @@ class KokoroTCPService:
             if client_socket is None:
                 return None
 
+            # Disable Nagle to reduce latency
+            try:
+                client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+
             # Expect HELLO(call_id) from outbound
             length_bytes = self._recv_exact(client_socket, 4)
             if not length_bytes:
@@ -224,6 +245,11 @@ class KokoroTCPService:
                 # Create socket
                 audio_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 audio_socket.connect(('127.0.0.1', port))
+                # Disable Nagle for low-latency streaming
+                try:
+                    audio_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except Exception:
+                    pass
 
                 # Send HELLO message
                 hello_data = call_id.encode('utf-8')
@@ -306,33 +332,57 @@ class KokoroTCPService:
                 text = text_bytes.decode('utf-8')
                 print(f"📝 Synthesizing for call {call_id}: {text[:50]}...")
 
-                # Synthesize audio
-                audio, sample_rate, synthesis_time = self.synthesize(text)
+                # Stream audio as it is generated to minimize latency
+                start_time = time.time()
+                pipeline_start = None
+                first_audio_time = None
+                sample_rate = 24000
+                sent_samples_total = 0
+                subchunk_ms = 40  # reduced to 40ms for ultra-low latency
+                subchunk_size = int(sample_rate * (subchunk_ms / 1000.0))
 
-                if audio is not None and len(audio) > 0:
-                    chunk_id += 1
+                try:
+                    pipeline_start = time.time()
+                    for result in self.pipeline(text, voice=self.voice, speed=1.0):
+                        if first_audio_time is None and result.audio is not None:
+                            first_audio_time = time.time()
+                            print(f"⏱️  Kokoro pipeline first audio: {(first_audio_time - pipeline_start)*1000:.1f}ms")
+                        if result.audio is None:
+                            continue
+                        # Ensure float32 1D
+                        audio = result.audio
+                        # Convert torch.Tensor -> numpy
+                        if isinstance(audio, torch.Tensor):
+                            audio = audio.detach().cpu().numpy()
+                        if audio.dtype != np.float32:
+                            audio = audio.astype(np.float32)
+                        if len(audio.shape) > 1:
+                            audio = audio.reshape(-1)
+                        # Slice into smaller frames for faster playout
+                        first_sent = False
+                        for i in range(0, len(audio), subchunk_size):
+                            frame = audio[i:i+subchunk_size]
+                            if frame.size == 0:
+                                continue
+                            chunk_id += 1
+                            audio_bytes = frame.tobytes()
+                            header = struct.pack('!III', len(audio_bytes), sample_rate, chunk_id)
+                            audio_socket.sendall(header)
+                            audio_socket.sendall(audio_bytes)
 
-                    # Convert to bytes
-                    audio_bytes = audio.tobytes()
+                            if not first_sent:
+                                # t2: Kokoro first subchunk sent (timestamp in seconds)
+                                print(f"t2: Kokoro first subchunk sent [call {call_id}] ts={time.time():.6f}")
+                                first_sent = True
 
-                    # Send audio chunk to audio processor: [length][sample_rate][chunk_id][audio_data]
-                    header = struct.pack('!III', len(audio_bytes), sample_rate, chunk_id)
+                            sent_samples_total += frame.size
+                            synth_elapsed = time.time() - start_time
+                            audio_duration = sent_samples_total / sample_rate
+                            rtf = synth_elapsed / audio_duration if audio_duration > 0 else 0.0
+                except Exception as e:
+                    print(f"❌ Streaming synthesis failed: {e}")
+                    break
 
-                    try:
-                        audio_socket.sendall(header)
-                        audio_socket.sendall(audio_bytes)
-
-                        # Calculate audio duration and real-time factor
-                        audio_duration = len(audio) / sample_rate
-                        rtf = synthesis_time / audio_duration if audio_duration > 0 else 0
-
-                        print(f"🔊 Sent chunk#{chunk_id} ({len(audio)} samples @{sample_rate}Hz) for call {call_id}")
-                        print(f"   ⚡ Synthesis: {synthesis_time:.3f}s | Audio: {audio_duration:.3f}s | RTF: {rtf:.3f}x")
-                    except Exception as e:
-                        print(f"❌ Failed to send audio: {e}")
-                        break
-                else:
-                    print(f"⚠️  Synthesis failed for call {call_id}")
 
         except Exception as e:
             print(f"❌ Client handler error: {e}")

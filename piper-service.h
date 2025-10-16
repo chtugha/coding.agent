@@ -174,7 +174,7 @@ private:
     // Audio output helpers (resilient)
     bool connect_audio_output_for_call(const std::string& call_id);
     bool try_connect_audio_output_for_call(const std::string& call_id);  // Non-blocking version
-    bool send_audio_to_processor(const std::string& call_id, const std::vector<float>& audio_samples, int sample_rate);
+    bool send_audio_to_processor(const std::string& call_id, const std::vector<float>& audio_samples, int sample_rate, bool start_of_utterance);
     void close_audio_output_for_call(const std::string& call_id);
     int calculate_audio_processor_port(const std::string& call_id);
 

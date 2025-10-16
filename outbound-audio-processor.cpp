@@ -8,6 +8,39 @@
 #include <fstream>
 #include <sys/time.h>
 
+#include <netinet/tcp.h>
+#include <deque>
+#include <condition_variable>
+#include <atomic>
+
+// Lightweight async conversion worker (file-local)
+namespace {
+struct ConversionJob {
+    std::vector<uint8_t> payload; // raw PCM float32 bytes or already-encoded G711
+    uint32_t sample_rate{0};
+    uint32_t chunk_id{0};
+    bool is_float{true};
+};
+
+std::mutex g_conv_mtx;
+std::condition_variable g_conv_cv;
+std::deque<ConversionJob> g_conv_q;
+
+
+void push_conversion_job(const std::vector<uint8_t>& payload, uint32_t sample_rate, uint32_t chunk_id, bool is_float) {
+    ConversionJob job;
+    job.payload = payload;
+    job.sample_rate = sample_rate;
+    job.chunk_id = chunk_id;
+    job.is_float = is_float;
+    {
+        std::lock_guard<std::mutex> lk(g_conv_mtx);
+        g_conv_q.emplace_back(std::move(job));
+    }
+    g_conv_cv.notify_one();
+}
+} // namespace
+
 
 OutboundAudioProcessor::OutboundAudioProcessor()
     : piper_tcp_socket_(-1)
@@ -225,6 +258,11 @@ void OutboundAudioProcessor::set_shared_memory_out(std::shared_ptr<ShmAudioChann
     ensure_output_running();
 }
 
+void OutboundAudioProcessor::clear_shared_memory_out() {
+    std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+    out_channel_.reset();
+}
+
 void OutboundAudioProcessor::set_silence_wav2_bytes(const std::vector<uint8_t>& bytes) {
     std::lock_guard<std::mutex> lk(out_buffer_mutex_);
     silence_wav2_ = bytes;
@@ -233,6 +271,7 @@ void OutboundAudioProcessor::set_silence_wav2_bytes(const std::vector<uint8_t>& 
 
 void OutboundAudioProcessor::ensure_output_running() {
     if (running_.load() && !output_running_.load()) {
+        // Start RTP scheduler (will perform conversion off the TCP receive thread)
         start_output_scheduler_();
     }
 }
@@ -260,20 +299,47 @@ bool OutboundAudioProcessor::load_and_set_silence_wav2(const std::string& wav_pa
 
 
 void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
-    std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-    // Cap buffer to avoid unbounded latency (keep ~12s @20ms frames); drop oldest to preserve continuity
-    constexpr size_t kMaxBytes = 160 * 600; // 600 frames * 160 bytes/frame ≈ 12s
-    if (!g711.empty()) {
-        // Trim oldest if this insert would exceed cap
-        if (out_buffer_.size() + g711.size() > kMaxBytes) {
-            size_t overflow = (out_buffer_.size() + g711.size()) - kMaxBytes;
-            overflow = std::min(overflow, out_buffer_.size());
-            if (overflow > 0) {
-                out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + overflow);
-                std::cout << "⚠️ Outbound buffer trimmed " << overflow << " bytes to keep up" << std::endl;
+    using namespace std::chrono_literals;
+    if (g711.empty()) return;
+
+    // Allow up to 2.0s of audio burst without drops to avoid choppiness on TTS bursts
+    constexpr size_t kMaxBytes = 160 * 100; // 100 frames = 2000ms @ 20ms/frame
+
+    int spins = 0;
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+            if (out_buffer_.size() + g711.size() <= kMaxBytes) {
+                // Enough room — enqueue all
+                size_t before_size = out_buffer_.size();
+                out_buffer_.insert(out_buffer_.end(), g711.begin(), g711.end());
+                static int enqueue_count = 0;
+                if (++enqueue_count <= 5 || enqueue_count % 100 == 0) {
+                    std::cout << "📥 Enqueued " << g711.size() << " bytes to out_buffer (was " << before_size << ", now " << out_buffer_.size() << ")" << std::endl;
+                }
+                return;
             }
         }
-        out_buffer_.insert(out_buffer_.end(), g711.begin(), g711.end());
+        // Not enough room — give the scheduler a moment to drain
+        if (++spins <= 50) { // wait up to ~100ms before considering drop
+            std::this_thread::sleep_for(2ms);
+            continue;
+        }
+        // Still full — drop the oldest bytes (frame-aligned) to make room for fresh audio
+        {
+            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+            size_t needed = (out_buffer_.size() + g711.size()) - kMaxBytes;
+            size_t drop = ((needed + 159) / 160) * 160; // align to 160-byte frames
+            if (drop > out_buffer_.size()) drop = out_buffer_.size();
+            if (drop > 0) {
+                out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + drop);
+                static int drop_count = 0;
+                if (++drop_count <= 5 || drop_count % 200 == 0) {
+                    std::cout << "⚠️  Dropped oldest " << drop << " bytes to make room (buffer now " << out_buffer_.size() << ")" << std::endl;
+                }
+            }
+            // loop to attempt enqueue again immediately
+        }
     }
 }
 
@@ -296,22 +362,146 @@ void OutboundAudioProcessor::start_output_scheduler_() {
         auto next = std::chrono::steady_clock::now();
         const auto interval = std::chrono::milliseconds(20);
         while (running_.load() && output_running_.load()) {
-            std::vector<uint8_t> frame;
-            bool have_audio = false;
-            if (out_channel_) {
-                std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                if (out_buffer_.size() >= 160) {
-                    frame.assign(out_buffer_.begin(), out_buffer_.begin() + 160);
-                    out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + 160);
-                    have_audio = true;
+            // Process all available conversion jobs immediately to minimize latency
+            {
+                while (true) {
+                    ConversionJob job;
+                    bool has_job = false;
+                    {
+                        std::lock_guard<std::mutex> lk(g_conv_mtx);
+                        if (!g_conv_q.empty()) { job = std::move(g_conv_q.front()); g_conv_q.pop_front(); has_job = true; }
+                    }
+                    if (!has_job) break;
+
+                    auto is_all_ulaw_silence = [](const uint8_t* p)->bool{
+                        for (int i = 0; i < 160; ++i) if (p[i] != 0xFF) return false; return true;
+                    };
+
+                    auto handle_bytes = [this, &is_all_ulaw_silence](std::vector<uint8_t>&& bytes){
+                        if (bytes.empty()) return;
+                        bool did_fast_start = false; // retained for clarity; used to decide remainder enqueue
+
+                        // If this is the first chunk of a new utterance, fast-start only when the first frame is non-silence.
+                        if (out_channel_ && bytes.size() >= 160) {
+                            bool try_fast = false;
+                            {
+                                std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                                if (pending_first_rtp_) try_fast = true;
+                            }
+                            if (try_fast) {
+                                size_t offset = 0;
+                                // Trim leading μ-law silence frames to avoid long initial silence on the phone
+                                while (bytes.size() - offset >= 160 && is_all_ulaw_silence(bytes.data() + offset)) {
+                                    offset += 160;
+                                }
+                                if (bytes.size() - offset >= 160) {
+                                    // First non-silence frame available — write immediately to SHM
+                                    bool wrote = false;
+                                    for (int tries = 0; tries < 20 && !wrote; ++tries) {
+                                        wrote = out_channel_->write_frame(bytes.data() + offset, 160);
+                                        if (!wrote) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                    }
+                                    if (wrote) {
+                                        did_fast_start = true;
+                                        {
+                                            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                                            pending_first_rtp_ = false;
+                                        }
+                                        std::string call_id;
+                                        {
+                                            std::lock_guard<std::mutex> lock(call_mutex_);
+                                            call_id = current_call_id_;
+                                        }
+                                        auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
+                                        auto ms = now.time_since_epoch().count();
+                                        std::cout << "t3: First RTP frame sent [call " << call_id << "] ts=" << ms << std::endl;
+
+                                        // Enqueue any remainder (excluding the fast-start frame and any trimmed silence)
+                                        size_t rem_off = offset + 160;
+                                        if (bytes.size() > rem_off) {
+                                            std::vector<uint8_t> rest(bytes.begin() + rem_off, bytes.end());
+                                            enqueue_g711_(rest);
+                                        }
+                                        return; // handled fully
+                                    }
+                                }
+                                // If we only saw silence so far, keep pending_first_rtp_ true and just enqueue the (trimmed) remainder
+                                if (offset > 0) {
+                                    if (bytes.size() > offset) {
+                                        std::vector<uint8_t> rest(bytes.begin() + offset, bytes.end());
+                                        enqueue_g711_(rest);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+
+                        // Default path: enqueue all
+                        enqueue_g711_(bytes);
+                    };
+
+                    if (job.is_float) {
+                        const float* f = reinterpret_cast<const float*>(job.payload.data());
+                        std::vector<float> mono(f, f + (job.payload.size() / 4));
+                        auto g711 = process_float_mono_to_ulaw(mono, job.sample_rate);
+                        handle_bytes(std::move(g711));
+                    } else {
+                        handle_bytes(std::vector<uint8_t>(job.payload.begin(), job.payload.end()));
+                    }
                 }
             }
-            if (!have_audio) {
-                make_silence_frame_(frame);
-            }
+
+            // Opportunistically drain multiple frames per tick into SHM ring to absorb TTS bursts
             if (out_channel_) {
-                (void)out_channel_->write_frame(frame.data(), frame.size());
+                constexpr int kBurstFrames = 16; // Higher burst to quickly clear backlogs from TTS
+
+                for (int n = 0; n < kBurstFrames; ++n) {
+                    uint8_t frame160[160];
+                    bool have = false;
+                    {
+                        std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                        if (out_buffer_.size() >= 160) {
+                            std::memcpy(frame160, out_buffer_.data(), 160);
+                            have = true;
+                        }
+                    }
+                    if (!have) break;
+
+                    bool wrote = false;
+                    for (int tries = 0; tries < 20 && !wrote; ++tries) {
+                        wrote = out_channel_->write_frame(frame160, 160);
+                        if (!wrote) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    if (!wrote) break; // SHM full right now; try next tick
+
+                    {
+                        std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                        if (out_buffer_.size() >= 160) {
+                            out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + 160);
+                        }
+                    }
+
+                    // Log t3 when we send the first real RTP frame of a new utterance
+                    bool do_log = false;
+                    {
+                        std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                        if (pending_first_rtp_) { pending_first_rtp_ = false; do_log = true; }
+                    }
+                    if (do_log) {
+                        std::string call_id;
+                        {
+                            std::lock_guard<std::mutex> lock(call_mutex_);
+                            call_id = current_call_id_;
+                        }
+                        auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
+                        auto ms = now.time_since_epoch().count();
+                        std::cout << "t3: First RTP frame sent [call " << call_id << "] ts=" << ms << std::endl;
+                    }
+                }
             }
+
+            // If no audio available or no channel, do not write silence to SHM —
+            // SIP client has its own keepalive mechanism; avoid filling the ring with 0xFF
             next += interval;
             std::this_thread::sleep_until(next);
         }
@@ -381,7 +571,11 @@ void OutboundAudioProcessor::handle_piper_tcp_connection() {
             std::cout << "❌ Failed to accept Piper client connection" << std::endl;
             continue; // keep accepting
         }
-
+        // Disable Nagle to reduce latency
+        {
+            int flag = 1;
+            setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
+        }
         std::cout << "🔗 Piper client connected" << std::endl;
         piper_connected_.store(true);
 
@@ -444,10 +638,13 @@ void OutboundAudioProcessor::handle_piper_tcp_connection() {
                 std::lock_guard<std::mutex> lock(call_mutex_);
                 call_id = current_call_id_;
             }
+            // Interpret start-of-utterance marker in MSB; use low 31 bits for sequence
+
+            const uint32_t seq = (chunk_id & 0x7FFFFFFFu);
             {
                 std::lock_guard<std::mutex> lk(chunk_dedup_mutex_);
                 uint32_t &last = last_chunk_id_[call_id];
-                if (chunk_id <= last) {
+                if (seq <= last) {
                     std::vector<uint8_t> tmp(std::min(chunk_length, 4096u));
                     uint32_t remaining = chunk_length;
                     while (remaining > 0 && running_.load()) {
@@ -455,7 +652,7 @@ void OutboundAudioProcessor::handle_piper_tcp_connection() {
                         if (!read_exact_from_socket(client_socket, tmp.data(), to_read)) break;
                         remaining -= to_read;
                     }
-                    std::cout << "⚠️ Dropped duplicate Piper TTS chunk id " << chunk_id << " (last=" << last << ") for call " << call_id << std::endl;
+                    std::cout << "⚠️ Dropped duplicate Piper TTS chunk id " << seq << " (last=" << last << ") for call " << call_id << std::endl;
                     continue;
                 }
             }
@@ -467,11 +664,11 @@ void OutboundAudioProcessor::handle_piper_tcp_connection() {
             // Process audio chunk (enqueue into scheduler buffer)
             process_piper_audio_chunk(payload, sample_rate, chunk_id);
 
-            // Update last chunk ID
+            // Update last chunk ID (store sequence only)
             {
                 std::lock_guard<std::mutex> lk(chunk_dedup_mutex_);
                 uint32_t &last = last_chunk_id_[call_id];
-                last = std::max(last, chunk_id);
+                last = std::max(last, seq);
             }
         }
 
@@ -498,18 +695,24 @@ bool OutboundAudioProcessor::read_exact_from_socket(int socket_fd, void* data, s
 }
 
 void OutboundAudioProcessor::process_piper_audio_chunk(const std::vector<uint8_t>& payload, uint32_t sample_rate, uint32_t chunk_id) {
-    // Unified pipeline: Piper provides float32 PCM
-    if ((payload.size() % 4) == 0) {
-        const float* f = reinterpret_cast<const float*>(payload.data());
-        std::vector<float> mono(f, f + (payload.size() / 4));
-        auto g711 = process_float_mono_to_ulaw(mono, sample_rate);
-        enqueue_g711_(g711);
-        std::cout << "📤 Piper TTS enqueued (float->G711): " << g711.size() << " bytes @8kHz, src_rate=" << sample_rate << ", id=" << chunk_id << std::endl;
-    } else {
-        // If Piper ever sends already-encoded bytes, accept as-is
-        enqueue_g711_(payload);
-        std::cout << "📤 Piper TTS enqueued (bytes passthrough): " << payload.size() << " bytes, id=" << chunk_id << std::endl;
+    // Heuristic start-of-utterance: mark only once when buffer is empty and we are not already pending first RTP
+    bool mark_start = false;
+    {
+        std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+        if (!pending_first_rtp_ && out_buffer_.size() < 160) {
+            pending_first_rtp_ = true;
+            mark_start = true;
+        }
     }
+    if (mark_start) {
+        auto now = std::chrono::system_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        std::cout << "⏱️  Outbound received first chunk of utterance ts=" << ms << std::endl;
+    }
+    // Offload conversion to async worker to keep TCP receive thread responsive
+    const bool is_float = ((payload.size() % 4) == 0);
+    // Keep deduplication monotonic by using the raw chunk_id (works for Kokoro which increments globally)
+    push_conversion_job(payload, sample_rate, chunk_id, is_float);
 }
 
 // Registration polling implementation
@@ -540,6 +743,9 @@ void OutboundAudioProcessor::registration_polling_thread(const std::string& call
         std::cout << "❌ Failed to create UDP socket for REGISTER listener" << std::endl;
         return;
     }
+    // Allow rapid rebinding across calls
+    int opt = 1;
+    setsockopt(udp_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -588,6 +794,12 @@ void OutboundAudioProcessor::registration_polling_thread(const std::string& call
         if (s < 0) {
             std::cout << "❌ Failed to connect to Kokoro server on port " << piper_tcp_port_ << std::endl;
             continue;
+        }
+
+        // Disable Nagle on this connection to minimize latency
+        {
+            int flag = 1;
+            setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
         }
 
         // Send HELLO(call_id)

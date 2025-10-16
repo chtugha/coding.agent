@@ -137,7 +137,12 @@ private:
     std::string output_host_ = "127.0.0.1"; // default output host
     int output_port_ = 8090;
     std::unordered_map<std::string, int> output_sockets_;
-
+    // Track when TTS began for each call to avoid talking over the user
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_tts_start_;
+    // Track last user utterance we replied to (normalized) to avoid duplicate replies
+    std::unordered_map<std::string, std::string> last_user_utt_;
+    // Estimated TTS speaking window end per call (heuristic), to prevent talk-over
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> tts_speaking_until_;
 
     // Internal methods
     void run_tcp_server(int port);

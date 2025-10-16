@@ -25,6 +25,7 @@ public:
 
     // Shared memory output to SIP client
     void set_shared_memory_out(std::shared_ptr<ShmAudioChannel> channel);
+    void clear_shared_memory_out();
 
     // Optional μ-law WAV2 silence data for testing (auto-cycled by scheduler)
     void set_silence_wav2_bytes(const std::vector<uint8_t>& bytes);
@@ -53,6 +54,9 @@ private:
     std::atomic<bool> output_running_{false};
     std::vector<uint8_t> out_buffer_; // queued G.711 bytes from Piper
     std::mutex out_buffer_mutex_;
+    // Set true when a new utterance arrives (buffer transitions from empty to non-empty).
+    // Used to log t3 when the first non-silence RTP frame for that utterance is written.
+    bool pending_first_rtp_ = false;
 
     // Test WAV2 (μ-law 8kHz) for silence source
     std::vector<uint8_t> silence_wav2_;
