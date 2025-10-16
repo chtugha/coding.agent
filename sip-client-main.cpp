@@ -2843,17 +2843,33 @@ void SimpleSipClient::start_outbound_stream_for_call(const std::string& call_id,
         while (running_ && running_flag->load()) {
             bool sent = false;
             bool is_audio = false;
+            // Determine selected outbound PT (0=PCMU, 8=PCMA) for proper silence detection and optional conversion
+            int selected_pt = 0; // default PCMU
+            {
+                std::lock_guard<std::mutex> lock(rtp_state_mutex_);
+                auto it = rtp_selected_pt_.find("default");
+                if (it != rtp_selected_pt_.end() && (it->second == 0 || it->second == 8)) {
+                    selected_pt = it->second;
+                }
+            }
+            const uint8_t silence_val = (selected_pt == 8) ? 0xD5 : 0xFF;
+
             if (channel->read_frame(frame)) {
                 if (!frame.empty()) {
-                    // Check if this looks like audio (not all 0xFF which is silence)
+                    // Check if this looks like audio (not all silence_val which is silence for the selected PT)
                     bool all_silence = true;
                     for (size_t i = 0; i < std::min(frame.size(), size_t(160)); ++i) {
-                        if (frame[i] != 0xFF) {
+                        if (frame[i] != silence_val) {
                             all_silence = false;
                             break;
                         }
                     }
                     is_audio = !all_silence;
+
+                    // If outbound is PCMA, convert μ-law (from SHM) to A-law before sending
+                    if (selected_pt == 8) {
+                        frame = convert_ulaw_to_alaw(frame);
+                    }
 
                     // Forward G.711 bytes as RTP to PBX
                     this->send_rtp_packets_to_pbx(call_id, frame, local_rtp_port);
@@ -2880,7 +2896,7 @@ void SimpleSipClient::start_outbound_stream_for_call(const std::string& call_id,
 
             if (!sent) {
                 // Send 20ms of silence to keep RTP alive
-                std::vector<uint8_t> silence(160, 0xFF); // \u03bc-law silence
+                std::vector<uint8_t> silence(160, (uint8_t)((selected_pt == 8) ? 0xD5 : 0xFF)); // PCMA uses 0xD5, PCMU uses 0xFF
                 if (!silence_wav_.empty()) {
                     // Use WAV content as source; wrap around
                     silence.resize(160);
