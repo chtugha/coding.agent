@@ -302,8 +302,8 @@ void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
     using namespace std::chrono_literals;
     if (g711.empty()) return;
 
-    // Allow up to 5.0s of audio burst without drops to avoid choppiness on TTS bursts
-    constexpr size_t kMaxBytes = 160 * 250; // 250 frames = 5000ms @ 20ms/frame
+    // Allow up to 12.0s of audio burst to tolerate long Kokoro bursts without chopping
+    constexpr size_t kMaxBytes = 160 * 600; // 600 frames = 12000ms @ 20ms/frame
 
     int spins = 0;
     for (;;) {
@@ -321,11 +321,11 @@ void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
             }
         }
         // Not enough room — give the scheduler a moment to drain
-        if (++spins <= 500) { // wait up to ~1000ms before considering drop
+        if (++spins <= 1000) { // wait up to ~2000ms before considering drop
             std::this_thread::sleep_for(2ms);
             continue;
         }
-        // Still full — drop policy: never drop before the first RTP of an utterance
+        // Still full — drop policy:
         {
             std::lock_guard<std::mutex> lk(out_buffer_mutex_);
             if (pending_first_rtp_) {
@@ -337,10 +337,11 @@ void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
             size_t drop = ((needed + 159) / 160) * 160; // align to 160-byte frames
             if (drop > out_buffer_.size()) drop = out_buffer_.size();
             if (drop > 0) {
-                out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + drop);
+                // Prefer dropping newest tail to preserve earlier speech continuity
+                out_buffer_.erase(out_buffer_.end() - drop, out_buffer_.end());
                 static int drop_count = 0;
                 if (++drop_count <= 5 || drop_count % 200 == 0) {
-                    std::cout << "⚠️  Dropped oldest " << drop << " bytes to make room (buffer now " << out_buffer_.size() << ")" << std::endl;
+                    std::cout << "⚠️  Dropped newest " << drop << " bytes (preserved head; buffer now " << out_buffer_.size() << ")" << std::endl;
                 }
             }
             // loop to attempt enqueue again immediately
@@ -458,7 +459,7 @@ void OutboundAudioProcessor::start_output_scheduler_() {
 
             // Opportunistically drain multiple frames per tick into SHM ring to absorb TTS bursts
             if (out_channel_) {
-                constexpr int kBurstFrames = 16; // Higher burst to quickly clear backlogs from TTS
+                constexpr int kBurstFrames = 8; // Pace SHM backlog to reduce ring saturation
 
                 for (int n = 0; n < kBurstFrames; ++n) {
                     uint8_t frame160[160];

@@ -2852,14 +2852,16 @@ void SimpleSipClient::start_outbound_stream_for_call(const std::string& call_id,
                     selected_pt = it->second;
                 }
             }
-            const uint8_t silence_val = (selected_pt == 8) ? 0xD5 : 0xFF;
+            // SHM holds μ-law (PCMU) payloads. Detect silence using μ-law 0xFF ONLY.
+            // Conversion to A-law (PT=8) happens AFTER detection.
+            const uint8_t ulaw_silence_val = 0xFF;
 
             if (channel->read_frame(frame)) {
                 if (!frame.empty()) {
-                    // Check if this looks like audio (not all silence_val which is silence for the selected PT)
+                    // Check if this looks like audio (not all μ-law silence)
                     bool all_silence = true;
                     for (size_t i = 0; i < std::min(frame.size(), size_t(160)); ++i) {
-                        if (frame[i] != silence_val) {
+                        if (frame[i] != ulaw_silence_val) {
                             all_silence = false;
                             break;
                         }
