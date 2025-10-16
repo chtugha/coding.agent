@@ -302,8 +302,8 @@ void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
     using namespace std::chrono_literals;
     if (g711.empty()) return;
 
-    // Allow up to 2.0s of audio burst without drops to avoid choppiness on TTS bursts
-    constexpr size_t kMaxBytes = 160 * 100; // 100 frames = 2000ms @ 20ms/frame
+    // Allow up to 5.0s of audio burst without drops to avoid choppiness on TTS bursts
+    constexpr size_t kMaxBytes = 160 * 250; // 250 frames = 5000ms @ 20ms/frame
 
     int spins = 0;
     for (;;) {
@@ -321,13 +321,18 @@ void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
             }
         }
         // Not enough room — give the scheduler a moment to drain
-        if (++spins <= 50) { // wait up to ~100ms before considering drop
+        if (++spins <= 500) { // wait up to ~1000ms before considering drop
             std::this_thread::sleep_for(2ms);
             continue;
         }
-        // Still full — drop the oldest bytes (frame-aligned) to make room for fresh audio
+        // Still full — drop policy: never drop before the first RTP of an utterance
         {
             std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+            if (pending_first_rtp_) {
+                // Avoid losing the beginning: wait a bit more and retry
+                std::this_thread::sleep_for(2ms);
+                continue;
+            }
             size_t needed = (out_buffer_.size() + g711.size()) - kMaxBytes;
             size_t drop = ((needed + 159) / 160) * 160; // align to 160-byte frames
             if (drop > out_buffer_.size()) drop = out_buffer_.size();
