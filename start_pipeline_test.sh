@@ -13,11 +13,10 @@ WHISPER_BIN="$ROOT_DIR/bin/whisper-service"
 LLAMA_BIN="$ROOT_DIR/bin/llama-service"
 KOKORO_SCRIPT="$ROOT_DIR/kokoro_service.py"
 KOKORO_VENV="$ROOT_DIR/venv-kokoro/bin/python3"
-OUTBOUND_BIN="$ROOT_DIR/bin/outbound-audio-processor"
 SIMULATOR_BIN="$ROOT_DIR/bin/pipeline_loop_sim"
 
 WHISPER_MODEL="$ROOT_DIR/models/ggml-large-v3-turbo-q5_0.bin"
-LLAMA_MODEL="$ROOT_DIR/models/llama-model.gguf"
+LLAMA_MODEL="$ROOT_DIR/models/Llama-3.2-3B-Instruct-Phishing-v1.Q5_K_M.gguf"
 DB_PATH="$ROOT_DIR/whisper_talk.db"
 
 TEST_WAV="$ROOT_DIR/tests/data/harvard/wav/OSR_us_000_0010_8k.wav"
@@ -34,12 +33,6 @@ fi
 
 if [ ! -f "$LLAMA_BIN" ]; then
     echo "❌ Llama binary not found: $LLAMA_BIN"
-    echo "   Run: bash scripts/build.sh"
-    exit 1
-fi
-
-if [ ! -f "$OUTBOUND_BIN" ]; then
-    echo "❌ Outbound audio processor not found: $OUTBOUND_BIN"
     echo "   Run: bash scripts/build.sh"
     exit 1
 fi
@@ -108,13 +101,7 @@ cleanup() {
         sleep 1
         kill -9 $KOKORO_PID 2>/dev/null || true
     fi
-    
-    if [ ! -z "$OUTBOUND_PID" ]; then
-        kill -TERM $OUTBOUND_PID 2>/dev/null || true
-        sleep 1
-        kill -9 $OUTBOUND_PID 2>/dev/null || true
-    fi
-    
+
     echo "✅ Cleanup complete"
     echo ""
     echo "📊 Service logs:"
@@ -122,7 +109,6 @@ cleanup() {
     echo "   Whisper:    /tmp/whisper-pipeline-test.log"
     echo "   Llama:      /tmp/llama-pipeline-test.log"
     echo "   Kokoro:     /tmp/kokoro-pipeline-test.log"
-    echo "   Outbound:   /tmp/outbound-pipeline-test.log"
     echo ""
 }
 
@@ -133,30 +119,7 @@ trap cleanup EXIT INT TERM
 echo "🚀 Starting services..."
 echo ""
 
-# Step 1: Start simulator first (it will wait for services)
-echo "🔄 Starting pipeline loop simulator (will wait for services)..."
-"$SIMULATOR_BIN" "$TEST_WAV" > /tmp/pipeline-simulator.log 2>&1 &
-SIMULATOR_PID=$!
-echo "   PID: $SIMULATOR_PID"
-echo "   Log: /tmp/pipeline-simulator.log"
-sleep 2
-
-# Step 2: Start Whisper service
-echo "🎤 Starting Whisper service..."
-"$WHISPER_BIN" \
-  --model "$WHISPER_MODEL" \
-  --database "$DB_PATH" \
-  --threads 8 \
-  --llama-host 127.0.0.1 \
-  --llama-port 8083 \
-  > /tmp/whisper-pipeline-test.log 2>&1 &
-WHISPER_PID=$!
-echo "   PID: $WHISPER_PID"
-echo "   Ports: 9001+call_id (audio), 13000 (UDP registration)"
-echo "   Log: /tmp/whisper-pipeline-test.log"
-sleep 3
-
-# Step 3: Start Llama service
+# Step 1: Start Llama service FIRST (must be on port 8083)
 echo "🦙 Starting Llama service..."
 "$LLAMA_BIN" \
   --model "$LLAMA_MODEL" \
@@ -172,7 +135,7 @@ echo "   Ports: 8083 (input from Whisper), 8090 (output to Kokoro)"
 echo "   Log: /tmp/llama-pipeline-test.log"
 sleep 3
 
-# Step 4: Start Kokoro service
+# Step 2: Start Kokoro service
 echo "🎵 Starting Kokoro service..."
 "$KOKORO_VENV" -u "$KOKORO_SCRIPT" \
   --voice af_sky \
@@ -182,27 +145,40 @@ echo "🎵 Starting Kokoro service..."
   > /tmp/kokoro-pipeline-test.log 2>&1 &
 KOKORO_PID=$!
 echo "   PID: $KOKORO_PID"
-echo "   Ports: 8090 (input from Llama), 9002+call_id (output to outbound), 13001 (UDP registration)"
+echo "   Ports: 8090 (input from Llama), 9002+call_id (output to simulator), 13001 (UDP registration)"
 echo "   Log: /tmp/kokoro-pipeline-test.log"
 sleep 5
 
-# Step 5: Start Outbound audio processor
-echo "📡 Starting Outbound audio processor..."
-"$OUTBOUND_BIN" \
-  --call-id "$CALL_ID" \
-  > /tmp/outbound-pipeline-test.log 2>&1 &
-OUTBOUND_PID=$!
-echo "   PID: $OUTBOUND_PID"
-echo "   Ports: 9002+call_id (listens for Kokoro), 13000+call_id (UDP registration)"
-echo "   Log: /tmp/outbound-pipeline-test.log"
+# Step 3: Start Whisper service
+echo "🎤 Starting Whisper service..."
+"$WHISPER_BIN" \
+  --model "$WHISPER_MODEL" \
+  --database "$DB_PATH" \
+  --threads 8 \
+  --llama-host 127.0.0.1 \
+  --llama-port 8083 \
+  > /tmp/whisper-pipeline-test.log 2>&1 &
+WHISPER_PID=$!
+echo "   PID: $WHISPER_PID"
+echo "   Ports: 9001+call_id (audio), 13000 (UDP registration)"
+echo "   Log: /tmp/whisper-pipeline-test.log"
 sleep 3
+
+# Step 4: Start simulator (mimics outbound-audio-processor)
+echo "🔄 Starting pipeline loop simulator..."
+"$SIMULATOR_BIN" "$TEST_WAV" > /tmp/pipeline-simulator.log 2>&1 &
+SIMULATOR_PID=$!
+echo "   PID: $SIMULATOR_PID"
+echo "   Ports: 9152 (audio to Whisper), 9153 (audio from Kokoro)"
+echo "   Log: /tmp/pipeline-simulator.log"
+sleep 2
 
 echo ""
 echo "✅ All services started"
 echo ""
 echo "📊 Service Architecture:"
-echo "   Simulator → Whisper (port 9152) → Llama (port 8083) → Kokoro (port 8090)"
-echo "   Kokoro → Outbound (port 9153) → Simulator (receives audio)"
+echo "   Simulator → Whisper (port 9152) → Llama (port 8083) → Kokoro (port 8090) → Simulator (port 9153)"
+echo "   Complete loop: Original audio → Whisper → Llama → Kokoro → Simulator → Whisper"
 echo ""
 echo "⏱️  Test will run for maximum 2 minutes..."
 echo ""
