@@ -155,6 +155,9 @@ private:
     bool send_tcp_transcription(int socket, const std::string& transcription);
     void send_tcp_bye(int socket);
 
+    // Post-processing
+    std::string post_process_transcription(const std::string& text);
+
     // LLaMA client helpers
     bool connect_llama_for_call(const std::string& call_id);
     bool send_llama_text(const std::string& call_id, const std::string& text);

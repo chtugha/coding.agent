@@ -156,7 +156,11 @@ add_executable(outbound-audio-processor
 
 target_link_libraries(outbound-audio-processor PRIVATE Threads::Threads)
 
-
+# Test simulator for Whisper inbound pipeline
+add_executable(whisper_inbound_sim
+    tests/whisper_inbound_sim.cpp
+)
+target_link_libraries(whisper_inbound_sim PRIVATE Threads::Threads)
 
 # Install
 if(BUILD_HTTP_SERVER)

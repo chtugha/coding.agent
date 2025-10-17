@@ -6,7 +6,7 @@ set -e
 
 ROOT_DIR="/Users/whisper/Documents/augment-projects/clean-repo"
 WHISPER_BIN="$ROOT_DIR/bin/whisper-service"
-MODEL_PATH="$ROOT_DIR/models/ggml-base.en.bin"
+MODEL_PATH="$ROOT_DIR/models/ggml-large-v3-turbo-q5_0.bin"
 DB_PATH="$ROOT_DIR/whisper_talk.db"
 
 # Set library path for whisper.cpp

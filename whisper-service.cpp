@@ -140,12 +140,13 @@ bool WhisperSession::process_window(const std::vector<float>& window) {
     }
 
     // Create real whisper parameters
+    // Using GREEDY sampling (baseline) - BEAM_SEARCH testing showed no improvement
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wparams.language = config_.language.c_str();
     wparams.n_threads = config_.n_threads;
-    wparams.temperature = config_.temperature;
-    wparams.no_timestamps = config_.no_timestamps;
-    wparams.translate = config_.translate;
+    wparams.temperature = 0.0f;
+    wparams.no_timestamps = true;
+    wparams.translate = false;
     wparams.print_progress = false;
     wparams.print_realtime = false;
 
@@ -883,6 +884,23 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
     }
 
     send_tcp_bye(socket);
+    std::cout << "📡 TCP BYE sent to audio input socket for call " << call_id << std::endl;
+
+    // Send BYE to llama-service socket
+    {
+        std::lock_guard<std::mutex> tlock(tcp_mutex_);
+        auto llama_it = llama_sockets_.find(call_id);
+        if (llama_it != llama_sockets_.end() && llama_it->second >= 0) {
+            std::cout << "📡 Sending BYE to llama socket for call " << call_id << std::endl;
+            send_tcp_bye(llama_it->second);
+            close(llama_it->second);
+            llama_sockets_.erase(llama_it);
+            std::cout << "📡 TCP BYE sent to llama socket for call " << call_id << std::endl;
+        } else {
+            std::cout << "⚠️  No llama socket found for call " << call_id << std::endl;
+        }
+    }
+
     // Close socket and remove from map
     close(socket);
     {
@@ -892,7 +910,7 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
             call_tcp_sockets_.erase(it);
         }
     }
-    // Destroy whisper session but keep LLaMA connection open for next call
+    // Destroy whisper session
     destroy_session(call_id);
     std::cout << "🎧 TCP audio handler ended for call " << call_id << std::endl;
     // log_session_stats();  // suppressed to reduce console spam
@@ -1081,4 +1099,73 @@ void StandaloneWhisperService::send_tcp_bye(int socket) {
     uint32_t bye_marker = 0xFFFFFFFF;
     write_all_fd(socket, &bye_marker, 4);
     std::cout << "📡 TCP BYE sent" << std::endl;
+}
+
+// Post-processing to improve transcription accuracy
+std::string StandaloneWhisperService::post_process_transcription(const std::string& text) {
+    if (text.empty()) return text;
+
+    std::string result = text;
+
+    // 1. Remove duplicate words at boundaries (e.g., "smooth smooth" → "smooth")
+    // Pattern: word followed by space and same word
+    size_t pos = 0;
+    while ((pos = result.find(' ', pos)) != std::string::npos) {
+        if (pos + 1 < result.size()) {
+            // Find the word before the space
+            size_t word_start = result.rfind(' ', pos - 1);
+            if (word_start == std::string::npos) word_start = 0;
+            else word_start++;
+
+            std::string word1 = result.substr(word_start, pos - word_start);
+
+            // Find the word after the space
+            size_t word_end = result.find(' ', pos + 1);
+            if (word_end == std::string::npos) word_end = result.size();
+
+            std::string word2 = result.substr(pos + 1, word_end - pos - 1);
+
+            // If words match (case-insensitive), remove the duplicate
+            if (!word1.empty() && !word2.empty()) {
+                std::string w1_lower = word1, w2_lower = word2;
+                std::transform(w1_lower.begin(), w1_lower.end(), w1_lower.begin(), ::tolower);
+                std::transform(w2_lower.begin(), w2_lower.end(), w2_lower.begin(), ::tolower);
+
+                if (w1_lower == w2_lower) {
+                    result.erase(pos, word_end - pos);
+                    continue;
+                }
+            }
+        }
+        pos++;
+    }
+
+    // 2. Normalize common contractions
+    // "It is" → "It's"
+    pos = 0;
+    while ((pos = result.find("It is", pos)) != std::string::npos) {
+        // Check if it's at word boundary
+        bool at_start = (pos == 0 || result[pos-1] == ' ' || result[pos-1] == '\n');
+        bool at_end = (pos + 5 >= result.size() || result[pos+5] == ' ' || result[pos+5] == '\n');
+        if (at_start && at_end) {
+            result.replace(pos, 5, "It's");
+        }
+        pos += 4;
+    }
+
+    // 3. Capitalize first letter if it's lowercase
+    if (!result.empty() && result[0] >= 'a' && result[0] <= 'z') {
+        result[0] = result[0] - 'a' + 'A';
+    }
+
+    // 4. Capitalize after sentence endings (. ! ?)
+    for (size_t i = 0; i + 2 < result.size(); i++) {
+        if ((result[i] == '.' || result[i] == '!' || result[i] == '?') && result[i+1] == ' ') {
+            if (result[i+2] >= 'a' && result[i+2] <= 'z') {
+                result[i+2] = result[i+2] - 'a' + 'A';
+            }
+        }
+    }
+
+    return result;
 }

@@ -74,3 +74,9 @@ venv-*/
 __pycache__/
 *.pyc
 *.pyo
+
+# Test data (WAV files can be large)
+tests/data/
+
+# Backup files
+*.old.json
