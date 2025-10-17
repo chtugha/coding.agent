@@ -162,6 +162,12 @@ add_executable(whisper_inbound_sim
 )
 target_link_libraries(whisper_inbound_sim PRIVATE Threads::Threads)
 
+# Test simulator for full pipeline loop (Whisper → Llama → Kokoro → Whisper)
+add_executable(pipeline_loop_sim
+    tests/pipeline_loop_sim.cpp
+)
+target_link_libraries(pipeline_loop_sim PRIVATE Threads::Threads)
+
 # Install
 if(BUILD_HTTP_SERVER)
     install(TARGETS http-server RUNTIME DESTINATION bin)

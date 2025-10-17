@@ -45,6 +45,11 @@ class KokoroTCPService:
         self.registered_calls = {}  # call_id -> timestamp
         self.registered_calls_lock = threading.Lock()
 
+        # Track outbound audio processor connections
+        self.outbound_sockets = {}  # call_id -> socket
+        self.outbound_sockets_lock = threading.Lock()
+        self.chunk_counters = {}  # call_id -> chunk_id
+
         # Performance tracking
         self.synthesis_times = []  # List of synthesis times for monitoring
         self.synthesis_lock = threading.Lock()
@@ -129,7 +134,106 @@ class KokoroTCPService:
             import traceback
             traceback.print_exc()
             return None, 0, 0
-    
+
+    def calculate_outbound_port(self, call_id):
+        """Calculate outbound audio processor port: 9002 + call_id"""
+        try:
+            call_id_num = int(call_id)
+            return 9002 + call_id_num
+        except ValueError:
+            return 9002  # Fallback
+
+    def connect_to_outbound_processor(self, call_id):
+        """Connect to outbound audio processor on port 9002+call_id"""
+        # Check if already connected
+        with self.outbound_sockets_lock:
+            if call_id in self.outbound_sockets:
+                return True
+
+        port = self.calculate_outbound_port(call_id)
+        max_attempts = 10
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Disable Nagle
+                s.connect(('127.0.0.1', port))
+
+                # Send HELLO(call_id)
+                call_id_bytes = call_id.encode('utf-8')
+                length = struct.pack('!I', len(call_id_bytes))
+                s.sendall(length)
+                s.sendall(call_id_bytes)
+
+                with self.outbound_sockets_lock:
+                    self.outbound_sockets[call_id] = s
+                    self.chunk_counters[call_id] = 0
+
+                print(f"🔗 Connected to outbound processor on port {port} for call_id {call_id}")
+                return True
+
+            except Exception as e:
+                if s:
+                    try:
+                        s.close()
+                    except:
+                        pass
+
+                sleep_ms = 200 if attempt <= 5 else 1000
+                if attempt == 1 or attempt == 5 or attempt == 9:
+                    print(f"⚠️  Outbound connect attempt {attempt}/{max_attempts} failed — retrying in {sleep_ms}ms")
+                time.sleep(sleep_ms / 1000.0)
+
+        print(f"❌ Failed to connect to outbound processor on port {port} after {max_attempts} attempts")
+        return False
+
+    def send_audio_to_outbound(self, call_id, audio, sample_rate):
+        """Send audio chunk to outbound audio processor"""
+        with self.outbound_sockets_lock:
+            if call_id not in self.outbound_sockets:
+                return False
+
+            s = self.outbound_sockets[call_id]
+            self.chunk_counters[call_id] += 1
+            chunk_id = self.chunk_counters[call_id]
+
+        try:
+            # Convert to bytes
+            audio_bytes = audio.tobytes()
+
+            # Send audio chunk: [length][sample_rate][chunk_id][audio_data]
+            header = struct.pack('!III', len(audio_bytes), sample_rate, chunk_id)
+            s.sendall(header)
+            s.sendall(audio_bytes)
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Failed to send audio to outbound processor: {e}")
+            # Close and remove socket
+            with self.outbound_sockets_lock:
+                if call_id in self.outbound_sockets:
+                    try:
+                        self.outbound_sockets[call_id].close()
+                    except:
+                        pass
+                    del self.outbound_sockets[call_id]
+            return False
+
+    def close_outbound_connection(self, call_id):
+        """Close connection to outbound audio processor"""
+        with self.outbound_sockets_lock:
+            if call_id in self.outbound_sockets:
+                try:
+                    # Send BYE (length=0)
+                    bye = struct.pack('!III', 0, 0, 0)
+                    self.outbound_sockets[call_id].sendall(bye)
+                    self.outbound_sockets[call_id].close()
+                except:
+                    pass
+                del self.outbound_sockets[call_id]
+                print(f"🔌 Closed outbound connection for call_id {call_id}")
+
     def registration_listener_thread(self):
         """Listen for UDP registration messages from outbound audio processors"""
         try:
@@ -152,12 +256,18 @@ class KokoroTCPService:
                             self.registered_calls[call_id] = threading.current_thread().ident
                         print(f"📥 Received REGISTER for call_id {call_id} - outbound processor is ready")
 
+                        # Connect to outbound processor
+                        threading.Thread(target=self.connect_to_outbound_processor, args=(call_id,), daemon=True).start()
+
                     elif message.startswith("BYE:"):
                         call_id = message[4:]
                         with self.registered_calls_lock:
                             if call_id in self.registered_calls:
                                 del self.registered_calls[call_id]
                         print(f"📤 Received BYE for call_id {call_id}")
+
+                        # Close outbound connection
+                        self.close_outbound_connection(call_id)
 
                 except socket.timeout:
                     continue
@@ -223,29 +333,28 @@ class KokoroTCPService:
                 audio, sample_rate, synthesis_time = self.synthesize(text)
 
                 if audio is not None and len(audio) > 0:
-                    chunk_id += 1
+                    # Calculate audio duration and real-time factor
+                    audio_duration = len(audio) / sample_rate
+                    rtf = synthesis_time / audio_duration if audio_duration > 0 else 0
 
-                    # Convert to bytes
-                    audio_bytes = audio.tobytes()
+                    print(f"🎵 Synthesized {len(audio)} samples @{sample_rate}Hz for call {call_id}")
+                    print(f"   ⚡ Synthesis: {synthesis_time:.3f}s | Audio: {audio_duration:.3f}s | RTF: {rtf:.3f}x")
 
-                    # Send audio chunk: [length][sample_rate][chunk_id][audio_data]
-                    header = struct.pack('!III', len(audio_bytes), sample_rate, chunk_id)
-
-                    try:
-                        client_socket.sendall(header)
-                        client_socket.sendall(audio_bytes)
-
-                        # Calculate audio duration and real-time factor
-                        audio_duration = len(audio) / sample_rate
-                        rtf = synthesis_time / audio_duration if audio_duration > 0 else 0
-
-                        print(f"🔊 Sent chunk#{chunk_id} ({len(audio)} samples @{sample_rate}Hz) for call {call_id}")
-                        print(f"   ⚡ Synthesis: {synthesis_time:.3f}s | Audio: {audio_duration:.3f}s | RTF: {rtf:.3f}x")
-                    except Exception as e:
-                        print(f"❌ Failed to send audio: {e}")
-                        break
+                    # Send audio to outbound processor (not back to llama)
+                    if self.send_audio_to_outbound(call_id, audio, sample_rate):
+                        print(f"🔊 Sent audio to outbound processor for call {call_id}")
+                    else:
+                        print(f"⚠️  Failed to send audio to outbound processor for call {call_id}")
+                        # Try to reconnect
+                        if self.connect_to_outbound_processor(call_id):
+                            # Retry sending
+                            if self.send_audio_to_outbound(call_id, audio, sample_rate):
+                                print(f"🔊 Sent audio to outbound processor (retry) for call {call_id}")
                 else:
                     print(f"⚠️  Synthesis failed for call {call_id}")
+
+            # Send BYE to outbound processor when done
+            self.close_outbound_connection(call_id)
             
         except Exception as e:
             print(f"❌ Client handler error: {e}")
