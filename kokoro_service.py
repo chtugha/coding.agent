@@ -103,11 +103,11 @@ class KokoroTCPService:
                 
                 # Pre-load German voices if they exist
                 if german_voices_dir.exists():
-                    for voice_file in german_voices_dir.glob("*.pt"):
+                    for voice_file in german_voices_dir.rglob("*.pt"):
                         voice_name = voice_file.stem
                         print(f"📥 Pre-loading German voice: {voice_name}")
                         # Ensure voice is a FloatTensor for KPipeline compatibility
-                        voice_tensor = torch.load(voice_file, weights_only=True)
+                        voice_tensor = torch.load(voice_file, weights_only=True, map_location='cpu')
                         if isinstance(voice_tensor, torch.Tensor):
                             self.cached_voices[voice_name] = voice_tensor.float()
                         else:
