@@ -47,6 +47,9 @@ OutboundAudioProcessor::OutboundAudioProcessor()
     , piper_tcp_port_(-1)
     , piper_connected_(false)
     , registration_running_(false)
+    , udp_dest_port_(-1)
+    , udp_call_id_(0)
+    , udp_socket_(-1)
 {
 }
 
@@ -253,14 +256,27 @@ std::vector<float> OutboundAudioProcessor::decode_bytes_to_float_mono(const std:
 }
 
 
-void OutboundAudioProcessor::set_shared_memory_out(std::shared_ptr<ShmAudioChannel> channel) {
-    out_channel_ = std::move(channel);
+void OutboundAudioProcessor::set_udp_output(const std::string& ip, int port, uint32_t call_id) {
+    std::lock_guard<std::mutex> lk(udp_mutex_);
+    udp_dest_ip_ = ip;
+    udp_dest_port_ = port;
+    udp_call_id_ = call_id;
+    
+    if (udp_socket_ < 0) {
+        udp_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+    }
+    
+    std::cout << "📡 Outbound UDP output set: " << ip << ":" << port << " for call_id " << call_id << std::endl;
     ensure_output_running();
 }
 
-void OutboundAudioProcessor::clear_shared_memory_out() {
-    std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-    out_channel_.reset();
+void OutboundAudioProcessor::clear_udp_output() {
+    std::lock_guard<std::mutex> lk(udp_mutex_);
+    if (udp_socket_ >= 0) {
+        close(udp_socket_);
+        udp_socket_ = -1;
+    }
+    udp_dest_port_ = -1;
 }
 
 void OutboundAudioProcessor::set_silence_wav2_bytes(const std::vector<uint8_t>& bytes) {
@@ -388,56 +404,78 @@ void OutboundAudioProcessor::start_output_scheduler_() {
                         bool did_fast_start = false; // retained for clarity; used to decide remainder enqueue
 
                         // If this is the first chunk of a new utterance, fast-start only when the first frame is non-silence.
-                        if (out_channel_ && bytes.size() >= 160) {
-                            bool try_fast = false;
+                        {
+                            bool has_udp = false;
                             {
-                                std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                                if (pending_first_rtp_) try_fast = true;
+                                std::lock_guard<std::mutex> lk(udp_mutex_);
+                                if (udp_dest_port_ > 0) has_udp = true;
                             }
-                            if (try_fast) {
-                                size_t offset = 0;
-                                // Trim leading μ-law silence frames to avoid long initial silence on the phone
-                                while (bytes.size() - offset >= 160 && is_all_ulaw_silence(bytes.data() + offset)) {
-                                    offset += 160;
-                                }
-                                if (bytes.size() - offset >= 160) {
-                                    // First non-silence frame available — write immediately to SHM
-                                    bool wrote = false;
-                                    for (int tries = 0; tries < 20 && !wrote; ++tries) {
-                                        wrote = out_channel_->write_frame(bytes.data() + offset, 160);
-                                        if (!wrote) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                                    }
-                                    if (wrote) {
-                                        did_fast_start = true;
-                                        {
-                                            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                                            pending_first_rtp_ = false;
-                                        }
-                                        std::string call_id;
-                                        {
-                                            std::lock_guard<std::mutex> lock(call_mutex_);
-                                            call_id = current_call_id_;
-                                        }
-                                        auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
-                                        auto ms = now.time_since_epoch().count();
-                                        std::cout << "t3: First RTP frame sent [call " << call_id << "] ts=" << ms << std::endl;
 
-                                        // Enqueue any remainder (excluding the fast-start frame and any trimmed silence)
-                                        size_t rem_off = offset + 160;
-                                        if (bytes.size() > rem_off) {
-                                            std::vector<uint8_t> rest(bytes.begin() + rem_off, bytes.end());
+                            if (has_udp && bytes.size() >= 160) {
+                                bool try_fast = false;
+                                {
+                                    std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                                    if (pending_first_rtp_) try_fast = true;
+                                }
+                                if (try_fast) {
+                                    size_t offset = 0;
+                                    // Trim leading μ-law silence frames to avoid long initial silence on the phone
+                                    while (bytes.size() - offset >= 160 && is_all_ulaw_silence(bytes.data() + offset)) {
+                                        offset += 160;
+                                    }
+                                    if (bytes.size() - offset >= 160) {
+                                        // First non-silence frame available — write immediately to UDP
+                                        bool wrote = false;
+                                        
+                                        // Prepare UDP packet: [call_id:4][G711:160]
+                                        std::vector<uint8_t> pkt(4 + 160);
+                                        {
+                                            std::lock_guard<std::mutex> lk(udp_mutex_);
+                                            *reinterpret_cast<uint32_t*>(pkt.data()) = htonl(udp_call_id_);
+                                            std::memcpy(pkt.data() + 4, bytes.data() + offset, 160);
+                                            
+                                            struct sockaddr_in dest_addr{};
+                                            dest_addr.sin_family = AF_INET;
+                                            dest_addr.sin_port = htons(udp_dest_port_);
+                                            dest_addr.sin_addr.s_addr = inet_addr(udp_dest_ip_.c_str());
+                                            
+                                            if (sendto(udp_socket_, pkt.data(), pkt.size(), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr)) > 0) {
+                                                wrote = true;
+                                            }
+                                        }
+
+                                        if (wrote) {
+                                            did_fast_start = true;
+                                            {
+                                                std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                                                pending_first_rtp_ = false;
+                                            }
+                                            std::string call_id;
+                                            {
+                                                std::lock_guard<std::mutex> lock(call_mutex_);
+                                                call_id = current_call_id_;
+                                            }
+                                            auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
+                                            auto ms = now.time_since_epoch().count();
+                                            std::cout << "t3: First RTP frame sent [call " << call_id << "] ts=" << ms << std::endl;
+
+                                            // Enqueue any remainder (excluding the fast-start frame and any trimmed silence)
+                                            size_t rem_off = offset + 160;
+                                            if (bytes.size() > rem_off) {
+                                                std::vector<uint8_t> rest(bytes.begin() + rem_off, bytes.end());
+                                                enqueue_g711_(rest);
+                                            }
+                                            return; // handled fully
+                                        }
+                                    }
+                                    // If we only saw silence so far, keep pending_first_rtp_ true and just enqueue the (trimmed) remainder
+                                    if (offset > 0) {
+                                        if (bytes.size() > offset) {
+                                            std::vector<uint8_t> rest(bytes.begin() + offset, bytes.end());
                                             enqueue_g711_(rest);
                                         }
-                                        return; // handled fully
+                                        return;
                                     }
-                                }
-                                // If we only saw silence so far, keep pending_first_rtp_ true and just enqueue the (trimmed) remainder
-                                if (offset > 0) {
-                                    if (bytes.size() > offset) {
-                                        std::vector<uint8_t> rest(bytes.begin() + offset, bytes.end());
-                                        enqueue_g711_(rest);
-                                    }
-                                    return;
                                 }
                             }
                         }
@@ -457,51 +495,71 @@ void OutboundAudioProcessor::start_output_scheduler_() {
                 }
             }
 
-            // Opportunistically drain multiple frames per tick into SHM ring to absorb TTS bursts
-            if (out_channel_) {
-                constexpr int kBurstFrames = 8; // Pace SHM backlog to reduce ring saturation
+            // Opportunistically drain multiple frames per tick into UDP to absorb TTS bursts
+            {
+                bool has_udp = false;
+                {
+                    std::lock_guard<std::mutex> lk(udp_mutex_);
+                    if (udp_dest_port_ > 0) has_udp = true;
+                }
 
-                for (int n = 0; n < kBurstFrames; ++n) {
-                    uint8_t frame160[160];
-                    bool have = false;
-                    {
-                        std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                        if (out_buffer_.size() >= 160) {
-                            std::memcpy(frame160, out_buffer_.data(), 160);
-                            have = true;
-                        }
-                    }
-                    if (!have) break;
+                if (has_udp) {
+                    constexpr int kBurstFrames = 8; 
 
-                    bool wrote = false;
-                    for (int tries = 0; tries < 20 && !wrote; ++tries) {
-                        wrote = out_channel_->write_frame(frame160, 160);
-                        if (!wrote) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    }
-                    if (!wrote) break; // SHM full right now; try next tick
-
-                    {
-                        std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                        if (out_buffer_.size() >= 160) {
-                            out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + 160);
-                        }
-                    }
-
-                    // Log t3 when we send the first real RTP frame of a new utterance
-                    bool do_log = false;
-                    {
-                        std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                        if (pending_first_rtp_) { pending_first_rtp_ = false; do_log = true; }
-                    }
-                    if (do_log) {
-                        std::string call_id;
+                    for (int n = 0; n < kBurstFrames; ++n) {
+                        uint8_t frame160[160];
+                        bool have = false;
                         {
-                            std::lock_guard<std::mutex> lock(call_mutex_);
-                            call_id = current_call_id_;
+                            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                            if (out_buffer_.size() >= 160) {
+                                std::memcpy(frame160, out_buffer_.data(), 160);
+                                have = true;
+                            }
                         }
-                        auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
-                        auto ms = now.time_since_epoch().count();
-                        std::cout << "t3: First RTP frame sent [call " << call_id << "] ts=" << ms << std::endl;
+                        if (!have) break;
+
+                        bool wrote = false;
+                        // Prepare UDP packet: [call_id:4][G711:160]
+                        std::vector<uint8_t> pkt(4 + 160);
+                        {
+                            std::lock_guard<std::mutex> lk(udp_mutex_);
+                            *reinterpret_cast<uint32_t*>(pkt.data()) = htonl(udp_call_id_);
+                            std::memcpy(pkt.data() + 4, frame160, 160);
+                            
+                            struct sockaddr_in dest_addr{};
+                            dest_addr.sin_family = AF_INET;
+                            dest_addr.sin_port = htons(udp_dest_port_);
+                            dest_addr.sin_addr.s_addr = inet_addr(udp_dest_ip_.c_str());
+                            
+                            if (sendto(udp_socket_, pkt.data(), pkt.size(), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr)) > 0) {
+                                wrote = true;
+                            }
+                        }
+                        if (!wrote) break; 
+
+                        {
+                            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                            if (out_buffer_.size() >= 160) {
+                                out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + 160);
+                            }
+                        }
+
+                        // Log t3 when we send the first real RTP frame of a new utterance
+                        bool do_log = false;
+                        {
+                            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
+                            if (pending_first_rtp_) { pending_first_rtp_ = false; do_log = true; }
+                        }
+                        if (do_log) {
+                            std::string call_id;
+                            {
+                                std::lock_guard<std::mutex> lock(call_mutex_);
+                                call_id = current_call_id_;
+                            }
+                            auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
+                            auto ms = now.time_since_epoch().count();
+                            std::cout << "t3: First RTP frame sent [call " << call_id << "] ts=" << ms << std::endl;
+                        }
                     }
                 }
             }

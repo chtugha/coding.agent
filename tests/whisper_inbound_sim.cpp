@@ -534,7 +534,7 @@ int main(int argc, char** argv) {
     }
 
     // Load reference map(s) from TSV if available
-    const std::string ref_tsv = "/Users/whisper/Documents/augment-projects/clean-repo/tests/data/harvard/harvard_references.tsv";
+    const std::string ref_tsv = "/Users/ollama/Documents/whisper-server2/coding.agent/tests/data/harvard/harvard_references.tsv";
     auto refs_by_name = load_references_multi(ref_tsv);
     if (refs_by_name.empty()) {
         std::cerr << "⚠️  reference map empty; WER checks will be skipped unless you provide: " << ref_tsv << "\n";

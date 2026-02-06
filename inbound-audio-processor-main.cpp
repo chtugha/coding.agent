@@ -1,118 +1,23 @@
 #include "inbound-audio-processor.h"
-#include "shmem_audio_channel.h"
+#include "rtp-packet.h"
 #include <iostream>
 #include <signal.h>
 #include <thread>
 #include <chrono>
 #include <memory>
 #include <sys/socket.h>
-#include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
+#include <atomic>
+#include <vector>
 
-// Control socket path
-static const char* kInboundCtrlSock = "/tmp/inbound-audio-processor.ctrl";
-
-// Global processor instance and SHM I/O
+std::atomic<bool> g_running{true};
 std::unique_ptr<InboundAudioProcessor> g_processor;
-std::shared_ptr<ShmAudioChannel> g_in_channel;
-std::thread g_reader_thread;
-std::atomic<bool> g_reader_running{false};
-std::mutex g_reader_mutex;
-
-static void stop_reader_locked_() {
-    if (g_reader_running.exchange(false)) {
-        if (g_reader_thread.joinable()) g_reader_thread.join();
-    }
-}
-
-static void start_reader_locked_() {
-    if (g_reader_running.exchange(true)) return;
-    g_reader_thread = std::thread([]() {
-        uint16_t seq = 0; uint32_t ts = 0; const uint32_t kInc = 160; // 20ms @8kHz
-        std::vector<uint8_t> frame;
-        while (g_reader_running.load()) {
-            if (g_in_channel && g_in_channel->read_frame(frame)) {
-                RTPAudioPacket pkt(0, frame, ts, seq);
-                if (g_processor) g_processor->process_rtp_audio(pkt);
-                seq++; ts += kInc;
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            }
-        }
-    });
-}
-
-static bool open_inbound_channel_(int call_id) {
-    auto ch = std::make_shared<ShmAudioChannel>();
-    std::string name = std::string("/ap_in_") + std::to_string(call_id);
-    if (!ch->create_or_open(name, static_cast<uint32_t>(call_id), 2048, 512, /*create=*/false)) {
-        std::cerr << "❌ Failed to open shared memory channel: " << name << std::endl;
-        return false;
-    }
-    ch->set_role_consumer(true);
-    g_in_channel = ch;
-    std::cout << "🔌 Inbound SHM channel bound: " << name << std::endl;
-    return true;
-}
-
-static void handle_control_connection_(int cfd, int base_port) {
-    char buf[256]; ssize_t n = read(cfd, buf, sizeof(buf)-1); if (n <= 0) return; buf[n] = '\0';
-    std::string cmd(buf);
-    if (cmd.rfind("ACTIVATE", 0) == 0) {
-        // Format: ACTIVATE <call_id>\n
-        int call_id = -1;
-        try { call_id = std::stoi(cmd.substr(9)); } catch (...) { call_id = -1; }
-        if (call_id >= 0) {
-            std::lock_guard<std::mutex> lk(g_reader_mutex);
-            stop_reader_locked_();
-            if (!open_inbound_channel_(call_id)) return;
-            if (g_processor && !g_processor->is_running()) g_processor->start(base_port);
-            if (g_processor) g_processor->activate_for_call(std::to_string(call_id));
-            start_reader_locked_();
-            std::cout << "✅ Activated for call " << call_id << std::endl;
-        }
-    } else if (cmd.rfind("DEACTIVATE", 0) == 0) {
-        std::lock_guard<std::mutex> lk(g_reader_mutex);
-        stop_reader_locked_();
-        if (g_processor) g_processor->deactivate_after_call();
-        g_in_channel.reset();
-        std::cout << "😴 Deactivated (SLEEPING)" << std::endl;
-    } else if (cmd.rfind("SHUTDOWN", 0) == 0) {
-        std::lock_guard<std::mutex> lk(g_reader_mutex);
-        stop_reader_locked_();
-        if (g_processor) { g_processor->deactivate_after_call(); g_processor->stop(); }
-        std::cout << "🛑 Shutdown requested" << std::endl;
-        exit(0);
-    }
-}
-
-static void control_server_thread_(int base_port) {
-    int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sfd < 0) return;
-    ::unlink(kInboundCtrlSock);
-    struct sockaddr_un addr{}; addr.sun_family = AF_UNIX; std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", kInboundCtrlSock);
-    if (bind(sfd, (struct sockaddr*)&addr, sizeof(addr)) != 0) { close(sfd); return; }
-    listen(sfd, 4);
-    std::cout << "📮 Control socket listening at " << kInboundCtrlSock << std::endl;
-    while (true) {
-        int cfd = accept(sfd, nullptr, nullptr);
-        if (cfd < 0) continue;
-        handle_control_connection_(cfd, base_port);
-        close(cfd);
-    }
-}
 
 static void signal_handler(int sig) {
-    if (sig == SIGINT) {
-        std::cout << "\n🛑 SIGINT - exiting inbound processor" << std::endl;
-        if (g_processor) { g_processor->deactivate_after_call(); g_processor->stop(); }
-        exit(0);
-    } else if (sig == SIGTERM) {
-        std::cout << "\n😴 SIGTERM - deactivating (sleep)" << std::endl;
-        std::lock_guard<std::mutex> lk(g_reader_mutex);
-        stop_reader_locked_();
-        if (g_processor) g_processor->deactivate_after_call();
-    }
+    std::cout << "\n🛑 Signal received (" << sig << "), shutting down..." << std::endl;
+    g_running = false;
 }
 
 static void setup_signal_handlers() {
@@ -124,49 +29,111 @@ static void setup_signal_handlers() {
 static void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [options]\n"
               << "Options:\n"
-              << "  --port PORT        Base port for inbound processor (default: 8083)\n"
-              << "  --call-id ID       Numeric call_id (optional)\n"
+              << "  --port PORT        UDP port to listen for RTP packets (default: 9001)\n"
               << "  --help            Show this help message\n";
 }
 
 int main(int argc, char* argv[]) {
-    std::cout << "🎤 Starting Inbound Audio Processor Service..." << std::endl;
+    int listen_port = 9001;
 
-    int base_port = 8083; int call_id = -1;
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "--help") { print_usage(argv[0]); return 0; }
-        else if (arg == "--port" && i + 1 < argc) { base_port = std::stoi(argv[++i]); }
-        else if (arg == "--call-id" && i + 1 < argc) { call_id = std::stoi(argv[++i]); }
-        else { std::cerr << "❌ Unknown argument: " << arg << std::endl; return 1; }
+        if (arg == "--help") {
+            print_usage(argv[0]);
+            return 0;
+        } else if (arg == "--port" && i + 1 < argc) {
+            listen_port = std::stoi(argv[++i]);
+        } else {
+            std::cerr << "❌ Unknown argument: " << arg << std::endl;
+            print_usage(argv[0]);
+            return 1;
+        }
     }
 
     setup_signal_handlers();
 
-    try {
-        g_processor = std::make_unique<InboundAudioProcessor>();
-        if (!g_processor->start(base_port)) { std::cerr << "❌ Failed to start inbound audio processor" << std::endl; return 1; }
+    std::cout << "🎤 Starting Standalone Inbound Audio Processor..." << std::endl;
+    std::cout << "📡 Listening for RTP on UDP port: " << listen_port << std::endl;
 
-        // Start control socket server
-        std::thread([base_port]() { control_server_thread_(base_port); }).detach();
-    } catch (const std::exception& e) {
-        std::cerr << "❌ Failed to create inbound processor: " << e.what() << std::endl; return 1; }
-
-    // If call_id provided, activate immediately
-    if (call_id >= 0) {
-        std::lock_guard<std::mutex> lk(g_reader_mutex);
-        if (open_inbound_channel_(call_id)) {
-            g_processor->activate_for_call(std::to_string(call_id));
-            start_reader_locked_();
-        }
-    } else {
-        std::cout << "😴 Waiting for ACTIVATE via control socket " << kInboundCtrlSock << std::endl;
+    g_processor = std::make_unique<InboundAudioProcessor>();
+    if (!g_processor->start(8083)) { // Base port for Whisper TCP is still needed
+        std::cerr << "❌ Failed to start inbound audio processor" << std::endl;
+        return 1;
     }
 
-    try {
-        while (g_processor && g_processor->is_running()) std::this_thread::sleep_for(std::chrono::seconds(1));
-    } catch (const std::exception& e) { std::cerr << "❌ Runtime error: " << e.what() << std::endl; return 1; }
+    // Create UDP socket
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return 1;
+    }
 
-    std::cout << "🛑 Inbound Audio Processor stopped" << std::endl;
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(listen_port);
+
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(sock);
+        return 1;
+    }
+
+    // Set timeout for recvfrom to check g_running
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    char buffer[2048];
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    std::cout << "🚀 Ready to process audio packets" << std::endl;
+
+    while (g_running) {
+        ssize_t received = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &client_len);
+        if (received > 0) {
+            // Assume the first 4 bytes are the call_id as uint32_t, followed by RTP packet
+            if (received < 4 + 12) continue; // Minimum size: call_id + RTP header
+
+            uint32_t call_id = ntohl(*reinterpret_cast<uint32_t*>(buffer));
+            std::string call_id_str = std::to_string(call_id);
+
+            // Update processor's current call_id if it changed
+            if (g_processor->get_current_call_id() != call_id_str) {
+                std::cout << "📞 New call detected: " << call_id_str << std::endl;
+                g_processor->activate_for_call(call_id_str);
+            }
+
+            // Parse RTP packet
+            RTPAudioPacket rtp_packet;
+            // The existing RTPAudioPacket constructor or parse method might need to be used
+            // Looking at the code, it seems RTPAudioPacket is a simple wrapper.
+            // Let's use the raw data skipping the call_id.
+            
+            // Re-verify RTPAudioPacket structure
+            // In sip-client-main.cpp:852: RTPAudioPacket packet(payload_type, audio_payload, timestamp, sequence);
+            
+            // Let's parse the RTP header properly
+            uint8_t* rtp_data = (uint8_t*)buffer + 4;
+            size_t rtp_len = received - 4;
+            
+            if (rtp_len >= 12) {
+                uint8_t payload_type = rtp_data[1] & 0x7F;
+                uint16_t sequence = (rtp_data[2] << 8) | rtp_data[3];
+                uint32_t timestamp = (rtp_data[4] << 24) | (rtp_data[5] << 16) | (rtp_data[6] << 8) | rtp_data[7];
+                std::vector<uint8_t> payload(rtp_data + 12, rtp_data + rtp_len);
+                
+                RTPAudioPacket pkt(payload_type, payload, timestamp, sequence);
+                g_processor->process_rtp_audio(pkt);
+            }
+        }
+    }
+
+    g_processor->stop();
+    close(sock);
+    std::cout << "🛑 Inbound Audio Processor stopped cleanly" << std::endl;
+
     return 0;
 }

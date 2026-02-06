@@ -9,7 +9,7 @@ from urllib.request import urlopen, Request
 
 OSR_URL = "https://www.voiptroubleshooter.com/open_speech/american.html"
 HARVARD_URL = "https://www.cs.columbia.edu/~hgs/audio/harvard.html"
-ROOT = "/Users/whisper/Documents/augment-projects/clean-repo"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "tests", "data", "harvard")
 WAV_DIR = os.path.join(DATA_DIR, "wav")
 REF_TSV = os.path.join(DATA_DIR, "harvard_references.tsv")

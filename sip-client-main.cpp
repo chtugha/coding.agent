@@ -1043,15 +1043,21 @@ void SimpleSipClient::handle_invite(const std::string& message, const struct soc
     std::cout << "📞 Sending 180 Ringing..." << std::endl;
     send_sip_response(180, "Ringing", call_id, from, to, via, cseq, sender_addr, line_id);
 
-    // Wait a moment to simulate ringing
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-    // Send 200 OK response to accept the call
-    send_sip_response(200, "OK", call_id, from, to, via, cseq, sender_addr, line_id);
-
     // Extract caller number from From header using RFC-compliant parsing
     std::string caller_number = extract_phone_number(from);
     std::cout << "📞 Extracted caller number: " << caller_number << " (from: " << from << ")" << std::endl;
+
+    // Launch audio processors BEFORE accepting call
+    std::cout << "🚀 Pre-launching audio processors for call " << call_id << std::endl;
+    handle_incoming_call(caller_number, call_id);
+
+    // Wait for audio processors to initialize and connect to services
+    std::cout << "⏳ Waiting for audio processors to initialize and connect to services..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+    // Now send 200 OK response to accept the call
+    std::cout << "📞 Sending 200 OK (audio processors ready)..." << std::endl;
+    send_sip_response(200, "OK", call_id, from, to, via, cseq, sender_addr, line_id);
 
     // Create and store call state for proper BYE handling (sessionless)
     {
@@ -1069,9 +1075,6 @@ void SimpleSipClient::handle_invite(const std::string& message, const struct soc
         active_calls_[call_id] = call_session;
         std::cout << "📞 Call state stored: " << call_id << " (status: active)" << std::endl;
     }
-
-    // Handle incoming call (sessionless)
-    handle_incoming_call(caller_number, call_id);
 }
 
 void SimpleSipClient::send_sip_response(int code, const std::string& reason, const std::string& call_id,

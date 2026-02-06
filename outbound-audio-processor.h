@@ -1,7 +1,6 @@
 #pragma once
 
 #include "base-audio-processor.h"
-#include "shmem_audio_channel.h"
 #include <thread>
 #include <functional>
 #include <unordered_map>
@@ -23,9 +22,9 @@ public:
     // SIP client callback interface (deprecated, kept for compatibility)
     void set_sip_client_callback(std::function<void(const std::string&, const std::vector<uint8_t>&)> callback);
 
-    // Shared memory output to SIP client
-    void set_shared_memory_out(std::shared_ptr<ShmAudioChannel> channel);
-    void clear_shared_memory_out();
+    // UDP output to SIP client
+    void set_udp_output(const std::string& ip, int port, uint32_t call_id);
+    void clear_udp_output();
 
     // Optional μ-law WAV2 silence data for testing (auto-cycled by scheduler)
     void set_silence_wav2_bytes(const std::vector<uint8_t>& bytes);
@@ -67,8 +66,12 @@ private:
     // SIP client callback (deprecated)
     std::function<void(const std::string&, const std::vector<uint8_t>&)> sip_client_callback_;
 
-    // Shared memory channel for outbound G.711 bytes
-    std::shared_ptr<ShmAudioChannel> out_channel_;
+    // UDP destination for outbound G.711 bytes
+    std::string udp_dest_ip_;
+    int udp_dest_port_ = -1;
+    uint32_t udp_call_id_ = 0;
+    int udp_socket_ = -1;
+    std::mutex udp_mutex_;
 
     // TCP connection from Piper service
     int piper_tcp_socket_;

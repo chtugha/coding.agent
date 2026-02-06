@@ -168,7 +168,7 @@ private:
 
 // Configuration and main entry point
 struct WhisperServiceArgs {
-    std::string model_path = "models/ggml-base.en.bin";
+    std::string model_path = "whisper-cpp/models/ggml-large-v3.bin";
     std::string database_path = "whisper_talk.db";
     std::string discovery_host = "127.0.0.1";
     int discovery_port = 13000;
@@ -176,7 +176,7 @@ struct WhisperServiceArgs {
     bool use_gpu = true;
     std::string language = "en";
     float temperature = 0.0f;
-    bool no_timestamps = false;
+    bool no_timestamps = true; // Default to true for speed
     bool translate = false;
     int discovery_interval_ms = 5000;
     bool verbose = false;

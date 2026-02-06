@@ -111,8 +111,20 @@ check_onnx_compat(){
 # --- Builders ---
 build_whisper(){
   log "Configuring whisper-cpp..."
-  cmake -S "$ROOT_DIR/whisper-cpp" -B "$ROOT_DIR/whisper-cpp/build" -DCMAKE_BUILD_TYPE=Release \
-    -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF
+  local cmake_opts=(
+    -S "$ROOT_DIR/whisper-cpp" 
+    -B "$ROOT_DIR/whisper-cpp/build" 
+    -DCMAKE_BUILD_TYPE=Release
+    -DWHISPER_BUILD_TESTS=OFF 
+    -DWHISPER_BUILD_EXAMPLES=OFF
+  )
+  
+  if [[ "$(uname -s)" = "Darwin" ]]; then
+    log "Enabling CoreML for macOS"
+    cmake_opts+=( -DWHISPER_COREML=1 )
+  fi
+
+  cmake "${cmake_opts[@]}"
   log "Building whisper-cpp..."
   cmake --build "$ROOT_DIR/whisper-cpp/build" --config Release -j 6
 }

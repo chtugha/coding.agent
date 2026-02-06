@@ -9,7 +9,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(BUILD_HTTP_SERVER "Build the HTTP server" ON)
 option(BUILD_WHISPER_SERVICE "Build the Whisper service" ON)
 option(BUILD_LLAMA_SERVICE "Build the LLaMA service" ON)
-option(BUILD_PIPER_SERVICE "Build the Piper service" ON)
+option(BUILD_PIPER_SERVICE "Build the Piper service" OFF)
 option(BUILD_SIP_CLIENT "Build the SIP client" ON)
 
 # Dependencies
@@ -127,19 +127,17 @@ endif()
 if(BUILD_SIP_CLIENT)
     add_executable(sip-client
         sip-client-main.cpp
-        shmem_audio_channel.cpp
         ${SHARED_SOURCES}
     )
-    target_link_libraries(sip-client PRIVATE Threads::Threads SQLite::SQLite3 OpenSSL::SSL OpenSSL::Crypto)
+    target_link_libraries(sip-client PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3)
 endif()
 
-# Standalone audio processor binaries (no DB, SHM-based)
+# Standalone audio processor binaries (no DB, UDP-based)
 add_executable(inbound-audio-processor
     inbound-audio-processor-main.cpp
     inbound-audio-processor.cpp
     base-audio-processor.cpp
     simple-audio-processor.cpp
-    shmem_audio_channel.cpp
     service-advertisement.cpp
 )
 
@@ -150,7 +148,6 @@ add_executable(outbound-audio-processor
     outbound-audio-processor.cpp
     base-audio-processor.cpp
     simple-audio-processor.cpp
-    shmem_audio_channel.cpp
     service-advertisement.cpp
 )
 

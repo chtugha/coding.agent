@@ -27,6 +27,7 @@ public:
     // Call management
     void activate_for_call(const std::string& call_id) override;
     void deactivate_after_call() override;
+    std::string get_current_call_id() const { return current_call_id_; }
 
     // Status
     ProcessorStatus get_status() const override;
@@ -59,10 +60,6 @@ private:
     std::atomic<bool> registration_running_;
     std::thread registration_thread_;
 
-    // TCP server for SIP client connections
-    int sip_client_listen_socket_;
-    std::atomic<bool> sip_server_running_;
-    std::thread sip_server_thread_;
     std::mutex whisper_mutex_;
 
     // Internal methods
@@ -76,11 +73,6 @@ private:
     void start_registration_polling(const std::string& call_id);
     void stop_registration_polling();
     void registration_polling_thread(const std::string& call_id);
-
-    // SIP client server methods
-    void handle_sip_client_connections();
-    void process_sip_client_connection(int client_socket);
-    bool read_exact_from_socket(int socket_fd, void* data, size_t size);
 
     // Port calculation
     int calculate_whisper_port(const std::string& call_id);

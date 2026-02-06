@@ -47,6 +47,14 @@ private:
     bool has_speech_;
     int sample_rate_;
     
+    // VAD state (sessionless)
+    bool in_speech_;
+    std::vector<float> current_chunk_;
+    int consec_speech_;
+    int consec_silence_;
+    int silence_windows_;
+    std::vector<float> prebuffer_;
+
     // Configuration
     std::string whisper_endpoint_;
     int chunk_duration_ms_;

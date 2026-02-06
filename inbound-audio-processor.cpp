@@ -32,8 +32,6 @@ InboundAudioProcessor::InboundAudioProcessor()
     , whisper_tcp_port_(-1)
     , whisper_connected_(false)
     , registration_running_(false)
-    , sip_client_listen_socket_(-1)
-    , sip_server_running_(false)
 {
     // Create audio interface
     audio_interface_ = std::make_unique<InboundAudioInterface>(this);
@@ -68,13 +66,9 @@ bool InboundAudioProcessor::start(int base_port) {
     running_.store(true);
     active_.store(false); // Start in sleeping state
 
-    // Start SIP client server
-    // start_sip_client_server(base_port);
-
     std::cout << "😴 Inbound Audio Processor started (SLEEPING) on base port " << base_port << std::endl;
     std::cout << "📡 TCP sockets will be created dynamically based on call_id" << std::endl;
     std::cout << "📢 Service advertiser running on port 13000 (standard discovery port)" << std::endl;
-    std::cout << "🔌 SIP client server running on port " << base_port << std::endl;
     
     return true;
 }
@@ -84,16 +78,6 @@ void InboundAudioProcessor::stop() {
 
     // Stop registration polling
     stop_registration_polling();
-
-    // Stop SIP client server
-    sip_server_running_.store(false);
-    if (sip_client_listen_socket_ >= 0) {
-        close(sip_client_listen_socket_);
-        sip_client_listen_socket_ = -1;
-    }
-    if (sip_server_thread_.joinable()) {
-        sip_server_thread_.join();
-    }
 
     // Close TCP sockets
     {
