@@ -3,6 +3,7 @@
 Kokoro TTS Service - Drop-in replacement for Piper
 Uses PyTorch with Metal Performance Shaders for Apple Silicon optimization
 Compatible with existing C++ TCP client code
+Now supports multi-language including German (de)
 """
 
 import torch
@@ -19,6 +20,7 @@ from pathlib import Path
 # Check if kokoro is installed
 try:
     from kokoro import KPipeline
+    from kokoro.model import KModel
 except ImportError:
     print("❌ Kokoro not installed. Install with: pip install torch kokoro")
     sys.exit(1)
@@ -30,12 +32,12 @@ class KokoroTCPService:
         Initialize Kokoro TTS service
 
         Args:
-            voice: Voice to use (af_sky, af_bella, af_sarah, am_adam, am_michael, bf_emma, bf_isabella, bm_george, bm_lewis)
+            voice: Default voice to use
             tcp_port: TCP port for LLaMA connections
             udp_port: UDP port for audio processor registrations
             device: PyTorch device (mps for Apple Silicon, cuda for NVIDIA, cpu for fallback)
         """
-        self.voice = voice
+        self.default_voice = voice
         self.tcp_port = tcp_port
         self.udp_port = udp_port
         self.running = True
@@ -67,23 +69,78 @@ class KokoroTCPService:
             self.device_str = "cpu"
             print(f"⚠️  Using CPU (slower)")
 
-        # Initialize Kokoro pipeline
-        print(f"🔄 Loading Kokoro model...")
-        self.pipeline = KPipeline(lang_code='en-us', device=self.device_str)
-        print(f"✅ Kokoro model loaded")
+        # Initialize Kokoro pipelines and voices
+        self.pipelines = {}
+        self.cached_voices = {}
+        self.load_pipelines()
 
         print(f"🎤 Kokoro TTS Service initialized")
-        print(f"   Voice: {voice}")
+        print(f"   Default Voice: {self.default_voice}")
         print(f"   Device: {self.device_str}")
         print(f"   TCP Port: {tcp_port}")
         print(f"   UDP Port: {udp_port}")
-    
-    def synthesize(self, text, speed=1.0):
+
+    def load_pipelines(self):
+        """Load various language pipelines"""
+        # English Pipeline (Default)
+        print(f"🔄 Loading English pipeline...")
+        self.pipelines['a'] = KPipeline(lang_code='a', device=self.device_str)
+        print(f"✅ English pipeline loaded")
+
+        # German Pipeline (Custom Model)
+        german_model_path = Path("models/kokoro-german/kokoro-german-v1_1-de.pth")
+        german_config_path = Path("models/kokoro-german/config.json")
+        german_voices_dir = Path("models/kokoro-german/voices")
+        
+        if german_model_path.exists() and german_config_path.exists():
+            print(f"🔄 Loading German pipeline (custom model)...")
+            try:
+                # Load custom German model
+                german_model = KModel(config=str(german_config_path), model=str(german_model_path))
+                # Note: 'de' is not a standard lang_code in KPipeline yet, 
+                # but we can use 'a' as a placeholder when providing the model explicitly.
+                self.pipelines['de'] = KPipeline(lang_code='a', model=german_model, device=self.device_str)
+                
+                # Pre-load German voices if they exist
+                if german_voices_dir.exists():
+                    for voice_file in german_voices_dir.glob("*.pt"):
+                        voice_name = voice_file.stem
+                        print(f"📥 Pre-loading German voice: {voice_name}")
+                        # Ensure voice is a FloatTensor for KPipeline compatibility
+                        voice_tensor = torch.load(voice_file, weights_only=True)
+                        if isinstance(voice_tensor, torch.Tensor):
+                            self.cached_voices[voice_name] = voice_tensor.float()
+                        else:
+                            print(f"⚠️  Loaded voice {voice_name} is not a tensor")
+                
+                print(f"✅ German pipeline loaded")
+            except Exception as e:
+                print(f"⚠️  Failed to load German pipeline: {e}")
+        else:
+            print(f"ℹ️  German model not found at {german_model_path}, skipping German support")
+
+    def get_pipeline_and_voice(self, voice_name=None):
+        """Determine which pipeline and voice to use"""
+        v = voice_name or self.default_voice
+        
+        # Check if it's a cached voice (German)
+        if v in self.cached_voices:
+            return self.pipelines.get('de', self.pipelines['a']), self.cached_voices[v]
+        
+        # Mapping voices to languages
+        if v.startswith('de_') or v in ['df_eva', 'dm_bernd']:
+            return self.pipelines.get('de', self.pipelines['a']), v
+        
+        # Default to English pipeline
+        return self.pipelines['a'], v
+
+    def synthesize(self, text, voice_name=None, speed=1.0):
         """
         Synthesize text to audio
 
         Args:
             text: Text to synthesize
+            voice_name: Voice to use (optional)
             speed: Speech speed (1.0 = normal)
 
         Returns:
@@ -92,9 +149,11 @@ class KokoroTCPService:
         start_time = time.time()
 
         try:
+            pipeline, voice = self.get_pipeline_and_voice(voice_name)
+            
             # Collect all audio chunks from the pipeline
             audio_chunks = []
-            for result in self.pipeline(text, voice=self.voice, speed=speed):
+            for result in pipeline(text, voice=voice, speed=speed):
                 if result.audio is not None:
                     audio_chunks.append(result.audio)
 
@@ -286,6 +345,7 @@ class KokoroTCPService:
 
     def handle_client(self, client_socket, addr):
         """Handle a single client connection"""
+        call_id = "unknown"
         try:
             # Read HELLO message (call_id)
             length_bytes = client_socket.recv(4)
@@ -304,7 +364,6 @@ class KokoroTCPService:
             print(f"👋 HELLO from LLaMA for call_id={call_id}")
             
             # Process text chunks
-            chunk_id = 0
             while self.running:
                 # Read text chunk length
                 length_bytes = client_socket.recv(4)
@@ -327,10 +386,19 @@ class KokoroTCPService:
                     break
                 
                 text = text_bytes.decode('utf-8')
-                print(f"📝 Synthesizing for call {call_id}: {text[:50]}...")
+                
+                # Check if voice is specified in text (custom protocol extension: "VOICE:name|Actual text")
+                current_voice = self.default_voice
+                if text.startswith("VOICE:"):
+                    parts = text.split("|", 1)
+                    if len(parts) == 2:
+                        current_voice = parts[0][6:]
+                        text = parts[1]
+                
+                print(f"📝 Synthesizing for call {call_id} using {current_voice}: {text[:50]}...")
 
                 # Synthesize audio
-                audio, sample_rate, synthesis_time = self.synthesize(text)
+                audio, sample_rate, synthesis_time = self.synthesize(text, voice_name=current_voice)
 
                 if audio is not None and len(audio) > 0:
                     # Calculate audio duration and real-time factor
@@ -340,7 +408,7 @@ class KokoroTCPService:
                     print(f"🎵 Synthesized {len(audio)} samples @{sample_rate}Hz for call {call_id}")
                     print(f"   ⚡ Synthesis: {synthesis_time:.3f}s | Audio: {audio_duration:.3f}s | RTF: {rtf:.3f}x")
 
-                    # Send audio to outbound processor (not back to llama)
+                    # Send audio to outbound processor
                     if self.send_audio_to_outbound(call_id, audio, sample_rate):
                         print(f"🔊 Sent audio to outbound processor for call {call_id}")
                     else:
@@ -363,7 +431,7 @@ class KokoroTCPService:
                 client_socket.close()
             except:
                 pass
-            print(f"🔌 Client disconnected for call {call_id if 'call_id' in locals() else 'unknown'}")
+            print(f"🔌 Client disconnected for call {call_id}")
     
     def run(self):
         """Run the TCP server and UDP registration listener"""
@@ -478,4 +546,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
