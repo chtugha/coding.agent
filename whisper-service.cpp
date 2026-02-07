@@ -115,10 +115,89 @@ bool WhisperSession::process_audio_chunk(const std::vector<float>& audio_samples
     // Update activity timestamp
     mark_activity();
 
-    // IMMEDIATE PROCESSING - NO BUFFERING, NO DELAYS
-    // Process the audio chunk as soon as it arrives for real-time speed
-    return process_window(audio_samples);
+    // VAD-based processing for better sentence awareness
+    std::lock_guard<std::recursive_mutex> lock(session_mutex_);
+    audio_buffer_.insert(audio_buffer_.end(), audio_samples.begin(), audio_samples.end());
+
+    // std::cout << "DEBUG [" << call_id_ << "] Buffer size: " << audio_buffer_.size() << " samples" << std::endl;
+    
+    if (audio_buffer_.size() > 1000000) {
+        std::cout << "⚠️ [" << call_id_ << "] Buffer overflow, clearing" << std::endl;
+        audio_buffer_.clear();
+    }
+
+    const size_t window_size = 320; // 20ms at 16kHz
+    const float vad_threshold_sq = 0.00000225f; // 0.0015^2
+    const float vad_stop_threshold_sq = vad_threshold_sq * 0.25f;
+    
+    size_t processed_until = 0;
+    bool any_inference = false;
+
+    while (processed_until + window_size <= audio_buffer_.size()) {
+        std::vector<float> window(audio_buffer_.begin() + processed_until, 
+                                  audio_buffer_.begin() + processed_until + window_size);
+        float energy_sq = calculate_energy(window);
+        
+        bool speech_now = in_speech_ ? (energy_sq > vad_stop_threshold_sq) : (energy_sq > vad_threshold_sq);
+
+        if (speech_now) {
+            consec_speech_++;
+            consec_silence_ = 0;
+        } else {
+            consec_silence_++;
+            consec_speech_ = 0;
+        }
+
+        if (!in_speech_) {
+            prebuffer_.insert(prebuffer_.end(), window.begin(), window.end());
+            if (prebuffer_.size() > 8000) { // 500ms
+                prebuffer_.erase(prebuffer_.begin(), prebuffer_.begin() + window_size);
+            }
+
+            if (consec_speech_ >= 2) { // 40ms of speech
+                in_speech_ = true;
+                std::cout << "🎙️ [" << call_id_ << "] VAD: Speech started" << std::endl;
+                current_segment_.insert(current_segment_.end(), prebuffer_.begin(), prebuffer_.end());
+                prebuffer_.clear();
+            }
+        }
+
+        if (in_speech_) {
+            current_segment_.insert(current_segment_.end(), window.begin(), window.end());
+            
+            // End of segment detected by silence or max length
+            // Using 500ms-800ms silence hangover for better natural sentences
+            if (consec_silence_ >= 30 || current_segment_.size() >= 320000) { // 600ms silence or 20s audio
+                if (current_segment_.size() > 4800) { // Min 300ms
+                    std::cout << "🎙️ [" << call_id_ << "] VAD: Segment complete (" << current_segment_.size() << " samples)" << std::endl;
+                    if (process_window(current_segment_)) {
+                        any_inference = true;
+                    }
+                }
+                current_segment_.clear();
+                in_speech_ = false;
+                consec_silence_ = 0;
+                consec_speech_ = 0;
+            }
+        }
+        
+        processed_until += window_size;
+    }
+
+    if (processed_until > 0) {
+        audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + processed_until);
+    }
+
+    return any_inference;
 }
+
+float WhisperSession::calculate_energy(const std::vector<float>& samples) {
+    if (samples.empty()) return 0.0f;
+    float sum = 0.0f;
+    for (float s : samples) sum += s * s;
+    return sum / samples.size();
+}
+
 
 // Process a single window with whisper inference
 bool WhisperSession::process_window(const std::vector<float>& window) {
@@ -159,8 +238,8 @@ bool WhisperSession::process_window(const std::vector<float>& window) {
     wparams.suppress_nst = true;        // Non-speech tokens suppression
     wparams.max_tokens = 0;             // No limit on tokens
     
-    // speedup exit on silence
-    wparams.no_context = true;          // Disable context for raw speed (sentences are cut by VAD)
+    // Speedup inference - sentence awareness handled by internal VAD
+    wparams.no_context = false;         // Enable context for better accuracy (VAD ensures clean segments)
     wparams.audio_ctx = 0;              // Default context size
     wparams.greedy.best_of = 1;         // Greedy only
 
@@ -191,7 +270,7 @@ bool WhisperSession::process_window(const std::vector<float>& window) {
 
         if (!transcription.empty()) {
             // Store transcription immediately - no deduplication delays
-            std::lock_guard<std::mutex> lock(session_mutex_);
+            std::lock_guard<std::recursive_mutex> lock(session_mutex_);
             latest_transcription_ = transcription;
 
             std::cout << "📝 [" << call_id_ << "] Transcription: " << transcription << std::endl;
@@ -205,7 +284,7 @@ bool WhisperSession::process_window(const std::vector<float>& window) {
 }
 
 std::string WhisperSession::get_latest_transcription() {
-    std::lock_guard<std::mutex> lock(session_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(session_mutex_);
     std::string result = latest_transcription_;
     latest_transcription_.clear(); // Clear after reading
     return result;
@@ -417,10 +496,14 @@ void StandaloneWhisperService::registration_listener_thread() {
                 }
 
                 if (!already_connected) {
-                    int call_id_num = std::stoi(call_id);
                     AudioStreamInfo stream;
                     stream.call_id = call_id;
-                    stream.tcp_port = 9001 + call_id_num;
+                    
+                    // Consistent port calculation matching InboundAudioProcessor
+                    unsigned int hash = 0;
+                    for (char c : call_id) hash = hash * 31 + c;
+                    stream.tcp_port = 9001 + (hash % 1000);
+                    
                     stream.stream_type = "inbound";
                     
                     std::thread([this, stream]() {
@@ -458,7 +541,12 @@ void StandaloneWhisperService::discover_and_connect_streams() {
         }
         AudioStreamInfo stream;
         stream.call_id = cid;
-        stream.tcp_port = 9001 + call.id;
+        
+        // Consistent port calculation matching InboundAudioProcessor
+        unsigned int hash = 0;
+        for (char c : cid) hash = hash * 31 + c;
+        stream.tcp_port = 9001 + (hash % 1000);
+        
         if (connect_to_audio_stream(stream)) {
             create_session(cid);
         }
@@ -689,6 +777,17 @@ std::string StandaloneWhisperService::post_process_transcription(const std::stri
     std::string res = text;
     res.erase(0, res.find_first_not_of(" \t\r\n"));
     res.erase(res.find_last_not_of(" \t\r\n") + 1);
+    
+    // Hallucination filters (common in whisper silence)
+    static const std::vector<std::string> filters = {
+        "Thank you.", "Thanks for watching.", "Please subscribe.", 
+        "Vielen Dank.", "Danke fürs Zuschauen.", "Abonnieren Sie."
+    };
+    
+    for (const auto& f : filters) {
+        if (res == f) return "";
+    }
+
     if (res.empty()) return "";
     if (res[0] >= 'a' && res[0] <= 'z') res[0] -= 32;
     return res;

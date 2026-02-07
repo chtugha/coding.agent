@@ -100,9 +100,8 @@ int main(int argc, char* argv[]) {
             uint32_t call_id = ntohl(*reinterpret_cast<uint32_t*>(buffer));
             std::string call_id_str = std::to_string(call_id);
 
-            // Update processor's current call_id if it changed
-            if (g_processor->get_current_call_id() != call_id_str) {
-                std::cout << "📞 New call detected: " << call_id_str << std::endl;
+            // Ensure call is active in processor
+            if (!g_processor->is_call_active(call_id_str)) {
                 g_processor->activate_for_call(call_id_str);
             }
 
@@ -126,7 +125,7 @@ int main(int argc, char* argv[]) {
                 std::vector<uint8_t> payload(rtp_data + 12, rtp_data + rtp_len);
                 
                 RTPAudioPacket pkt(payload_type, payload, timestamp, sequence);
-                g_processor->process_rtp_audio(pkt);
+                g_processor->process_rtp_audio(call_id_str, pkt);
             }
         }
     }

@@ -57,7 +57,17 @@ private:
     std::string latest_transcription_;
     std::atomic<bool> is_active_;
     std::chrono::steady_clock::time_point last_activity_;
-    mutable std::mutex session_mutex_;  // mutable for const methods
+    mutable std::recursive_mutex session_mutex_;  // recursive to allow nested calls during VAD
+
+    // Buffering and VAD logic (moved from AudioProcessor for better awareness)
+    std::vector<float> audio_buffer_;
+    std::vector<float> prebuffer_;
+    std::vector<float> current_segment_;
+    bool in_speech_ = false;
+    int consec_speech_ = 0;
+    int consec_silence_ = 0;
+
+    float calculate_energy(const std::vector<float>& samples);
 
     // Indicates whether ctx_ is shared (owned by service) or owned by this session
     bool ctx_shared_ = false;
@@ -168,13 +178,13 @@ private:
 
 // Configuration and main entry point
 struct WhisperServiceArgs {
-    std::string model_path = "whisper-cpp/models/ggml-large-v3.bin";
+    std::string model_path = "coding.agent/whisper-cpp/models/ggml-large-v3.bin";
     std::string database_path = "whisper_talk.db";
     std::string discovery_host = "127.0.0.1";
     int discovery_port = 13000;
-    int n_threads = 8;  // Optimized for M4 (10 cores: 4 performance + 6 efficiency)
+    int n_threads = 6;  // Optimized for Apple Silicon performance cores
     bool use_gpu = true;
-    std::string language = "en";
+    std::string language = "de";
     float temperature = 0.0f;
     bool no_timestamps = true; // Default to true for speed
     bool translate = false;

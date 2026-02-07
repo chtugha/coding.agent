@@ -36,6 +36,7 @@ public:
         std::string processor_type;
         size_t total_packets_processed;
         std::string current_call_id;
+        size_t active_calls;
     };
     virtual ProcessorStatus get_status() const;
 

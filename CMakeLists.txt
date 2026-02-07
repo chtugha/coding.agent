@@ -28,10 +28,6 @@ include_directories(
 )
 
 # External libraries (imported) - set these to your local builds if not auto-detected
-# Note: actual library build outputs (based on current subprojects):
-#  - whisper.cpp: ${CMAKE_SOURCE_DIR}/whisper-cpp/build/src/libwhisper.dylib
-#  - llama.cpp:   ${CMAKE_SOURCE_DIR}/llama-cpp/build/bin/libllama.dylib
-#  - libpiper:    ${CMAKE_SOURCE_DIR}/libpiper/build/libpiper.dylib (if built)
 set(DEFAULT_WHISPER_LIB ${CMAKE_SOURCE_DIR}/whisper-cpp/build/src/libwhisper.dylib)
 set(DEFAULT_LLAMA_LIB   ${CMAKE_SOURCE_DIR}/llama-cpp/build/bin/libllama.dylib)
 set(DEFAULT_PIPER_LIB   ${CMAKE_SOURCE_DIR}/libpiper/build/libpiper.dylib)
@@ -43,22 +39,16 @@ set(PIPER_LIB       "${DEFAULT_PIPER_LIB}"    CACHE FILEPATH "Path to Piper libr
 if(EXISTS ${WHISPER_CPP_LIB})
     add_library(thirdparty_whisper SHARED IMPORTED)
     set_target_properties(thirdparty_whisper PROPERTIES IMPORTED_LOCATION ${WHISPER_CPP_LIB})
-else()
-    message(WARNING "whisper-cpp library not found at ${WHISPER_CPP_LIB}. Set WHISPER_CPP_LIB to a valid path.")
 endif()
 
 if(EXISTS ${LLAMA_CPP_LIB})
     add_library(thirdparty_llama SHARED IMPORTED)
     set_target_properties(thirdparty_llama PROPERTIES IMPORTED_LOCATION ${LLAMA_CPP_LIB})
-else()
-    message(WARNING "llama.cpp library not found at ${LLAMA_CPP_LIB}. Set LLAMA_CPP_LIB to a valid path.")
 endif()
 
 if(EXISTS ${PIPER_LIB})
     add_library(thirdparty_piper SHARED IMPORTED)
     set_target_properties(thirdparty_piper PROPERTIES IMPORTED_LOCATION ${PIPER_LIB})
-else()
-    message(WARNING "Piper library not found at ${PIPER_LIB}. Set PIPER_LIB to a valid path.")
 endif()
 
 # Common compile settings
@@ -132,22 +122,21 @@ if(BUILD_SIP_CLIENT)
     target_link_libraries(sip-client PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3)
 endif()
 
-# Standalone audio processor binaries (no DB, UDP-based)
+# Standalone audio processor binaries (consolidated InboundAudioProcessor)
 add_executable(inbound-audio-processor
     inbound-audio-processor-main.cpp
     inbound-audio-processor.cpp
     base-audio-processor.cpp
-    simple-audio-processor.cpp
     service-advertisement.cpp
+    database.cpp
 )
 
-target_link_libraries(inbound-audio-processor PRIVATE Threads::Threads)
+target_link_libraries(inbound-audio-processor PRIVATE Threads::Threads SQLite::SQLite3)
 
 add_executable(outbound-audio-processor
     outbound-audio-processor-main.cpp
     outbound-audio-processor.cpp
     base-audio-processor.cpp
-    simple-audio-processor.cpp
     service-advertisement.cpp
 )
 
@@ -159,7 +148,7 @@ add_executable(whisper_inbound_sim
 )
 target_link_libraries(whisper_inbound_sim PRIVATE Threads::Threads)
 
-# Test simulator for full pipeline loop (Whisper → Llama → Kokoro → Whisper)
+# Test simulator for full pipeline loop
 add_executable(pipeline_loop_sim
     tests/pipeline_loop_sim.cpp
 )
