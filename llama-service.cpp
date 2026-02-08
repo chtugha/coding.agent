@@ -550,6 +550,7 @@ bool StandaloneLlamaService::start(int tcp_port) {
                 (void)llama_decode(warm_ctx_, tmp);
                 n_past++;
             }
+            llama_batch_free(tmp);
             llama_sampler_free(sp);
             std::cout << "✅ LLaMA warm-up completed" << std::endl;
         }
