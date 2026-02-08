@@ -106,4 +106,15 @@ private:
     // Port calculation
     int calculate_whisper_port(const std::string& call_id);
     int calculate_port_offset(const std::string& call_id);
+
+    // Control socket management
+    void start_control_socket();
+    void control_socket_loop();
+    int ctrl_socket_ = -1;
+    std::thread ctrl_thread_;
+
+    // SIP UDP listener
+    void sip_udp_loop();
+    int sip_udp_sock_ = -1;
+    std::thread sip_udp_thread_;
 };

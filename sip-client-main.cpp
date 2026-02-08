@@ -1,8 +1,7 @@
 // Standalone SIP Client Module - Optimized for Fast Audio Processing
-// Handles incoming calls, creates database sessions, manages audio streams
-// Manages SIP line connections and status updates
+// Handles incoming calls, manages audio streams
+// Manages SIP line connections
 
-#include "database.h"
 #include "audio-processor-interface.h"
 
 #include <iostream>
@@ -72,41 +71,25 @@ static bool send_control_command_retry(const char* path, const std::string& cmd,
     return false;
 }
 
-static void whisper_register_notify(int call_num_id, int repeats = 5, int delay_ms = 100) {
-    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET; addr.sin_port = htons(13000);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 127.0.0.1
-    std::string msg = std::string("REGISTER:") + std::to_string(call_num_id);
-    for (int i = 1; i <= repeats; ++i) {
-        int s = socket(AF_INET, SOCK_DGRAM, 0);
-        if (s < 0) {
-            std::cout << "⚠️ [SIP->Whisper poke] Failed to create UDP socket: " << strerror(errno) << std::endl;
-            break;
-        }
-        ssize_t sent = sendto(s, msg.data(), msg.size(), 0, (struct sockaddr*)&addr, sizeof(addr));
-        if (sent < 0) {
-            std::cout << "⚠️ [SIP->Whisper poke] REGISTER send failed for call_id " << call_num_id << ": " << strerror(errno) << std::endl;
-        } else {
-            if (i == 1 || i == repeats) {
-                std::cout << "📤 [SIP->Whisper poke] Sent REGISTER (" << i << "/" << repeats << ") for call_id " << call_num_id << std::endl;
-            }
-        }
-        close(s);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-    }
-}
-
-
-
-
 
 // Simple SIP client configuration
-struct SipConfig {
+struct SipLineConfig {
+    int line_id;
     std::string username;
     std::string password;
     std::string server_ip;
     int server_port;
-    bool auto_answer;
+    bool enabled;
+    std::string status;
+    std::string extension;
+    std::string display_name;
+};
+
+struct SipConfig {
+    std::vector<SipLineConfig> lines;
+    bool auto_answer = true;
+    std::string inbound_processor_ip = "127.0.0.1";
+    int inbound_processor_port = 9001;
 };
 
 // Call state (local to SIP client) - sessionless
@@ -279,18 +262,16 @@ public:
     SimpleSipClient();
     ~SimpleSipClient();
 
-    bool init(Database* database, int specific_line_id = -1);
+    bool init(const SipConfig& config);
 
     // Simple audio routing
-    // Removed: session registration functions - using sessionless routing
     void route_rtp_to_processor(int call_num_id, const uint8_t* rtp_data, size_t rtp_len);
 
 
     // SIP networking
     bool setup_sip_listener();
     void sip_listener_loop();
-    int allocate_dynamic_port(); // Legacy method
-    int allocate_rtp_port_for_call(const std::string& call_id); // Dynamic line-based allocation
+    int allocate_rtp_port_for_call(const std::string& call_id); 
     bool setup_rtp_listener(int rtp_port, int call_num_id);
     bool start();
     void stop();
@@ -321,9 +302,8 @@ public:
     void parse_options_response_for_user_info(const std::string& response);
 
 private:
-    Database* database_;
+    SipConfig config_;
     bool running_;
-    int specific_line_id_; // -1 means process all enabled lines
     std::thread sip_thread_;
     std::thread connection_monitor_thread_;
 
@@ -352,13 +332,11 @@ private:
     std::unordered_map<std::string, int> rtp_selected_pt_; // call_id -> payload type (0=PCMU, 8=PCMA)
     std::mutex rtp_state_mutex_;
 
-    // Outbound TTS de-dup (drop identical payloads within a short window)
+    // Outbound TTS de-dup
     uint64_t last_tts_hash_ = 0;
     size_t last_tts_size_ = 0;
     std::chrono::steady_clock::time_point last_tts_time_;
     std::mutex tts_dedup_mutex_;
-
-
 
 
     // SIP networking
@@ -368,12 +346,12 @@ private:
     std::thread sip_listener_thread_;
 
     // Registration state tracking
-    std::map<int, bool> line_registered_; // line_id -> is_registered
-    std::map<int, std::chrono::steady_clock::time_point> last_registration_; // line_id -> last_reg_time
+    std::map<int, bool> line_registered_; 
+    std::map<int, std::chrono::steady_clock::time_point> last_registration_; 
     std::mutex registration_mutex_;
 
-    // Status update tracking to avoid spam
-    std::map<int, std::string> last_status_; // line_id -> last_status
+    // Status update tracking
+    std::map<int, std::string> last_status_; 
     std::mutex status_mutex_;
 
     // Active calls
@@ -384,7 +362,7 @@ private:
     std::vector<SipLineConfig> sip_lines_;
     std::mutex sip_lines_mutex_;
 
-    // Number format handling (RFC 3966, E.164)
+    // Number format handling
     std::string extract_phone_number(const std::string& sip_header);
 
     // REGISTER response forwarding
@@ -399,12 +377,14 @@ private:
     std::string current_call_id_;
     int current_call_num_id_ = 0;
 
+    // Port/ID negotiation
+    int negotiate_call_num_id(int requested_id);
+
     // Main loops
     void sip_management_loop();
     void connection_monitor_loop();
 
     // SIP line connection management
-    void load_sip_lines_from_database(bool verbose = true);
     bool test_sip_connection(const SipLineConfig& line);
     void update_line_status(int line_id, const std::string& status);
 
@@ -427,18 +407,9 @@ private:
     void handle_bye(const std::string& message, const struct sockaddr_in& sender_addr);
     void send_sip_response(int code, const std::string& reason, const std::string& call_id, const std::string& from, const std::string& to, const std::string& via, int cseq, const struct sockaddr_in& dest_addr, int line_id = -1);
 
-
-    // Port management - use call_id directly (dynamic allocation)
-    int get_caller_port(int caller_id) const {
-        // Legacy method - kept for compatibility
-        return 10000 + caller_id;
-    }
-
     // Dynamic RTP port calculation from line_id
     int calculate_rtp_port(int line_id) const {
-        int port = 10000 + line_id;
-        std::cout << "🔢 RTP port for line " << line_id << ": " << port << " (10000 + " << line_id << ")" << std::endl;
-        return port;
+        return 10000 + line_id;
     }
 };
 
@@ -475,25 +446,46 @@ void signal_handler(int signal) {
 void print_usage() {
     std::cout << "Usage: sip-client [options]\n"
               << "Options:\n"
-              << "  --db PATH          Database file path (default: whisper_talk.db)\n"
-              << "  --help             Show this help message\n"
-              << "\nNote: SIP line configurations are read from the database.\n"
-              << "      Use the web interface to configure SIP lines.\n"
-              << "      RTP ports are auto-assigned as 10000 + line_id\n";
+              << "  --user USER        SIP username/extension\n"
+              << "  --pass PASS        SIP password\n"
+              << "  --server IP        SIP server IP\n"
+              << "  --port PORT        SIP server port (default: 5060)\n"
+              << "  --inbound IP:PORT  Inbound Audio Processor address (default: 127.0.0.1:9001)\n"
+              << "  --line-id ID       Specific line ID to use (default: 1)\n"
+              << "  --help             Show this help message\n";
 }
 
 int main(int argc, char** argv) {
-    std::string db_path = "whisper_talk.db";
-    int specific_line_id = -1; // -1 means process all enabled lines
+    SipConfig config;
+    SipLineConfig line;
+    line.line_id = 1;
+    line.server_port = 5060;
+    line.enabled = true;
+    line.status = "init";
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "--db" && i + 1 < argc) {
-            db_path = argv[++i];
-
+        if (arg == "--user" && i + 1 < argc) {
+            line.username = argv[++i];
+            line.extension = line.username;
+        } else if (arg == "--pass" && i + 1 < argc) {
+            line.password = argv[++i];
+        } else if (arg == "--server" && i + 1 < argc) {
+            line.server_ip = argv[++i];
+        } else if (arg == "--port" && i + 1 < argc) {
+            line.server_port = std::atoi(argv[++i]);
         } else if (arg == "--line-id" && i + 1 < argc) {
-            specific_line_id = std::atoi(argv[++i]);
+            line.line_id = std::atoi(argv[++i]);
+        } else if (arg == "--inbound" && i + 1 < argc) {
+            std::string inbound = argv[++i];
+            auto pos = inbound.find(':');
+            if (pos != std::string::npos) {
+                config.inbound_processor_ip = inbound.substr(0, pos);
+                config.inbound_processor_port = std::stoi(inbound.substr(pos + 1));
+            } else {
+                config.inbound_processor_ip = inbound;
+            }
         } else if (arg == "--help") {
             print_usage();
             return 0;
@@ -504,29 +496,25 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << "📞 Starting Whisper Talk LLaMA SIP Client..." << std::endl;
-    std::cout << "   Database: " << db_path << std::endl;
-    if (specific_line_id != -1) {
-        std::cout << "   Target Line ID: " << specific_line_id << " (single line mode)" << std::endl;
-    } else {
-        std::cout << "   Target: All enabled lines" << std::endl;
+    if (line.username.empty() || line.server_ip.empty()) {
+        std::cerr << "❌ Error: --user and --server are required." << std::endl;
+        print_usage();
+        return 1;
     }
+
+    config.lines.push_back(line);
+
+    std::cout << "📞 Starting Standalone SIP Client..." << std::endl;
+    std::cout << "   User: " << line.username << " @ " << line.server_ip << ":" << line.server_port << std::endl;
+    std::cout << "   Inbound Processor: " << config.inbound_processor_ip << ":" << config.inbound_processor_port << std::endl;
 
     // Setup signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Initialize database
-    Database database;
-    if (!database.init(db_path)) {
-        std::cerr << "❌ Failed to initialize database!" << std::endl;
-        return 1;
-    }
-    std::cout << "✅ Database initialized" << std::endl;
-
     // Create SIP client
     g_sip_client = std::make_unique<SimpleSipClient>();
-    if (!g_sip_client->init(&database, specific_line_id)) {
+    if (!g_sip_client->init(config)) {
         std::cerr << "❌ Failed to initialize SIP client!" << std::endl;
         return 1;
     }
@@ -542,25 +530,21 @@ int main(int argc, char** argv) {
 
     // Main loop
     while (g_running) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Fast response
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     std::cout << "🛑 Shutting down SIP client..." << std::endl;
     if (g_sip_client) {
         g_sip_client->stop();
         g_sip_client.reset();
-        std::cout << "🛑 SIP client stopped and reset" << std::endl;
-    } else {
-        std::cout << "🛑 SIP client was null (unexpected)" << std::endl;
     }
-    database.close();
     std::cout << "✅ SIP client stopped cleanly" << std::endl;
 
     return 0;
 }
 
 // SimpleSipClient implementation
-SimpleSipClient::SimpleSipClient() : database_(nullptr), running_(false),
+SimpleSipClient::SimpleSipClient() : running_(false),
                                    sip_listen_socket_(-1), sip_listen_port_(0), local_ip_("") {
     // Auto-detect local IP on startup
     update_local_ip();
@@ -585,19 +569,53 @@ SimpleSipClient::~SimpleSipClient() {
     std::cout << "🛑 SimpleSipClient destructor complete" << std::endl;
 }
 
-bool SimpleSipClient::init(Database* database, int specific_line_id) {
-    database_ = database;
-    specific_line_id_ = specific_line_id;
+bool SimpleSipClient::init(const SipConfig& config) {
+    config_ = config;
+    running_ = true;
 
-    if (!database_) {
-        std::cerr << "❌ Database is required for SIP client" << std::endl;
-        return false;
+    // Set up local IP
+    local_ip_ = detect_local_ip();
+    std::cout << "🏠 Local IP: " << local_ip_ << std::endl;
+
+    // Use lines from config
+    {
+        std::lock_guard<std::mutex> lock(sip_lines_mutex_);
+        sip_lines_ = config_.lines;
     }
 
-    // Load SIP lines from database
-    load_sip_lines_from_database();
-
     return true;
+}
+
+int SimpleSipClient::negotiate_call_num_id(int requested_id) {
+    int ctrl_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (ctrl_fd < 0) return requested_id;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/inbound-audio-processor.ctrl", sizeof(addr.sun_path) - 1);
+
+    if (connect(ctrl_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(ctrl_fd);
+        return requested_id; // Processor not running, use requested
+    }
+
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "REQUEST_ID:%d", requested_id);
+    send(ctrl_fd, cmd, strlen(cmd), 0);
+
+    char response[64];
+    memset(response, 0, sizeof(response));
+    ssize_t n = recv(ctrl_fd, response, sizeof(response) - 1, 0);
+    close(ctrl_fd);
+
+    if (n > 0) {
+        if (strncmp(response, "GRANTED_ID:", 11) == 0) {
+            return atoi(response + 11);
+        }
+    }
+
+    return requested_id;
 }
 
 bool SimpleSipClient::setup_sip_listener() {
@@ -1048,12 +1066,11 @@ void SimpleSipClient::send_sip_response(int code, const std::string& reason, con
     std::string contact_user = "whisper"; // fallback
     std::string user_agent = "Whisper-Talk-LLaMA/1.0"; // fallback
 
-    if (line_id > 0 && database_) {
-        auto sip_lines = database_->get_all_sip_lines();
-        for (const auto& line : sip_lines) {
+    {
+        std::lock_guard<std::mutex> lock(sip_lines_mutex_);
+        for (const auto& line : sip_lines_) {
             if (line.line_id == line_id) {
                 contact_user = line.username;
-                user_agent = "Whisper-Talk-LLaMA/1.0";
                 break;
             }
         }
@@ -1197,12 +1214,7 @@ void SimpleSipClient::handle_bye(const std::string& message, const struct sockad
         }
     }
 
-    // End call in database
-    if (database_) {
-        database_->end_call(call_id);
-    }
-
-    // SHM-based cleanup for this call
+    // Local cleanup for this call
     end_call(call_id);
 
     std::cout << "✅ BYE processed successfully (sessionless)" << std::endl;
@@ -1402,34 +1414,15 @@ std::string SimpleSipClient::extract_phone_number(const std::string& sip_header)
 void SimpleSipClient::handle_incoming_call(const std::string& caller_number, const std::string& call_id) {
     std::cout << "📞 Incoming call from: " << caller_number << std::endl;
 
-    if (!database_) {
-        std::cerr << "❌ No database connection available" << std::endl;
-        return;
-    }
+    // Negotiate call_num_id with Inbound Audio Processor
+    // We start with a base ID (e.g. 1) and let the processor assign us an available one
+    static int next_base_id = 1;
+    int call_num_id = negotiate_call_num_id(next_base_id++);
+    if (next_base_id > 1000) next_base_id = 1; // wrap around
 
-    // Step 1: Get or create caller in database
-    std::cout << "🔍 Looking up caller in database: " << caller_number << std::endl;
-    int caller_id = database_->get_or_create_caller(caller_number);
-    if (caller_id < 0) {
-        std::cerr << "❌ Failed to create caller record for: " << caller_number << std::endl;
-        return;
-    }
-    std::cout << "✅ Caller ID: " << caller_id << std::endl;
+    std::cout << "🆔 Negotiated call_num_id: " << call_num_id << " for call " << call_id << std::endl;
 
-    // Step 2: Create call record in database
-    int line_id = (specific_line_id_ != -1) ? specific_line_id_ : 1;
-    if (!database_->create_call(call_id, caller_id, line_id, caller_number)) {
-        std::cerr << "❌ Failed to create call record for: " << call_id << std::endl;
-        return;
-    }
-    std::cout << "📞 Call record created in database: " << call_id << std::endl;
-    // Resolve numeric call id from database row id for consistent port mapping
-    Call db_call = database_->get_call(call_id);
-    int call_num_id = db_call.id > 0 ? db_call.id : 0;
-    std::string call_num_id_str = std::to_string(call_num_id);
-
-
-    // Step 3: Register call locally (sessionless)
+    // Step 1: Register call locally
     {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         current_call_id_ = call_id;
@@ -1438,7 +1431,6 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
         SipCallSession session;
         session.call_id = call_id;
         session.call_num_id = call_num_id;
-        session.caller_id = caller_id;
         session.phone_number = caller_number;
         session.status = "active";
         session.start_time = std::chrono::system_clock::now();
@@ -1446,35 +1438,7 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
         call_num_id_to_call_id_[call_num_id] = call_id;
     }
 
-    // Notify standalone services via control commands (if needed) or simple UDP poke
-    // whisper_register_notify is still useful to pre-warm whisper
-    whisper_register_notify(call_num_id);
-
-    // Sessionless: Simple RTP port registration using call_id
-    if (!call_id.empty()) {
-        int rtp_port = -1;
-        {
-            std::lock_guard<std::mutex> lock(audio_routing_mutex_);
-            auto rtp_it = call_id_to_rtp_port_.find(call_id);
-            if (rtp_it != call_id_to_rtp_port_.end()) {
-                rtp_port = rtp_it->second;
-                // Sessionless: No need to map RTP port to session
-                call_id_to_rtp_port_.erase(rtp_it);
-                std::cout << "🎵 Registered RTP port " << rtp_port << " → call " << call_id << std::endl;
-            }
-        }
-
-
-    }
-
-    // Step 3: Assign unique port for this caller (sessionless)
-    int caller_port = get_caller_port(caller_id);
-    std::cout << "✅ Call setup complete for caller_id: " << caller_id << " (port: " << caller_port << ")" << std::endl;
-    std::cout << "📱 Call answered automatically (sessionless). Active on port " << caller_port << std::endl;
-    std::cout << "🎤 Ready to receive audio for call: " << call_id << " (port: " << caller_port << ")" << std::endl;
-
-    // Real call is now active - audio will be processed when RTP packets arrive
-    // Call will be ended when SIP BYE is received
+    std::cout << "✅ Call setup complete for call_num_id: " << call_num_id << std::endl;
 }
 
 void SimpleSipClient::end_call(const std::string& call_id) {
@@ -1582,18 +1546,14 @@ void SimpleSipClient::stream_audio_from_piper(const std::string& call_id, const 
 }
 
 // SIP Line Management Implementation
-void SimpleSipClient::load_sip_lines_from_database(bool verbose) {
-    std::lock_guard<std::mutex> lock(sip_lines_mutex_);
-    sip_lines_ = database_->get_all_sip_lines();
-
-    if (verbose) {
-        std::cout << "📋 Loaded " << sip_lines_.size() << " SIP lines from database:" << std::endl;
-        for (const auto& line : sip_lines_) {
-            std::cout << "   Line " << line.line_id << ": " << line.username
-                      << " @ " << line.server_ip << ":" << line.server_port
-                      << " (status: " << line.status << ")" << std::endl;
-        }
+void SimpleSipClient::update_line_status(int line_id, const std::string& status) {
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        if (last_status_[line_id] == status) return;
+        last_status_[line_id] = status;
     }
+    
+    std::cout << "ℹ️ Line " << line_id << " status: " << status << std::endl;
 }
 
 
@@ -1884,11 +1844,7 @@ void SimpleSipClient::update_line_status(int line_id, const std::string& status)
         last_status_[line_id] = status;
     }
 
-    if (database_->update_sip_line_status(line_id, status)) {
-        std::cout << "📊 Line " << line_id << " status: " << status << std::endl;
-    } else {
-        std::cerr << "❌ Failed to update status for line " << line_id << std::endl;
-    }
+    std::cout << "📊 Line " << line_id << " status: " << status << std::endl;
 }
 
 void SimpleSipClient::sip_management_loop() {
@@ -1911,7 +1867,6 @@ void SimpleSipClient::connection_monitor_loop() {
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
     // Initialize all line statuses on startup
-    load_sip_lines_from_database(false);
     {
         std::lock_guard<std::mutex> lock(sip_lines_mutex_);
         for (const auto& line : sip_lines_) {
@@ -1924,18 +1879,10 @@ void SimpleSipClient::connection_monitor_loop() {
     }
 
     while (running_) {
-        // Reload SIP lines from database (in case they were updated via web interface)
-        load_sip_lines_from_database(false); // Silent reload
-
         // Test connections for enabled lines
         {
             std::lock_guard<std::mutex> lock(sip_lines_mutex_);
             for (const auto& line : sip_lines_) {
-                // If specific line ID is set, only process that line
-                if (specific_line_id_ != -1 && line.line_id != specific_line_id_) {
-                    continue;
-                }
-
                 if (!line.enabled) {
                     // Always update disabled lines to disabled status
                     update_line_status(line.line_id, "disabled");

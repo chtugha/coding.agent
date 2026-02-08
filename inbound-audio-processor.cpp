@@ -86,14 +86,97 @@ bool InboundAudioProcessor::start(int base_port) {
     running_.store(true);
     active_.store(true); // Always active in multi-call mode
 
+    start_control_socket();
+
     std::cout << "🚀 Inbound Audio Processor started (MULTI-CALL) on base port " << base_port << std::endl;
     return true;
+}
+
+void InboundAudioProcessor::start_control_socket() {
+    ctrl_thread_ = std::thread(&InboundAudioProcessor::control_socket_loop, this);
+}
+
+void InboundAudioProcessor::control_socket_loop() {
+    const char* socket_path = "/tmp/inbound-audio-processor.ctrl";
+    unlink(socket_path);
+
+    ctrl_socket_ = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (ctrl_socket_ < 0) return;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+
+    if (bind(ctrl_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(ctrl_socket_);
+        return;
+    }
+
+    listen(ctrl_socket_, 5);
+    std::cout << "🎮 Control socket listening on " << socket_path << std::endl;
+
+    while (running_.load()) {
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(ctrl_socket_, &fds);
+
+        int ret = select(ctrl_socket_ + 1, &fds, nullptr, nullptr, &tv);
+        if (ret <= 0) continue;
+
+        int client_fd = accept(ctrl_socket_, nullptr, nullptr);
+        if (client_fd < 0) continue;
+
+        char buf[128];
+        memset(buf, 0, sizeof(buf));
+        ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            std::string cmd(buf);
+            if (cmd.find("REQUEST_ID:") == 0) {
+                int requested_id = std::stoi(cmd.substr(11));
+                int granted_id = requested_id;
+
+                // Check if ID is already in use
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                bool in_use = true;
+                while (in_use) {
+                    in_use = false;
+                    for (const auto& pair : active_calls_) {
+                        if (std::stoi(pair.first) == granted_id) { // Assuming numeric call_id for standalone
+                            in_use = true;
+                            granted_id++;
+                            break;
+                        }
+                    }
+                }
+
+                char resp[64];
+                snprintf(resp, sizeof(resp), "GRANTED_ID:%d", granted_id);
+                send(client_fd, resp, strlen(resp), 0);
+                std::cout << "🆔 Granted call_num_id: " << granted_id << " (requested: " << requested_id << ")" << std::endl;
+            }
+        }
+        close(client_fd);
+    }
+    close(ctrl_socket_);
+    unlink(socket_path);
 }
 
 void InboundAudioProcessor::stop() {
     if (!running_.load()) return;
     
     running_.store(false);
+
+    if (ctrl_thread_.joinable()) {
+        ctrl_thread_.join();
+    }
+
+    if (sip_udp_thread_.joinable()) {
+        sip_udp_thread_.join();
+    }
     
     std::lock_guard<std::mutex> lock(calls_mutex_);
     for (auto& pair : active_calls_) {
@@ -377,6 +460,49 @@ void InboundAudioProcessor::registration_polling_thread(std::shared_ptr<CallStat
     }
 }
 
+void InboundAudioProcessor::start_sip_client_server(int port) {
+    sip_udp_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sip_udp_sock_ < 0) return;
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(sip_udp_sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "❌ Failed to bind SIP UDP listener on port " << port << std::endl;
+        close(sip_udp_sock_);
+        sip_udp_sock_ = -1;
+        return;
+    }
+
+    std::cout << "👂 SIP UDP listener started on port " << port << std::endl;
+    sip_udp_thread_ = std::thread(&InboundAudioProcessor::sip_udp_loop, this);
+}
+
+void InboundAudioProcessor::sip_udp_loop() {
+    uint8_t buf[2048];
+    while (running_.load()) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        ssize_t n = recvfrom(sip_udp_sock_, buf, sizeof(buf), 0, (struct sockaddr*)&client_addr, &client_len);
+        if (n < 4) continue;
+
+        uint32_t cid_net;
+        memcpy(&cid_net, buf, 4);
+        int call_num_id = ntohl(cid_net);
+        std::string call_id = std::to_string(call_num_id);
+
+        if (n < 16) continue;
+
+        uint8_t payload_type = buf[4 + 1] & 0x7F;
+        const uint8_t* rtp_payload = buf + 4 + 12;
+        size_t payload_len = n - 4 - 12;
+
+        process_rtp_audio(call_id, payload_type, rtp_payload, payload_len);
+    }
+}
+
 void InboundAudioProcessor::cleanup_call(std::shared_ptr<CallState> state) {
     stop_registration_polling(state);
     
@@ -409,6 +535,12 @@ std::shared_ptr<InboundAudioProcessor::CallState> InboundAudioProcessor::get_or_
     
     auto state = std::make_shared<CallState>(call_id);
     active_calls_[call_id] = state;
+
+    // Auto-activate for new calls
+    std::cout << "📞 Auto-activating for new call: " << call_id << std::endl;
+    setup_whisper_tcp_socket(state);
+    start_registration_polling(state);
+
     return state;
 }
 

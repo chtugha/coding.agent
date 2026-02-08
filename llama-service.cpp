@@ -213,7 +213,7 @@ bool LlamaSession::prime_system_prompt() {
         }
     }
     if (sid < 0) sid = -sid;
-    seq_id_ = sid % 8; // n_seq_max is typically 8 in our warm context configuration
+    seq_id_ = sid % 64; // n_seq_max is capped at 64 in our warm context configuration
 
     // Clear any prior state for this sequence and prime with system prompt
     llama_memory_t mem = llama_get_memory(ctx_);
@@ -661,11 +661,10 @@ bool StandaloneLlamaService::destroy_session(const std::string& call_id) {
 
     sessions_.erase(it);
 
-    // DO NOT close Kokoro socket - keep it open for next call
-    // The socket is per-call_id and will be reused or cleaned up on service stop
-    // This enables sessionless architecture where TCP connections persist across calls
+    // Clean up Kokoro output socket for this call
+    close_output_for_call(call_id);
 
-    std::cout << "🗑️ Destroyed LLaMA session for call " << call_id << " (keeping Kokoro connection open)" << std::endl;
+    std::cout << "🗑️ Destroyed LLaMA session for call " << call_id << std::endl;
     return true;
 }
 

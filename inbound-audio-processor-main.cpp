@@ -56,80 +56,21 @@ int main(int argc, char* argv[]) {
     std::cout << "📡 Listening for RTP on UDP port: " << listen_port << std::endl;
 
     g_processor = std::make_unique<InboundAudioProcessor>();
-    if (!g_processor->start(8083)) { // Base port for Whisper TCP is still needed
+    if (!g_processor->start(8083)) { // Base port for Whisper TCP
         std::cerr << "❌ Failed to start inbound audio processor" << std::endl;
         return 1;
     }
 
-    // Create UDP socket
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        perror("socket");
-        return 1;
-    }
-
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(listen_port);
-
-    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind");
-        close(sock);
-        return 1;
-    }
-
-    // Set timeout for recvfrom to check g_running
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    char buffer[2048];
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
+    // Start UDP listener within the processor
+    g_processor->start_sip_client_server(listen_port);
 
     std::cout << "🚀 Ready to process audio packets" << std::endl;
 
     while (g_running) {
-        ssize_t received = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr*)&client_addr, &client_len);
-        if (received > 0) {
-            // Assume the first 4 bytes are the call_id as uint32_t, followed by RTP packet
-            if (received < 4 + 12) continue; // Minimum size: call_id + RTP header
-
-            uint32_t call_id = ntohl(*reinterpret_cast<uint32_t*>(buffer));
-            std::string call_id_str = std::to_string(call_id);
-
-            // Ensure call is active in processor
-            if (!g_processor->is_call_active(call_id_str)) {
-                g_processor->activate_for_call(call_id_str);
-            }
-
-            // Parse RTP packet
-            RTPAudioPacket rtp_packet;
-            // The existing RTPAudioPacket constructor or parse method might need to be used
-            // Looking at the code, it seems RTPAudioPacket is a simple wrapper.
-            // Let's use the raw data skipping the call_id.
-            
-            // Re-verify RTPAudioPacket structure
-            // In sip-client-main.cpp:852: RTPAudioPacket packet(payload_type, audio_payload, timestamp, sequence);
-            
-            // Let's parse the RTP header properly
-            uint8_t* rtp_data = (uint8_t*)buffer + 4;
-            size_t rtp_len = received - 4;
-            
-            if (rtp_len >= 12) {
-                uint8_t payload_type = rtp_data[1] & 0x7F;
-                const uint8_t* audio_payload = rtp_data + 12;
-                size_t audio_len = rtp_len - 12;
-                
-                g_processor->process_rtp_audio(call_id_str, payload_type, audio_payload, audio_len);
-            }
-        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     g_processor->stop();
-    close(sock);
     std::cout << "🛑 Inbound Audio Processor stopped cleanly" << std::endl;
 
     return 0;
