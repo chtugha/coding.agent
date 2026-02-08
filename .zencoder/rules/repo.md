@@ -40,7 +40,8 @@ cd coding.agent && ./scripts/build-deps.sh
 ```
 
 ## Documentation Rules
-**IMPORTANT**: The program summaries in this folder must be updated every time changes are made to the internal function or connection mechanisms of the respective programs.
+- **Summary Updates**: The program summaries in this folder MUST be updated every time changes are made to the internal function or connection mechanisms of the respective programs.
+- **Architectural Integrity**: Ensure any new service follows the standalone microservice pattern, avoiding direct database dependencies in the real-time audio path.
 
 ## Main Files & Resources
 - **SIP Client**: [./coding.agent/sip-client-main.cpp](./coding.agent/sip-client-main.cpp) ([Summary](./sip-client.md))
