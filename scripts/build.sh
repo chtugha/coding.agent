@@ -11,7 +11,7 @@ log(){ printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # Flags and options
 WITH_DEPS="auto"   # auto|0|1  -> auto builds deps if missing
-WITH_PIPER=1        # build libpiper by default (we intelligently detect ONNXRuntime)
+WITH_PIPER=0        # build libpiper by default (we intelligently detect ONNXRuntime)
 WITH_PIPER_PREBUILT="auto" # auto|0|1 -> manage/download prebuilt Piper binary for runtime (macOS arm64)
 FORCE_DEPS=0        # 1 to rebuild deps even if present
 ONNXRUNTIME_DIR_ENV="${ONNXRUNTIME_DIR:-}"
