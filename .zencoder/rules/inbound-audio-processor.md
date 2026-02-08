@@ -1,24 +1,16 @@
----
-description: Summary of the Inbound Audio Processor program
-alwaysApply: true
----
-
 # Inbound Audio Processor
 
 ## Overview
-The **Inbound Audio Processor** (`inbound-audio-processor.cpp`) is the bridge between the SIP Client and the Whisper ASR service. It transforms telephony-grade audio into a format suitable for high-accuracy speech recognition.
+The **Inbound Audio Processor** (`inbound-audio-processor.cpp`) converts telephony-grade audio (G.711) from the SIP Client into high-quality PCM audio for the Whisper ASR service.
 
 ## Internal Function
-- **Decoding**: Decodes G.711 μ-law/a-law or PCM16 audio packets received via RTP.
-- **Resampling**: Upsamples audio from 8kHz (standard telephony) to 16kHz (required by Whisper).
-- **Format Conversion**: Converts 16-bit integer samples to 32-bit floating-point samples.
-- **Dynamic Session Management**: Manages independent `CallState` objects for concurrent calls. It extracts a 4-byte `call_num_id` prefix from incoming UDP packets and automatically activates Whisper sessions on the first packet.
-- **ID Negotiation Service**: Provides a Unix Domain Socket control interface to assign unique `call_num_id`s to connecting SIP client instances, ensuring isolation in the multi-call pipeline.
-- **TCP Management**: Maintains persistent TCP connections to the `WhisperService` for each active call session.
+- **Decoding**: Decodes G.711 μ-law RTP payloads into 16-bit PCM.
+- **Conversion**: Normalizes audio to float32 and resamples from 8kHz to 16kHz (linear interpolation).
+- **Streaming**: Streams the converted audio to the `Whisper Service` over a persistent TCP connection.
+- **Resilience**: If the `Whisper Service` is unavailable, it continues to process audio but "dumps" (discards) the output until a reconnection is successful.
 
 ## Inbound Connections
-- **SIP Client (UDP)**: Receives RTP packets from the SIP client on port 9001 (default). Packets are prefixed with a 4-byte big-endian `call_num_id`.
-- **Control Socket (Unix Domain)**: Listens on `/tmp/inbound-audio-processor.ctrl` for `GET_ID` requests from SIP clients.
+- **SIP Client (UDP)**: Receives prefixed RTP packets on UDP port 9001.
 
 ## Outbound Connections
-- **Whisper Service (TCP)**: Streams float32 PCM audio to `WhisperService` on unique ports calculated based on the negotiated `call_num_id`.
+- **Whisper Service (TCP)**: Streams float32 PCM audio on ports `13000 + (call_id % 100)`.

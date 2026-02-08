@@ -1,22 +1,15 @@
----
-description: Summary of the Kokoro TTS Service program
-alwaysApply: true
----
-
 # Kokoro TTS Service
 
 ## Overview
-The **Kokoro TTS Service** (`kokoro_service.py`) is a high-fidelity Text-to-Speech engine. It serves as an optimized replacement for Piper, providing natural-sounding voices for both English and German.
+The **Kokoro TTS Service** (`kokoro_service.py`) is a high-fidelity Text-to-Speech engine optimized for Apple Silicon.
 
 ## Internal Function
-- **Synthesis**: Uses the Kokoro model and PyTorch to convert text into 24kHz float32 PCM audio.
-- **Language Support**: Includes a custom German pipeline with dedicated models and voices.
-- **Hardware Acceleration**: Optimized for Apple Silicon using Metal Performance Shaders (MPS).
-- **Concurrency**: Handles multiple synthesis requests simultaneously for concurrent calls.
+- **Synthesis**: Uses the Kokoro model and PyTorch (MPS) to convert text into 24kHz float32 PCM audio.
+- **Language Support**: Specifically optimized for German and English.
+- **Streaming**: Streams synthesized audio chunks directly to the `Outbound Audio Processor`.
 
 ## Inbound Connections
 - **LLaMA Service (TCP)**: Receives response text for synthesis on port 8090.
-- **Outbound Audio Processor (UDP)**: Receives registration notifications from the audio processor to know where to send synthesized audio.
 
 ## Outbound Connections
-- **Outbound Audio Processor (TCP)**: Streams synthesized PCM audio chunks to the audio processor on unique ports starting at 8090.
+- **Outbound Audio Processor (TCP)**: Streams float32 PCM audio to the processor on unique ports starting at 8090.

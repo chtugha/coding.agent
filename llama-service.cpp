@@ -1,1162 +1,168 @@
-#include "llama-service.h"
-
-// LLaMA includes
-#include "llama.h"
-
+// LLaMA Service (Consolidated)
 #include <iostream>
-#include <sstream>
-#include <regex>
+#include <vector>
+#include <string>
+#include <thread>
+#include <mutex>
+#include <map>
+#include <atomic>
+#include <chrono>
 #include <cstring>
-#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <unistd.h>
 #include <fcntl.h>
-#include <cerrno>
-#include <vector>
-#include <iomanip>
+#include "llama.h"
 
+struct LlamaCall {
+    int id;
+    int seq_id;
+    int n_past = 0;
+    std::string history;
+};
 
-// Helpers to match current llama.cpp API
-static std::vector<llama_token> tokenize_text(struct llama_context * ctx, const std::string & text, bool add_bos) {
-    const llama_model * model = llama_get_model(ctx);
-    const llama_vocab * vocab = llama_model_get_vocab(model);
-    int n_tokens = (int)text.size() + (add_bos ? 1 : 0);
-    std::vector<llama_token> tokens(n_tokens);
-    int r = llama_tokenize(vocab, text.c_str(), (int32_t)text.size(), tokens.data(), (int32_t)tokens.size(), add_bos, /*parse_special*/ false);
-    if (r < 0) {
-        tokens.resize(-r);
-        int r2 = llama_tokenize(vocab, text.c_str(), (int32_t)text.size(), tokens.data(), (int32_t)tokens.size(), add_bos, false);
-        (void)r2;
-    } else {
-        tokens.resize(r);
-    }
-    return tokens;
-}
-
-static std::string token_to_piece(struct llama_context * ctx, llama_token token) {
-    const llama_model * model = llama_get_model(ctx);
-    const llama_vocab * vocab = llama_model_get_vocab(model);
-    std::vector<char> buf(8, 0);
-    int r = llama_token_to_piece(vocab, token, buf.data(), (int32_t)buf.size(), /*lstrip*/ 0, /*special*/ false);
-    if (r < 0) {
-        buf.resize(-r);
-        int r2 = llama_token_to_piece(vocab, token, buf.data(), (int32_t)buf.size(), 0, false);
-        (void)r2;
-    } else {
-        buf.resize(r);
-    }
-    return std::string(buf.data(), buf.size());
-}
-
-// LLaMA Session Implementation
-LlamaSession::LlamaSession(const std::string& call_id, const LlamaSessionConfig& config)
-    : call_id_(call_id), config_(config), model_(nullptr), ctx_(nullptr),
-      sampler_(nullptr), batch_(nullptr), is_active_(false) {
-    last_activity_ = std::chrono::steady_clock::now();
-}
-
-LlamaSession::~LlamaSession() {
-    cleanup_llama_context();
-}
-
-bool LlamaSession::initialize() {
-    std::lock_guard<std::mutex> lock(session_mutex_);
-
-    if (!initialize_llama_context()) {
-        std::cout << "❌ Failed to initialize LLaMA context for call " << call_id_ << std::endl;
-        return false;
-    }
-
-    // Initialize conversation with system prompt - calm, patient, empathetic phone assistant (German)
-    conversation_history_ = "Du bist " + config_.bot_name + ", ein ruhiger und geduldiger Telefonassistent, der mit " + config_.person_name + " spricht.\n\n" +
-                           "Dein Kommunikationsstil:\n" +
-                           "- Sprich natürlich und konversationell, wie ein freundlicher Mensch\n" +
-                           "- Sei warmherzig, verständnisvoll und empathisch\n" +
-                           "- Hör aufmerksam zu und antworte durchdacht\n" +
-                           "- Fass dich kurz (1-2 Sätze), aber bleib freundlich\n" +
-                           "- Unterbrich niemals und dränge nicht zur Eile\n" +
-                           "- Sei jederzeit höflich und respektvoll\n" +
-                           "- Vermeide bürokratische oder roboterhafte Sprache\n" +
-                           "- Warte, bis die Person fertig gesprochen hat, bevor du antwortest\n\n" +
-                           "Gespräch:\n\n";
-
-    is_active_.store(true);
-    mark_activity();
-
-
-    // Prime the system prompt into the KV cache for this session
-    if (!prime_system_prompt()) {
-        std::cout << "⚠️ Failed to prime system prompt for call " << call_id_ << std::endl;
-    }
-
-    std::cout << "✅ LLaMA session initialized for call " << call_id_ << std::endl;
-    return true;
-}
-
-bool LlamaSession::initialize_llama_context() {
-    // If service provided a shared warm context/model, reuse them
-    if (config_.shared_ctx && config_.shared_model) {
-        ctx_ = config_.shared_ctx;
-        model_ = config_.shared_model;
-        shared_mutex_ = config_.shared_mutex;
-        ctx_shared_ = true;
-
-        // Cache vocab pointer
+class LlamaService {
+public:
+    LlamaService(const std::string& model_path) : running_(true) {
+        llama_backend_init();
+        llama_model_params mparams = llama_model_default_params();
+        mparams.n_gpu_layers = 99; // Use GPU
+        model_ = llama_model_load_from_file(model_path.c_str(), mparams);
+        
+        llama_context_params cparams = llama_context_default_params();
+        cparams.n_ctx = 4096;
+        cparams.n_threads = 4;
+        ctx_ = llama_init_from_model(model_, cparams);
+        
         vocab_ = llama_model_get_vocab(model_);
-
-        // Initialize sampler
-        auto sampler_params = llama_sampler_chain_default_params();
-        sampler_ = llama_sampler_chain_init(sampler_params);
-
-        if (config_.temperature > 0.0f) {
-            llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(config_.top_k));
-            llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(config_.top_p, 1));
-            llama_sampler_chain_add(sampler_, llama_sampler_init_temp(config_.temperature));
-            llama_sampler_chain_add(sampler_, llama_sampler_init_dist(0));
-        } else {
-            llama_sampler_chain_add(sampler_, llama_sampler_init_greedy());
-        }
-
-        // Initialize batch
-        batch_ = new llama_batch;
-        *batch_ = llama_batch_init(config_.n_ctx, 0, 1);
-
-        std::cout << "🔁 Reusing preloaded LLaMA model/context for call " << call_id_ << std::endl;
-        return true;
-    }
-
-    // Otherwise, create a private context/model for this session (fallback)
-    llama_backend_init();
-
-    llama_model_params model_params = llama_model_default_params();
-    model_params.n_gpu_layers = config_.use_gpu ? config_.n_gpu_layers : 0;
-
-    model_ = llama_model_load_from_file(config_.model_path.c_str(), model_params);
-    if (!model_) {
-        std::cout << "❌ Failed to load LLaMA model: " << config_.model_path << std::endl;
-        return false;
-    }
-
-    llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx = config_.n_ctx;
-    ctx_params.n_threads = config_.n_threads;
-
-    ctx_ = llama_init_from_model(model_, ctx_params);
-    if (!ctx_) {
-        std::cout << "❌ Failed to create LLaMA context" << std::endl;
-        llama_model_free(model_);
-        model_ = nullptr;
-        return false;
-    }
-
-    vocab_ = llama_model_get_vocab(model_);
-
-    auto sampler_params = llama_sampler_chain_default_params();
-    sampler_ = llama_sampler_chain_init(sampler_params);
-
-    if (config_.temperature > 0.0f) {
-        llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(config_.top_k));
-        llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(config_.top_p, 1));
-        llama_sampler_chain_add(sampler_, llama_sampler_init_temp(config_.temperature));
-        llama_sampler_chain_add(sampler_, llama_sampler_init_dist(0));
-    } else {
+        sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
         llama_sampler_chain_add(sampler_, llama_sampler_init_greedy());
     }
 
-    batch_ = new llama_batch;
-    *batch_ = llama_batch_init(config_.n_ctx, 0, 1);
-
-    return true;
-}
-
-void LlamaSession::cleanup_llama_context() {
-    if (batch_) {
-        llama_batch_free(*batch_);
-        delete batch_;
-        batch_ = nullptr;
-    }
-
-    if (sampler_) {
+    ~LlamaService() {
         llama_sampler_free(sampler_);
-        sampler_ = nullptr;
+        llama_free(ctx_);
+        llama_model_free(model_);
+        llama_backend_free();
     }
 
-    // Do not free shared context/model owned by the service
-    if (!ctx_shared_) {
-        if (ctx_) {
-            llama_free(ctx_);
-            ctx_ = nullptr;
-        }
-        if (model_) {
-            llama_model_free(model_);
-            model_ = nullptr;
-        }
-    } else {
-        ctx_ = nullptr;
-        model_ = nullptr;
-    }
-}
-
-bool LlamaSession::prime_system_prompt() {
-    if (!ctx_ || !batch_) return false;
-
-    // Derive a stable sequence ID from call_id_
-    int sid = 0;
-    try {
-        sid = std::stoi(call_id_);
-    } catch (const std::exception&) {
-        for (unsigned char c : call_id_) {
-            sid = (int)((sid * 131u) + c) & 0x7fffffff; // simple hash
-        }
-    }
-    if (sid < 0) sid = -sid;
-    seq_id_ = sid % 64; // n_seq_max is capped at 64 in our warm context configuration
-
-    // Clear any prior state for this sequence and prime with system prompt
-    llama_memory_t mem = llama_get_memory(ctx_);
-    llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
-
-    // Tokenize the system prompt with BOS
-    std::vector<llama_token> tokens = tokenize_text(ctx_, conversation_history_, true);
-    n_past_ = 0;
-
-    if (!tokens.empty()) {
-        batch_->n_tokens = tokens.size();
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            batch_->token[i] = tokens[i];
-            batch_->pos[i] = n_past_ + (int)i;
-            batch_->n_seq_id[i] = 1;
-            batch_->seq_id[i][0] = seq_id_;
-            batch_->logits[i] = i == tokens.size() - 1;
-        }
-        if (llama_decode(ctx_, *batch_) != 0) {
-            return false;
-        }
-        n_past_ += (int)tokens.size();
-    }
-
-    primed_ = true;
-    return true;
-}
-
-
-std::string LlamaSession::process_text(const std::string& input_text) {
-    std::lock_guard<std::mutex> lock(session_mutex_);
-
-    if (!is_active_.load() || !ctx_) {
-        std::cout << "❌ [" << call_id_ << "] Session inactive or no context" << std::endl;
-        return "";
-    }
-
-    // When using shared warm context, serialize llama_decode across sessions
-    std::unique_lock<std::mutex> shared_lock;
-    if (shared_mutex_) {
-        shared_lock = std::unique_lock<std::mutex>(*shared_mutex_);
-    }
-
-    mark_activity();
-
-    // Format the conversation prompt
-    std::string prompt = format_conversation_prompt(input_text);
-
-    // Generate response
-    std::string response = generate_response(prompt);
-
-    if (!response.empty()) {
-        latest_response_ = response;
-
-        // Update conversation history
-        conversation_history_ += config_.person_name + ": " + input_text + "\n";
-        conversation_history_ += config_.bot_name + ": " + response + "\n";
-
-        std::cout << "🦙 [" << call_id_ << "] Generated response: " << response << std::endl;
-    }
-
-    return response;
-}
-
-std::string LlamaSession::format_conversation_prompt(const std::string& user_input) {
-    // For incremental decoding with KV reuse, only append the new turn
-    std::string prompt;
-    prompt += config_.person_name + ": " + user_input + "\n";
-    prompt += config_.bot_name + ": ";
-    return prompt;
-}
-
-std::string LlamaSession::generate_response(const std::string& prompt) {
-    if (!ctx_ || !sampler_ || !batch_) {
-        std::cout << "❌ [" << call_id_ << "] Missing context/sampler/batch" << std::endl;
-        return "";
-    }
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    // Ensure the system prompt has been primed once
-    if (!primed_) {
-        if (!prime_system_prompt()) {
-            std::cout << "❌ Failed to prime system prompt for call " << call_id_ << std::endl;
-            return "";
-        }
-    }
-
-    // Tokenize only the new turn (no BOS for incremental appends)
-    std::vector<llama_token> tokens = tokenize_text(ctx_, prompt, false);
-    if (tokens.empty()) {
-        std::cout << "❌ [" << call_id_ << "] Tokenization returned empty" << std::endl;
-        return "";
-    }
-
-    // Ensure KV cache capacity: if near limit, clear and re-prime to avoid scheduler slot exhaustion
-    const int safety_margin = 16;
-    const int reserve_for_gen = config_.max_tokens;
-    if (n_past_ + (int)tokens.size() + reserve_for_gen >= config_.n_ctx - safety_margin) {
-        std::cout << "⚠️  [" << call_id_ << "] KV near capacity (n_past=" << n_past_
-                  << ", add=" << tokens.size() << ", gen=" << reserve_for_gen
-                  << ", n_ctx=" << config_.n_ctx << ") — clearing cache and re-priming" << std::endl;
-        // Remove all tokens for this session's sequence from KV to free slots
-        llama_memory_t mem = llama_get_memory(ctx_);
-        llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
-        n_past_ = 0;
-        primed_ = false;
-        if (!prime_system_prompt()) {
-            std::cout << "❌ Failed to re-prime after KV clear for call " << call_id_ << std::endl;
-            return "";
-        }
-    }
-
-    auto tokenize_time = std::chrono::high_resolution_clock::now();
-    auto tokenize_ms = std::chrono::duration_cast<std::chrono::milliseconds>(tokenize_time - start_time).count();
-
-    // Append the new prompt tokens at the current position for this sequence
-    batch_->n_tokens = tokens.size();
-    for (size_t i = 0; i < tokens.size(); i++) {
-        batch_->token[i] = tokens[i];
-        batch_->pos[i] = n_past_ + (int)i;
-        batch_->n_seq_id[i] = 1;
-        batch_->seq_id[i][0] = seq_id_;
-        batch_->logits[i] = i == tokens.size() - 1;
-    }
-
-    if (llama_decode(ctx_, *batch_) != 0) {
-        std::cout << "⚠️  [" << call_id_ << "] Decode failed (likely KV cache full) - clearing and retrying" << std::endl;
-        // Clear KV cache for this sequence and re-prime
-        llama_memory_t mem = llama_get_memory(ctx_);
-        llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
-        n_past_ = 0;
-        primed_ = false;
-
-        if (!prime_system_prompt()) {
-            std::cout << "❌ Failed to re-prime after decode failure for call " << call_id_ << std::endl;
-            return "";
-        }
-
-        // Retry the decode with just the current prompt
-        std::string retry_prompt = format_conversation_prompt(prompt.substr(prompt.find(":") + 2));
-        std::vector<llama_token> retry_tokens = tokenize_text(ctx_, retry_prompt, false);
-
-        batch_->n_tokens = retry_tokens.size();
-        for (size_t i = 0; i < retry_tokens.size(); i++) {
-            batch_->token[i] = retry_tokens[i];
-            batch_->pos[i] = n_past_ + (int)i;
-            batch_->n_seq_id[i] = 1;
-            batch_->seq_id[i][0] = seq_id_;
-            batch_->logits[i] = i == retry_tokens.size() - 1;
-        }
-
-        if (llama_decode(ctx_, *batch_) != 0) {
-            std::cout << "❌ Failed to decode prompt after retry for call " << call_id_ << std::endl;
-            return "";
-        }
-        n_past_ += (int)retry_tokens.size();
-    } else {
-        n_past_ += (int)tokens.size();
-    }
-
-    auto decode_time = std::chrono::high_resolution_clock::now();
-    auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(decode_time - tokenize_time).count();
-
-    // Generate response tokens
-    std::string response;
-    int tokens_generated = 0;
-    int max_gen = config_.max_tokens;
-    for (int i = 0; i < max_gen; i++) {
-        // Sample next token
-        llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
-
-        // End of sequence
-        if (id == llama_vocab_eos(vocab_)) {
-            break;
-        }
-
-        // Convert token to text
-        std::string token_text = token_to_piece(ctx_, id);
-        tokens_generated++;
-        response += token_text;
-
-        // Stop when the model starts the next user turn
-        if (response.find("\n" + config_.person_name + ":") != std::string::npos) {
-            size_t pos = response.find("\n" + config_.person_name + ":");
-            response = response.substr(0, pos);
-            break;
-        }
-        // Prefer low-latency replies: if we completed a sentence and have some content, stop early
-        if (response.size() >= 80 && (token_text.find('.') != std::string::npos ||
-                                      token_text.find('!') != std::string::npos ||
-                                      token_text.find('?') != std::string::npos)) {
-            break;
-        }
-
-        // Feed the generated token back
-        batch_->n_tokens = 1;
-        batch_->token[0] = id;
-        batch_->pos[0] = n_past_;
-        batch_->n_seq_id[0] = 1;
-        batch_->seq_id[0][0] = seq_id_;
-        batch_->logits[0] = true;
-
-        if (llama_decode(ctx_, *batch_) != 0) {
-            break;
-        }
-        n_past_++;
-    }
-
-    auto generate_time = std::chrono::high_resolution_clock::now();
-    auto generate_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generate_time - decode_time).count();
-    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generate_time - start_time).count();
-
-    // Additional safety: trim if model echoed a new user turn
-    // Check for "User:" first
-    size_t pos_with_colon = response.find(config_.person_name + ":");
-    if (pos_with_colon != std::string::npos) {
-        response = response.substr(0, pos_with_colon);
-    }
-
-    // Check for just "User" at the end (without colon)
-    size_t pos_without_colon = response.rfind(config_.person_name);
-    if (pos_without_colon != std::string::npos &&
-        pos_without_colon + config_.person_name.length() == response.length()) {
-        response = response.substr(0, pos_without_colon);
-    }
-
-    // Check for duplicated tags
-    size_t pos_dupe = response.find(config_.person_name + config_.person_name + ":");
-    if (pos_dupe != std::string::npos) {
-        response = response.substr(0, pos_dupe);
-    }
-
-    // Cleanup response (trim whitespace)
-    response = std::regex_replace(response, std::regex("^\\s+"), "");
-    response = std::regex_replace(response, std::regex("\\s+$"), "");
-
-    // Performance logging
-    std::cout << "⏱️  LLaMA timing [" << call_id_ << "]: "
-              << "tokenize=" << tokenize_ms << "ms, "
-              << "decode=" << decode_ms << "ms, "
-              << "generate=" << generate_ms << "ms (" << tokens_generated << " tokens), "
-              << "total=" << total_ms << "ms" << std::endl;
-
-    // Proactive KV management: if context grows too large, clear after this response to prevent stalls
-    if (n_past_ > (int)(config_.n_ctx * 0.75f)) {
-        llama_memory_t mem = llama_get_memory(ctx_);
-        llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
-        n_past_ = 0;
-        primed_ = false;
-        std::cout << "🧹 [" << call_id_ << "] Cleared KV after response to prevent slot exhaustion" << std::endl;
-    }
-
-    return response;
-}
-
-// Standalone LLaMA Service Implementation
-StandaloneLlamaService::StandaloneLlamaService(const LlamaSessionConfig& default_config)
-    : default_config_(default_config), server_socket_(-1), running_(false) {
-}
-
-StandaloneLlamaService::~StandaloneLlamaService() {
-    stop();
-}
-
-bool StandaloneLlamaService::start(int tcp_port) {
-    if (running_.load()) {
-        std::cout << "⚠️ LLaMA service already running" << std::endl;
-        return false;
-    }
-
-    std::cout << "🚀 Starting LLaMA service on TCP port " << tcp_port << std::endl;
-    std::cout << "📁 Model: " << default_config_.model_path << std::endl;
-
-    // Eager warm load
-    auto t0 = std::chrono::steady_clock::now();
-    std::cout << "⏳ Preloading LLaMA model..." << std::endl;
-    llama_backend_init();
-    llama_model_params model_params = llama_model_default_params();
-    model_params.n_gpu_layers = default_config_.use_gpu ? default_config_.n_gpu_layers : 0;
-    warm_model_ = llama_model_load_from_file(default_config_.model_path.c_str(), model_params);
-    if (!warm_model_) {
-        std::cout << "❌ Failed to load LLaMA model: " << default_config_.model_path << std::endl;
-        return false;
-    }
-
-    llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx = default_config_.n_ctx;
-    ctx_params.n_threads = default_config_.n_threads;
-    ctx_params.n_seq_max = 64; // capped by current llama.cpp build (n_seq_max <= 64)
-    warm_ctx_ = llama_init_from_model(warm_model_, ctx_params);
-    if (!warm_ctx_) {
-        std::cout << "❌ Failed to create LLaMA context" << std::endl;
-        llama_model_free(warm_model_);
-        warm_model_ = nullptr;
-        return false;
-    }
-
-    warm_loaded_ = true;
-    auto t1 = std::chrono::steady_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    std::cout << "✅ LLaMA model preloaded in " << ms << " ms" << std::endl;
-
-    // Warm-up decode/generate to compile GPU kernels and allocate graphs
-    try {
-        const std::string warm_prompt = std::string("System: You are a helpful assistant.\n") +
-                                        "User: hi\n" +
-                                        "" + default_config_.bot_name + ": ";
-        std::vector<llama_token> toks = tokenize_text(warm_ctx_, warm_prompt, /*add_bos*/ true);
-        if (!toks.empty()) {
-            llama_batch tmp = llama_batch_init(default_config_.n_ctx, 0, 1);
-            // feed prompt tokens
-            tmp.n_tokens = (int)toks.size();
-            for (int i = 0; i < tmp.n_tokens; ++i) {
-                tmp.token[i] = toks[i];
-                tmp.pos[i] = i;
-                tmp.n_seq_id[i] = 1;
-                tmp.seq_id[i][0] = 0;
-                tmp.logits[i] = (i == tmp.n_tokens - 1);
-            }
-            (void)llama_decode(warm_ctx_, tmp);
-
-            // sample a couple of tokens and feed back
-            auto sp = llama_sampler_chain_init(llama_sampler_chain_default_params());
-            llama_sampler_chain_add(sp, llama_sampler_init_greedy());
-            int n_past = (int)toks.size();
-            for (int i = 0; i < 2; ++i) {
-                llama_token id = llama_sampler_sample(sp, warm_ctx_, -1);
-                tmp.n_tokens = 1;
-                tmp.token[0] = id;
-                tmp.pos[0] = n_past;
-                tmp.n_seq_id[0] = 1;
-                tmp.seq_id[0][0] = 0;
-                tmp.logits[0] = true;
-                (void)llama_decode(warm_ctx_, tmp);
-                n_past++;
-            }
-            llama_batch_free(tmp);
-            llama_sampler_free(sp);
-            std::cout << "✅ LLaMA warm-up completed" << std::endl;
-        }
-    } catch (...) {
-        std::cout << "⚠️ LLaMA warm-up threw exception (non-fatal)" << std::endl;
-    }
-
-
-    // Now mark running and start server
-    running_.store(true);
-    server_thread_ = std::thread(&StandaloneLlamaService::run_tcp_server, this, tcp_port);
-
-    return true;
-}
-
-void StandaloneLlamaService::stop() {
-    if (!running_.load() && !warm_loaded_) {
-        return;
-    }
-
-    std::cout << "🛑 Stopping LLaMA service..." << std::endl;
-
-    running_.store(false);
-
-    if (server_socket_ >= 0) {
-        close(server_socket_);
-        server_socket_ = -1;
-    }
-
-    if (server_thread_.joinable()) {
-        server_thread_.join();
-    }
-
-    cleanup_tcp_threads();
-
-    // Cleanup all sessions
-    {
-        std::lock_guard<std::mutex> lock(sessions_mutex_);
-        sessions_.clear();
-    }
-
-    // Free warm context/model
-    if (warm_ctx_) { llama_free(warm_ctx_); warm_ctx_ = nullptr; }
-    if (warm_model_) { llama_model_free(warm_model_); warm_model_ = nullptr; }
-    warm_loaded_ = false;
-
-    std::cout << "✅ LLaMA service stopped" << std::endl;
-}
-
-bool StandaloneLlamaService::create_session(const std::string& call_id) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-
-    if (sessions_.find(call_id) != sessions_.end()) {
-        std::cout << "⚠️ LLaMA session already exists for call " << call_id << std::endl;
-        return true;
-    }
-
-    // Use a copy of default config and inject shared warm context/model
-    LlamaSessionConfig cfg = default_config_;
-    if (warm_loaded_ && warm_model_ && warm_ctx_) {
-        cfg.shared_model = warm_model_;
-        cfg.shared_ctx = warm_ctx_;
-        cfg.shared_mutex = &warm_mutex_;
-    }
-
-    auto session = std::make_unique<LlamaSession>(call_id, cfg);
-    if (!session->initialize()) {
-        return false;
-    }
-
-    sessions_[call_id] = std::move(session);
-    std::cout << "✅ Created LLaMA session for call " << call_id << std::endl;
-
-    // Immediately connect to TTS service (Kokoro/Piper) to eliminate first-response delay
-    if (!output_host_.empty() && output_port_ > 0) {
-        if (connect_output_for_call(call_id)) {
-            std::cout << "🔗 Pre-connected to TTS service for call " << call_id << std::endl;
-        } else {
-            std::cout << "⚠️ Failed to pre-connect to TTS service for call " << call_id << " (will retry on first response)" << std::endl;
-        }
-    }
-
-    return true;
-}
-
-bool StandaloneLlamaService::destroy_session(const std::string& call_id) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-
-    auto it = sessions_.find(call_id);
-    if (it == sessions_.end()) {
-        return false;
-    }
-
-    sessions_.erase(it);
-
-    // Clean up Kokoro output socket for this call
-    close_output_for_call(call_id);
-
-    std::cout << "🗑️ Destroyed LLaMA session for call " << call_id << std::endl;
-    return true;
-}
-
-std::string StandaloneLlamaService::process_text_for_call(const std::string& call_id, const std::string& text) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-
-    auto it = sessions_.find(call_id);
-    if (it == sessions_.end()) {
-        std::cout << "❌ No LLaMA session found for call " << call_id << std::endl;
-        return "";
-    }
-
-    return it->second->process_text(text);
-}
-
-void StandaloneLlamaService::set_output_endpoint(const std::string& host, int port) {
-    output_host_ = host;
-    output_port_ = port;
-    std::cout << "🔌 LLaMA output endpoint set to " << host << ":" << port << std::endl;
-}
-
-void StandaloneLlamaService::run_tcp_server(int port) {
-    server_socket_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket_ < 0) {
-        std::cout << "❌ Failed to create TCP server socket" << std::endl;
-        return;
-    }
-
-    int opt = 1;
-    setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(port);
-
-    if (bind(server_socket_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        std::cout << "❌ Failed to bind TCP server socket to port " << port << std::endl;
-        close(server_socket_);
-        server_socket_ = -1;
-        return;
-    }
-
-    if (listen(server_socket_, 16) < 0) {
-        std::cout << "❌ Failed to listen on TCP server socket" << std::endl;
-        close(server_socket_);
-        server_socket_ = -1;
-        return;
-    }
-
-    std::cout << "🦙 LLaMA service listening on TCP port " << port << std::endl;
-
-    while (running_.load()) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-
-        int client_socket = accept(server_socket_, (struct sockaddr*)&client_addr, &client_len);
-        if (client_socket < 0) {
-            if (running_.load()) {
-                std::cout << "⚠️ Failed to accept TCP connection" << std::endl;
-            }
-            continue;
-        }
-
-        std::string call_id;
-        if (!read_tcp_hello(client_socket, call_id)) {
-            std::cout << "❌ Failed to read TCP HELLO" << std::endl;
-            close(client_socket);
-            continue;
-        }
-
-        // Prevent duplicate text handlers per call_id
-        {
-            auto it = call_tcp_threads_.find(call_id);
-            if (it != call_tcp_threads_.end() && it->second.joinable()) {
-                std::cout << "⚠️ LLaMA text handler already running for call " << call_id << ", rejecting duplicate connection" << std::endl;
-                close(client_socket);
-                continue;
-            }
-        }
-
-        create_session(call_id);
-
-        call_tcp_threads_[call_id] = std::thread(&StandaloneLlamaService::handle_tcp_text_stream, this, call_id, client_socket);
-    }
-}
-
-void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, int socket) {
-    std::cout << "📥 Starting LLaMA text handler for call " << call_id << std::endl;
-
-    // Buffer to accumulate text chunks before responding
-    std::string text_buffer;
-    auto last_text_time = std::chrono::steady_clock::now();
-    // Dynamic silence thresholds: longer if buffer does not end with punctuation
-    const int silence_threshold_ms_with_punct = 500;   // respond after 500ms when sentence looks complete
-    const int silence_threshold_ms_no_punct   = 1200;  // wait a bit longer to avoid mid-sentence replies
-
-    // Set socket to non-blocking mode for timeout-based reads
-    int flags = fcntl(socket, F_GETFL, 0);
-    fcntl(socket, F_SETFL, flags | O_NONBLOCK);
-
-    // Non-blocking framed reader state
-    std::vector<uint8_t> rxbuf;
-    rxbuf.reserve(8192);
-
-    bool disconnect_requested = false;
-
-    while (running_.load()) {
-        // 1) Drain any available bytes from socket without blocking
-        while (true) {
-            uint8_t tmp[4096];
-            ssize_t n = recv(socket, tmp, sizeof(tmp), 0);
-            if (n > 0) {
-                rxbuf.insert(rxbuf.end(), tmp, tmp + n);
-                continue; // try to read more in this tick
-            } else if (n == 0) {
-                // Peer closed connection
-                disconnect_requested = true;
-                break;
-            } else {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    // No more data right now
-                    break;
-                } else {
-                    // Real socket error → treat as disconnect
-                    disconnect_requested = true;
-                    break;
-                }
-            }
-        }
-
-        // 2) Parse complete frames from rxbuf
-        while (rxbuf.size() >= 4) {
-            uint32_t len_be = 0;
-            std::memcpy(&len_be, rxbuf.data(), 4);
-            uint32_t len = ntohl(len_be);
-
-            if (len == 0xFFFFFFFF) {
-                // BYE marker
-                rxbuf.erase(rxbuf.begin(), rxbuf.begin() + 4);
-                disconnect_requested = true;
-                break;
-            }
-
-            if (len == 0 || len > 10 * 1024 * 1024) {
-                // Invalid frame (protect against corruption) → drop buffer
-                std::cout << "⚠️ Invalid text frame length (" << len << ") - dropping buffer" << std::endl;
-                rxbuf.clear();
-                break;
-            }
-
-            if (rxbuf.size() < 4u + len) {
-                // Incomplete frame, wait for more bytes
-                break;
-            }
-
-            // Extract one complete frame
-            std::string text(reinterpret_cast<char*>(rxbuf.data() + 4), len);
-            rxbuf.erase(rxbuf.begin(), rxbuf.begin() + 4 + len);
-
-            if (text.empty()) continue;
-
-            // Accumulate text chunks
-            std::cout << "📝 Incoming text [" << call_id << "]: " << text << std::endl;
-            if (!text_buffer.empty()) text_buffer += " ";
-            text_buffer += text;
-            last_text_time = std::chrono::steady_clock::now();
-            std::cout << "📦 Buffered text [" << call_id << "]: " << text_buffer << std::endl;
-        }
-
-        // 3) If silence exceeded threshold and we have buffered text → respond
-        auto now = std::chrono::steady_clock::now();
-        auto silence_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_text_time).count();
-        if (!text_buffer.empty()) {
-            // Choose threshold based on whether buffer looks like a completed sentence
-            auto trim = [](std::string s) {
-                size_t a = s.find_first_not_of(" \t\n\r");
-                size_t b = s.find_last_not_of(" \t\n\r");
-                if (a == std::string::npos) return std::string();
-                return s.substr(a, b - a + 1);
-            };
-            auto to_lower = [](std::string s){ for (auto &c: s) c = (char)tolower(c); return s; };
-            auto ends_with_sentence_punct = [](const std::string& s) {
-                int i = (int)s.size() - 1;
-                // skip trailing whitespace
-                while (i >= 0 && (s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t')) --i;
-                if (i < 0) return false;
-                char c = s[i];
-                if (c == '!' || c == '?') return true;
-                if (c == '.') {
-                    // do not treat ellipsis ... as end-of-sentence
-                    int dots = 0;
-                    while (i >= 0 && s[i] == '.') { ++dots; --i; }
-                    return dots == 1; // exactly one trailing dot counts
-                }
-                return false;
-            };
-            auto word_count = [](const std::string& s){ int cnt = 0; bool in = false; for(char c: s){ if(!isspace((unsigned char)c)){ if(!in){ in = true; ++cnt; } } else { in = false; } } return cnt; };
-            auto is_backchannel = [&](const std::string& s){
-                std::string t = to_lower(trim(s));
-                if (t.empty()) return false;
-                static const char* phrases[] = {"ok", "okay", "danke", "ja", "genau", "richtig", "klar", "verstehe", "moment", "gut", "schön"};
-                for (auto p : phrases) { if (t == p) return true; }
-                // also treat very short one- or two-word acks as backchannel if no question mark
-                if (word_count(t) <= 2 && t.find('?') == std::string::npos) return true;
-                return false;
-            };
-
-            bool complete_sentence = ends_with_sentence_punct(text_buffer);
-            int threshold_ms = complete_sentence ? silence_threshold_ms_with_punct : silence_threshold_ms_no_punct;
-
-            // If backchannel/very short and not a question, require a floor to avoid echoing acknowledgements
-            if (is_backchannel(text_buffer)) {
-                threshold_ms = std::max(threshold_ms, 600);
-            }
-
-            // Speaking guard: if we started TTS recently, suppress trivial acks for ~1200ms
-            {
-                std::lock_guard<std::mutex> lock(call_data_mutex_);
-                auto it_last = last_tts_start_.find(call_id);
-                if (it_last != last_tts_start_.end()) {
-                    auto since_tts_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - it_last->second).count();
-                    if (since_tts_ms < 1200 && is_backchannel(text_buffer)) {
-                        threshold_ms = std::max(threshold_ms, 1200 - since_tts_ms);
-                    }
-                }
-            }
-
-            // While TTS is speaking (estimated), do not respond yet to avoid talk-over
-            bool suppressed = false;
-            {
-                std::lock_guard<std::mutex> lock(call_data_mutex_);
-                auto it_until = tts_speaking_until_.find(call_id);
-                if (it_until != tts_speaking_until_.end() && now < it_until->second) {
-                    suppressed = true;
-                }
-            }
-
-            if (suppressed) {
-                // Keep buffering; we will respond after TTS finishes
-            } else if (silence_ms >= threshold_ms) {
-                std::cout << "🔇 Silence detected (" << silence_ms << "ms, thr=" << threshold_ms << ") - responding to: " << text_buffer << std::endl;
-                // Deduplicate: if this utterance equals the last one we already answered, skip
-                auto norm = [&](std::string s){
-                    // lowercase + trim + collapse spaces
-                    for (auto &c: s) c = (char)tolower(c);
-                    size_t a = s.find_first_not_of(" \t\n\r");
-                    size_t b = s.find_last_not_of(" \t\n\r");
-                    s = (a==std::string::npos)? std::string() : s.substr(a, b-a+1);
-                    std::string out; out.reserve(s.size()); bool in_space=false;
-                    for(char c: s){ if (isspace((unsigned char)c)) { if(!in_space){ out.push_back(' '); in_space=true; } } else { out.push_back(c); in_space=false; } }
-                    return out;
-                };
-                std::string norm_text = norm(text_buffer);
-                {
-                    std::lock_guard<std::mutex> lock(call_data_mutex_);
-                    // If equal to last user utterance, clear and do not respond
-                    auto it_last = last_user_utt_.find(call_id);
-                    if (it_last != last_user_utt_.end() && it_last->second == norm_text) {
-                        text_buffer.clear();
-                        last_text_time = std::chrono::steady_clock::now();
-                        continue;
-                    }
-                    // Remember current utterance
-                    last_user_utt_[call_id] = norm_text;
-                }
-
-                // Check if session still exists before processing (avoid post-BYE responses)
-                {
-                    std::lock_guard<std::mutex> lock(sessions_mutex_);
-                    if (sessions_.find(call_id) == sessions_.end()) {
-                        std::cout << "⚠️  Session " << call_id << " destroyed - skipping response generation" << std::endl;
-                        text_buffer.clear();
-                        last_text_time = std::chrono::steady_clock::now();
-                        continue;
-                    }
-                }
-
-                std::string response = process_text_for_call(call_id, text_buffer);
-                if (!response.empty()) {
-                    std::cout << "💬 Response [" << call_id << "]: " << response << std::endl;
-                    if (!output_host_.empty() && output_port_ > 0) {
-                        if (connect_output_for_call(call_id)) {
-                            // t1: LLaMA send-to-Kokoro (timestamp in seconds)
-                            std::cout << "t1: LLaMA send-to-Kokoro [call " << call_id << "] ts=" << std::fixed << std::setprecision(6) << (double)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count()/1e6 << std::endl;
-                            send_output_text(call_id, response);
-                        }
-                    } else {
-                        (void)send_tcp_response(socket, response);
-                    }
-                }
-                text_buffer.clear();
-                // Reset timer to avoid immediate re-triggering
-                last_text_time = std::chrono::steady_clock::now();
-            }
-        }
-
-        // 4) On disconnect: DO NOT process remaining buffer (call ended, user hung up)
-        if (disconnect_requested) {
-            if (!text_buffer.empty()) {
-                std::cout << "🔇 Discarding buffered text after disconnect: " << text_buffer << std::endl;
-                text_buffer.clear();
-            }
-            break;
-        }
-
-        // 5) Avoid busy-spin – small sleep keeps CPU low while staying responsive
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-
-    // Send BYE to upstream (Whisper) and close
-    send_tcp_bye(socket);
-    close(socket);
-
-    // Destroy session but keep Kokoro connection open for next call
-    destroy_session(call_id);
-    std::cout << "📤 Ended LLaMA text handler for call " << call_id << " (keeping Kokoro connection open)" << std::endl;
-}
-
-static bool recv_all(int socket, void* buf, size_t nbytes) {
-    char* p = static_cast<char*>(buf);
-    size_t total = 0;
-    while (total < nbytes) {
-        ssize_t r = recv(socket, p + total, nbytes - total, 0);
-        if (r <= 0) return false;
-        total += (size_t)r;
-    }
-    return true;
-}
-
-bool StandaloneLlamaService::read_tcp_hello(int socket, std::string& call_id) {
-    uint32_t length_be = 0;
-    if (!recv_all(socket, &length_be, 4)) {
-        std::cout << "❌ Failed to read HELLO length from Whisper" << std::endl;
-        return false;
-    }
-    uint32_t length = ntohl(length_be);
-    if (length == 0 || length > 4096) return false;
-    std::string buf(length, '\0');
-    if (!recv_all(socket, buf.data(), length)) {
-        std::cout << "❌ Failed to read HELLO payload from Whisper (" << length << " bytes)" << std::endl;
-        return false;
-    }
-    call_id = buf;
-    std::cout << "👋 HELLO from whisper for call_id=" << call_id << std::endl;
-    return true;
-}
-
-bool StandaloneLlamaService::read_tcp_text_chunk(int socket, std::string& text) {
-    uint32_t length_be = 0;
-    if (!recv_all(socket, &length_be, 4)) {
-        std::cout << "❌ Failed to read text length from Whisper (client disconnected?)" << std::endl;
-        return false;
-    }
-    uint32_t length = ntohl(length_be);
-    if (length == 0xFFFFFFFF) { text = "BYE"; return true; }
-    if (length == 0 || length > 10*1024*1024) return false;
-    text.resize(length);
-    if (!recv_all(socket, text.data(), length)) {
-        std::cout << "❌ Failed to read text payload from Whisper (" << length << " bytes)" << std::endl;
-        return false;
-    }
-    return true;
-}
-
-bool StandaloneLlamaService::send_tcp_response(int socket, const std::string& response) {
-    uint32_t l = htonl((uint32_t)response.size());
-    if (send(socket, &l, 4, 0) != 4) return false;
-    if (!response.empty() && send(socket, response.data(), response.size(), 0) != (ssize_t)response.size()) return false;
-    return true;
-}
-
-bool StandaloneLlamaService::send_tcp_bye(int socket) {
-    uint32_t bye = 0xFFFFFFFF;
-    return send(socket, &bye, 4, 0) == 4;
-}
-
-bool StandaloneLlamaService::connect_output_for_call(const std::string& call_id) {
-    if (output_host_.empty() || output_port_ <= 0) {
-        std::cout << "❌ Cannot connect output for call " << call_id << ": output endpoint not configured" << std::endl;
-        return false;
-    }
-    
-    {
-        std::lock_guard<std::mutex> lock(call_data_mutex_);
-        if (output_sockets_.count(call_id)) return true;
-    }
-
-    const int max_attempts = 10;
-
-    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
-        int s = socket(AF_INET, SOCK_STREAM, 0);
-        if (s < 0) {
-            if (attempt < max_attempts) {
-                int sleep_ms = (attempt <= 5) ? 200 : 1000;
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-                continue;
-            }
-            std::cout << "❌ Failed to create socket for call " << call_id << " after "
-                      << max_attempts << " attempts: " << strerror(errno) << std::endl;
-            return false;
-        }
-
-        sockaddr_in addr{};
+    void run() {
+        int lsock = socket(AF_INET, SOCK_STREAM, 0);
+        int opt = 1; setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(output_port_);
-        addr.sin_addr.s_addr = inet_addr(output_host_.c_str());
+        addr.sin_port = htons(8083);
+        addr.sin_addr.s_addr = INADDR_ANY;
+        bind(lsock, (struct sockaddr*)&addr, sizeof(addr));
+        listen(lsock, 5);
 
-        // Disable Nagle to reduce latency to Kokoro
-        int flag = 1;
-        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+        std::cout << "🦙 LLaMA Service listening on port 8083" << std::endl;
 
-        if (connect(s, (sockaddr*)&addr, sizeof(addr)) < 0) {
-            close(s);
-            if (attempt < max_attempts) {
-                int sleep_ms = (attempt <= 5) ? 200 : 1000;
-                if (attempt == 1 || attempt == 5 || attempt == max_attempts - 1) {
-                    std::cout << "⚠️ TTS connection attempt " << attempt << "/" << max_attempts
-                              << " failed for call " << call_id << " - retrying in " << sleep_ms << "ms" << std::endl;
+        while (running_) {
+            int csock = accept(lsock, NULL, NULL);
+            if (csock < 0) continue;
+            char buf[4096];
+            ssize_t n = recv(csock, buf, sizeof(buf)-1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string msg(buf);
+                size_t sep = msg.find(':');
+                if (sep != std::string::npos) {
+                    int cid = std::stoi(msg.substr(0, sep));
+                    std::string text = msg.substr(sep + 1);
+                    std::string response = process_call(cid, text);
+                    send_to_tts(cid, response);
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-                continue;
             }
-            std::cout << "❌ Failed to connect to " << output_host_ << ":" << output_port_
-                      << " for call " << call_id << " after " << max_attempts << " attempts: "
-                      << strerror(errno) << std::endl;
-            return false;
+            close(csock);
+        }
+    }
+
+private:
+    std::string process_call(int cid, const std::string& text) {
+        auto call = get_or_create_call(cid);
+        std::lock_guard<std::mutex> lock(llama_mutex_);
+
+        std::string prompt = "User: " + text + "\nAssistant:";
+        std::vector<llama_token> tokens = tokenize(prompt, false);
+
+        llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            batch.token[i] = tokens[i];
+            batch.pos[i] = call->n_past + i;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = call->seq_id;
+            batch.logits[i] = (i == tokens.size() - 1);
         }
 
-        // Send HELLO(call_id)
-        uint32_t n = htonl((uint32_t)call_id.size());
-        if (send(s, &n, 4, 0) != 4) {
-            close(s);
-            if (attempt < max_attempts) {
-                int sleep_ms = (attempt <= 5) ? 200 : 1000;
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-                continue;
-            }
-            std::cout << "❌ Failed to send HELLO length for call " << call_id
-                      << " after " << max_attempts << " attempts: " << strerror(errno) << std::endl;
-            return false;
-        }
-        if (send(s, call_id.data(), call_id.size(), 0) != (ssize_t)call_id.size()) {
-            close(s);
-            if (attempt < max_attempts) {
-                int sleep_ms = (attempt <= 5) ? 200 : 1000;
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-                continue;
-            }
-            std::cout << "❌ Failed to send HELLO call_id for call " << call_id
-                      << " after " << max_attempts << " attempts: " << strerror(errno) << std::endl;
-            return false;
+        if (llama_decode(ctx_, batch) != 0) return "";
+        call->n_past += tokens.size();
+        llama_batch_free(batch);
+
+        std::string response;
+        for (int i = 0; i < 64; ++i) {
+            llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
+            if (id == llama_vocab_eos(vocab_)) break;
+            
+            char piece[128];
+            int n = llama_token_to_piece(vocab_, id, piece, sizeof(piece), 0, false);
+            if (n > 0) response.append(piece, n);
+
+            llama_batch b = llama_batch_get_one(&id, 1);
+            b.pos[0] = call->n_past;
+            b.seq_id[0][0] = call->seq_id;
+            if (llama_decode(ctx_, b) != 0) break;
+            call->n_past++;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(call_data_mutex_);
-            output_sockets_[call_id] = s;
+        std::cout << "🦙 [" << cid << "] Response: " << response << std::endl;
+        return response;
+    }
+
+    std::vector<llama_token> tokenize(const std::string& text, bool bos) {
+        std::vector<llama_token> res(text.size() + (bos ? 1 : 0));
+        int n = llama_tokenize(vocab_, text.c_str(), text.size(), res.data(), res.size(), bos, true);
+        res.resize(n);
+        return res;
+    }
+
+    void send_to_tts(int cid, const std::string& text) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(8090); // Kokoro port
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            std::string msg = std::to_string(cid) + ":" + text;
+            send(sock, msg.c_str(), msg.length(), 0);
         }
-        std::cout << "🔗 Connected output socket for call " << call_id << " to " << output_host_
-                  << ":" << output_port_ << " (attempt " << attempt << ")" << std::endl;
-        return true;
+        close(sock);
     }
 
-    return false;
-}
-
-bool StandaloneLlamaService::send_output_text(const std::string& call_id, const std::string& text) {
-    int s = -1;
-    {
-        std::lock_guard<std::mutex> lock(call_data_mutex_);
-        auto it = output_sockets_.find(call_id);
-        if (it == output_sockets_.end()) return false;
-        s = it->second;
+    std::shared_ptr<LlamaCall> get_or_create_call(int cid) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        if (calls_.count(cid)) return calls_[cid];
+        auto call = std::make_shared<LlamaCall>();
+        call->id = cid;
+        call->seq_id = calls_.size();
+        calls_[cid] = call;
+        return call;
     }
 
-    uint32_t l = htonl((uint32_t)text.size());
-    if (send(s, &l, 4, 0) != 4) return false;
-    if (!text.empty() && send(s, text.data(), text.size(), 0) != (ssize_t)text.size()) return false;
+    std::atomic<bool> running_;
+    struct llama_model* model_ = nullptr;
+    struct llama_context* ctx_ = nullptr;
+    const struct llama_vocab* vocab_ = nullptr;
+    struct llama_sampler* sampler_ = nullptr;
+    std::mutex llama_mutex_;
+    std::mutex calls_mutex_;
+    std::map<int, std::shared_ptr<LlamaCall>> calls_;
+};
 
-    // Mark TTS start for this call to help suppress immediate follow-up replies to acknowledgements
-    {
-        std::lock_guard<std::mutex> lock(call_data_mutex_);
-        auto now = std::chrono::steady_clock::now();
-        last_tts_start_[call_id] = now;
-        // Heuristic speaking window estimation: ~16 chars/sec (faster) + 250ms margin for safety
-        double secs = std::max(0.6, (double)text.size() / 16.0) + 0.25;
-        auto until = now + std::chrono::milliseconds((int)(secs * 1000));
-        tts_speaking_until_[call_id] = until;
-        std::cout << "🔒 [" << call_id << "] Half-duplex gate active for " << (int)(secs*1000) << "ms (text len=" << text.size() << ")" << std::endl;
-    }
-    return true;
-}
-
-void StandaloneLlamaService::close_output_for_call(const std::string& call_id) {
-    auto it = output_sockets_.find(call_id);
-    if (it != output_sockets_.end()) {
-        send_tcp_bye(it->second);
-        close(it->second);
-        output_sockets_.erase(it);
-    }
-}
-
-
-void StandaloneLlamaService::cleanup_tcp_threads() {
-    for (auto & kv : call_tcp_threads_) {
-        if (kv.second.joinable()) kv.second.join();
-    }
-    call_tcp_threads_.clear();
+int main(int argc, char** argv) {
+    if (argc < 2) { std::cout << "Usage: llama-service <model_path>" << std::endl; return 1; }
+    LlamaService service(argv[1]);
+    service.run();
+    return 0;
 }

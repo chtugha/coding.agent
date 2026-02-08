@@ -1,26 +1,22 @@
----
-description: Summary of the SIP Client program
-alwaysApply: true
----
-
 # SIP Client
 
 ## Overview
-The **SIP Client** (`sip-client-main.cpp`) acts as the central RTP gateway for the WhisperTalk system. It manages SIP signaling, handles incoming calls, and coordinates the audio data flow between the telephony network and the internal processing services.
+The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts as the RTP gateway for the WhisperTalk system. It handles SIP registration, incoming calls (INVITE), and routes audio between the telephony network and the internal processors.
 
 ## Internal Function
-- **SIP Signaling**: Implements a lightweight SIP stack to register with servers and handle INVITE/BYE requests.
-- **Standalone Operation**: Fully decoupled from the system database. Accepts credentials via command-line arguments and maintains internal state for active calls.
-- **ID Negotiation**: Communicates with the `InboundAudioProcessor` via a Unix Domain Socket to negotiate a unique `call_num_id` for each call session.
-- **Resilient Forwarding**: Forwards RTP packets to the `InboundAudioProcessor` via UDP, prefixed with the 4-byte negotiated `call_num_id`. Automatically dumps streams if the processor is offline and resumes when it returns.
-- **Multi-Instance Support**: Multiple SIP client instances can run concurrently, coordinating with the central audio processor to avoid ID collisions.
+- **SIP Signaling**: Implements basic SIP registration and INVITE/BYE handling using raw UDP sockets.
+- **RTP Routing**: 
+    - Receives RTP packets from the network and forwards them (with a 4-byte `call_id` prefix) to the `Inbound Audio Processor` via UDP.
+    - Receives encoded G.711 frames from the `Outbound Audio Processor` via UDP and sends them as RTP packets to the remote caller.
+- **Session Management**: Tracks active calls by `Call-ID` and assigns numeric `call_id` for internal routing.
 
 ## Inbound Connections
-- **SIP/SDP (Network)**: Receives signaling on port 5060 (UDP).
-- **RTP (Network)**: Receives audio packets from the remote party on dynamically negotiated UDP ports.
-- **RTP (Internal)**: Receives G.711 audio packets from `OutboundAudioProcessor` via UDP.
+- **SIP (Network)**: UDP port 5060 (or as configured).
+- **RTP (Network)**: Dynamically negotiated UDP ports.
+- **Audio (Internal)**: UDP port 9002 (receives audio from `Outbound Audio Processor`).
 
 ## Outbound Connections
-- **RTP (Network)**: Sends audio packets to the remote party.
-- **Inbound Audio Processor (UDP)**: Sends raw RTP packets to `InboundAudioProcessor` (port 9001), prefixed with a 4-byte big-endian `call_num_id`.
-- **Inbound Audio Processor (Unix Socket)**: Connects to `/tmp/inbound-audio-processor.ctrl` for `call_num_id` negotiation.
+- **SIP (Network)**: UDP to SIP server.
+- **RTP (Network)**: UDP to remote party.
+- **Audio (Internal)**: UDP port 9001 (sends audio to `Inbound Audio Processor`).
+- **Control (Unix Socket)**: Sends `ACTIVATE:call_id` to `/tmp/*.ctrl` to notify processors of new calls.

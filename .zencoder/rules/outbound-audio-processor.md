@@ -1,22 +1,17 @@
----
-description: Summary of the Outbound Audio Processor program
-alwaysApply: true
----
-
 # Outbound Audio Processor
 
 ## Overview
-The **Outbound Audio Processor** (`outbound-audio-processor.cpp`) handles the audio pipeline from the TTS engine (Kokoro/Piper) back to the SIP Client, enabling the system to speak to the caller.
+The **Outbound Audio Processor** (`outbound-audio-processor.cpp`) handles the audio pipeline from the TTS engine (Kokoro) back to the SIP Client.
 
 ## Internal Function
-- **Audio Acquisition**: Receives high-quality PCM audio from the TTS service via TCP.
-- **Resampling/Processing**: Downsamples audio (typically 22.05kHz or 24kHz) to 8kHz and applies anti-aliasing filters.
-- **Encoding**: Converts float32 samples to G.711 μ-law format for telephony transmission.
-- **Continuous Scheduling**: Runs a high-precision scheduler to output exactly 20ms of audio every 20ms, filling gaps with silence or comfort noise to maintain RTP timing.
+- **Audio Acquisition**: Receives 24kHz float32 PCM audio from the `Kokoro TTS Service` via TCP.
+- **Downsampling**: Converts audio to 8kHz and encodes it into G.711 μ-law format.
+- **Scheduling**: Uses a high-precision 20ms timer to send constant-rate audio frames back to the `SIP Client`, filling gaps with silence if necessary.
+- **Multi-Call**: Manages independent buffers and TCP listeners for each active call.
 
 ## Inbound Connections
-- **TTS Service (TCP)**: Receives float32 PCM audio on ports starting at 8090.
-- **Control Socket (Unix Domain)**: Receives commands via `/tmp/outbound-audio-processor.ctrl`.
+- **Kokoro TTS (TCP)**: Receives float32 PCM audio on ports `8090 + (call_id % 100)`.
+- **Control Socket (Unix)**: Receives `ACTIVATE:call_id` on `/tmp/outbound-audio-processor.ctrl`.
 
 ## Outbound Connections
-- **SIP Client (UDP)**: Sends encoded G.711 RTP-ready packets to the SIP Client's RTP input port.
+- **SIP Client (UDP)**: Sends 160-byte G.711 frames (prefixed with `call_id`) to UDP port 9002.
