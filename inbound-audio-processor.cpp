@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/un.h>
 
 // G.711 μ-law decode table (fast lookup)
 static float ulaw_table[256];
@@ -87,6 +88,8 @@ bool InboundAudioProcessor::start(int base_port) {
     active_.store(true); // Always active in multi-call mode
 
     start_control_socket();
+    
+    maintenance_thread_ = std::thread(&InboundAudioProcessor::maintenance_loop, this);
 
     std::cout << "🚀 Inbound Audio Processor started (MULTI-CALL) on base port " << base_port << std::endl;
     return true;
@@ -145,7 +148,7 @@ void InboundAudioProcessor::control_socket_loop() {
                 while (in_use) {
                     in_use = false;
                     for (const auto& pair : active_calls_) {
-                        if (std::stoi(pair.first) == granted_id) { // Assuming numeric call_id for standalone
+                        if (pair.first == std::to_string(granted_id)) {
                             in_use = true;
                             granted_id++;
                             break;
@@ -157,6 +160,12 @@ void InboundAudioProcessor::control_socket_loop() {
                 snprintf(resp, sizeof(resp), "GRANTED_ID:%d", granted_id);
                 send(client_fd, resp, strlen(resp), 0);
                 std::cout << "🆔 Granted call_num_id: " << granted_id << " (requested: " << requested_id << ")" << std::endl;
+            } else if (cmd.find("DEACTIVATE:") == 0) {
+                std::string call_id = cmd.substr(11);
+                deactivate_call(call_id);
+            } else if (cmd.find("ACTIVATE:") == 0) {
+                std::string call_id = cmd.substr(9);
+                activate_for_call(call_id);
             }
         }
         close(client_fd);
@@ -176,6 +185,10 @@ void InboundAudioProcessor::stop() {
 
     if (sip_udp_thread_.joinable()) {
         sip_udp_thread_.join();
+    }
+
+    if (maintenance_thread_.joinable()) {
+        maintenance_thread_.join();
     }
     
     std::lock_guard<std::mutex> lock(calls_mutex_);
@@ -246,10 +259,16 @@ void InboundAudioProcessor::process_rtp_audio(const std::string& call_id, uint8_
             }
             send_tcp_audio_chunk(state, state->pcm_buffer);
         } else {
-            // Buffer temporarily if not connected yet
-            if (state->initial_buffer.size() < CallState::MAX_INITIAL_BUFFER_SAMPLES) {
-                state->initial_buffer.insert(state->initial_buffer.end(), state->pcm_buffer.begin(), state->pcm_buffer.end());
+            // Buffer temporarily if not connected yet (sliding window)
+            if (state->initial_buffer.size() + state->pcm_buffer.size() > CallState::MAX_INITIAL_BUFFER_SAMPLES) {
+                size_t excess = (state->initial_buffer.size() + state->pcm_buffer.size()) - CallState::MAX_INITIAL_BUFFER_SAMPLES;
+                if (excess < state->initial_buffer.size()) {
+                    state->initial_buffer.erase(state->initial_buffer.begin(), state->initial_buffer.begin() + excess);
+                } else {
+                    state->initial_buffer.clear();
+                }
             }
+            state->initial_buffer.insert(state->initial_buffer.end(), state->pcm_buffer.begin(), state->pcm_buffer.end());
         }
         total_packets_processed_.fetch_add(1);
     }
@@ -315,13 +334,6 @@ InboundAudioProcessor::ProcessorStatus InboundAudioProcessor::get_status() const
     return status;
 }
 
-int InboundAudioProcessor::get_system_speed_from_database() {
-    if (database_) {
-        return database_->get_system_speed();
-    }
-    return 3;
-}
-
 // Connection management
 bool InboundAudioProcessor::setup_whisper_tcp_socket(std::shared_ptr<CallState> state) {
     state->listen_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -360,14 +372,23 @@ void InboundAudioProcessor::handle_whisper_tcp_connection(std::shared_ptr<CallSt
         socklen_t client_len = sizeof(client_addr);
         
         int client_socket = accept(state->listen_socket, (struct sockaddr*)&client_addr, &client_len);
-        if (client_socket < 0) break;
+        if (client_socket < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            break;
+        }
         
         {
             std::lock_guard<std::mutex> lock(state->mutex);
             state->tcp_socket = client_socket;
             state->connected.store(true);
-            std::cout << "🔗 Whisper client connected for call " << state->call_id << std::endl;
+            std::cout << "🔗 Whisper client connected for call " << state->call_id << " on port " << state->tcp_port << std::endl;
             send_tcp_hello(state->tcp_socket, state->call_id);
+            
+            // Flush initial buffer if any (limit to 5s)
+            if (!state->initial_buffer.empty()) {
+                send_tcp_audio_chunk(state, state->initial_buffer);
+                state->initial_buffer.clear();
+            }
         }
         
         // Wait for connection to close by blocking on a read
@@ -376,12 +397,12 @@ void InboundAudioProcessor::handle_whisper_tcp_connection(std::shared_ptr<CallSt
             ssize_t n = recv(client_socket, &dummy, 1, MSG_PEEK);
             if (n <= 0) {
                 if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
                     continue;
                 }
                 break; 
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         
         {
@@ -391,6 +412,7 @@ void InboundAudioProcessor::handle_whisper_tcp_connection(std::shared_ptr<CallSt
                 state->tcp_socket = -1;
             }
             state->connected.store(false);
+            std::cout << "🔌 Whisper client disconnected for call " << state->call_id << std::endl;
         }
     }
 }
@@ -449,12 +471,12 @@ void InboundAudioProcessor::registration_polling_thread(std::shared_ptr<CallStat
     std::string reg_msg = "REGISTER:" + state->call_id;
 
     while (state->registration_running.load() && running_.load()) {
-        if (state->connected.load()) break;
-
-        int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (udp_sock >= 0) {
-            sendto(udp_sock, reg_msg.c_str(), reg_msg.length(), 0, (struct sockaddr*)&whisper_addr, sizeof(whisper_addr));
-            close(udp_sock);
+        if (!state->connected.load()) {
+            int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (udp_sock >= 0) {
+                sendto(udp_sock, reg_msg.c_str(), reg_msg.length(), 0, (struct sockaddr*)&whisper_addr, sizeof(whisper_addr));
+                close(udp_sock);
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
@@ -552,4 +574,31 @@ int InboundAudioProcessor::calculate_port_offset(const std::string& call_id) {
     unsigned int hash = 0;
     for (char c : call_id) hash = hash * 31 + c;
     return hash % 1000;
+}
+
+void InboundAudioProcessor::maintenance_loop() {
+    while (running_.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        
+        std::vector<std::shared_ptr<CallState>> stale_calls;
+        auto now = std::chrono::steady_clock::now();
+        
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            for (auto it = active_calls_.begin(); it != active_calls_.end(); ) {
+                auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count();
+                if (duration > 15) { // 15 seconds of inactivity
+                    std::cout << "⏳ Call " << it->first << " timed out (stale for " << duration << "s)" << std::endl;
+                    stale_calls.push_back(it->second);
+                    it = active_calls_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        
+        for (auto& state : stale_calls) {
+            cleanup_call(state);
+        }
+    }
 }

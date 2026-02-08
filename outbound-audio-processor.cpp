@@ -7,7 +7,7 @@
 #include <arpa/inet.h>
 #include <fstream>
 #include <sys/time.h>
-
+#include <sys/un.h>
 #include <netinet/tcp.h>
 #include <deque>
 #include <condition_variable>
@@ -16,6 +16,7 @@
 // Lightweight async conversion worker (file-local)
 namespace {
 struct ConversionJob {
+    std::string call_id;
     std::vector<uint8_t> payload; // raw PCM float32 bytes or already-encoded G711
     uint32_t sample_rate{0};
     uint32_t chunk_id{0};
@@ -25,10 +26,12 @@ struct ConversionJob {
 std::mutex g_conv_mtx;
 std::condition_variable g_conv_cv;
 std::deque<ConversionJob> g_conv_q;
+std::thread g_conv_thread;
+std::atomic<bool> g_conv_running{false};
 
-
-void push_conversion_job(const std::vector<uint8_t>& payload, uint32_t sample_rate, uint32_t chunk_id, bool is_float) {
+void push_conversion_job(const std::string& call_id, const std::vector<uint8_t>& payload, uint32_t sample_rate, uint32_t chunk_id, bool is_float) {
     ConversionJob job;
+    job.call_id = call_id;
     job.payload = payload;
     job.sample_rate = sample_rate;
     job.chunk_id = chunk_id;
@@ -42,15 +45,7 @@ void push_conversion_job(const std::vector<uint8_t>& payload, uint32_t sample_ra
 } // namespace
 
 
-OutboundAudioProcessor::OutboundAudioProcessor()
-    : udp_dest_port_(-1)
-    , udp_call_id_(0)
-    , udp_socket_(-1)
-    , piper_tcp_socket_(-1)
-    , piper_tcp_port_(-1)
-    , piper_connected_(false)
-    , registration_running_(false)
-{
+OutboundAudioProcessor::OutboundAudioProcessor() {
 }
 
 OutboundAudioProcessor::~OutboundAudioProcessor() {
@@ -61,112 +56,155 @@ bool OutboundAudioProcessor::start(int base_port) {
     if (running_.load()) return true;
 
     base_port_ = base_port;
-
     running_.store(true);
-    active_.store(false); // Start in sleeping state
+    active_.store(true);
 
-    std::cout << "😴 Outbound Audio Processor started (SLEEPING) on base port " << base_port << std::endl;
-    std::cout << "📡 TCP sockets will be created dynamically based on call_id" << std::endl;
+    if (!g_conv_running.exchange(true)) {
+        g_conv_thread = std::thread([this]() {
+            while (g_conv_running.load()) {
+                ConversionJob job;
+                {
+                    std::unique_lock<std::mutex> lk(g_conv_mtx);
+                    g_conv_cv.wait(lk, []{ return !g_conv_q.empty() || !g_conv_running.load(); });
+                    if (!g_conv_running.load() && g_conv_q.empty()) break;
+                    job = std::move(g_conv_q.front());
+                    g_conv_q.pop_front();
+                }
 
+                std::shared_ptr<CallState> state;
+                {
+                    std::lock_guard<std::mutex> lock(calls_mutex_);
+                    auto it = active_calls_.find(job.call_id);
+                    if (it != active_calls_.end()) state = it->second;
+                }
+
+                if (state) {
+                    std::vector<uint8_t> g711;
+                    if (job.is_float) {
+                        std::vector<float> mono(job.payload.size() / 4);
+                        memcpy(mono.data(), job.payload.data(), job.payload.size());
+                        g711 = process_float_mono_to_ulaw(mono, job.sample_rate);
+                    } else {
+                        g711 = job.payload; // Already G711
+                    }
+                    enqueue_g711_(state, g711);
+                    state->last_activity = std::chrono::steady_clock::now();
+                }
+            }
+        });
+    }
+
+    ctrl_thread_ = std::thread(&OutboundAudioProcessor::control_socket_loop, this);
+    maintenance_thread_ = std::thread(&OutboundAudioProcessor::maintenance_loop, this);
+    start_output_scheduler_();
+
+    std::cout << "🚀 Outbound Audio Processor started on base port " << base_port << std::endl;
     return true;
 }
 
 void OutboundAudioProcessor::stop() {
-    BaseAudioProcessor::stop();
+    if (!running_.load()) return;
+    
+    running_.store(false);
+    
+    if (ctrl_socket_ >= 0) {
+        close(ctrl_socket_);
+        ctrl_socket_ = -1;
+    }
+    unlink("/tmp/outbound-audio-processor.ctrl");
 
-    // Stop registration polling
-    stop_registration_polling();
+    if (ctrl_thread_.joinable()) ctrl_thread_.join();
+    if (maintenance_thread_.joinable()) maintenance_thread_.join();
 
-    // Stop output scheduler first
+    g_conv_running.store(false);
+    g_conv_cv.notify_all();
+    if (g_conv_thread.joinable()) g_conv_thread.join();
+
     stop_output_scheduler_();
 
-    // Close TCP socket
-    {
-        std::lock_guard<std::mutex> lock(piper_mutex_);
-        if (piper_tcp_socket_ >= 0) {
-            close(piper_tcp_socket_);
-            piper_tcp_socket_ = -1;
-        }
-        piper_connected_.store(false);
+    std::lock_guard<std::mutex> lock(calls_mutex_);
+    for (auto& pair : active_calls_) {
+        cleanup_call(pair.second);
     }
-
-    // Join TCP thread
-    if (piper_tcp_thread_.joinable()) {
-        piper_tcp_thread_.join();
-    }
+    active_calls_.clear();
 
     std::cout << "🛑 Outbound Audio Processor stopped" << std::endl;
 }
 
+void OutboundAudioProcessor::control_socket_loop() {
+    const char* socket_path = "/tmp/outbound-audio-processor.ctrl";
+    unlink(socket_path);
+
+    ctrl_socket_ = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (ctrl_socket_ < 0) return;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+
+    if (bind(ctrl_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "❌ Failed to bind outbound control socket" << std::endl;
+        return;
+    }
+
+    if (listen(ctrl_socket_, 5) < 0) return;
+
+    std::cout << "🎮 Outbound Control Socket listening on " << socket_path << std::endl;
+
+    while (running_.load()) {
+        struct sockaddr_un remote;
+        socklen_t len = sizeof(remote);
+        int client_fd = accept(ctrl_socket_, (struct sockaddr*)&remote, &len);
+        if (client_fd < 0) {
+            if (running_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        char buf[256];
+        ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            buf[n] = '\0';
+            std::string cmd(buf);
+            
+            if (cmd.find("ACTIVATE:") == 0) {
+                std::string call_id = cmd.substr(9);
+                auto state = get_or_create_call_state(call_id);
+                std::string resp = "OK:" + std::to_string(state->piper_tcp_port);
+                send(client_fd, resp.c_str(), resp.length(), 0);
+            } else if (cmd.find("DEACTIVATE:") == 0) {
+                std::string call_id = cmd.substr(11);
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                auto it = active_calls_.find(call_id);
+                if (it != active_calls_.end()) {
+                    cleanup_call(it->second);
+                    active_calls_.erase(it);
+                }
+                send(client_fd, "OK", 2, 0);
+            }
+        }
+        close(client_fd);
+    }
+}
+
 void OutboundAudioProcessor::set_sip_client_callback(std::function<void(const std::string&, const std::vector<uint8_t>&)> callback) {
-    sip_client_callback_ = callback;
 }
 
 void OutboundAudioProcessor::activate_for_call(const std::string& call_id) {
-    BaseAudioProcessor::activate_for_call(call_id);
-
-    if (!active_.load()) return;
-
-    // Determine Kokoro (Piper) TCP port (server lives in Kokoro now)
-    piper_tcp_port_ = calculate_piper_port(call_id);
-
-    // Start UDP registration listener and, upon REGISTER, connect to Kokoro
-    start_registration_polling(call_id);
-
-    std::cout << "✅ Outbound Audio Processor ACTIVE - will connect to Kokoro on port " << piper_tcp_port_ << " for call " << call_id << std::endl;
+    get_or_create_call_state(call_id);
 }
 
 void OutboundAudioProcessor::deactivate_after_call() {
-    // Stop registration polling
-    stop_registration_polling();
-
-    // Send BYE to Piper/Kokoro registration listener (UDP 13001)
-    if (!current_call_id_.empty()) {
-        int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (udp_sock >= 0) {
-            struct sockaddr_in piper_addr{};
-            piper_addr.sin_family = AF_INET;
-            piper_addr.sin_port = htons(13001);
-            piper_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-            std::string bye_msg = std::string("BYE:") + current_call_id_;
-            sendto(udp_sock, bye_msg.c_str(), (int)bye_msg.size(), 0, (struct sockaddr*)&piper_addr, sizeof(piper_addr));
-            close(udp_sock);
-            std::cout << "📤 Sent BYE message to Piper service for call_id " << current_call_id_ << std::endl;
-        }
-    }
-
-    BaseAudioProcessor::deactivate_after_call();
-
-    // Stop output scheduler
-    stop_output_scheduler_();
-
-    // Close Piper TCP connection
-    {
-        std::lock_guard<std::mutex> lock(piper_mutex_);
-        if (piper_tcp_socket_ >= 0) {
-            close(piper_tcp_socket_);
-            piper_tcp_socket_ = -1;
-        }
-        piper_connected_.store(false);
-    }
-
-    // Join TCP thread
-    if (piper_tcp_thread_.joinable()) {
-        piper_tcp_thread_.join();
-    }
-
-    // Remove service advertisement
-    if (service_advertiser_) {
-        std::string call_id;
-        {
-            std::lock_guard<std::mutex> lock(call_mutex_);
-            call_id = current_call_id_;
-        }
-        if (!call_id.empty()) {
-            service_advertiser_->remove_stream_advertisement(call_id);
-        }
-    }
 }
+
+BaseAudioProcessor::ProcessorStatus OutboundAudioProcessor::get_status() const {
+    auto status = BaseAudioProcessor::get_status();
+    status.processor_type = "Outbound (Multi-Call)";
+    std::lock_guard<std::mutex> lock(calls_mutex_);
+    status.active_calls = active_calls_.size();
+    return status;
+}
+
 std::vector<uint8_t> OutboundAudioProcessor::process_float_mono_to_ulaw(const std::vector<float>& mono, uint32_t sample_rate) {
     if (mono.empty()) return {};
     std::vector<float> work = mono;
@@ -175,204 +213,85 @@ std::vector<uint8_t> OutboundAudioProcessor::process_float_mono_to_ulaw(const st
     return convert_float_to_g711_ulaw(work);
 }
 
-OutboundAudioProcessor::AudioFileType OutboundAudioProcessor::detect_audio_file_type(const std::vector<uint8_t>& bytes) {
-    if (bytes.size() >= 12 && bytes[0]=='R' && bytes[1]=='I' && bytes[2]=='F' && bytes[3]=='F' && bytes[8]=='W' && bytes[9]=='A' && bytes[10]=='V' && bytes[11]=='E') return AudioFileType::WAV;
-    if (bytes.size() >= 3 && bytes[0]==0xFF && (bytes[1]&0xE0)==0xE0) return AudioFileType::MP3;
-    if (bytes.size() >= 12 && bytes[4]=='f' && bytes[5]=='t' && bytes[6]=='y' && bytes[7]=='p') return AudioFileType::MP4; // MP4/M4A
-    if (bytes.size() >= 4 && bytes[0]=='f' && bytes[1]=='L' && bytes[2]=='a' && bytes[3]=='C') return AudioFileType::FLAC;
-    if (bytes.size() >= 4 && bytes[0]=='O' && bytes[1]=='g' && bytes[2]=='g' && bytes[3]=='S') return AudioFileType::OGG;
-    return AudioFileType::UNKNOWN;
-}
+std::shared_ptr<OutboundAudioProcessor::CallState> OutboundAudioProcessor::get_or_create_call_state(const std::string& call_id) {
+    std::lock_guard<std::mutex> lock(calls_mutex_);
+    auto it = active_calls_.find(call_id);
+    if (it != active_calls_.end()) return it->second;
 
-bool OutboundAudioProcessor::read_entire_file(const std::string& path, std::vector<uint8_t>& out) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    f.seekg(0, std::ios::end);
-    std::streampos len = f.tellg();
-    if (len <= 0) return false;
-    out.resize(static_cast<size_t>(len));
-    f.seekg(0, std::ios::beg);
-    f.read(reinterpret_cast<char*>(out.data()), len);
-    return bool(f);
-}
+    auto state = std::make_shared<CallState>(call_id);
+    state->piper_tcp_port = calculate_piper_port(call_id);
+    state->udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    state->udp_dest_ip = "127.0.0.1";
+    state->udp_dest_port = 9002;
+    state->udp_call_id = static_cast<uint32_t>(std::stoul(call_id));
 
-bool OutboundAudioProcessor::parse_wav_header(const std::vector<uint8_t>& b,
-                                 uint16_t& fmt, uint16_t& channels, uint32_t& rate,
-                                 uint16_t& bits_per_sample, size_t& data_offset, size_t& data_size) {
-    if (b.size() < 44) return false;
-    if (!(b[0]=='R'&&b[1]=='I'&&b[2]=='F'&&b[3]=='F'&&b[8]=='W'&&b[9]=='A'&&b[10]=='V'&&b[11]=='E')) return false;
-    size_t pos = 12;
-    bool have_fmt=false, have_data=false;
-    while (pos + 8 <= b.size()) {
-        uint32_t id = *reinterpret_cast<const uint32_t*>(&b[pos]); pos += 4;
-        uint32_t sz = *reinterpret_cast<const uint32_t*>(&b[pos]); pos += 4;
-        if (pos + sz > b.size()) break;
-        if (id == 0x20746d66u && sz >= 16) { // 'fmt '
-            fmt = *reinterpret_cast<const uint16_t*>(&b[pos+0]);
-            channels = *reinterpret_cast<const uint16_t*>(&b[pos+2]);
-            rate = *reinterpret_cast<const uint32_t*>(&b[pos+4]);
-            bits_per_sample = *reinterpret_cast<const uint16_t*>(&b[pos+14]);
-            have_fmt = true;
-        } else if (id == 0x61746164u) { // 'data'
-            data_offset = pos;
-            data_size = sz;
-            have_data = true;
-        }
-        pos += sz;
-    }
-    return have_fmt && have_data;
-}
-
-std::vector<float> OutboundAudioProcessor::decode_bytes_to_float_mono(const std::vector<uint8_t>& bytes, AudioFileType type, uint32_t& sample_rate) {
-    sample_rate = 0;
-    std::vector<float> mono;
-    if (type == AudioFileType::WAV) {
-        uint16_t fmt=0, ch=0, bps=0; uint32_t rate=0; size_t off=0, sz=0;
-        if (!parse_wav_header(bytes, fmt, ch, rate, bps, off, sz) || ch==0) return {};
-        sample_rate = rate;
-        const uint8_t* p = bytes.data() + off; const uint8_t* end = p + sz;
-        auto push_frame = [&](double acc){ mono.push_back(static_cast<float>(acc / ch)); };
-        if (fmt == 1) { // PCM
-            if (bps == 8) {
-                while (p < end) { double acc=0.0; for (int c=0;c<ch && p<end;++c) acc += double(int(int8_t(*p++ - 128))<<8) / 32768.0; push_frame(acc);} }
-            else if (bps == 16) { while (p + 2*ch <= end) { double acc=0.0; for (int c=0;c<ch;++c){ int16_t v = int16_t(p[0] | (p[1]<<8)); p+=2; acc += double(v)/32768.0; } push_frame(acc);} }
-            else if (bps == 24) { while (p + 3*ch <= end) { double acc=0.0; for (int c=0;c<ch;++c){ int32_t v = (p[0]|(p[1]<<8)|(p[2]<<16)); if (v & 0x00800000) v |= 0xFF000000; p+=3; acc += double(v)/32768.0; } push_frame(acc);} }
-            else if (bps == 32) { while (p + 4*ch <= end) { double acc=0.0; for (int c=0;c<ch;++c){ int32_t v = (p[0]|(p[1]<<8)|(p[2]<<16)|(p[3]<<24)); p+=4; acc += double(v)/32768.0; } push_frame(acc);} }
-            else return {};
-        } else if (fmt == 3) { // IEEE float32
-            while (p + 4*ch <= end) { double acc=0.0; const float* pf = reinterpret_cast<const float*>(p); for (int c=0;c<ch;++c) acc += pf[c]; p += 4*ch; push_frame(acc);}
-        } else if (fmt == 6 || fmt == 7) { // A-law or μ-law
-            auto alaw_to_linear = [](uint8_t a)->int16_t{ a^=0x55; int sign=a&0x80; int exp=(a&0x70)>>4; int mant=a&0x0F; int sample=(mant<<4)+8; if(exp) sample=(sample+0x100)<<(exp-1); if(sign) sample=-sample; return (int16_t)sample; };
-            auto mulaw_to_linear = [](uint8_t u)->int16_t{ u=~u; int t=((u&0x0F)<<3)+0x84; t <<= ((unsigned)u&0x70)>>4; return (u&0x80)?(0x84-t):(t-0x84); };
-            while (p + ch <= end) { double acc=0.0; for (int c=0;c<ch;++c){ uint8_t b=*p++; int16_t lin = (fmt==6)? alaw_to_linear(b): mulaw_to_linear(b); acc += double(lin)/32768.0; } push_frame(acc);}
-        } else {
-            return {};
-        }
-    } else {
-        // Unsupported types today (MP3/MP4/M4A/FLAC/OGG) — placeholder for future decoders
-        return {};
-    }
-    return mono;
-}
-
-
-void OutboundAudioProcessor::set_udp_output(const std::string& ip, int port, uint32_t call_id) {
-    std::lock_guard<std::mutex> lk(udp_mutex_);
-    udp_dest_ip_ = ip;
-    udp_dest_port_ = port;
-    udp_call_id_ = call_id;
+    active_calls_[call_id] = state;
     
-    if (udp_socket_ < 0) {
-        udp_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+    start_registration_polling(state);
+    
+    std::cout << "📞 Created CallState for outbound call " << call_id << " on port " << state->piper_tcp_port << std::endl;
+    return state;
+}
+
+void OutboundAudioProcessor::cleanup_call(std::shared_ptr<CallState> state) {
+    stop_registration_polling(state);
+    
+    state->piper_connected.store(false);
+    {
+        std::lock_guard<std::mutex> lock(state->piper_mutex);
+        if (state->piper_tcp_socket >= 0) {
+            close(state->piper_tcp_socket);
+            state->piper_tcp_socket = -1;
+        }
     }
     
-    std::cout << "📡 Outbound UDP output set: " << ip << ":" << port << " for call_id " << call_id << std::endl;
-    ensure_output_running();
-}
-
-void OutboundAudioProcessor::clear_udp_output() {
-    std::lock_guard<std::mutex> lk(udp_mutex_);
-    if (udp_socket_ >= 0) {
-        close(udp_socket_);
-        udp_socket_ = -1;
+    if (state->udp_socket >= 0) {
+        close(state->udp_socket);
+        state->udp_socket = -1;
     }
-    udp_dest_port_ = -1;
-}
-
-void OutboundAudioProcessor::set_silence_wav2_bytes(const std::vector<uint8_t>& bytes) {
-    std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-    silence_wav2_ = bytes;
-    silence_wav2_pos_ = 0;
-}
-
-void OutboundAudioProcessor::ensure_output_running() {
-    if (running_.load() && !output_running_.load()) {
-        // Start RTP scheduler (will perform conversion off the TCP receive thread)
-        start_output_scheduler_();
+    
+    if (state->piper_tcp_thread.joinable()) {
+        state->piper_tcp_thread.join();
     }
 }
 
-BaseAudioProcessor::ProcessorStatus OutboundAudioProcessor::get_status() const {
-    auto status = BaseAudioProcessor::get_status();
-    status.processor_type = "Outbound";
-    return status;
+void OutboundAudioProcessor::maintenance_loop() {
+    while (running_.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        std::vector<std::shared_ptr<CallState>> stale_calls;
+        auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            for (auto it = active_calls_.begin(); it != active_calls_.end(); ) {
+                auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count();
+                if (duration > 30) { // 30 seconds of inactivity for outbound
+                    stale_calls.push_back(it->second);
+                    it = active_calls_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        for (auto& s : stale_calls) cleanup_call(s);
+    }
 }
 
-bool OutboundAudioProcessor::load_and_set_silence_wav2(const std::string& wav_path) {
-    std::vector<uint8_t> file_bytes;
-    if (!read_entire_file(wav_path, file_bytes)) return false;
-    auto type = detect_audio_file_type(file_bytes);
-    uint32_t src_rate = 0;
-    auto mono = decode_bytes_to_float_mono(file_bytes, type, src_rate);
-    if (mono.empty() || src_rate == 0) return false;
-    auto g711 = process_float_mono_to_ulaw(mono, src_rate);
-    if (g711.empty()) return false;
-    set_silence_wav2_bytes(g711);
-    return true;
-}
-
-
-
-
-void OutboundAudioProcessor::enqueue_g711_(const std::vector<uint8_t>& g711) {
-    using namespace std::chrono_literals;
+void OutboundAudioProcessor::enqueue_g711_(std::shared_ptr<CallState> state, const std::vector<uint8_t>& g711) {
     if (g711.empty()) return;
-
-    // Allow up to 12.0s of audio burst to tolerate long Kokoro bursts without chopping
-    constexpr size_t kMaxBytes = 160 * 600; // 600 frames = 12000ms @ 20ms/frame
-
-    int spins = 0;
-    for (;;) {
-        {
-            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-            if (out_buffer_.size() + g711.size() <= kMaxBytes) {
-                // Enough room — enqueue all
-                size_t before_size = out_buffer_.size();
-                out_buffer_.insert(out_buffer_.end(), g711.begin(), g711.end());
-                static int enqueue_count = 0;
-                if (++enqueue_count <= 5 || enqueue_count % 100 == 0) {
-                    std::cout << "📥 Enqueued " << g711.size() << " bytes to out_buffer (was " << before_size << ", now " << out_buffer_.size() << ")" << std::endl;
-                }
-                return;
-            }
-        }
-        // Not enough room — give the scheduler a moment to drain
-        if (++spins <= 1000) { // wait up to ~2000ms before considering drop
-            std::this_thread::sleep_for(2ms);
-            continue;
-        }
-        // Still full — drop policy:
-        {
-            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-            if (pending_first_rtp_) {
-                // Avoid losing the beginning: wait a bit more and retry
-                std::this_thread::sleep_for(2ms);
-                continue;
-            }
-            size_t needed = (out_buffer_.size() + g711.size()) - kMaxBytes;
-            size_t drop = ((needed + 159) / 160) * 160; // align to 160-byte frames
-            if (drop > out_buffer_.size()) drop = out_buffer_.size();
-            if (drop > 0) {
-                // Prefer dropping newest tail to preserve earlier speech continuity
-                out_buffer_.erase(out_buffer_.end() - drop, out_buffer_.end());
-                static int drop_count = 0;
-                if (++drop_count <= 5 || drop_count % 200 == 0) {
-                    std::cout << "⚠️  Dropped newest " << drop << " bytes (preserved head; buffer now " << out_buffer_.size() << ")" << std::endl;
-                }
-            }
-            // loop to attempt enqueue again immediately
-        }
+    std::lock_guard<std::mutex> lk(state->out_buffer_mutex);
+    // Max 10s buffer
+    if (state->out_buffer.size() + g711.size() > 160 * 500) {
+        state->out_buffer.erase(state->out_buffer.begin(), state->out_buffer.begin() + g711.size());
     }
+    state->out_buffer.insert(state->out_buffer.end(), g711.begin(), g711.end());
 }
 
-void OutboundAudioProcessor::make_silence_frame_(std::vector<uint8_t>& frame) {
-    frame.resize(160, 0xFF); // μ-law silence
-
-    // Only play test WAV if Piper is NOT connected
-    // Once Piper connects, we play actual silence until Piper audio arrives
-    if (!piper_connected_.load() && !silence_wav2_.empty()) {
+void OutboundAudioProcessor::make_silence_frame_(std::shared_ptr<CallState> state, std::vector<uint8_t>& frame) {
+    frame.resize(160, 0xFF);
+    if (!state->piper_connected.load() && !silence_wav2_.empty()) {
+        std::lock_guard<std::mutex> lock(calls_mutex_); // for silence_wav2_pos_ safety if shared, but let's just use 0
         for (size_t i = 0; i < 160; ++i) {
-            frame[i] = silence_wav2_[silence_wav2_pos_];
+            frame[i] = silence_wav2_[silence_wav2_pos_ % silence_wav2_.size()];
             silence_wav2_pos_ = (silence_wav2_pos_ + 1) % silence_wav2_.size();
         }
     }
@@ -382,432 +301,76 @@ void OutboundAudioProcessor::start_output_scheduler_() {
     if (output_running_.exchange(true)) return;
     output_thread_ = std::thread([this]() {
         auto next = std::chrono::steady_clock::now();
-        const auto interval = std::chrono::milliseconds(20);
-        while (running_.load() && output_running_.load()) {
-            // Process all available conversion jobs immediately to minimize latency
+        while (output_running_.load()) {
+            std::vector<std::shared_ptr<CallState>> current_calls;
             {
-                while (true) {
-                    ConversionJob job;
-                    bool has_job = false;
-                    {
-                        std::lock_guard<std::mutex> lk(g_conv_mtx);
-                        if (!g_conv_q.empty()) { job = std::move(g_conv_q.front()); g_conv_q.pop_front(); has_job = true; }
-                    }
-                    if (!has_job) break;
-
-                    auto is_all_ulaw_silence = [](const uint8_t* p)->bool{
-                        for (int i = 0; i < 160; ++i) if (p[i] != 0xFF) return false; return true;
-                    };
-
-                    auto handle_bytes = [this, &is_all_ulaw_silence](std::vector<uint8_t>&& bytes){
-                        if (bytes.empty()) return;
-                        bool did_fast_start = false; // retained for clarity; used to decide remainder enqueue
-
-                        // If this is the first chunk of a new utterance, fast-start only when the first frame is non-silence.
-                        {
-                            bool has_udp = false;
-                            {
-                                std::lock_guard<std::mutex> lk(udp_mutex_);
-                                if (udp_dest_port_ > 0) has_udp = true;
-                            }
-
-                            if (has_udp && bytes.size() >= 160) {
-                                bool try_fast = false;
-                                {
-                                    std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                                    if (pending_first_rtp_) try_fast = true;
-                                }
-                                if (try_fast) {
-                                    size_t offset = 0;
-                                    // Trim leading μ-law silence frames to avoid long initial silence on the phone
-                                    while (bytes.size() - offset >= 160 && is_all_ulaw_silence(bytes.data() + offset)) {
-                                        offset += 160;
-                                    }
-                                    if (bytes.size() - offset >= 160) {
-                                        // First non-silence frame available — write immediately to UDP
-                                        bool wrote = false;
-                                        
-                                        // Prepare UDP packet: [call_id:4][G711:160]
-                                        std::vector<uint8_t> pkt(4 + 160);
-                                        {
-                                            std::lock_guard<std::mutex> lk(udp_mutex_);
-                                            *reinterpret_cast<uint32_t*>(pkt.data()) = htonl(udp_call_id_);
-                                            std::memcpy(pkt.data() + 4, bytes.data() + offset, 160);
-                                            
-                                            struct sockaddr_in dest_addr{};
-                                            dest_addr.sin_family = AF_INET;
-                                            dest_addr.sin_port = htons(udp_dest_port_);
-                                            dest_addr.sin_addr.s_addr = inet_addr(udp_dest_ip_.c_str());
-                                            
-                                            if (sendto(udp_socket_, pkt.data(), pkt.size(), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr)) > 0) {
-                                                wrote = true;
-                                            }
-                                        }
-
-                                        if (wrote) {
-                                            did_fast_start = true;
-                                            {
-                                                std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                                                pending_first_rtp_ = false;
-                                            }
-                                            std::string call_id;
-                                            {
-                                                std::lock_guard<std::mutex> lock(call_mutex_);
-                                                call_id = current_call_id_;
-                                            }
-                                            auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
-                                            auto ms = now.time_since_epoch().count();
-                                            std::cout << "t3: First RTP frame sent [call " << call_id << "] ts=" << ms << std::endl;
-
-                                            // Enqueue any remainder (excluding the fast-start frame and any trimmed silence)
-                                            size_t rem_off = offset + 160;
-                                            if (bytes.size() > rem_off) {
-                                                std::vector<uint8_t> rest(bytes.begin() + rem_off, bytes.end());
-                                                enqueue_g711_(rest);
-                                            }
-                                            return; // handled fully
-                                        }
-                                    }
-                                    // If we only saw silence so far, keep pending_first_rtp_ true and just enqueue the (trimmed) remainder
-                                    if (offset > 0) {
-                                        if (bytes.size() > offset) {
-                                            std::vector<uint8_t> rest(bytes.begin() + offset, bytes.end());
-                                            enqueue_g711_(rest);
-                                        }
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Default path: enqueue all
-                        enqueue_g711_(bytes);
-                    };
-
-                    if (job.is_float) {
-                        const float* f = reinterpret_cast<const float*>(job.payload.data());
-                        std::vector<float> mono(f, f + (job.payload.size() / 4));
-                        auto g711 = process_float_mono_to_ulaw(mono, job.sample_rate);
-                        handle_bytes(std::move(g711));
-                    } else {
-                        handle_bytes(std::vector<uint8_t>(job.payload.begin(), job.payload.end()));
-                    }
-                }
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                for (auto& p : active_calls_) current_calls.push_back(p.second);
             }
 
-            // Opportunistically drain multiple frames per tick into UDP to absorb TTS bursts
-            {
-                bool has_udp = false;
+            for (auto& state : current_calls) {
+                std::vector<uint8_t> frame(160);
+                bool has_audio = false;
                 {
-                    std::lock_guard<std::mutex> lk(udp_mutex_);
-                    if (udp_dest_port_ > 0) has_udp = true;
+                    std::lock_guard<std::mutex> lk(state->out_buffer_mutex);
+                    if (state->out_buffer.size() >= 160) {
+                        memcpy(frame.data(), state->out_buffer.data(), 160);
+                        state->out_buffer.erase(state->out_buffer.begin(), state->out_buffer.begin() + 160);
+                        has_audio = true;
+                        state->pending_first_rtp = false;
+                    }
                 }
 
-                if (has_udp) {
-                    constexpr int kBurstFrames = 8; 
+                if (!has_audio) {
+                    make_silence_frame_(state, frame);
+                }
 
-                    for (int n = 0; n < kBurstFrames; ++n) {
-                        uint8_t frame160[160];
-                        bool have = false;
-                        {
-                            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                            if (out_buffer_.size() >= 160) {
-                                std::memcpy(frame160, out_buffer_.data(), 160);
-                                have = true;
-                            }
-                        }
-                        if (!have) break;
+                if (state->udp_socket >= 0 && state->udp_dest_port > 0) {
+                    struct sockaddr_in addr{};
+                    addr.sin_family = AF_INET;
+                    addr.sin_port = htons(state->udp_dest_port);
+                    inet_pton(AF_INET, state->udp_dest_ip.c_str(), &addr.sin_addr);
 
-                        bool wrote = false;
-                        // Prepare UDP packet: [call_id:4][G711:160]
-                        std::vector<uint8_t> pkt(4 + 160);
-                        {
-                            std::lock_guard<std::mutex> lk(udp_mutex_);
-                            *reinterpret_cast<uint32_t*>(pkt.data()) = htonl(udp_call_id_);
-                            std::memcpy(pkt.data() + 4, frame160, 160);
-                            
-                            struct sockaddr_in dest_addr{};
-                            dest_addr.sin_family = AF_INET;
-                            dest_addr.sin_port = htons(udp_dest_port_);
-                            dest_addr.sin_addr.s_addr = inet_addr(udp_dest_ip_.c_str());
-                            
-                            if (sendto(udp_socket_, pkt.data(), pkt.size(), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr)) > 0) {
-                                wrote = true;
-                            }
-                        }
-                        if (!wrote) break; 
+                    std::vector<uint8_t> pkt(4 + 160);
+                    uint32_t cid_net = htonl(state->udp_call_id);
+                    memcpy(pkt.data(), &cid_net, 4);
+                    memcpy(pkt.data() + 4, frame.data(), 160);
 
-                        {
-                            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                            if (out_buffer_.size() >= 160) {
-                                out_buffer_.erase(out_buffer_.begin(), out_buffer_.begin() + 160);
-                            }
-                        }
-
-                        // Log t3 when we send the first real RTP frame of a new utterance
-                        bool do_log = false;
-                        {
-                            std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-                            if (pending_first_rtp_) { pending_first_rtp_ = false; do_log = true; }
-                        }
-                        if (do_log) {
-                            std::string call_id;
-                            {
-                                std::lock_guard<std::mutex> lock(call_mutex_);
-                                call_id = current_call_id_;
-                            }
-                            auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
-                            auto ms = now.time_since_epoch().count();
-                            std::cout << "t3: First RTP frame sent [call " << call_id << "] ts=" << ms << std::endl;
-                        }
-                    }
+                    sendto(state->udp_socket, pkt.data(), pkt.size(), 0, (struct sockaddr*)&addr, sizeof(addr));
                 }
             }
 
-            // If no audio available or no channel, do not write silence to SHM —
-            // SIP client has its own keepalive mechanism; avoid filling the ring with 0xFF
-            next += interval;
+            next += std::chrono::milliseconds(20);
             std::this_thread::sleep_until(next);
         }
     });
 }
 
 void OutboundAudioProcessor::stop_output_scheduler_() {
-    if (!output_running_.exchange(false)) return;
+    output_running_.store(false);
     if (output_thread_.joinable()) output_thread_.join();
 }
 
-// Private methods
-bool OutboundAudioProcessor::setup_piper_tcp_socket(const std::string& call_id) {
-    piper_tcp_socket_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (piper_tcp_socket_ < 0) {
-        std::cout << "❌ Failed to create Piper TCP socket" << std::endl;
-        return false;
-    }
-
-    int opt = 1;
-    setsockopt(piper_tcp_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    piper_tcp_port_ = calculate_piper_port(call_id);
-
-    struct sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(piper_tcp_port_);
-
-    if (bind(piper_tcp_socket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cout << "❌ Failed to bind Piper TCP socket to port " << piper_tcp_port_ << std::endl;
-        close(piper_tcp_socket_);
-        piper_tcp_socket_ = -1;
-        return false;
-    }
-
-    if (listen(piper_tcp_socket_, 1) < 0) {
-        std::cout << "❌ Failed to listen on Piper TCP socket" << std::endl;
-        close(piper_tcp_socket_);
-        piper_tcp_socket_ = -1;
-        return false;
-    }
-
-    // Start connection handler thread
-    piper_tcp_thread_ = std::thread(&OutboundAudioProcessor::handle_piper_tcp_connection, this);
-
-    std::cout << "✅ Piper TCP socket listening on port " << piper_tcp_port_ << " for call " << call_id << std::endl;
-    return true;
-}
-
 int OutboundAudioProcessor::calculate_piper_port(const std::string& call_id) {
-    int port = 9002 + calculate_port_offset(call_id);
-    std::cout << "🔢 Piper port for call " << call_id << ": " << port << " (9002 + " << calculate_port_offset(call_id) << ")" << std::endl;
-    return port;
+    unsigned int hash = 0;
+    for (char c : call_id) hash = hash * 31 + c;
+    return 8091 + (hash % 1000);
 }
 
-void OutboundAudioProcessor::handle_piper_tcp_connection() {
-    std::cout << "👂 Piper TCP connection handler started" << std::endl;
-
-    while (running_.load() && piper_tcp_socket_ >= 0) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-
-        int client_socket = accept(piper_tcp_socket_, (struct sockaddr*)&client_addr, &client_len);
-        if (client_socket < 0) {
-            if (!running_.load()) break;
-            std::cout << "❌ Failed to accept Piper client connection" << std::endl;
-            continue; // keep accepting
-        }
-        // Disable Nagle to reduce latency
-        {
-            int flag = 1;
-            setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
-        }
-        std::cout << "🔗 Piper client connected" << std::endl;
-        piper_connected_.store(true);
-
-        // Read HELLO message and verify call_id
-        std::string expected_call_id;
-        {
-            std::lock_guard<std::mutex> lock(call_mutex_);
-            expected_call_id = current_call_id_;
-        }
-        bool hello_ok = false;
-        uint32_t length = 0;
-        if (read_exact_from_socket(client_socket, &length, 4)) {
-            length = ntohl(length);
-            if (length > 0 && length < 1024) {
-                std::vector<char> call_id_buffer(length + 1);
-                if (read_exact_from_socket(client_socket, call_id_buffer.data(), length)) {
-                    call_id_buffer[length] = '\0';
-                    std::string received_call_id(call_id_buffer.data());
-                    std::cout << "📡 TCP HELLO received from Piper for call: " << received_call_id << std::endl;
-                    if (received_call_id == expected_call_id) hello_ok = true;
-                }
-            }
-        }
-        if (!hello_ok) {
-            std::cout << "⚠️ Piper HELLO missing/mismatch; closing connection" << std::endl;
-            close(client_socket);
-            piper_connected_.store(false);
-            continue;
-        }
-
-        // Process incoming audio data for this connection
-        while (running_.load() && piper_connected_.load()) {
-            uint32_t chunk_length = 0, sample_rate = 0, chunk_id = 0;
-
-            // Read chunk header: [length][sample_rate][chunk_id]
-            if (!read_exact_from_socket(client_socket, &chunk_length, 4) ||
-                !read_exact_from_socket(client_socket, &sample_rate, 4) ||
-                !read_exact_from_socket(client_socket, &chunk_id, 4)) {
-                break;
-            }
-
-            chunk_length = ntohl(chunk_length);
-            sample_rate = ntohl(sample_rate);
-            chunk_id = ntohl(chunk_id);
-
-            if (chunk_length == 0) {
-                std::cout << "📡 TCP BYE received from Piper" << std::endl;
-                break;
-            }
-
-            // Allow up to 10MB chunks (long sentences can generate large audio)
-            if (chunk_length > 10 * 1024 * 1024) {
-                std::cout << "⚠️ Piper chunk too large (" << chunk_length << " bytes) — dropping" << std::endl;
-                break;
-            }
-
-            // Duplicate check per call
-            std::string call_id;
-            {
-                std::lock_guard<std::mutex> lock(call_mutex_);
-                call_id = current_call_id_;
-            }
-            // Interpret start-of-utterance marker in MSB; use low 31 bits for sequence
-
-            const uint32_t seq = (chunk_id & 0x7FFFFFFFu);
-            {
-                std::lock_guard<std::mutex> lk(chunk_dedup_mutex_);
-                uint32_t &last = last_chunk_id_[call_id];
-                if (seq <= last) {
-                    std::vector<uint8_t> tmp(std::min(chunk_length, 4096u));
-                    uint32_t remaining = chunk_length;
-                    while (remaining > 0 && running_.load()) {
-                        uint32_t to_read = std::min(remaining, static_cast<uint32_t>(tmp.size()));
-                        if (!read_exact_from_socket(client_socket, tmp.data(), to_read)) break;
-                        remaining -= to_read;
-                    }
-                    std::cout << "⚠️ Dropped duplicate Piper TTS chunk id " << seq << " (last=" << last << ") for call " << call_id << std::endl;
-                    continue;
-                }
-            }
-
-            // Read payload
-            std::vector<uint8_t> payload(chunk_length);
-            if (!read_exact_from_socket(client_socket, payload.data(), chunk_length)) break;
-
-            // Process audio chunk (enqueue into scheduler buffer)
-            process_piper_audio_chunk(payload, sample_rate, chunk_id);
-
-            // Update last chunk ID (store sequence only)
-            {
-                std::lock_guard<std::mutex> lk(chunk_dedup_mutex_);
-                uint32_t &last = last_chunk_id_[call_id];
-                last = std::max(last, seq);
-            }
-        }
-
-        close(client_socket);
-        piper_connected_.store(false);
-        std::cout << "🔌 Piper client disconnected" << std::endl;
-        // Continue accepting new connections
-    }
-
-    std::cout << "👂 Piper TCP connection handler stopped" << std::endl;
+void OutboundAudioProcessor::start_registration_polling(std::shared_ptr<CallState> state) {
+    state->registration_running.store(true);
+    state->registration_thread = std::thread(&OutboundAudioProcessor::registration_polling_thread, this, state);
 }
 
-bool OutboundAudioProcessor::read_exact_from_socket(int socket_fd, void* data, size_t size) {
-    uint8_t* ptr = static_cast<uint8_t*>(data);
-    size_t remaining = size;
-
-    while (remaining > 0) {
-        ssize_t received = read(socket_fd, ptr, remaining);
-        if (received <= 0) return false;
-        ptr += received;
-        remaining -= received;
-    }
-    return true;
+void OutboundAudioProcessor::stop_registration_polling(std::shared_ptr<CallState> state) {
+    state->registration_running.store(false);
+    if (state->registration_thread.joinable()) state->registration_thread.join();
 }
 
-void OutboundAudioProcessor::process_piper_audio_chunk(const std::vector<uint8_t>& payload, uint32_t sample_rate, uint32_t chunk_id) {
-    // Heuristic start-of-utterance: mark only once when buffer is empty and we are not already pending first RTP
-    bool mark_start = false;
-    {
-        std::lock_guard<std::mutex> lk(out_buffer_mutex_);
-        if (!pending_first_rtp_ && out_buffer_.size() < 160) {
-            pending_first_rtp_ = true;
-            mark_start = true;
-        }
-    }
-    if (mark_start) {
-        auto now = std::chrono::system_clock::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        std::cout << "⏱️  Outbound received first chunk of utterance ts=" << ms << std::endl;
-    }
-    // Offload conversion to async worker to keep TCP receive thread responsive
-    const bool is_float = ((payload.size() % 4) == 0);
-    // Keep deduplication monotonic by using the raw chunk_id (works for Kokoro which increments globally)
-    push_conversion_job(payload, sample_rate, chunk_id, is_float);
-}
-
-// Registration polling implementation
-void OutboundAudioProcessor::start_registration_polling(const std::string& call_id) {
-    stop_registration_polling(); // Stop any existing polling
-
-    registration_running_.store(true);
-    registration_thread_ = std::thread(&OutboundAudioProcessor::registration_polling_thread, this, call_id);
-
-    std::cout << "🔄 Started registration listener for call " << call_id << std::endl;
-}
-
-void OutboundAudioProcessor::stop_registration_polling() {
-    registration_running_.store(false);
-
-    if (registration_thread_.joinable()) {
-        registration_thread_.join();
-    }
-}
-
-void OutboundAudioProcessor::registration_polling_thread(const std::string& call_id) {
-    // Listen for UDP REGISTER from Kokoro on 13000 + call
-    int offset = calculate_port_offset(call_id);
-    int udp_port = 13000 + offset;
-
+void OutboundAudioProcessor::registration_polling_thread(std::shared_ptr<CallState> state) {
+    int udp_port = 14000 + (calculate_piper_port(state->call_id) % 1000);
     int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_sock < 0) {
-        std::cout << "❌ Failed to create UDP socket for REGISTER listener" << std::endl;
-        return;
-    }
-    // Allow rapid rebinding across calls
+    if (udp_sock < 0) return;
     int opt = 1;
     setsockopt(udp_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -817,104 +380,114 @@ void OutboundAudioProcessor::registration_polling_thread(const std::string& call
     addr.sin_port = htons(udp_port);
 
     if (bind(udp_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cout << "❌ Failed to bind UDP REGISTER listener to port " << udp_port << std::endl;
         close(udp_sock);
         return;
     }
 
-    std::cout << "📡 Outbound waiting for REGISTER on UDP port " << udp_port << " for call " << call_id << std::endl;
+    std::cout << "📡 Outbound REGISTER listener on port " << udp_port << " for call " << state->call_id << std::endl;
 
-    // Wait for REGISTER then connect to Kokoro (server on 9002+call)
     char buf[256];
-    while (registration_running_.load() && running_.load() && active_.load() && !piper_connected_.load()) {
-        struct timeval tv{1,0};
+    while (state->registration_running.load() && running_.load()) {
+        struct timeval tv{1, 0};
         setsockopt(udp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         struct sockaddr_in src{}; socklen_t slen = sizeof(src);
-        ssize_t n = recvfrom(udp_sock, buf, sizeof(buf)-1, 0, (struct sockaddr*)&src, &slen);
+        ssize_t n = recvfrom(udp_sock, buf, sizeof(buf) - 1, 0, (struct sockaddr*)&src, &slen);
         if (n <= 0) continue;
         buf[n] = '\0';
         std::string msg(buf);
-        if (msg.rfind("REGISTER:", 0) != 0) continue;
-        std::string received = msg.substr(9);
-        if (received != call_id) continue;
+        if (msg.find("REGISTER:") != 0) continue;
 
-        // Connect to Kokoro server at 127.0.0.1:piper_tcp_port_
-        int s = -1;
-        for (int attempt = 1; attempt <= 10 && registration_running_.load() && running_.load() && active_.load(); ++attempt) {
-            s = socket(AF_INET, SOCK_STREAM, 0);
-            if (s < 0) break;
-            struct sockaddr_in dst{};
-            dst.sin_family = AF_INET;
-            dst.sin_addr.s_addr = inet_addr("127.0.0.1");
-            dst.sin_port = htons(piper_tcp_port_);
-            if (connect(s, (struct sockaddr*)&dst, sizeof(dst)) == 0) break;
-            close(s); s = -1;
-            int sleep_ms = (attempt <= 5) ? 200 : 1000;
-            if (attempt == 1 || attempt == 5 || attempt == 9) {
-                std::cout << "⚠️ Kokoro connect attempt " << attempt << "/10 failed — retrying in " << sleep_ms << "ms" << std::endl;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-        }
-        if (s < 0) {
-            std::cout << "❌ Failed to connect to Kokoro server on port " << piper_tcp_port_ << std::endl;
-            continue;
-        }
-
-        // Disable Nagle on this connection to minimize latency
-        {
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) continue;
+        struct sockaddr_in dst{};
+        dst.sin_family = AF_INET;
+        dst.sin_addr.s_addr = inet_addr("127.0.0.1");
+        dst.sin_port = htons(state->piper_tcp_port);
+        
+        if (connect(s, (struct sockaddr*)&dst, sizeof(dst)) == 0) {
             int flag = 1;
             setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
-        }
-
-        // Send HELLO(call_id)
-        uint32_t nlen = htonl(static_cast<uint32_t>(call_id.size()));
-        if (write(s, &nlen, 4) != 4 || write(s, call_id.data(), call_id.size()) != (ssize_t)call_id.size()) {
-            std::cout << "❌ Failed to send HELLO to Kokoro" << std::endl;
+            uint32_t nlen = htonl(static_cast<uint32_t>(state->call_id.size()));
+            write(s, &nlen, 4);
+            write(s, state->call_id.data(), state->call_id.size());
+            
+            {
+                std::lock_guard<std::mutex> lock(state->piper_mutex);
+                state->piper_tcp_socket = s;
+                state->piper_connected.store(true);
+            }
+            
+            while (state->registration_running.load() && running_.load() && state->piper_connected.load()) {
+                uint32_t len=0, rate=0, id=0;
+                if (!read_exact_from_socket(s, &len, 4) || !read_exact_from_socket(s, &rate, 4) || !read_exact_from_socket(s, &id, 4)) break;
+                len = ntohl(len); rate = ntohl(rate); id = ntohl(id);
+                if (len == 0 || len > 10*1024*1024) break;
+                std::vector<uint8_t> payload(len);
+                if (!read_exact_from_socket(s, payload.data(), len)) break;
+                push_conversion_job(state->call_id, payload, rate, id, (len % 4 == 0));
+                state->last_activity = std::chrono::steady_clock::now();
+            }
             close(s);
-            continue;
-        }
-        {
-            std::lock_guard<std::mutex> lock(piper_mutex_);
-            piper_tcp_socket_ = s;
-            piper_connected_.store(true);
-        }
-        std::cout << "🔗 Connected to Kokoro on port " << piper_tcp_port_ << " for call " << call_id << std::endl;
-
-        // Read incoming audio stream until disconnect
-        while (running_.load() && piper_connected_.load()) {
-            uint32_t chunk_length = 0, sample_rate = 0, chunk_id = 0;
-            if (!read_exact_from_socket(s, &chunk_length, 4) ||
-                !read_exact_from_socket(s, &sample_rate, 4) ||
-                !read_exact_from_socket(s, &chunk_id, 4)) {
-                break;
+            {
+                std::lock_guard<std::mutex> lock(state->piper_mutex);
+                state->piper_tcp_socket = -1;
+                state->piper_connected.store(false);
             }
-            chunk_length = ntohl(chunk_length);
-            sample_rate = ntohl(sample_rate);
-            chunk_id = ntohl(chunk_id);
-            if (chunk_length == 0) {
-                std::cout << "📡 TCP BYE received from Kokoro" << std::endl;
-                break;
-            }
-            if (chunk_length > 10 * 1024 * 1024) {
-                std::cout << "⚠️ Kokoro chunk too large (" << chunk_length << ") — dropping" << std::endl;
-                break;
-            }
-            std::vector<uint8_t> payload(chunk_length);
-            if (!read_exact_from_socket(s, payload.data(), chunk_length)) break;
-            process_piper_audio_chunk(payload, sample_rate, chunk_id);
+        } else {
+            close(s);
         }
-
-        close(s);
-        {
-            std::lock_guard<std::mutex> lock(piper_mutex_);
-            piper_tcp_socket_ = -1;
-        }
-        piper_connected_.store(false);
-        std::cout << "🔌 Disconnected from Kokoro" << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-
     close(udp_sock);
-    std::cout << "🛑 Registration listener stopped for call " << call_id << std::endl;
 }
 
-// Unused functions removed for performance optimization
+bool OutboundAudioProcessor::read_exact_from_socket(int socket_fd, void* data, size_t size) {
+    uint8_t* ptr = static_cast<uint8_t*>(data);
+    size_t remaining = size;
+    while (remaining > 0) {
+        ssize_t received = read(socket_fd, ptr, remaining);
+        if (received <= 0) return false;
+        ptr += received;
+        remaining -= received;
+    }
+    return true;
+}
+
+void OutboundAudioProcessor::set_udp_output(const std::string& ip, int port, uint32_t call_id) {}
+void OutboundAudioProcessor::clear_udp_output() {}
+void OutboundAudioProcessor::set_silence_wav2_bytes(const std::vector<uint8_t>& bytes) {
+    std::lock_guard<std::mutex> lk(calls_mutex_);
+    silence_wav2_ = bytes;
+    silence_wav2_pos_ = 0;
+}
+bool OutboundAudioProcessor::load_and_set_silence_wav2(const std::string& path) {
+    std::vector<uint8_t> bytes;
+    if (!read_entire_file(path, bytes)) return false;
+    uint32_t rate = 0;
+    auto mono = decode_bytes_to_float_mono(bytes, detect_audio_file_type(bytes), rate);
+    if (mono.empty()) return false;
+    set_silence_wav2_bytes(process_float_mono_to_ulaw(mono, rate));
+    return true;
+}
+
+// Utility methods from original file (kept but simplified)
+OutboundAudioProcessor::AudioFileType OutboundAudioProcessor::detect_audio_file_type(const std::vector<uint8_t>& b) {
+    if (b.size() >= 12 && b[0]=='R' && b[1]=='I' && b[2]=='F' && b[3]=='F') return AudioFileType::WAV;
+    return AudioFileType::UNKNOWN;
+}
+bool OutboundAudioProcessor::read_entire_file(const std::string& path, std::vector<uint8_t>& out) {
+    std::ifstream f(path, std::ios::binary); if (!f) return false;
+    f.seekg(0, std::ios::end); out.resize(f.tellg()); f.seekg(0, std::ios::beg);
+    f.read(reinterpret_cast<char*>(out.data()), out.size()); return true;
+}
+bool OutboundAudioProcessor::parse_wav_header(const std::vector<uint8_t>& b, uint16_t& fmt, uint16_t& ch, uint32_t& rate, uint16_t& bps, size_t& off, size_t& sz) {
+    if (b.size() < 44) return false; fmt = *reinterpret_cast<const uint16_t*>(&b[20]); ch = *reinterpret_cast<const uint16_t*>(&b[22]);
+    rate = *reinterpret_cast<const uint32_t*>(&b[24]); bps = *reinterpret_cast<const uint16_t*>(&b[34]); off = 44; sz = b.size() - 44; return true;
+}
+std::vector<float> OutboundAudioProcessor::decode_bytes_to_float_mono(const std::vector<uint8_t>& b, AudioFileType t, uint32_t& r) {
+    uint16_t fmt, ch, bps; size_t off, sz; if (!parse_wav_header(b, fmt, ch, r, bps, off, sz)) return {};
+    std::vector<float> mono; const int16_t* p = reinterpret_cast<const int16_t*>(b.data() + off);
+    for (size_t i = 0; i < sz / 2; i += ch) mono.push_back(p[i] / 32768.0f); return mono;
+}
+void OutboundAudioProcessor::ensure_output_running() { start_output_scheduler_(); }
+void OutboundAudioProcessor::process_piper_audio_chunk(std::shared_ptr<CallState> s, const std::vector<uint8_t>& p, uint32_t r, uint32_t i) {}

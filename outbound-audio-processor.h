@@ -44,56 +44,72 @@ public:
     ProcessorStatus get_status() const override;
 
 private:
+    int ctrl_socket_ = -1;
+    std::thread ctrl_thread_;
+    void control_socket_loop();
+
+    struct CallState {
+        std::string call_id;
+        
+        // UDP destination for outbound G.711 bytes
+        std::string udp_dest_ip;
+        int udp_dest_port = -1;
+        uint32_t udp_call_id = 0;
+        int udp_socket = -1;
+        std::mutex udp_mutex;
+
+        // TCP connection from Piper/Kokoro service
+        int piper_tcp_socket = -1;
+        int piper_tcp_port = -1;
+        std::atomic<bool> piper_connected{false};
+        std::thread piper_tcp_thread;
+        std::mutex piper_mutex;
+
+        // Output buffer and scheduler state
+        std::vector<uint8_t> out_buffer;
+        std::mutex out_buffer_mutex;
+        bool pending_first_rtp = false;
+        
+        // Activity timing
+        std::chrono::steady_clock::time_point last_activity;
+
+        // Registration polling
+        std::atomic<bool> registration_running{false};
+        std::thread registration_thread;
+
+        CallState(const std::string& id) : call_id(id) {
+            last_activity = std::chrono::steady_clock::now();
+        }
+    };
+
+    std::unordered_map<std::string, std::shared_ptr<CallState>> active_calls_;
+    mutable std::mutex calls_mutex_;
+
     // Unified input type for extensible formats
     enum class AudioFileType { WAV, MP3, MP4, M4A, FLAC, OGG, UNKNOWN };
 
-
-    // Output scheduler for continuous 20ms frames
+    // Common output scheduler for ALL calls
     std::thread output_thread_;
     std::atomic<bool> output_running_{false};
-    std::vector<uint8_t> out_buffer_; // queued G.711 bytes from Piper
-    std::mutex out_buffer_mutex_;
-    // Set true when a new utterance arrives (buffer transitions from empty to non-empty).
-    // Used to log t3 when the first non-silence RTP frame for that utterance is written.
-    bool pending_first_rtp_ = false;
 
     // Test WAV2 (μ-law 8kHz) for silence source
     std::vector<uint8_t> silence_wav2_;
     size_t silence_wav2_pos_ = 0;
 
-
-private:
-    // SIP client callback (deprecated)
-    std::function<void(const std::string&, const std::vector<uint8_t>&)> sip_client_callback_;
-
-    // UDP destination for outbound G.711 bytes
-    std::string udp_dest_ip_;
-    int udp_dest_port_ = -1;
-    uint32_t udp_call_id_ = 0;
-    int udp_socket_ = -1;
-    std::mutex udp_mutex_;
-
-    // TCP connection from Piper service
-    int piper_tcp_socket_;
-    int piper_tcp_port_;
-    std::atomic<bool> piper_connected_;
-    std::thread piper_tcp_thread_;
-    std::mutex piper_mutex_;
-
-    // Registration polling
-    std::atomic<bool> registration_running_;
-    std::thread registration_thread_;
-
-    // Deduplication state for incoming TTS chunks (per call)
-    std::unordered_map<std::string, uint32_t> last_chunk_id_;
-    std::mutex chunk_dedup_mutex_;
-
     // Internal methods
-    bool setup_piper_tcp_socket(const std::string& call_id);
-    void handle_piper_tcp_connection();
-    void enqueue_g711_(const std::vector<uint8_t>& g711);
+    std::shared_ptr<CallState> get_or_create_call_state(const std::string& call_id);
+    void cleanup_call(std::shared_ptr<CallState> state);
+
+    bool setup_piper_tcp_socket(std::shared_ptr<CallState> state);
+    void handle_piper_tcp_connection(std::shared_ptr<CallState> state);
+    void enqueue_g711_(std::shared_ptr<CallState> state, const std::vector<uint8_t>& g711);
     void start_output_scheduler_();
     void stop_output_scheduler_();
+    
+    // Maintenance loop for stale calls
+    void maintenance_loop();
+    std::thread maintenance_thread_;
+
     // Unified audio pipeline helpers
     std::vector<uint8_t> process_float_mono_to_ulaw(const std::vector<float>& mono, uint32_t sample_rate);
     static AudioFileType detect_audio_file_type(const std::vector<uint8_t>& bytes);
@@ -104,16 +120,16 @@ private:
     std::vector<float> decode_bytes_to_float_mono(const std::vector<uint8_t>& bytes, AudioFileType type,
                                                   uint32_t& sample_rate);
 
-    void make_silence_frame_(std::vector<uint8_t>& frame);
+    void make_silence_frame_(std::shared_ptr<CallState> state, std::vector<uint8_t>& frame);
 
     bool read_exact_from_socket(int socket_fd, void* data, size_t size);
-    void process_piper_audio_chunk(const std::vector<uint8_t>& payload, uint32_t sample_rate, uint32_t chunk_id);
+    void process_piper_audio_chunk(std::shared_ptr<CallState> state, const std::vector<uint8_t>& payload, uint32_t sample_rate, uint32_t chunk_id);
 
     // Port calculation
     int calculate_piper_port(const std::string& call_id);
 
     // Registration polling
-    void start_registration_polling(const std::string& call_id);
-    void stop_registration_polling();
-    void registration_polling_thread(const std::string& call_id);
+    void start_registration_polling(std::shared_ptr<CallState> state);
+    void stop_registration_polling(std::shared_ptr<CallState> state);
+    void registration_polling_thread(std::shared_ptr<CallState> state);
 };

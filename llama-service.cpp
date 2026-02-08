@@ -1,5 +1,4 @@
 #include "llama-service.h"
-#include "database.h"
 
 // LLaMA includes
 #include "llama.h"
@@ -488,11 +487,6 @@ bool StandaloneLlamaService::start(int tcp_port) {
     std::cout << "🚀 Starting LLaMA service on TCP port " << tcp_port << std::endl;
     std::cout << "📁 Model: " << default_config_.model_path << std::endl;
 
-    // Mark service as starting in DB if available
-    if (database_) {
-        database_->set_llama_service_status("starting");
-    }
-
     // Eager warm load
     auto t0 = std::chrono::steady_clock::now();
     std::cout << "⏳ Preloading LLaMA model..." << std::endl;
@@ -502,7 +496,6 @@ bool StandaloneLlamaService::start(int tcp_port) {
     warm_model_ = llama_model_load_from_file(default_config_.model_path.c_str(), model_params);
     if (!warm_model_) {
         std::cout << "❌ Failed to load LLaMA model: " << default_config_.model_path << std::endl;
-        if (database_) database_->set_llama_service_status("error");
         return false;
     }
 
@@ -515,7 +508,6 @@ bool StandaloneLlamaService::start(int tcp_port) {
         std::cout << "❌ Failed to create LLaMA context" << std::endl;
         llama_model_free(warm_model_);
         warm_model_ = nullptr;
-        if (database_) database_->set_llama_service_status("error");
         return false;
     }
 
@@ -570,10 +562,6 @@ bool StandaloneLlamaService::start(int tcp_port) {
     running_.store(true);
     server_thread_ = std::thread(&StandaloneLlamaService::run_tcp_server, this, tcp_port);
 
-    if (database_) {
-        database_->set_llama_service_status("running");
-    }
-
     return true;
 }
 
@@ -607,10 +595,6 @@ void StandaloneLlamaService::stop() {
     if (warm_ctx_) { llama_free(warm_ctx_); warm_ctx_ = nullptr; }
     if (warm_model_) { llama_model_free(warm_model_); warm_model_ = nullptr; }
     warm_loaded_ = false;
-
-    if (database_) {
-        database_->set_llama_service_status("stopped");
-    }
 
     std::cout << "✅ LLaMA service stopped" << std::endl;
 }
@@ -678,17 +662,6 @@ std::string StandaloneLlamaService::process_text_for_call(const std::string& cal
     }
 
     return it->second->process_text(text);
-}
-
-bool StandaloneLlamaService::init_database(const std::string& db_path) {
-    database_ = std::make_unique<Database>();
-    if (!database_->init(db_path)) {
-        std::cout << "❌ Failed to initialize database at " << db_path << std::endl;
-        database_.reset();
-        return false;
-    }
-    std::cout << "💾 LLaMA service connected to DB: " << db_path << std::endl;
-    return true;
 }
 
 void StandaloneLlamaService::set_output_endpoint(const std::string& host, int port) {
@@ -894,23 +867,30 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
             }
 
             // Speaking guard: if we started TTS recently, suppress trivial acks for ~1200ms
-            auto it_last = last_tts_start_.find(call_id);
-            if (it_last != last_tts_start_.end()) {
-                auto since_tts_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - it_last->second).count();
-                if (since_tts_ms < 1200 && is_backchannel(text_buffer)) {
-                    threshold_ms = std::max(threshold_ms, 1200 - since_tts_ms);
+            {
+                std::lock_guard<std::mutex> lock(call_data_mutex_);
+                auto it_last = last_tts_start_.find(call_id);
+                if (it_last != last_tts_start_.end()) {
+                    auto since_tts_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - it_last->second).count();
+                    if (since_tts_ms < 1200 && is_backchannel(text_buffer)) {
+                        threshold_ms = std::max(threshold_ms, 1200 - since_tts_ms);
+                    }
                 }
             }
 
             // While TTS is speaking (estimated), do not respond yet to avoid talk-over
-auto it_until = tts_speaking_until_.find(call_id);
-if (it_until != tts_speaking_until_.end() && now < it_until->second) {
-    // Keep buffering; we will respond after TTS finishes
-    auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(it_until->second - now).count();
-    if (remaining_ms > 100) { // only log if significant time remains
-        // Suppressed log to reduce spam
-    }
-} else if (silence_ms >= threshold_ms) {
+            bool suppressed = false;
+            {
+                std::lock_guard<std::mutex> lock(call_data_mutex_);
+                auto it_until = tts_speaking_until_.find(call_id);
+                if (it_until != tts_speaking_until_.end() && now < it_until->second) {
+                    suppressed = true;
+                }
+            }
+
+            if (suppressed) {
+                // Keep buffering; we will respond after TTS finishes
+            } else if (silence_ms >= threshold_ms) {
                 std::cout << "🔇 Silence detected (" << silence_ms << "ms, thr=" << threshold_ms << ") - responding to: " << text_buffer << std::endl;
                 // Deduplicate: if this utterance equals the last one we already answered, skip
                 auto norm = [&](std::string s){
@@ -925,6 +905,7 @@ if (it_until != tts_speaking_until_.end() && now < it_until->second) {
                 };
                 std::string norm_text = norm(text_buffer);
                 {
+                    std::lock_guard<std::mutex> lock(call_data_mutex_);
                     // If equal to last user utterance, clear and do not respond
                     auto it_last = last_user_utt_.find(call_id);
                     if (it_last != last_user_utt_.end() && it_last->second == norm_text) {
@@ -932,9 +913,9 @@ if (it_until != tts_speaking_until_.end() && now < it_until->second) {
                         last_text_time = std::chrono::steady_clock::now();
                         continue;
                     }
+                    // Remember current utterance
+                    last_user_utt_[call_id] = norm_text;
                 }
-                // Remember current utterance
-                last_user_utt_[call_id] = norm_text;
 
                 // Check if session still exists before processing (avoid post-BYE responses)
                 {
@@ -948,25 +929,22 @@ if (it_until != tts_speaking_until_.end() && now < it_until->second) {
                 }
 
                 std::string response = process_text_for_call(call_id, text_buffer);
-            if (!response.empty()) {
-                std::cout << "💬 Response [" << call_id << "]: " << response << std::endl;
-                if (database_) {
-                    database_->append_llama_response(call_id, response);
-                }
-                if (!output_host_.empty() && output_port_ > 0) {
-                    if (connect_output_for_call(call_id)) {
-                        // t1: LLaMA send-to-Kokoro (timestamp in seconds)
-                        std::cout << "t1: LLaMA send-to-Kokoro [call " << call_id << "] ts=" << std::fixed << std::setprecision(6) << (double)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count()/1e6 << std::endl;
-                        send_output_text(call_id, response);
+                if (!response.empty()) {
+                    std::cout << "💬 Response [" << call_id << "]: " << response << std::endl;
+                    if (!output_host_.empty() && output_port_ > 0) {
+                        if (connect_output_for_call(call_id)) {
+                            // t1: LLaMA send-to-Kokoro (timestamp in seconds)
+                            std::cout << "t1: LLaMA send-to-Kokoro [call " << call_id << "] ts=" << std::fixed << std::setprecision(6) << (double)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count()/1e6 << std::endl;
+                            send_output_text(call_id, response);
+                        }
+                    } else {
+                        (void)send_tcp_response(socket, response);
                     }
-                } else {
-                    (void)send_tcp_response(socket, response);
                 }
+                text_buffer.clear();
+                // Reset timer to avoid immediate re-triggering
+                last_text_time = std::chrono::steady_clock::now();
             }
-            text_buffer.clear();
-            // Reset timer to avoid immediate re-triggering
-            last_text_time = std::chrono::steady_clock::now();
-        }
         }
 
         // 4) On disconnect: DO NOT process remaining buffer (call ended, user hung up)
@@ -1054,7 +1032,11 @@ bool StandaloneLlamaService::connect_output_for_call(const std::string& call_id)
         std::cout << "❌ Cannot connect output for call " << call_id << ": output endpoint not configured" << std::endl;
         return false;
     }
-    if (output_sockets_.count(call_id)) return true;
+    
+    {
+        std::lock_guard<std::mutex> lock(call_data_mutex_);
+        if (output_sockets_.count(call_id)) return true;
+    }
 
     const int max_attempts = 10;
 
@@ -1122,7 +1104,10 @@ bool StandaloneLlamaService::connect_output_for_call(const std::string& call_id)
             return false;
         }
 
-        output_sockets_[call_id] = s;
+        {
+            std::lock_guard<std::mutex> lock(call_data_mutex_);
+            output_sockets_[call_id] = s;
+        }
         std::cout << "🔗 Connected output socket for call " << call_id << " to " << output_host_
                   << ":" << output_port_ << " (attempt " << attempt << ")" << std::endl;
         return true;
@@ -1132,19 +1117,29 @@ bool StandaloneLlamaService::connect_output_for_call(const std::string& call_id)
 }
 
 bool StandaloneLlamaService::send_output_text(const std::string& call_id, const std::string& text) {
-    auto it = output_sockets_.find(call_id);
-    if (it == output_sockets_.end()) return false;
-    int s = it->second;
+    int s = -1;
+    {
+        std::lock_guard<std::mutex> lock(call_data_mutex_);
+        auto it = output_sockets_.find(call_id);
+        if (it == output_sockets_.end()) return false;
+        s = it->second;
+    }
+
     uint32_t l = htonl((uint32_t)text.size());
     if (send(s, &l, 4, 0) != 4) return false;
     if (!text.empty() && send(s, text.data(), text.size(), 0) != (ssize_t)text.size()) return false;
+
     // Mark TTS start for this call to help suppress immediate follow-up replies to acknowledgements
-    last_tts_start_[call_id] = std::chrono::steady_clock::now();
-    // Heuristic speaking window estimation: ~16 chars/sec (faster) + 250ms margin for safety
-    double secs = std::max(0.6, (double)text.size() / 16.0) + 0.25;
-    auto until = last_tts_start_[call_id] + std::chrono::milliseconds((int)(secs * 1000));
-    tts_speaking_until_[call_id] = until;
-    std::cout << "🔒 [" << call_id << "] Half-duplex gate active for " << (int)(secs*1000) << "ms (text len=" << text.size() << ")" << std::endl;
+    {
+        std::lock_guard<std::mutex> lock(call_data_mutex_);
+        auto now = std::chrono::steady_clock::now();
+        last_tts_start_[call_id] = now;
+        // Heuristic speaking window estimation: ~16 chars/sec (faster) + 250ms margin for safety
+        double secs = std::max(0.6, (double)text.size() / 16.0) + 0.25;
+        auto until = now + std::chrono::milliseconds((int)(secs * 1000));
+        tts_speaking_until_[call_id] = until;
+        std::cout << "🔒 [" << call_id << "] Half-duplex gate active for " << (int)(secs*1000) << "ms (text len=" << text.size() << ")" << std::endl;
+    }
     return true;
 }
 

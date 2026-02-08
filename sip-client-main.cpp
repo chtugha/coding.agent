@@ -35,7 +35,6 @@ extern char **environ;
 #include <sys/un.h>
 
 static const char* kInboundCtrlSock = "/tmp/inbound-audio-processor.ctrl";
-static const char* kOutboundCtrlSock = "/tmp/outbound-audio-processor.ctrl";
 
 static bool send_control_command(const char* path, const std::string& cmd) {
     int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -376,9 +375,11 @@ private:
     std::unordered_map<std::string, int> call_id_to_rtp_port_;
     std::string current_call_id_;
     int current_call_num_id_ = 0;
+    int specific_line_id_ = -1;
 
     // Port/ID negotiation
     int negotiate_call_num_id(int requested_id);
+    int allocate_dynamic_port();
 
     // Main loops
     void sip_management_loop();
@@ -1444,10 +1445,12 @@ void SimpleSipClient::handle_incoming_call(const std::string& caller_number, con
 void SimpleSipClient::end_call(const std::string& call_id) {
     std::cout << "📞 Ending call: " << call_id << " (sessionless)" << std::endl;
 
+    int call_num_id = 0;
     {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         auto it = active_calls_.find(call_id);
         if (it != active_calls_.end()) {
+            call_num_id = it->second.call_num_id;
             call_num_id_to_call_id_.erase(it->second.call_num_id);
             active_calls_.erase(it);
         }
@@ -1470,6 +1473,12 @@ void SimpleSipClient::end_call(const std::string& call_id) {
         rtp_ssrc_.erase(call_id);
         rtp_destinations_.erase(call_id);
         rtp_selected_pt_.erase(call_id);
+    }
+
+    // Tell inbound processor to deactivate this call
+    if (call_num_id > 0) {
+        std::string deactivate_cmd = "DEACTIVATE:" + std::to_string(call_num_id);
+        send_control_command("/tmp/inbound-audio-processor.ctrl", deactivate_cmd);
     }
 
     std::cout << "🧹 Call cleanup complete (sessionless)" << std::endl;
@@ -1832,19 +1841,6 @@ bool SimpleSipClient::test_sip_connection(const SipLineConfig& line) {
     }
 
     return false;
-}
-
-void SimpleSipClient::update_line_status(int line_id, const std::string& status) {
-    // Check if status actually changed to avoid spam
-    {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        if (last_status_[line_id] == status) {
-            return; // Status hasn't changed, skip update
-        }
-        last_status_[line_id] = status;
-    }
-
-    std::cout << "📊 Line " << line_id << " status: " << status << std::endl;
 }
 
 void SimpleSipClient::sip_management_loop() {

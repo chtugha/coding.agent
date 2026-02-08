@@ -148,7 +148,7 @@ int main(int argc, char** argv) {
     // Configure LLaMA endpoint before starting
     g_whisper_service->set_llama_endpoint(args.llama_host, args.llama_port);
 
-    if (!g_whisper_service->start(config, args.database_path)) {
+    if (!g_whisper_service->start(config)) {
         std::cout << "❌ Failed to start whisper service" << std::endl;
         return 1;
     }

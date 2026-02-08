@@ -1,5 +1,4 @@
 #include "llama-service.h"
-#include "database.h"
 
 #include <iostream>
 #include <string>
@@ -12,7 +11,6 @@ static std::atomic<bool> g_shutdown(false);
 
 struct LlamaArgs {
     std::string model_path = "models/llama-7b-q4_0.gguf";
-    std::string db_path    = "whisper_talk.db";
     int port               = 8083; // input from whisper
     int n_threads          = 4;
     int n_ctx              = 2048;
@@ -31,7 +29,6 @@ static void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n\n";
     std::cout << "Options:\n";
     std::cout << "  -m, --model PATH           LLaMA model path [models/llama-7b-q4_0.gguf]\n";
-    std::cout << "  -d, --database PATH        Database path [whisper_talk.db]\n";
     std::cout << "  -p, --port N               TCP port to listen for Whisper [8083]\n";
     std::cout << "  --threads N                Threads for LLaMA [4]\n";
     std::cout << "  --ctx N                    Context length [2048]\n";
@@ -50,7 +47,6 @@ static bool parse_args(int argc, char** argv, LlamaArgs& a) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") { print_usage(argv[0]); return false; }
         else if (arg == "-m" || arg == "--model") { a.model_path = argv[++i]; }
-        else if (arg == "-d" || arg == "--database") { a.db_path = argv[++i]; }
         else if (arg == "-p" || arg == "--port") { a.port = std::stoi(argv[++i]); }
         else if (arg == "--threads") { a.n_threads = std::stoi(argv[++i]); }
         else if (arg == "--ctx") { a.n_ctx = std::stoi(argv[++i]); }
@@ -92,9 +88,7 @@ int main(int argc, char** argv) {
     cfg.bot_name = a.bot;
 
     g_llama_service = std::make_unique<StandaloneLlamaService>(cfg);
-    if (!g_llama_service->init_database(a.db_path)) {
-        return 1;
-    }
+
     // Always set output endpoint (now enabled by default)
     g_llama_service->set_output_endpoint(a.out_host, a.out_port);
 
@@ -103,7 +97,6 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "\n🦙 LLaMA service started on port " << a.port << ", model: " << a.model_path << std::endl;
-    std::cout << "DB: " << a.db_path << std::endl;
     if (!a.out_host.empty()) {
         std::cout << "Output endpoint: " << a.out_host << ":" << a.out_port << std::endl;
     }
@@ -117,4 +110,3 @@ int main(int argc, char** argv) {
     std::cout << "✅ LLaMA service stopped" << std::endl;
     return 0;
 }
-

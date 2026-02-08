@@ -18,7 +18,6 @@ BaseAudioProcessor::BaseAudioProcessor()
     : running_(false)
     , active_(false)
     , base_port_(0)
-    , database_(nullptr)
     , total_packets_processed_(0)
 {
     // Initialize G.711 lookup tables if not already done
@@ -38,11 +37,6 @@ void BaseAudioProcessor::stop() {
     
     running_.store(false);
     active_.store(false);
-    
-    // Stop service advertiser
-    if (service_advertiser_) {
-        service_advertiser_->stop();
-    }
     
     std::cout << "🛑 Base Audio Processor stopped" << std::endl;
 }
@@ -70,10 +64,6 @@ void BaseAudioProcessor::deactivate_after_call() {
     }
     
     std::cout << "😴 Audio Processor deactivated" << std::endl;
-}
-
-void BaseAudioProcessor::set_database(Database* database) {
-    database_ = database;
 }
 
 BaseAudioProcessor::ProcessorStatus BaseAudioProcessor::get_status() const {

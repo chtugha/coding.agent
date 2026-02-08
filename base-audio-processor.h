@@ -1,7 +1,5 @@
 #pragma once
 
-#include "database.h"
-#include "service-advertisement.h"
 #include <memory>
 #include <string>
 #include <atomic>
@@ -9,6 +7,10 @@
 #include <mutex>
 #include <functional>
 #include <unordered_map>
+#include <vector>
+
+// Forward declaration if still needed for some reason, but we want to remove it
+// class Database; 
 
 // Base class for audio processors with shared functionality
 class BaseAudioProcessor {
@@ -26,8 +28,8 @@ public:
     virtual void deactivate_after_call();
     bool is_active() const { return active_.load(); }
 
-    // Configuration
-    void set_database(Database* database);
+    // Configuration - REMOVED database
+    // void set_database(Database* database);
 
     // Status
     struct ProcessorStatus {
@@ -45,15 +47,12 @@ protected:
     std::atomic<bool> running_;
     std::atomic<bool> active_;
     int base_port_;
-    Database* database_;
+    // Database* database_; // REMOVED
     std::atomic<size_t> total_packets_processed_;
 
     // Call management
     std::string current_call_id_;
     std::mutex call_mutex_;
-
-    // Service advertisement
-    std::unique_ptr<ServiceAdvertiser> service_advertiser_;
 
     // TCP utility functions
     bool write_all_fd(int fd, const void* data, size_t size);

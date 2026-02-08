@@ -64,16 +64,20 @@ if(APPLE)
 endif()
 
 # Source groups
-set(SHARED_SOURCES
+set(DATABASE_SOURCES
     database.cpp
-    service-advertisement.cpp
     simple-http-api.cpp
+)
+
+set(SERVICE_DISCOVERY_SOURCES
+    service-advertisement.cpp
 )
 
 if(BUILD_HTTP_SERVER)
     add_executable(http-server
         http-server.cpp
-        ${SHARED_SOURCES}
+        ${DATABASE_SOURCES}
+        ${SERVICE_DISCOVERY_SOURCES}
     )
     target_link_libraries(http-server PRIVATE Threads::Threads SQLite::SQLite3)
 endif()
@@ -82,9 +86,9 @@ if(BUILD_WHISPER_SERVICE)
     add_executable(whisper-service
         whisper-service-main.cpp
         whisper-service.cpp
-        ${SHARED_SOURCES}
+        ${SERVICE_DISCOVERY_SOURCES}
     )
-    target_link_libraries(whisper-service PRIVATE Threads::Threads SQLite::SQLite3)
+    target_link_libraries(whisper-service PRIVATE Threads::Threads)
     if(TARGET thirdparty_whisper)
         target_link_libraries(whisper-service PRIVATE thirdparty_whisper)
     endif()
@@ -94,9 +98,9 @@ if(BUILD_LLAMA_SERVICE)
     add_executable(llama-service
         llama-service-main.cpp
         llama-service.cpp
-        ${SHARED_SOURCES}
+        ${SERVICE_DISCOVERY_SOURCES}
     )
-    target_link_libraries(llama-service PRIVATE Threads::Threads SQLite::SQLite3)
+    target_link_libraries(llama-service PRIVATE Threads::Threads)
     if(TARGET thirdparty_llama)
         target_link_libraries(llama-service PRIVATE thirdparty_llama)
     endif()
@@ -117,9 +121,8 @@ endif()
 if(BUILD_SIP_CLIENT)
     add_executable(sip-client
         sip-client-main.cpp
-        ${SHARED_SOURCES}
     )
-    target_link_libraries(sip-client PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3)
+    target_link_libraries(sip-client PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 endif()
 
 # Standalone audio processor binaries (consolidated InboundAudioProcessor)
@@ -127,11 +130,9 @@ add_executable(inbound-audio-processor
     inbound-audio-processor-main.cpp
     inbound-audio-processor.cpp
     base-audio-processor.cpp
-    service-advertisement.cpp
-    database.cpp
 )
 
-target_link_libraries(inbound-audio-processor PRIVATE Threads::Threads SQLite::SQLite3)
+target_link_libraries(inbound-audio-processor PRIVATE Threads::Threads)
 
 add_executable(outbound-audio-processor
     outbound-audio-processor-main.cpp

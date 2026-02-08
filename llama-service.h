@@ -16,9 +16,6 @@ struct llama_sampler;
 struct llama_batch;
 struct llama_vocab;
 
-// Forward declaration for Database
-class Database;
-
 // LLaMA session configuration
 struct LlamaSessionConfig {
     std::string model_path = "models/llama-7b-q4_0.gguf";
@@ -102,7 +99,6 @@ public:
     void stop();
 
     // Configuration
-    bool init_database(const std::string& db_path);
     void set_output_endpoint(const std::string& host, int port);
 
     // Session management
@@ -112,9 +108,6 @@ public:
 
 private:
     LlamaSessionConfig default_config_;
-
-    // Database connection
-    std::unique_ptr<Database> database_;
 
     // Eager warm load to avoid lazy loading on first request
     llama_model* warm_model_ = nullptr;
@@ -143,6 +136,7 @@ private:
     std::unordered_map<std::string, std::string> last_user_utt_;
     // Estimated TTS speaking window end per call (heuristic), to prevent talk-over
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> tts_speaking_until_;
+    std::mutex call_data_mutex_; // Protects the maps above
 
     // Internal methods
     void run_tcp_server(int port);

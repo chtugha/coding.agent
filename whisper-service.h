@@ -1,7 +1,6 @@
 #pragma once
 
 #include "service-advertisement.h"
-#include "database.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -87,7 +86,7 @@ public:
     ~StandaloneWhisperService();
 
     // Service lifecycle
-    bool start(const WhisperSessionConfig& config, const std::string& db_path = "whisper_talk.db");
+    bool start(const WhisperSessionConfig& config);
     void stop();
     bool is_running() const { return running_.load(); }
 
@@ -112,10 +111,6 @@ private:
     std::atomic<bool> running_;
     WhisperSessionConfig config_;
 
-    // Database connection
-    std::unique_ptr<Database> database_;
-
-
     // Eager model preload to avoid lazy loading on first TCP connection
     whisper_context* warm_ctx_ = nullptr;
     bool warm_loaded_ = false;
@@ -134,11 +129,6 @@ private:
     std::unordered_map<std::string, std::unique_ptr<WhisperSession>> sessions_;
     std::mutex sessions_mutex_;
 
-    // Service discovery
-    std::unique_ptr<ServiceDiscovery> service_discovery_;
-    std::thread discovery_thread_;
-    std::chrono::steady_clock::time_point last_discovery_;
-
     // Registration listener (UDP)
     int registration_socket_ = -1;
     std::thread registration_thread_;
@@ -146,14 +136,12 @@ private:
 
     // TCP connection management (audio input)
     std::unordered_map<std::string, int> call_tcp_sockets_;
-    // Note: TCP handler threads are detached and manage their own lifecycle
+    std::mutex tcp_mutex_;
 
     // TCP connection management (to LLaMA per call)
     std::string llama_host_ = "127.0.0.1";
     int llama_port_ = 8083;
     std::unordered_map<std::string, int> llama_sockets_;
-
-    std::mutex tcp_mutex_;
 
     // Main service loop
     void run_service_loop();

@@ -61,7 +61,7 @@ private:
         
         // Initial buffering while waiting for TCP connection
         std::vector<float> initial_buffer;
-        static constexpr size_t MAX_INITIAL_BUFFER_SAMPLES = 16000 * 5; // 5 seconds
+        static constexpr size_t MAX_INITIAL_BUFFER_SAMPLES = 16000 * 10; // 10 seconds
         
         // Activity timing
         std::chrono::steady_clock::time_point last_activity;
@@ -83,8 +83,6 @@ private:
     // Multi-call management
     std::unordered_map<std::string, std::shared_ptr<CallState>> active_calls_;
     mutable std::mutex calls_mutex_;
-
-    int get_system_speed_from_database();
 
     // Connection management
     bool setup_whisper_tcp_socket(std::shared_ptr<CallState> state);
@@ -117,4 +115,8 @@ private:
     void sip_udp_loop();
     int sip_udp_sock_ = -1;
     std::thread sip_udp_thread_;
+
+    // Maintenance thread for stale calls
+    void maintenance_loop();
+    std::thread maintenance_thread_;
 };

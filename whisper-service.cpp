@@ -293,28 +293,16 @@ std::string WhisperSession::get_latest_transcription() {
 // StandaloneWhisperService Implementation
 StandaloneWhisperService::StandaloneWhisperService()
     : running_(false) {
-
-    service_discovery_ = std::make_unique<ServiceDiscovery>();
 }
 
 StandaloneWhisperService::~StandaloneWhisperService() {
     stop();
 }
 
-bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const std::string& db_path) {
+bool StandaloneWhisperService::start(const WhisperSessionConfig& config) {
     if (running_.load()) return true;
 
     config_ = config;
-
-    // Initialize database connection
-    database_ = std::make_unique<Database>();
-    if (!database_->init(db_path)) {
-        std::cout << "❌ Failed to initialize database: " << db_path << std::endl;
-        return false;
-    }
-
-    // Mark service as starting
-    database_->set_whisper_service_status("starting");
 
     // Eagerly load Whisper model to avoid lazy load on first TCP connection
     std::cout << "⏳ Preloading Whisper model: " << config_.model_path << std::endl;
@@ -327,7 +315,6 @@ bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const s
     warm_ctx_ = whisper_init_from_file_with_params(config_.model_path.c_str(), cparams);
     if (!warm_ctx_) {
         std::cout << "❌ Whisper preload failed for model: " << config_.model_path << std::endl;
-        database_->set_whisper_service_status("error");
         return false;
     }
     warm_loaded_ = true;
@@ -352,19 +339,14 @@ bool StandaloneWhisperService::start(const WhisperSessionConfig& config, const s
         std::cout << "⚠️ Whisper warm-up threw exception (non-fatal)" << std::endl;
     }
 
-
-    // Only now mark running and launch discovery
+    // Only now mark running
     running_.store(true);
-    discovery_thread_ = std::thread(&StandaloneWhisperService::run_service_loop, this);
 
     // Start registration listener
     start_registration_listener();
 
-    // Update DB and log
-    database_->set_whisper_service_status("running");
     std::cout << "🎤 Standalone Whisper Service started" << std::endl;
     std::cout << "📡 Model: " << config.model_path << std::endl;
-    std::cout << "💾 Database: " << db_path << std::endl;
     std::cout << "🔍 Listening for audio processor registrations on UDP port 13000..." << std::endl;
 
     return true;
@@ -405,10 +387,6 @@ void StandaloneWhisperService::stop() {
         whisper_free(warm_ctx_);
         warm_ctx_ = nullptr;
         warm_loaded_ = false;
-    }
-
-    if (database_) {
-        database_->set_whisper_service_status("stopped");
     }
 
     std::cout << "🛑 Standalone Whisper Service stopped" << std::endl;
@@ -524,32 +502,8 @@ void StandaloneWhisperService::registration_listener_thread() {
 
 void StandaloneWhisperService::run_service_loop() {
     while (running_.load()) {
-        discover_and_connect_streams();
         cleanup_inactive_sessions();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    }
-}
-
-void StandaloneWhisperService::discover_and_connect_streams() {
-    if (!database_) return;
-    auto active_calls = database_->get_active_calls();
-    for (const auto& call : active_calls) {
-        std::string cid = std::to_string(call.id);
-        {
-            std::lock_guard<std::mutex> lock(tcp_mutex_);
-            if (call_tcp_sockets_.find(cid) != call_tcp_sockets_.end()) continue;
-        }
-        AudioStreamInfo stream;
-        stream.call_id = cid;
-        
-        // Consistent port calculation matching InboundAudioProcessor
-        unsigned int hash = 0;
-        for (char c : cid) hash = hash * 31 + c;
-        stream.tcp_port = 13001 + (hash % 1000);
-        
-        if (connect_to_audio_stream(stream)) {
-            create_session(cid);
-        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5000));
     }
 }
 
@@ -647,7 +601,6 @@ void StandaloneWhisperService::handle_tcp_audio_stream(const std::string& call_i
                     if (transcription.empty()) continue;
 
                     send_tcp_transcription(socket, transcription);
-                    if (database_) database_->append_transcription(call_id, transcription);
 
                     // Forward to LLaMA logic
                     std::string trimmed = transcription;
