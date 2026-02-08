@@ -378,10 +378,6 @@ void StandaloneWhisperService::stop() {
         sessions_.clear();
     }
 
-    if (discovery_thread_.joinable()) {
-        discovery_thread_.join();
-    }
-
     // Free preloaded model context
     if (warm_ctx_) {
         whisper_free(warm_ctx_);
