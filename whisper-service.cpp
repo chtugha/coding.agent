@@ -502,7 +502,7 @@ void StandaloneWhisperService::registration_listener_thread() {
                     // Consistent port calculation matching InboundAudioProcessor
                     unsigned int hash = 0;
                     for (char c : call_id) hash = hash * 31 + c;
-                    stream.tcp_port = 9001 + (hash % 1000);
+                    stream.tcp_port = 13001 + (hash % 1000);
                     
                     stream.stream_type = "inbound";
                     
@@ -545,7 +545,7 @@ void StandaloneWhisperService::discover_and_connect_streams() {
         // Consistent port calculation matching InboundAudioProcessor
         unsigned int hash = 0;
         for (char c : cid) hash = hash * 31 + c;
-        stream.tcp_port = 9001 + (hash % 1000);
+        stream.tcp_port = 13001 + (hash % 1000);
         
         if (connect_to_audio_stream(stream)) {
             create_session(cid);

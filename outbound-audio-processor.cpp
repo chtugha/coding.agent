@@ -43,13 +43,13 @@ void push_conversion_job(const std::vector<uint8_t>& payload, uint32_t sample_ra
 
 
 OutboundAudioProcessor::OutboundAudioProcessor()
-    : piper_tcp_socket_(-1)
+    : udp_dest_port_(-1)
+    , udp_call_id_(0)
+    , udp_socket_(-1)
+    , piper_tcp_socket_(-1)
     , piper_tcp_port_(-1)
     , piper_connected_(false)
     , registration_running_(false)
-    , udp_dest_port_(-1)
-    , udp_call_id_(0)
-    , udp_socket_(-1)
 {
 }
 

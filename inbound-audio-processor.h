@@ -23,6 +23,7 @@ public:
     void stop() override;
 
     // Audio processing interface (extended for multiple calls)
+    void process_rtp_audio(const std::string& call_id, uint8_t payload_type, const uint8_t* audio_data, size_t audio_len);
     void process_rtp_audio(const std::string& call_id, const RTPAudioPacket& packet);
     
     // Legacy support for single-call interface
@@ -53,20 +54,25 @@ private:
         int tcp_port = -1;
         std::atomic<bool> connected{false};
         std::thread tcp_thread;
+        std::mutex mutex; // Protects tcp_socket and buffers
         
-        // Audio processing state (merged from SimpleAudioProcessor)
-        std::vector<float> audio_buffer;
-        std::mutex buffer_mutex;
+        // Pre-allocated buffers for zero-allocation processing
+        std::vector<float> pcm_buffer;
         
-        // Registration polling
-        std::atomic<bool> registration_running{false};
-        std::thread registration_thread;
+        // Initial buffering while waiting for TCP connection
+        std::vector<float> initial_buffer;
+        static constexpr size_t MAX_INITIAL_BUFFER_SAMPLES = 16000 * 5; // 5 seconds
         
         // Activity timing
         std::chrono::steady_clock::time_point last_activity;
 
+        // Registration polling
+        std::atomic<bool> registration_running{false};
+        std::thread registration_thread;
+
         CallState(const std::string& id) : call_id(id) {
             last_activity = std::chrono::steady_clock::now();
+            pcm_buffer.reserve(640); // 20ms at 16kHz is 320 samples, upsampling from 8kHz
         }
         
         ~CallState() {
@@ -78,19 +84,11 @@ private:
     std::unordered_map<std::string, std::shared_ptr<CallState>> active_calls_;
     mutable std::mutex calls_mutex_;
 
-    // Internal processing methods (moved from SimpleAudioProcessor)
-    std::vector<float> decode_rtp_audio(const RTPAudioPacket& packet, const std::string& call_id);
-    std::vector<float> convert_g711_ulaw(const std::vector<uint8_t>& data);
-    std::vector<float> convert_g711_alaw(const std::vector<uint8_t>& data);
-    std::vector<float> convert_pcm16(const std::vector<uint8_t>& data);
-    
-    void process_call_audio(std::shared_ptr<CallState> state, const std::vector<float>& samples);
     int get_system_speed_from_database();
 
     // Connection management
     bool setup_whisper_tcp_socket(std::shared_ptr<CallState> state);
     void handle_whisper_tcp_connection(std::shared_ptr<CallState> state);
-    void forward_to_whisper(std::shared_ptr<CallState> state, const std::vector<float>& audio_samples);
     void send_tcp_audio_chunk(std::shared_ptr<CallState> state, const std::vector<float>& audio_samples);
     void send_tcp_hello(int socket_fd, const std::string& call_id);
     void send_tcp_bye(int socket_fd);

@@ -22,7 +22,7 @@ class Database;
 // LLaMA session configuration
 struct LlamaSessionConfig {
     std::string model_path = "models/llama-7b-q4_0.gguf";
-    std::string language = "en";
+    std::string language = "de";
     int n_threads = 4;
     int n_ctx = 2048;
     int n_gpu_layers = 999;
@@ -32,8 +32,8 @@ struct LlamaSessionConfig {
     int top_k = 5;
     bool use_gpu = true;
     bool flash_attn = false;
-    std::string person_name = "User";
-    std::string bot_name = "Assistant";
+    std::string person_name = "Anrufer";
+    std::string bot_name = "Assistent";
     // Shared warm context/model (optional). When set, sessions reuse these and do not free them.
     llama_model* shared_model = nullptr;
     llama_context* shared_ctx = nullptr;

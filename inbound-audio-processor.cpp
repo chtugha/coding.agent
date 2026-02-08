@@ -112,6 +112,10 @@ void InboundAudioProcessor::process_rtp_audio(const RTPAudioPacket& packet) {
 }
 
 void InboundAudioProcessor::process_rtp_audio(const std::string& call_id, const RTPAudioPacket& packet) {
+    process_rtp_audio(call_id, packet.payload_type, packet.audio_data.data(), packet.audio_data.size());
+}
+
+void InboundAudioProcessor::process_rtp_audio(const std::string& call_id, uint8_t payload_type, const uint8_t* audio_data, size_t audio_len) {
     if (!running_.load()) return;
 
     auto state = get_or_create_call_state(call_id);
@@ -119,12 +123,53 @@ void InboundAudioProcessor::process_rtp_audio(const std::string& call_id, const 
 
     state->last_activity = std::chrono::steady_clock::now();
 
-    // Fast audio decoding
-    std::vector<float> audio_samples = decode_rtp_audio(packet, call_id);
-    if (audio_samples.empty()) return;
+    if (payload_type == 101) return; // Ignore DTMF
 
-    process_call_audio(state, audio_samples);
-    total_packets_processed_.fetch_add(1);
+    // Zero-allocation decoding and upsampling
+    if (payload_type == 0 || payload_type == 8) { // G.711
+        if (state->pcm_buffer.size() != audio_len * 2) {
+            state->pcm_buffer.resize(audio_len * 2);
+        }
+        float* dst = state->pcm_buffer.data();
+        const float* table = (payload_type == 0) ? ulaw_table : alaw_table;
+        
+        for (size_t i = 0; i < audio_len; ++i) {
+            float s = table[audio_data[i]];
+            dst[i*2] = s;
+            float next = (i + 1 < audio_len) ? table[audio_data[i+1]] : s;
+            dst[i*2 + 1] = 0.5f * (s + next);
+        }
+    } else if (payload_type == 10 || payload_type == 11) { // PCM16
+        size_t n = audio_len / 2;
+        if (state->pcm_buffer.size() != n) {
+            state->pcm_buffer.resize(n);
+        }
+        float* dst = state->pcm_buffer.data();
+        for (size_t i = 0; i < n; ++i) {
+            int16_t sample = (audio_data[i*2 + 1] << 8) | audio_data[i*2];
+            dst[i] = sample / 32768.0f;
+        }
+    } else {
+        return; // Unsupported payload
+    }
+
+    if (!state->pcm_buffer.empty()) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->connected.load() && state->tcp_socket >= 0) {
+            // Flush initial buffer if any
+            if (!state->initial_buffer.empty()) {
+                send_tcp_audio_chunk(state, state->initial_buffer);
+                state->initial_buffer.clear();
+            }
+            send_tcp_audio_chunk(state, state->pcm_buffer);
+        } else {
+            // Buffer temporarily if not connected yet
+            if (state->initial_buffer.size() < CallState::MAX_INITIAL_BUFFER_SAMPLES) {
+                state->initial_buffer.insert(state->initial_buffer.end(), state->pcm_buffer.begin(), state->pcm_buffer.end());
+            }
+        }
+        total_packets_processed_.fetch_add(1);
+    }
 }
 
 void InboundAudioProcessor::activate_for_call(const std::string& call_id) {
@@ -187,73 +232,6 @@ InboundAudioProcessor::ProcessorStatus InboundAudioProcessor::get_status() const
     return status;
 }
 
-// Internal processing methods
-std::vector<float> InboundAudioProcessor::decode_rtp_audio(const RTPAudioPacket& packet, const std::string& /*call_id*/) {
-    if (packet.audio_data.empty()) return {};
-
-    // Handle DTMF events (RFC 4733) - payload type 101
-    if (packet.payload_type == 101) {
-        // DTMF handling could be added here if needed
-        return {};
-    }
-
-    // Fast codec detection and decoding
-    switch (packet.payload_type) {
-        case 0:  // G.711 μ-law
-            return convert_g711_ulaw(packet.audio_data);
-        case 8:  // G.711 A-law
-            return convert_g711_alaw(packet.audio_data);
-        case 10: // PCM 16-bit
-        case 11:
-            return convert_pcm16(packet.audio_data);
-        default:
-            return {}; // Unsupported codec
-    }
-}
-
-std::vector<float> InboundAudioProcessor::convert_g711_ulaw(const std::vector<uint8_t>& data) {
-    std::vector<float> samples;
-    samples.reserve(data.size() * 2); // Upsample 8kHz -> 16kHz
-
-    for (size_t i = 0; i < data.size(); ++i) {
-        float s = ulaw_table[data[i]];
-        float next = (i + 1 < data.size()) ? ulaw_table[data[i + 1]] : s;
-        samples.push_back(s);
-        samples.push_back(0.5f * (s + next)); // Linear interpolation upsampling
-    }
-    return samples;
-}
-
-std::vector<float> InboundAudioProcessor::convert_g711_alaw(const std::vector<uint8_t>& data) {
-    std::vector<float> samples;
-    samples.reserve(data.size() * 2);
-
-    for (size_t i = 0; i < data.size(); ++i) {
-        float s = alaw_table[data[i]];
-        float next = (i + 1 < data.size()) ? alaw_table[data[i + 1]] : s;
-        samples.push_back(s);
-        samples.push_back(0.5f * (s + next));
-    }
-    return samples;
-}
-
-std::vector<float> InboundAudioProcessor::convert_pcm16(const std::vector<uint8_t>& data) {
-    std::vector<float> samples;
-    samples.reserve(data.size() / 2);
-    for (size_t i = 0; i < data.size(); i += 2) {
-        if (i + 1 < data.size()) {
-            int16_t sample = (data[i + 1] << 8) | data[i];
-            samples.push_back(sample / 32768.0f);
-        }
-    }
-    return samples;
-}
-
-void InboundAudioProcessor::process_call_audio(std::shared_ptr<CallState> state, const std::vector<float>& samples) {
-    if (samples.empty()) return;
-    forward_to_whisper(state, samples);
-}
-
 int InboundAudioProcessor::get_system_speed_from_database() {
     if (database_) {
         return database_->get_system_speed();
@@ -301,25 +279,37 @@ void InboundAudioProcessor::handle_whisper_tcp_connection(std::shared_ptr<CallSt
         int client_socket = accept(state->listen_socket, (struct sockaddr*)&client_addr, &client_len);
         if (client_socket < 0) break;
         
-        state->tcp_socket = client_socket;
-        state->connected.store(true);
-        
-        std::cout << "🔗 Whisper client connected for call " << state->call_id << std::endl;
-        send_tcp_hello(state->tcp_socket, state->call_id);
-        
-        while (running_.load() && state->connected.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->tcp_socket = client_socket;
+            state->connected.store(true);
+            std::cout << "🔗 Whisper client connected for call " << state->call_id << std::endl;
+            send_tcp_hello(state->tcp_socket, state->call_id);
         }
         
-        close(state->tcp_socket);
-        state->tcp_socket = -1;
-        state->connected.store(false);
+        // Wait for connection to close by blocking on a read
+        char dummy;
+        while (running_.load() && state->connected.load()) {
+            ssize_t n = recv(client_socket, &dummy, 1, MSG_PEEK);
+            if (n <= 0) {
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+                break; 
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (state->tcp_socket >= 0) {
+                close(state->tcp_socket);
+                state->tcp_socket = -1;
+            }
+            state->connected.store(false);
+        }
     }
-}
-
-void InboundAudioProcessor::forward_to_whisper(std::shared_ptr<CallState> state, const std::vector<float>& audio_samples) {
-    if (!state->connected.load() || state->tcp_socket < 0) return;
-    send_tcp_audio_chunk(state, audio_samples);
 }
 
 void InboundAudioProcessor::send_tcp_audio_chunk(std::shared_ptr<CallState> state, const std::vector<float>& audio_samples) {
@@ -391,10 +381,13 @@ void InboundAudioProcessor::cleanup_call(std::shared_ptr<CallState> state) {
     stop_registration_polling(state);
     
     state->connected.store(false);
-    if (state->tcp_socket >= 0) {
-        send_tcp_bye(state->tcp_socket);
-        close(state->tcp_socket);
-        state->tcp_socket = -1;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->tcp_socket >= 0) {
+            send_tcp_bye(state->tcp_socket);
+            close(state->tcp_socket);
+            state->tcp_socket = -1;
+        }
     }
     
     if (state->listen_socket >= 0) {
@@ -420,7 +413,7 @@ std::shared_ptr<InboundAudioProcessor::CallState> InboundAudioProcessor::get_or_
 }
 
 int InboundAudioProcessor::calculate_whisper_port(const std::string& call_id) {
-    return 9001 + calculate_port_offset(call_id);
+    return 13001 + calculate_port_offset(call_id);
 }
 
 int InboundAudioProcessor::calculate_port_offset(const std::string& call_id) {

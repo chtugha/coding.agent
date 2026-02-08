@@ -195,14 +195,7 @@ ensure_prebuilt_piper(){
 
   # Discover latest release tag and asset URL
   latest_tag="$(curl -sL "$api_url" | sed -n 's/.*"tag_name"\s*:\s*"\([^"]\+\)".*/\1/p' | head -n1)"
-  asset_url="$(curl -sL "$api_url" | awk -v n="$asset_name" '
-    BEGIN{RS="},"; FS="\n"}
-    $0 ~ /"name"\s*:\s*""n""/ {
-      if ($0 ~ /browser_download_url/) {
-        match($0, /"browser_download_url"\s*:\s*"([^"]+)"/, a);
-        print a[1];
-      }
-    }' | head -n1)"
+  asset_url="$(curl -sL "$api_url" | grep -C 5 "\"name\": \"$asset_name\"" | grep "browser_download_url" | sed -n 's/.*"browser_download_url"\s*:\s*"\([^"]\+\)".*/\1/p' | head -n1)"
 
   # Fallback to known release if API rate-limited or asset not found
   if [[ -z "$latest_tag" || -z "$asset_url" ]]; then
@@ -280,10 +273,16 @@ fi
 
 # Top-level build
 log "Configuring top-level project..."
+piper_flag="OFF"
+if [[ "$WITH_PIPER" = "1" ]]; then
+  piper_flag="ON"
+fi
+
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
   -DWHISPER_CPP_LIB="$WHISPER_LIB" \
   -DLLAMA_CPP_LIB="$LLAMA_LIB" \
-  -DBUILD_SIP_CLIENT=ON
+  -DBUILD_SIP_CLIENT=ON \
+  -DBUILD_PIPER_SERVICE="$piper_flag"
 
 log "Building targets..."
 cmake --build "$BUILD_DIR" --config Release -j 6

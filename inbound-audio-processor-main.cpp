@@ -120,12 +120,10 @@ int main(int argc, char* argv[]) {
             
             if (rtp_len >= 12) {
                 uint8_t payload_type = rtp_data[1] & 0x7F;
-                uint16_t sequence = (rtp_data[2] << 8) | rtp_data[3];
-                uint32_t timestamp = (rtp_data[4] << 24) | (rtp_data[5] << 16) | (rtp_data[6] << 8) | rtp_data[7];
-                std::vector<uint8_t> payload(rtp_data + 12, rtp_data + rtp_len);
+                const uint8_t* audio_payload = rtp_data + 12;
+                size_t audio_len = rtp_len - 12;
                 
-                RTPAudioPacket pkt(payload_type, payload, timestamp, sequence);
-                g_processor->process_rtp_audio(call_id_str, pkt);
+                g_processor->process_rtp_audio(call_id_str, payload_type, audio_payload, audio_len);
             }
         }
     }

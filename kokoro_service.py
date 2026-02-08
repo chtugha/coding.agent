@@ -27,7 +27,7 @@ except ImportError:
 
 
 class KokoroTCPService:
-    def __init__(self, voice="af_sky", tcp_port=8090, udp_port=13001, device="mps"):
+    def __init__(self, voice="df_eva", tcp_port=8090, udp_port=13001, device="mps"):
         """
         Initialize Kokoro TTS service
 
@@ -517,8 +517,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Kokoro TTS Service')
-    parser.add_argument('-v', '--voice', default='af_sky',
-                       help='Voice to use (default: af_sky)')
+    parser.add_argument('-v', '--voice', default='df_eva',
+                       help='Voice to use (default: df_eva)')
     parser.add_argument('-t', '--tcp-port', type=int, default=8090,
                        help='TCP port for LLaMA connections (default: 8090)')
     parser.add_argument('-u', '--udp-port', type=int, default=13001,

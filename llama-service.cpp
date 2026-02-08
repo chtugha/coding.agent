@@ -70,18 +70,18 @@ bool LlamaSession::initialize() {
         return false;
     }
 
-    // Initialize conversation with system prompt - calm, patient, empathetic phone assistant
-    conversation_history_ = "You are " + config_.bot_name + ", a calm and patient phone assistant speaking with " + config_.person_name + ".\n\n" +
-                           "Your communication style:\n" +
-                           "- Speak naturally and conversationally, like a friendly human\n" +
-                           "- Be warm, understanding, and empathetic\n" +
-                           "- Listen carefully and respond thoughtfully\n" +
-                           "- Keep responses brief (1-2 sentences) but kind\n" +
-                           "- Never interrupt or rush the conversation\n" +
-                           "- Be polite and respectful at all times\n" +
-                           "- Avoid bureaucratic or robotic language\n" +
-                           "- Wait for the person to finish speaking before responding\n\n" +
-                           "Conversation:\n\n";
+    // Initialize conversation with system prompt - calm, patient, empathetic phone assistant (German)
+    conversation_history_ = "Du bist " + config_.bot_name + ", ein ruhiger und geduldiger Telefonassistent, der mit " + config_.person_name + " spricht.\n\n" +
+                           "Dein Kommunikationsstil:\n" +
+                           "- Sprich natürlich und konversationell, wie ein freundlicher Mensch\n" +
+                           "- Sei warmherzig, verständnisvoll und empathisch\n" +
+                           "- Hör aufmerksam zu und antworte durchdacht\n" +
+                           "- Fass dich kurz (1-2 Sätze), aber bleib freundlich\n" +
+                           "- Unterbrich niemals und dränge nicht zur Eile\n" +
+                           "- Sei jederzeit höflich und respektvoll\n" +
+                           "- Vermeide bürokratische oder roboterhafte Sprache\n" +
+                           "- Warte, bis die Person fertig gesprochen hat, bevor du antwortest\n\n" +
+                           "Gespräch:\n\n";
 
     is_active_.store(true);
     mark_activity();
@@ -213,7 +213,7 @@ bool LlamaSession::prime_system_prompt() {
         }
     }
     if (sid < 0) sid = -sid;
-    seq_id_ = sid % 64; // must be < n_seq_max configured in warm ctx (64 on this build)
+    seq_id_ = sid % 8; // n_seq_max is typically 8 in our warm context configuration
 
     // Clear any prior state for this sequence and prime with system prompt
     llama_memory_t mem = llama_get_memory(ctx_);
@@ -321,7 +321,6 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
         llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
         n_past_ = 0;
         primed_ = false;
-        conversation_history_.clear();
         if (!prime_system_prompt()) {
             std::cout << "❌ Failed to re-prime after KV clear for call " << call_id_ << std::endl;
             return "";
@@ -348,7 +347,6 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
         llama_memory_seq_rm(mem, (llama_seq_id)seq_id_, 0, -1);
         n_past_ = 0;
         primed_ = false;
-        conversation_history_.clear();
 
         if (!prime_system_prompt()) {
             std::cout << "❌ Failed to re-prime after decode failure for call " << call_id_ << std::endl;
@@ -383,7 +381,7 @@ std::string LlamaSession::generate_response(const std::string& prompt) {
     // Generate response tokens
     std::string response;
     int tokens_generated = 0;
-    int max_gen = config_.max_tokens; if (max_gen > 50) max_gen = 50; // cap at 50 for ultra-fast responses
+    int max_gen = config_.max_tokens;
     for (int i = 0; i < max_gen; i++) {
         // Sample next token
         llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
@@ -774,8 +772,8 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
     std::string text_buffer;
     auto last_text_time = std::chrono::steady_clock::now();
     // Dynamic silence thresholds: longer if buffer does not end with punctuation
-    const int silence_threshold_ms_with_punct = 0;     // respond immediately when sentence looks complete
-    const int silence_threshold_ms_no_punct   = 1500;  // still wait longer to avoid mid-sentence replies
+    const int silence_threshold_ms_with_punct = 500;   // respond after 500ms when sentence looks complete
+    const int silence_threshold_ms_no_punct   = 1200;  // wait a bit longer to avoid mid-sentence replies
 
     // Set socket to non-blocking mode for timeout-based reads
     int flags = fcntl(socket, F_GETFL, 0);
@@ -881,7 +879,7 @@ void StandaloneLlamaService::handle_tcp_text_stream(const std::string& call_id, 
             auto is_backchannel = [&](const std::string& s){
                 std::string t = to_lower(trim(s));
                 if (t.empty()) return false;
-                static const char* phrases[] = {"ok", "okay", "thanks", "thank you", "yeah", "yes", "yep", "right", "sure", "alright", "got it", "i do", "i see", "wait"};
+                static const char* phrases[] = {"ok", "okay", "danke", "ja", "genau", "richtig", "klar", "verstehe", "moment", "gut", "schön"};
                 for (auto p : phrases) { if (t == p) return true; }
                 // also treat very short one- or two-word acks as backchannel if no question mark
                 if (word_count(t) <= 2 && t.find('?') == std::string::npos) return true;
