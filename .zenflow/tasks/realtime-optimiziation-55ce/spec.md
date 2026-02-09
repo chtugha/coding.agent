@@ -1,5 +1,17 @@
 # Technical Specification: WhisperTalk Real-Time Optimization
 
+**Document Version**: 1.2  
+**Last Updated**: 2026-02-09  
+**Status**: Final - Ready for Planning Phase
+
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 1.0 | 2026-02-09 | Zencoder | Initial specification |
+| 1.1 | 2026-02-09 | Zencoder | Critical fixes: KV cache rollback, VAD buffer, signal ordering, error handling |
+| 1.2 | 2026-02-09 | Zencoder | Test corpus generation fix, optional improvements: German compound words, port collision, metrics disk management, CoreML warm-up |
+
+---
+
 ## 1. Technical Context
 
 ### 1.1 Language & Build System
@@ -157,6 +169,8 @@ int call_id = next_id_offset + (sequential_counter++ % 1000);
   - Kokoro connects TO Outbound as TCP client
 
 **Range Support**: 0-9999 call IDs (10 instances × 1000 calls each)
+
+**Port Collision Behavior**: With >100 concurrent calls, multiple calls share the same listening port via modulo mapping. Services differentiate calls using the `call_id` prefix in TCP streams. Maximum concurrent calls: 9999 (limited by call_id space, not ports).
 
 **Connection Initiation Summary**:
 ```
@@ -360,6 +374,8 @@ private:
      }
      ```
    - **Alternative**: Use 2-second timeout as primary trigger (more robust than punctuation detection)
+   
+   - **German Compound Word Edge Case**: German compound words spoken with pauses (e.g., "Donaudampfschifffahrtsgesellschaft" with pauses between components) may trigger the 2-second timeout mid-word, causing sentence fragmentation. This is acceptable as LLaMA can handle fragmented input contextually. If needed for heavily technical German conversations, increase timeout to 3 seconds, but this trades responsiveness for completeness.
    
 2. **Response Interruption**:
    - Currently generates responses in blocking call to llama.cpp
@@ -827,6 +843,8 @@ call_id,stage,event,timestamp,latency_ms
 - End-to-end latency: `kokoro_end - vad_start = 980ms`
 - Per-stage breakdown for bottleneck identification
 
+**Disk Management**: Each call writes approximately 1KB of CSV data. For 10,000 calls, this totals ~10MB. For production deployments or long-running stress tests, implement log rotation (delete files older than 7 days) or use in-memory aggregation to prevent disk exhaustion.
+
 ---
 
 ## 3. Source Code Structure Changes
@@ -1026,6 +1044,7 @@ CALL_END:<call_id>
 - Log messages at each stage confirm signal propagation
 - Memory inspection shows resource cleanup (no leaks)
 - Test script: Start call, send BYE, check all service logs
+- CoreML warm-up: Run dummy transcription on Whisper startup to warm up model (avoids 200-500ms first-call latency spike)
 
 **Estimated Effort**: 2-3 days
 
@@ -1399,33 +1418,94 @@ ruff check kokoro_service.py
 - **Duration**: 5-30 words per sentence (3-15 seconds)
 - **Generation Script**: `scripts/generate_test_corpus.py`
 
-**Script Implementation**:
+**Script Implementation** (Direct Kokoro Import):
 ```python
-# scripts/generate_test_corpus.py
-import subprocess
-import wave
+#!/usr/bin/env python3
+"""
+Test corpus generator for WhisperTalk integration testing.
+Uses Kokoro library directly (not the TCP service).
+"""
+import sys
+import numpy as np
+from pathlib import Path
 
+try:
+    from kokoro import KPipeline
+    import soundfile as sf  # For writing WAV files
+except ImportError:
+    print("Error: Required packages not installed")
+    print("Install with: pip install kokoro soundfile")
+    sys.exit(1)
+
+# German test sentences (50 total)
 sentences = [
     "Wie ist das Wetter heute?",
     "Ich möchte einen Termin vereinbaren.",
     "Können Sie mir helfen?",
-    # ... 47 more sentences
+    "Guten Tag, wie geht es Ihnen?",
+    "Ich habe eine Frage zu meiner Bestellung.",
+    "Können Sie das bitte wiederholen?",
+    "Vielen Dank für Ihre Hilfe.",
+    "Auf Wiedersehen und einen schönen Tag.",
+    "Ich verstehe das nicht ganz.",
+    "Könnten Sie bitte langsamer sprechen?",
+    # ... 40 more sentences (expand to 50 for full corpus)
 ]
 
-for i, text in enumerate(sentences):
-    # Use Kokoro to synthesize
-    subprocess.run([
-        'python3', 'kokoro_service.py', '--text', text,
-        '--output', f'tests/test_corpus/sent_{i:02d}.wav'
-    ])
+def generate_corpus():
+    # Initialize Kokoro with German model
+    print("Loading Kokoro pipeline (German)...")
+    pipeline = KPipeline(lang_code='a', device='mps')  # Use 'a' for multi-lang
     
-    # Convert to G.711 (using ffmpeg or sox)
-    subprocess.run([
-        'ffmpeg', '-i', f'tests/test_corpus/sent_{i:02d}.wav',
-        '-ar', '8000', '-acodec', 'pcm_mulaw',
-        f'tests/test_corpus/sent_{i:02d}_8k.wav'
-    ])
+    # Create output directory
+    output_dir = Path('tests/test_corpus')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Generate ground truth JSON
+    transcripts = {}
+    
+    for i, text in enumerate(sentences):
+        print(f"Synthesizing {i+1}/{len(sentences)}: {text[:50]}...")
+        
+        # Generate audio using Kokoro (returns numpy array at 24kHz)
+        audio = pipeline(text, voice='af_bella', speed=1.0, lang='de')
+        
+        # Save 24kHz version
+        wav_24k = output_dir / f'sent_{i:02d}_24k.wav'
+        sf.write(wav_24k, audio, 24000)
+        
+        # Downsample to 8kHz for telephony simulation
+        # Simple decimation (every 3rd sample: 24000/3 = 8000)
+        audio_8k = audio[::3]
+        wav_8k = output_dir / f'sent_{i:02d}_8k.wav'
+        sf.write(wav_8k, audio_8k, 8000, subtype='PCM_16')
+        
+        # Add to ground truth
+        transcripts[f'sent_{i:02d}_8k.wav'] = text
+    
+    # Write ground truth JSON
+    import json
+    with open(output_dir / 'transcripts.json', 'w', encoding='utf-8') as f:
+        json.dump(transcripts, f, ensure_ascii=False, indent=2)
+    
+    print(f"\n✅ Generated {len(sentences)} audio files")
+    print(f"📁 Output: {output_dir}")
+    print(f"📋 Ground truth: {output_dir / 'transcripts.json'}")
+
+if __name__ == '__main__':
+    generate_corpus()
 ```
+
+**Alternative: Using ffmpeg for resampling** (if higher quality needed):
+```bash
+# After generating 24kHz files with Kokoro
+for f in tests/test_corpus/sent_*_24k.wav; do
+    ffmpeg -i "$f" -ar 8000 -ac 1 -acodec pcm_mulaw \
+           "${f/_24k/_8k_mulaw}.wav"
+done
+```
+
+**Note on Kokoro Service**: The `kokoro_service.py` is a TCP service for runtime synthesis, not a CLI tool. For test corpus generation, we use the Kokoro library directly via Python import. This avoids starting/stopping the service and simplifies the generation script.
 
 **Ground Truth**: `tests/test_corpus/transcripts.json`
 ```json

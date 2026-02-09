@@ -22,6 +22,7 @@ Save the PRD to `{@artifacts_path}/requirements.md`.
 
 ### [x] Step: Technical Specification
 <!-- chat-id: 504b32fb-827e-4de2-80a8-79c8f8641e6c -->
+<!-- completed: 2026-02-09 -->
 
 Create a technical specification based on the PRD in `{@artifacts_path}/requirements.md`.
 
