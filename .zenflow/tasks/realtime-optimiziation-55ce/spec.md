@@ -49,25 +49,88 @@ DATA:<call_id>:<payload>
   - Forward signals to downstream service via Unix socket
   - On CALL_END, clean up call-specific resources (threads, buffers, sockets)
 
-**Unix Socket Communication Pattern**:
+**Unix Socket Communication Pattern with Error Handling**:
 ```cpp
 // Sender side (example from SIP Client)
-int ctrl_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
-struct sockaddr_un addr;
-addr.sun_family = AF_UNIX;
-strcpy(addr.sun_path, "/tmp/inbound-audio-processor.ctrl");
-std::string msg = "CALL_START:" + std::to_string(call_id);
-sendto(ctrl_sock, msg.c_str(), msg.length(), 0, (struct sockaddr*)&addr, sizeof(addr));
+int send_control_signal(const std::string& target_path, const std::string& message) {
+    int ctrl_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (ctrl_sock < 0) {
+        std::cerr << "Failed to create control socket" << std::endl;
+        return -1;
+    }
+    
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, target_path.c_str(), sizeof(addr.sun_path) - 1);
+    
+    // Set timeout to avoid blocking forever
+    struct timeval tv{.tv_sec = 0, .tv_usec = 100000};  // 100ms
+    setsockopt(ctrl_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    
+    ssize_t sent = sendto(ctrl_sock, message.c_str(), message.length(), 0, 
+                          (struct sockaddr*)&addr, sizeof(addr));
+    close(ctrl_sock);
+    
+    if (sent < 0) {
+        // Non-critical: Log but continue (service may not be running yet)
+        std::cerr << "Warning: Failed to send control signal to " << target_path 
+                  << " (service may not be ready)" << std::endl;
+        return -1;
+    }
+    return 0;
+}
 
 // Receiver side (example from Inbound Audio Processor)
-int ctrl_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
-struct sockaddr_un addr;
-addr.sun_family = AF_UNIX;
-strcpy(addr.sun_path, "/tmp/inbound-audio-processor.ctrl");
-unlink(addr.sun_path);  // Clean up old socket
-bind(ctrl_sock, (struct sockaddr*)&addr, sizeof(addr));
-// Listen in dedicated thread
+int setup_control_listener(const std::string& socket_path) {
+    int ctrl_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (ctrl_sock < 0) {
+        std::cerr << "Failed to create control socket" << std::endl;
+        return -1;
+    }
+    
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+    
+    // Clean up old socket if exists (prevent bind failure)
+    unlink(addr.sun_path);
+    
+    if (bind(ctrl_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "Failed to bind control socket: " << strerror(errno) << std::endl;
+        close(ctrl_sock);
+        return -1;
+    }
+    
+    // Set non-blocking for graceful shutdown
+    int flags = fcntl(ctrl_sock, F_GETFL, 0);
+    fcntl(ctrl_sock, F_SETFL, flags | O_NONBLOCK);
+    
+    return ctrl_sock;
+}
+
+// Listener thread receives signals
+void control_listener_thread(int ctrl_sock) {
+    char buf[256];
+    while (running_) {
+        ssize_t n = recv(ctrl_sock, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            buf[n] = '\0';
+            handle_control_signal(std::string(buf));
+        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            std::cerr << "Control socket error: " << strerror(errno) << std::endl;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
 ```
+
+**Key Design Points**:
+- Signals are **advisory, not critical**: If a service isn't ready, the sender logs a warning but continues
+- Receiver uses `unlink()` before bind to handle restarts cleanly
+- Timeouts prevent indefinite blocking
+- Non-blocking receive allows graceful shutdown
+- Signal ordering (CALL_START before audio) is best-effort, not guaranteed
 
 #### 2.1.2 Call ID Management
 **Current State**: Sequential ID assignment starting from 1 in each SIP client instance.
@@ -82,11 +145,26 @@ int next_id_offset = instance_id * 1000;  // Each instance gets 1000 IDs
 int call_id = next_id_offset + (sequential_counter++ % 1000);
 ```
 
-**Port Mapping**: 
-- Whisper TCP ports: `13000 + (call_id % 100)`
-- Kokoro TCP ports: `8090 + (call_id % 100)`
+**Port Mapping** (Server Listeners): 
+- **Whisper Service**: Listens on ports `13000-13099` (100 ports mapped via `13000 + (call_id % 100)`)
+  - Inbound Processor connects TO Whisper as TCP client
+- **LLaMA Service**: Listens on port `8083` (single port, multiplexed by call_id in message)
+  - Whisper connects TO LLaMA as TCP client
+- **Kokoro Service**: Listens on port `8090` (single port, spawns thread per call)
+  - LLaMA connects TO Kokoro as TCP client
+  - Kokoro then connects TO Outbound Processor as client
+- **Outbound Processor**: Listens on ports `8090-8189` (100 ports mapped via `8090 + (call_id % 100)`)
+  - Kokoro connects TO Outbound as TCP client
 
 **Range Support**: 0-9999 call IDs (10 instances × 1000 calls each)
+
+**Connection Initiation Summary**:
+```
+Inbound (client) → Whisper (server on 13000+call_id%100)
+Whisper (client) → LLaMA (server on 8083)
+LLaMA (client)   → Kokoro (server on 8090)
+Kokoro (client)  → Outbound (server on 8090+call_id%100)
+```
 
 ---
 
@@ -215,10 +293,49 @@ private:
 #### 2.2.4 LLaMA Service (`llama-service.cpp`)
 
 **Changes Required**:
-1. **Sentence Completion Detection**:
-   - Buffer incoming text until sentence-ending punctuation: `.`, `?`, `!`
-   - OR 2-second timeout since last text chunk
-   - Max buffer time: 5 seconds (safety limit)
+1. **Sentence Completion Detection** (Implemented in LLaMA service):
+   - **Location**: LLaMA TCP receiver thread buffers text from Whisper
+   - **Logic**: Accumulate text chunks until sentence-ending punctuation detected (`.`, `?`, `!`)
+   - **Timeout**: If no punctuation within 2 seconds of last chunk, treat as complete
+   - **Max Buffer**: 5 seconds total wait time (safety limit to avoid indefinite delay)
+   - **Implementation**:
+     ```cpp
+     struct SentenceBuffer {
+         std::string accumulated_text;
+         std::chrono::steady_clock::time_point last_chunk_time;
+         std::chrono::steady_clock::time_point buffer_start_time;
+         
+         bool is_complete() {
+             auto now = std::chrono::steady_clock::now();
+             
+             // Check for sentence-ending punctuation
+             if (accumulated_text.find_last_of(".?!") != std::string::npos) {
+                 return true;
+             }
+             
+             // 2-second timeout since last chunk
+             auto since_last = std::chrono::duration_cast<std::chrono::seconds>(
+                 now - last_chunk_time).count();
+             if (since_last >= 2) return true;
+             
+             // 5-second absolute timeout (safety)
+             auto total_time = std::chrono::duration_cast<std::chrono::seconds>(
+                 now - buffer_start_time).count();
+             if (total_time >= 5) return true;
+             
+             return false;
+         }
+         
+         void add_chunk(const std::string& text) {
+             if (accumulated_text.empty()) {
+                 buffer_start_time = std::chrono::steady_clock::now();
+             }
+             accumulated_text += text + " ";  // Space between chunks
+             last_chunk_time = std::chrono::steady_clock::now();
+         }
+     };
+     ```
+   - **Why LLaMA, not Whisper**: Whisper sends transcriptions immediately after VAD trigger; buffering in LLaMA allows Whisper to remain stateless and focused on ASR
    
 2. **Response Interruption**:
    - Currently generates responses in blocking call to llama.cpp
@@ -351,31 +468,47 @@ class ControlListener(threading.Thread):
 9. Audio flow begins: SIP → Inbound → Whisper → LLaMA → Kokoro → Outbound → SIP
 ```
 
-#### 2.3.2 Call End Sequence
+#### 2.3.2 Call End Sequence (Signal-First Ordering)
 ```
 1. SIP Client receives BYE
 2. SIP Client sends CALL_END to Inbound Processor [Unix socket]
+
 3. Inbound Processor:
+   - Forwards CALL_END to Whisper [Unix socket] FIRST
    - Stops audio conversion thread for call_id
+   - Waits 200ms grace period (allow downstream to prepare)
    - Closes TCP to Whisper
-   - Forwards CALL_END to Whisper [Unix socket]
+
 4. Whisper:
+   - Forwards CALL_END to LLaMA [Unix socket] FIRST
    - Stops transcription for call_id
+   - Waits 200ms grace period
    - Closes TCP from Inbound
-   - Forwards CALL_END to LLaMA [Unix socket]
+
 5. LLaMA:
+   - Forwards CALL_END to Kokoro [Unix socket] FIRST
+   - Stops any active generation (sets stop_flag)
    - Clears conversation history for call_id
-   - Stops any active generation
-   - Forwards CALL_END to Kokoro [Unix socket]
+   - Waits 200ms grace period
+   - Closes TCP connections
+
 6. Kokoro:
+   - Forwards CALL_END to Outbound [Unix socket] FIRST
    - Stops synthesis for call_id
+   - Waits 200ms grace period
    - Closes TCP to Outbound Processor
-   - Forwards CALL_END to Outbound [Unix socket]
+
 7. Outbound Processor:
    - Stops RTP scheduling for call_id
    - Closes TCP from Kokoro
-   - No further forwarding
+   - No further forwarding (end of pipeline)
 ```
+
+**Key Design Principle: Signal-First, Close-Later**
+- **Rationale**: Forward CALL_END before closing connections to avoid race conditions
+- **Grace Period**: 200ms delay allows downstream services to receive signal and prepare for shutdown
+- **Idempotency**: CALL_END signals are idempotent (safe to receive multiple times)
+- **Timeout**: If downstream doesn't respond, proceed with cleanup anyway (non-blocking)
 
 #### 2.3.3 Crash Recovery Flows
 
@@ -414,43 +547,78 @@ if (in_speech && energy < threshold) silence_count++;
 if (silence_count > 8) segment_complete = true;  // 800ms silence
 ```
 
-**Enhanced Algorithm** (German-optimized):
+**Enhanced Algorithm** (German-optimized with proper buffer management):
 ```cpp
-// 100ms windows with 3-window hysteresis
-float energy = sum(samples^2) / count;
-
-// Speech start: Single high-energy window
-if (energy > 0.00005f && !in_speech) {
-    in_speech = true;
-    silence_count = 0;
-}
-
-// Speech end: 3 consecutive low-energy windows (300ms)
-if (in_speech && energy < 0.00005f) {
-    silence_count++;
-    if (silence_count >= 3) {  // Changed from 8 to 3 consecutive
-        // Additional check: Verify sustained silence (next 500ms)
-        if (verify_sustained_silence(500ms)) {
-            segment_complete = true;
-            in_speech = false;
-            silence_count = 0;
+// Process audio buffer in 100ms windows (1600 samples at 16kHz)
+void process_audio_buffer(WhisperCall* call) {
+    std::vector<float> to_transcribe;
+    
+    std::lock_guard<std::mutex> lock(call->mutex);
+    
+    // Process all complete windows in buffer
+    while (call->audio_buffer.size() >= 1600) {
+        // Calculate energy for current window
+        float energy = 0.0f;
+        for (int i = 0; i < 1600; ++i) {
+            energy += call->audio_buffer[i] * call->audio_buffer[i];
+        }
+        energy /= 1600.0f;
+        
+        // Speech start: Single high-energy window
+        if (energy > 0.00005f && !call->in_speech) {
+            call->in_speech = true;
+            call->silence_count = 0;
+        }
+        
+        // Speech end: 8 consecutive low-energy windows (800ms)
+        // Note: Keeping 800ms (not 300ms) to avoid cutting German compound words
+        if (call->in_speech && energy < 0.00005f) {
+            call->silence_count++;
+        } else if (call->in_speech) {
+            call->silence_count = 0;  // Reset on any speech
+        }
+        
+        // Trigger transcription on 800ms silence after speech OR 8s max
+        bool should_transcribe = false;
+        if (call->in_speech && call->silence_count >= 8) {  // 800ms silence
+            should_transcribe = true;
+            call->in_speech = false;
+            call->silence_count = 0;
+        } else if (call->audio_buffer.size() >= 16000 * 8) {  // 8 seconds max
+            should_transcribe = true;
+            call->in_speech = false;
+            call->silence_count = 0;
+        }
+        
+        if (should_transcribe && call->audio_buffer.size() > 0) {
+            // Move entire buffer to transcription queue
+            to_transcribe = std::move(call->audio_buffer);
+            call->audio_buffer.clear();
+            break;  // Stop processing, transcribe accumulated audio
+        } else {
+            // Remove processed window and continue (FIX: was missing in current code)
+            call->audio_buffer.erase(call->audio_buffer.begin(), 
+                                    call->audio_buffer.begin() + 1600);
         }
     }
-} else if (in_speech) {
-    silence_count = 0;  // Reset on any speech
-}
-
-// Safety limits
-if (audio_buffer.size() > 16000 * 8) {  // 8 seconds max
-    segment_complete = true;
-    in_speech = false;
+    
+    // Transcribe outside the lock
+    if (!to_transcribe.empty()) {
+        transcribe_and_send(call->id, to_transcribe);
+    }
 }
 ```
 
+**Key Fixes from Current Code**:
+1. **Window Removal**: `erase()` call after processing each window (was missing, caused infinite buffer growth)
+2. **Complete Loop**: Process ALL windows in buffer, not just first one
+3. **Proper Locking**: Acquire lock once, process all windows, release before transcription
+4. **Conservative Timing**: Keep 800ms silence threshold (not 300ms) based on German speech patterns
+
 **Rationale**:
-- 3-window (300ms) minimum prevents cutting short pauses (German: "äh", "also")
-- Sustained silence check (500ms) avoids false triggers on single noisy frames
-- Maintains real-time responsiveness while improving accuracy
+- 800ms silence is appropriate for German (compound words, thinking pauses: "äh", "also")
+- Window removal prevents memory growth bug in current implementation
+- Processing all buffered windows reduces latency (don't wait for next iteration)
 
 **Metrics Collection**:
 ```cpp
@@ -473,44 +641,82 @@ struct VADMetrics {
 
 **Solution**: Token-by-token generation with periodic cancellation checks.
 
-**Implementation**:
+**Implementation with KV Cache Rollback**:
 ```cpp
-std::string generate_with_interruption(int call_id, const std::string& prompt, 
-                                       std::atomic<bool>& stop_flag) {
-    // Apply chat template
+std::string generate_with_interruption(int call_id, llama_context* ctx, 
+                                       const std::string& prompt, 
+                                       std::atomic<bool>& stop_flag,
+                                       int seq_id) {
+    // Apply chat template and encode prompt
     std::vector<llama_token> tokens = tokenize(prompt);
-    llama_decode(ctx, llama_batch_get_one(tokens.data(), tokens.size(), 0, 0));
+    
+    // Save KV cache position BEFORE generation (for rollback on interrupt)
+    int n_past_checkpoint = llama_get_kv_cache_used_cells(ctx);
+    
+    // Decode prompt into KV cache
+    llama_decode(ctx, llama_batch_get_one(tokens.data(), tokens.size(), 
+                                          n_past_checkpoint, seq_id));
     
     std::string response;
-    int n_tokens = 0;
+    int n_tokens_generated = 0;
+    int n_past = n_past_checkpoint + tokens.size();
     
     while (true) {
-        // Sample next token
-        llama_token id = llama_sampling_sample(ctx, NULL, 0);
-        if (llama_token_is_eog(model, id)) break;
+        // Check for interruption BEFORE sampling (more responsive)
+        if (stop_flag.load()) {
+            std::cout << "⏸️  Response interrupted for call " << call_id 
+                      << " after " << n_tokens_generated << " tokens" << std::endl;
+            
+            // CRITICAL: Rollback KV cache to checkpoint (remove partial response)
+            llama_kv_cache_seq_rm(ctx, seq_id, n_past_checkpoint, -1);
+            
+            return "";  // Discard partial response, cache is clean
+        }
         
+        // Sample next token
+        llama_token id = llama_sampling_sample(ctx, NULL, seq_id);
+        if (llama_token_is_eog(llama_get_model(ctx), id)) break;
+        
+        // Decode token (adds to KV cache)
         response += llama_token_to_piece(ctx, id);
-        llama_decode(ctx, llama_batch_get_one(&id, 1, n_tokens, 0));
-        n_tokens++;
+        llama_decode(ctx, llama_batch_get_one(&id, 1, n_past, seq_id));
+        n_past++;
+        n_tokens_generated++;
         
         // Check for interruption every 5 tokens (~every 50ms at 100 tok/s)
-        if (n_tokens % 5 == 0 && stop_flag.load()) {
-            std::cout << "⏸️  Response interrupted for call " << call_id << std::endl;
-            return "";  // Discard partial response
+        if (n_tokens_generated % 5 == 0 && stop_flag.load()) {
+            // Rollback KV cache (remove partial response tokens)
+            llama_kv_cache_seq_rm(ctx, seq_id, n_past_checkpoint, -1);
+            
+            std::cout << "⏸️  Response interrupted for call " << call_id 
+                      << " (discarded " << n_tokens_generated << " tokens)" << std::endl;
+            return "";
         }
         
         // Safety limit: 50 tokens max (for German "short and sharp" responses)
-        if (n_tokens >= 50) break;
+        if (n_tokens_generated >= 50) break;
     }
     
     return response;
 }
 ```
 
+**Key Design Points**:
+1. **Checkpoint Before Generation**: Save `n_past` before generating response tokens
+2. **KV Cache Rollback**: Use `llama_kv_cache_seq_rm(ctx, seq_id, checkpoint, -1)` to remove partial response
+3. **Sequence ID**: Use per-call `seq_id` to isolate conversations in shared context
+4. **Early Check**: Check `stop_flag` before sampling (more responsive than checking after decode)
+
 **Triggering Interruption**:
 - When new transcription arrives from Whisper while generating
 - Set per-call `stop_flag` atomic bool
-- Main loop detects flag, exits generation early
+- Generation loop checks flag every 5 tokens
+- On interrupt: Rollback KV cache, discard partial text, ready for new input
+
+**Testing KV Cache Correctness**:
+- Verify conversation context preserved after interruption
+- Test: Interrupt mid-response, send new input, verify response uses full history
+- Monitor `llama_get_kv_cache_used_cells()` to detect leaks
 
 ---
 
@@ -615,11 +821,80 @@ None. All changes within existing 6 service files.
 
 **Total New Code**: ~750 LOC across 6 files
 
+### 3.3 Build System Changes
+
+**CMakeLists.txt** (root):
+- No changes required for control sockets (standard POSIX)
+- Existing build commands remain unchanged:
+  ```bash
+  mkdir -p build && cd build
+  cmake ..
+  make
+  ```
+
+**Test Executables**:
+- Add test targets in tests/ subdirectory
+- New CMake targets:
+  - `test_inbound_processor` 
+  - `test_whisper_vad`
+  - `test_outbound_timing`
+- Python tests don't require CMake changes (standalone scripts)
+
+**Dependencies**:
+- No new external dependencies
+- All Unix socket code uses existing POSIX headers (`<sys/un.h>`, `<sys/socket.h>`)
+- llama.cpp KV cache functions already available in current version
+
+**System Requirements**:
+- Increase file descriptor limit for 100 Whisper listeners:
+  ```bash
+  ulimit -n 4096  # Required before starting Whisper service
+  ```
+- Add to service startup script or document in README
+
 ---
 
-## 4. Data Model / API / Interface Changes
+## 4. Backward Compatibility
 
-### 4.1 Control Protocol (New)
+### 4.1 Breaking Changes
+This is a **breaking release** that requires coordinated upgrade of all services:
+
+**Not Compatible**:
+- Old SIP client with new Inbound Processor (expects CALL_START signal)
+- Old services without control socket listeners (will miss CALL_END signals)
+- Whisper service with only 10 ports vs. new 100-port requirement
+
+**Migration Path**:
+1. Stop all running services
+2. Build and deploy all 6 updated services simultaneously
+3. Restart in order: Outbound → Kokoro → LLaMA → Whisper → Inbound → SIP Client
+4. No data migration needed (services are stateless)
+
+### 4.2 Optional Features
+**Control Signals**: While signals improve cleanup, services continue operating without them (graceful degradation)
+- Missing CALL_START: Services auto-activate on first data packet (current behavior)
+- Missing CALL_END: Services rely on TCP connection close and 60s timeout
+
+**Metrics Collection**: Optional, disabled by default
+- Enable via CLI flag: `--enable-metrics`
+- No performance impact when disabled
+
+### 4.3 Configuration Compatibility
+**Unchanged**:
+- Port numbers (except Whisper expansion from 10 to 100)
+- RTP packet format (4-byte call_id prefix)
+- Audio formats (G.711, PCM float32)
+- SIP protocol compatibility
+
+**New**:
+- SIP Client `--instance-id` argument (default: 0 for single instance)
+- Control socket paths in `/tmp/` (auto-created, no config needed)
+
+---
+
+## 5. Data Model / API / Interface Changes
+
+### 5.1 Control Protocol (New)
 **Transport**: Unix datagram sockets  
 **Endpoints**:
 - `/tmp/inbound-audio-processor.ctrl`
@@ -636,7 +911,7 @@ CALL_END:<call_id>
 
 **No changes to existing data protocols** (UDP RTP, TCP streaming remain unchanged).
 
-### 4.2 CLI Interface Changes
+### 5.2 CLI Interface Changes
 
 **SIP Client**:
 ```bash
@@ -649,7 +924,7 @@ CALL_END:<call_id>
 
 **All other services**: No CLI changes.
 
-### 4.3 Port Allocation
+### 5.3 Port Allocation
 
 **Before**:
 - Whisper: 13001-13010 (10 ports)
