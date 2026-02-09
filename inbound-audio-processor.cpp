@@ -18,10 +18,10 @@
 struct CallState {
     int id;
     int tcp_socket = -1;
-    int listen_socket = -1;
     std::atomic<bool> connected{false};
     std::mutex mutex;
     std::chrono::steady_clock::time_point last_activity;
+    std::chrono::steady_clock::time_point last_reconnect_attempt;
 };
 
 class InboundAudioProcessor {
@@ -32,13 +32,11 @@ public:
 
     void run() {
         std::thread udp_thread(&InboundAudioProcessor::udp_receiver_loop, this);
-        std::thread ctrl_thread(&InboundAudioProcessor::control_socket_loop, this);
         while (running_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             cleanup_inactive_calls();
         }
         udp_thread.join();
-        ctrl_thread.join();
     }
 
 private:
@@ -77,7 +75,7 @@ private:
             state->last_activity = std::chrono::steady_clock::now();
 
             // Decode and Upsample (8kHz PCMU -> 16kHz float32)
-            size_t payload_len = n - 16; // 4 bytes CID + 12 bytes RTP header
+            size_t payload_len = n - 16;
             std::vector<float> pcm(payload_len * 2);
             const uint8_t* rtp_payload = buf + 16;
             for (size_t i = 0; i < payload_len; ++i) {
@@ -93,61 +91,32 @@ private:
                     state->connected = false;
                     close(state->tcp_socket);
                     state->tcp_socket = -1;
+                    std::cout << "💔 Whisper disconnected for call " << cid << ", dumping stream." << std::endl;
+                }
+            } else {
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - state->last_reconnect_attempt).count() > 2) {
+                    state->last_reconnect_attempt = now;
+                    int sock = socket(AF_INET, SOCK_STREAM, 0);
+                    struct sockaddr_in addr{};
+                    addr.sin_family = AF_INET;
+                    addr.sin_port = htons(13000 + cid);
+                    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+                    
+                    struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 100000; // 100ms
+                    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+                    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                        state->tcp_socket = sock;
+                        state->connected = true;
+                        std::cout << "🔗 Whisper connected for call " << cid << std::endl;
+                        send(sock, pcm.data(), pcm.size() * 4, MSG_NOSIGNAL);
+                    } else {
+                        close(sock);
+                    }
                 }
             }
         }
-    }
-
-    void control_socket_loop() {
-        const char* path = "/tmp/inbound-audio-processor.ctrl";
-        unlink(path);
-        int lsock = socket(AF_UNIX, SOCK_STREAM, 0);
-        struct sockaddr_un addr{}; addr.sun_family = AF_UNIX; strncpy(addr.sun_path, path, sizeof(addr.sun_path)-1);
-        bind(lsock, (struct sockaddr*)&addr, sizeof(addr));
-        listen(lsock, 5);
-
-        while (running_) {
-            int csock = accept(lsock, NULL, NULL);
-            if (csock < 0) continue;
-            char buf[128];
-            ssize_t n = recv(csock, buf, sizeof(buf)-1, 0);
-            if (n > 0) {
-                buf[n] = '\0';
-                std::string cmd(buf);
-                if (cmd.find("ACTIVATE:") == 0) {
-                    int cid = std::stoi(cmd.substr(9));
-                    activate_call(cid);
-                }
-            }
-            close(csock);
-        }
-    }
-
-    void activate_call(int cid) {
-        auto state = get_or_create_call(cid);
-        if (state->listen_socket != -1) return;
-
-        state->listen_socket = socket(AF_INET, SOCK_STREAM, 0);
-        int opt = 1; setsockopt(state->listen_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(13000 + cid);
-        addr.sin_addr.s_addr = INADDR_ANY;
-        bind(state->listen_socket, (struct sockaddr*)&addr, sizeof(addr));
-        listen(state->listen_socket, 1);
-
-        std::thread([this, state]() {
-            while (running_ && state->listen_socket != -1) {
-                int csock = accept(state->listen_socket, NULL, NULL);
-                if (csock < 0) continue;
-                std::lock_guard<std::mutex> lock(state->mutex);
-                if (state->tcp_socket != -1) close(state->tcp_socket);
-                state->tcp_socket = csock;
-                state->connected = true;
-                std::cout << "🔗 Whisper connected for call " << state->id << std::endl;
-            }
-        }).detach();
-        std::cout << "👂 Listening for Whisper on port " << (13000 + cid) << std::endl;
     }
 
     std::shared_ptr<CallState> get_or_create_call(int cid) {
@@ -166,7 +135,6 @@ private:
             if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count() > 60) {
                 std::lock_guard<std::mutex> clock(it->second->mutex);
                 if (it->second->tcp_socket != -1) close(it->second->tcp_socket);
-                if (it->second->listen_socket != -1) close(it->second->listen_socket);
                 it = calls_.erase(it);
             } else {
                 ++it;

@@ -92,6 +92,8 @@ private:
         }
         call->connected = false;
         close(sock);
+        send_to_llama(cid, "CLEAR");
+        std::cout << "📥 Inbound audio disconnected for call " << cid << std::endl;
     }
 
     void process_calls() {

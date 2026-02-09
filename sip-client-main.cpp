@@ -138,8 +138,6 @@ private:
         }
 
         session->rtp_thread = std::thread(&SipClient::rtp_receiver_loop, this, session);
-        send_control("/tmp/inbound-audio-processor.ctrl", "ACTIVATE:" + std::to_string(cid));
-        send_control("/tmp/outbound-audio-processor.ctrl", "ACTIVATE:" + std::to_string(cid));
 
         std::ostringstream resp;
         resp << "SIP/2.0 200 OK\r\nVia: " << via << "\r\nFrom: " << from << "\r\nTo: " << to << ";tag=whisper" << cid << "\r\n";
@@ -230,13 +228,6 @@ private:
         srv.sin_family = AF_INET; srv.sin_port = htons(server_port_); srv.sin_addr.s_addr = inet_addr(server_.c_str());
         std::string s = req.str();
         sendto(sip_sock_, s.c_str(), s.length(), 0, (struct sockaddr*)&srv, sizeof(srv));
-    }
-
-    void send_control(const char* path, const std::string& cmd) {
-        int s = socket(AF_UNIX, SOCK_STREAM, 0);
-        struct sockaddr_un addr{}; addr.sun_family = AF_UNIX; strncpy(addr.sun_path, path, sizeof(addr.sun_path)-1);
-        if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) == 0) send(s, cmd.c_str(), cmd.length(), 0);
-        close(s);
     }
 
     std::atomic<bool> running_;

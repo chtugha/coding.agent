@@ -131,7 +131,16 @@ build_whisper(){
 
 build_llama(){
   log "Configuring llama-cpp..."
-  cmake -S "$ROOT_DIR/llama-cpp" -B "$ROOT_DIR/llama-cpp/build" -DCMAKE_BUILD_TYPE=Release
+  local cmake_opts=(
+    -S "$ROOT_DIR/llama-cpp"
+    -B "$ROOT_DIR/llama-cpp/build"
+    -DCMAKE_BUILD_TYPE=Release
+  )
+  if [[ "$(uname -s)" = "Darwin" ]]; then
+    log "Enabling Metal for llama-cpp"
+    cmake_opts+=( -DGGML_METAL=ON )
+  fi
+  cmake "${cmake_opts[@]}"
   log "Building llama-cpp (target: llama)..."
   cmake --build "$ROOT_DIR/llama-cpp/build" --config Release --target llama -j 6
 }

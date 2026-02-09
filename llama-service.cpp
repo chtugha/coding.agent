@@ -70,9 +70,13 @@ public:
                 size_t sep = msg.find(':');
                 if (sep != std::string::npos) {
                     int cid = std::stoi(msg.substr(0, sep));
-                    std::string text = msg.substr(sep + 1);
-                    std::string response = process_call(cid, text);
-                    send_to_tts(cid, response);
+                    std::string payload = msg.substr(sep + 1);
+                    if (payload == "CLEAR") {
+                        clear_call(cid);
+                    } else {
+                        std::string response = process_call(cid, payload);
+                        send_to_tts(cid, response);
+                    }
                 }
             }
             close(csock);
@@ -80,12 +84,30 @@ public:
     }
 
 private:
+    void clear_call(int cid) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        if (calls_.count(cid)) {
+            std::lock_guard<std::mutex> llama_lock(llama_mutex_);
+            llama_memory_t mem = llama_get_memory(ctx_);
+            llama_memory_seq_rm(mem, calls_[cid]->seq_id, -1, -1);
+            calls_.erase(cid);
+            std::cout << "🦙 [" << cid << "] Session cleared" << std::endl;
+        }
+    }
     std::string process_call(int cid, const std::string& text) {
         auto call = get_or_create_call(cid);
         std::lock_guard<std::mutex> lock(llama_mutex_);
 
-        std::string prompt = "User: " + text + "\nAssistant:";
-        std::vector<llama_token> tokens = tokenize(prompt, false);
+        std::string prompt;
+        if (call->n_past == 0) {
+            // System prompt + first user message
+            prompt = "System: Du bist ein hilfreicher Telefon-Assistent. Antworte immer auf Deutsch, sehr kurz und prägnant in maximal 1-2 Sätzen.\n"
+                     "User: " + text + "\nAssistant:";
+        } else {
+            prompt = "User: " + text + "\nAssistant:";
+        }
+
+        std::vector<llama_token> tokens = tokenize(prompt, call->n_past == 0);
 
         llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
         for (size_t i = 0; i < tokens.size(); ++i) {
@@ -96,24 +118,37 @@ private:
             batch.logits[i] = (i == tokens.size() - 1);
         }
 
-        if (llama_decode(ctx_, batch) != 0) return "";
+        if (llama_decode(ctx_, batch) != 0) {
+            llama_batch_free(batch);
+            return "Fehler bei der Verarbeitung.";
+        }
         call->n_past += tokens.size();
         llama_batch_free(batch);
 
         std::string response;
-        for (int i = 0; i < 64; ++i) {
-            llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
+        llama_token id;
+        for (int i = 0; i < 128; ++i) {
+            id = llama_sampler_sample(sampler_, ctx_, -1);
             if (id == llama_vocab_eos(vocab_)) break;
             
             char piece[128];
             int n = llama_token_to_piece(vocab_, id, piece, sizeof(piece), 0, false);
             if (n > 0) response.append(piece, n);
 
-            llama_batch b = llama_batch_get_one(&id, 1);
+            // Decode next token
+            llama_batch b = llama_batch_init(1, 0, 1);
+            b.token[0] = id;
             b.pos[0] = call->n_past;
+            b.n_seq_id[0] = 1;
             b.seq_id[0][0] = call->seq_id;
-            if (llama_decode(ctx_, b) != 0) break;
+            b.logits[0] = true;
+            
+            if (llama_decode(ctx_, b) != 0) {
+                llama_batch_free(b);
+                break;
+            }
             call->n_past++;
+            llama_batch_free(b);
         }
 
         std::cout << "🦙 [" << cid << "] Response: " << response << std::endl;
@@ -145,12 +180,13 @@ private:
         if (calls_.count(cid)) return calls_[cid];
         auto call = std::make_shared<LlamaCall>();
         call->id = cid;
-        call->seq_id = calls_.size();
+        call->seq_id = next_seq_id_++;
         calls_[cid] = call;
         return call;
     }
 
     std::atomic<bool> running_;
+    int next_seq_id_ = 0;
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;
