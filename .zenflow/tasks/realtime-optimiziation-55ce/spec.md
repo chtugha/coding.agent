@@ -1591,3 +1591,4 @@ test:
 |---------|------|--------|---------|
 | 1.0 | 2026-02-09 | Zencoder | Initial technical specification based on requirements.md |
 | 1.1 | 2026-02-09 | Zencoder | Critical fixes: Unix socket error handling, VAD buffer management, KV cache rollback, signal-first ordering, sentence buffer edge cases, metrics standardization, test data generation |
+| 1.2 | 2026-02-09 | Zencoder | Test corpus generation fix, optional improvements: German compound words, port collision, metrics disk management, CoreML warm-up |
