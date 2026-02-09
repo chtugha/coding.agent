@@ -137,8 +137,8 @@ build_llama(){
     -DCMAKE_BUILD_TYPE=Release
   )
   if [[ "$(uname -s)" = "Darwin" ]]; then
-    log "Enabling Metal for llama-cpp"
-    cmake_opts+=( -DGGML_METAL=ON )
+    log "Enabling CoreML for llama-cpp"
+    cmake_opts+=( -DGGML_COREML=ON )
   fi
   cmake "${cmake_opts[@]}"
   log "Building llama-cpp (target: llama)..."

@@ -107,26 +107,37 @@ private:
             std::vector<float> to_process;
             {
                 std::lock_guard<std::mutex> lock(call->mutex);
-                if (call->audio_buffer.size() > 16000) { // 1 second
-                    // Very basic VAD based on energy
+                
+                // Process in 100ms chunks (1600 samples)
+                while (call->audio_buffer.size() >= 1600) {
                     float energy = 0;
-                    for (float s : call->audio_buffer) energy += s * s;
-                    energy /= call->audio_buffer.size();
+                    for (int i = 0; i < 1600; ++i) energy += call->audio_buffer[i] * call->audio_buffer[i];
+                    energy /= 1600.0f;
 
-                    if (energy > 0.0001f) {
+                    if (energy > 0.00005f) { // Slightly more sensitive for telephony
                         call->in_speech = true;
                         call->silence_count = 0;
                     } else {
-                        call->silence_count++;
+                        if (call->in_speech) call->silence_count++;
                     }
 
-                    if (call->in_speech && call->silence_count > 30) { // ~0.5s silence after speech
+                    // If we found speech and then silence, or buffer too long
+                    if (call->in_speech && call->silence_count > 8) { // ~800ms silence after speech
                         to_process = std::move(call->audio_buffer);
                         call->in_speech = false;
                         call->silence_count = 0;
-                    } else if (call->audio_buffer.size() > 16000 * 10) { // Max 10s
+                        break;
+                    } else if (call->audio_buffer.size() > 16000 * 8) { // Max 8s safety limit
                         to_process = std::move(call->audio_buffer);
+                        call->in_speech = false;
+                        call->silence_count = 0;
+                        break;
                     }
+                    
+                    // If not triggering yet, we just keep accumulating. 
+                    // To avoid infinite accumulation if no silence is found, we have the 8s limit.
+                    // We only "break" the while loop if we decided to process.
+                    break; 
                 }
             }
 
