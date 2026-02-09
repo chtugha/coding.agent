@@ -337,6 +337,30 @@ private:
      ```
    - **Why LLaMA, not Whisper**: Whisper sends transcriptions immediately after VAD trigger; buffering in LLaMA allows Whisper to remain stateless and focused on ASR
    
+   - **Known Limitation - German Abbreviations**: Current implementation may incorrectly trigger on abbreviations like "Dr.", "z.B.", "usw.". For production deployment, consider enhanced logic:
+     ```cpp
+     bool is_sentence_ending(const std::string& text) {
+         std::string trimmed = trim(text);
+         if (trimmed.empty()) return false;
+         
+         char last = trimmed.back();
+         if (last != '.' && last != '?' && last != '!') return false;
+         
+         // Check for common German abbreviations (simple heuristic)
+         static const std::vector<std::string> abbrevs = 
+             {"Dr.", "z.B.", "usw.", "bzw.", "etc.", "ca."};
+         for (const auto& abbrev : abbrevs) {
+             if (trimmed.length() >= abbrev.length() &&
+                 trimmed.substr(trimmed.length() - abbrev.length()) == abbrev) {
+                 return false;  // Don't end on abbreviation
+             }
+         }
+         
+         return true;  // Valid sentence ending
+     }
+     ```
+   - **Alternative**: Use 2-second timeout as primary trigger (more robust than punctuation detection)
+   
 2. **Response Interruption**:
    - Currently generates responses in blocking call to llama.cpp
    - Solution: Use `llama_decode` in streaming mode with cancellation check
@@ -510,6 +534,35 @@ class ControlListener(threading.Thread):
 - **Idempotency**: CALL_END signals are idempotent (safe to receive multiple times)
 - **Timeout**: If downstream doesn't respond, proceed with cleanup anyway (non-blocking)
 
+**Grace Period Implementation Example**:
+```cpp
+// Example from Inbound Audio Processor on CALL_END
+void handle_call_end(int call_id) {
+    // 1. Forward signal FIRST
+    send_control_signal("/tmp/whisper-service.ctrl", 
+                       "CALL_END:" + std::to_string(call_id));
+    
+    // 2. Stop local processing
+    auto call_state = calls_[call_id];
+    call_state->active = false;  // Signal processing thread to stop
+    
+    // 3. Grace period (allow downstream to receive and process signal)
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    // 4. Now safe to close connections
+    {
+        std::lock_guard<std::mutex> lock(call_state->mutex);
+        if (call_state->tcp_socket != -1) {
+            close(call_state->tcp_socket);
+            call_state->tcp_socket = -1;
+        }
+    }
+    
+    // 5. Cleanup resources
+    calls_.erase(call_id);
+}
+```
+
 #### 2.3.3 Crash Recovery Flows
 
 **Scenario: Whisper Service Crashes**
@@ -597,12 +650,14 @@ void process_audio_buffer(WhisperCall* call) {
             break;  // Stop processing, transcribe accumulated audio
         } else {
             // Remove processed window and continue (FIX: was missing in current code)
+            // Note: Loop continues to next while iteration, processing next 1600 samples
+            // If buffer has < 1600 samples remaining, loop exits naturally
             call->audio_buffer.erase(call->audio_buffer.begin(), 
                                     call->audio_buffer.begin() + 1600);
         }
     }
     
-    // Transcribe outside the lock
+    // Transcribe outside the lock (avoid blocking audio receiver)
     if (!to_transcribe.empty()) {
         transcribe_and_send(call->id, to_transcribe);
     }
@@ -748,14 +803,29 @@ struct CallMetrics {
 - LLaMA: Start on text receive, stop on response complete
 - Kokoro: Start on text receive, stop on audio synthesis complete
 
-**Export Format** (CSV for analysis):
+**Export Format and Aggregation**:
+- **File Location**: Each service writes to `/tmp/metrics/<service_name>_<call_id>.csv`
+  - Example: `/tmp/metrics/whisper_123.csv`, `/tmp/metrics/llama_123.csv`
+- **Timestamp Format**: ISO 8601 with milliseconds (e.g., `2026-02-09T12:00:01.234+01:00`)
+- **Real-time vs. Post-processing**: Files written during call, aggregated after call ends
+- **Aggregation**: Integration test harness merges all service CSVs for call_id into single timeline
+
+**CSV Schema**:
+```csv
+call_id,stage,event,timestamp,latency_ms
+123,vad,start,2026-02-09T12:00:01.149+01:00,
+123,vad,end,2026-02-09T12:00:01.234+01:00,85
+123,whisper,start,2026-02-09T12:00:01.234+01:00,
+123,whisper,end,2026-02-09T12:00:01.654+01:00,420
+123,llama,start,2026-02-09T12:00:01.654+01:00,
+123,llama,end,2026-02-09T12:00:01.934+01:00,280
+123,kokoro,start,2026-02-09T12:00:01.934+01:00,
+123,kokoro,end,2026-02-09T12:00:02.129+01:00,195
 ```
-call_id,stage,latency_ms,timestamp
-123,vad,85,2026-02-09T12:00:01.234
-123,whisper,420,2026-02-09T12:00:01.654
-123,llama,280,2026-02-09T12:00:01.934
-123,kokoro,195,2026-02-09T12:00:02.129
-```
+
+**Aggregated Metrics** (computed by test harness):
+- End-to-end latency: `kokoro_end - vad_start = 980ms`
+- Per-stage breakdown for bottleneck identification
 
 ---
 
@@ -1046,10 +1116,13 @@ CALL_END:<call_id>
 1. Develop test harness for automated pipeline testing
 2. Test scenario 1: Single call end-to-end (INVITE → conversation → BYE)
 3. Test scenario 2: 10 concurrent calls
-4. Test scenario 3: Service crash recovery (kill/restart each service)
+4. Test scenario 3: Service crash recovery (kill/restart each service individually)
 5. Test scenario 4: Long conversation (20+ turns, memory stability)
 6. Test scenario 5: Rapid churn (100 calls in 5 minutes)
-7. Collect metrics: Latency, memory, CPU, errors
+7. Test scenario 6: Chaos testing (kill random service every 5s during 20-turn conversation)
+8. Test scenario 7: Cascade failure (kill Whisper+LLaMA simultaneously, verify recovery)
+9. Test scenario 8: Service restart during reconnection (kill service while partner is attempting reconnect)
+10. Collect metrics: Latency, memory, CPU, errors
 
 **Verification**:
 - All scenarios pass (automated pass/fail)
@@ -1264,7 +1337,8 @@ ruff check kokoro_service.py
 
 | Phase | Effort | Duration | Dependencies |
 |-------|--------|----------|--------------|
-| Phase 1: Call Lifecycle | 2-3 days | Week 1 | None |
+| Phase 0: Baseline Measurement | 1 day | Pre-Week 1 | None |
+| Phase 1: Call Lifecycle | 2-3 days | Week 1 | Phase 0 |
 | Phase 2: Multi-Instance | 1 day | Week 1 | Phase 1 |
 | Phase 3: Crash Resilience | 2 days | Week 1-2 | Phase 1 |
 | Phase 4: VAD Optimization | 2 days | Week 2 | Phase 1 |
@@ -1272,8 +1346,25 @@ ruff check kokoro_service.py
 | Phase 6: Integration Testing | 3-4 days | Week 3 | All phases |
 | Phase 7: Performance Monitoring | 1 day | Week 3 | Phase 6 |
 
-**Total Estimated Effort**: 13-17 days  
+**Total Estimated Effort**: 14-18 days  
 **Calendar Duration**: ~3 weeks (with some parallelization)
+
+### Phase 0: Baseline Measurement (Pre-Implementation)
+**Goal**: Establish current system performance metrics for comparison.
+
+**Tasks**:
+1. Run current system with 10 concurrent calls (no code changes)
+2. Measure: end-to-end latency, per-stage latency, memory usage, CPU utilization
+3. Benchmark VAD accuracy on test corpus (using current algorithm)
+4. Document results in `baseline_metrics.md`
+5. Identify current bottlenecks
+
+**Verification**:
+- Baseline metrics documented and reviewed
+- Clear understanding of current performance envelope
+- Regression detection: Phase 6 results compared against baseline
+
+**Estimated Effort**: 1 day
 
 ---
 
@@ -1282,18 +1373,72 @@ ruff check kokoro_service.py
 ### 11.1 Test Files
 
 **Per-Service Tests** (location: `tests/`):
-- `test_sip_client.py` - Mock INVITE/BYE injection
-- `test_inbound_processor.cpp` - Mock RTP sender
-- `test_whisper_vad.cpp` - VAD accuracy benchmark
-- `test_llama_interruption.py` - Response cancellation
-- `test_kokoro_latency.py` - TTS performance
-- `test_outbound_timing.cpp` - RTP schedule verification
+- `test_sip_client.py` - Mock INVITE/BYE injection (Python for TCP socket scripting)
+- `test_inbound_processor.cpp` - Mock RTP sender (C++ for performance)
+- `test_whisper_vad.cpp` - VAD accuracy benchmark (C++ for direct buffer access)
+- `test_llama_interruption.py` - Response cancellation (Python for timing control)
+- `test_kokoro_latency.py` - TTS performance (Python for Kokoro integration)
+- `test_outbound_timing.cpp` - RTP schedule verification (C++ for timing precision)
 
 **Integration Tests**:
 - `tests/pipeline_integration_test.py` - Main test harness
 - `tests/test_corpus/` - German audio samples (50 sentences)
 
-### 11.2 Test Execution Commands
+**Language Choice**: Python tests used for services requiring complex timing, TCP connection management, and scripting flexibility. C++ tests used for performance-critical and buffer-level validation.
+
+### 11.2 Test Data Generation
+
+**Audio Corpus Creation**:
+- **Source**: 50 German sentences from Harvard Open Speech Corpus or custom set
+- **Synthesis Method**: 
+  1. Use Kokoro TTS service (already in pipeline) to generate clean audio
+  2. Alternative: Record native German speakers for production testing
+- **Format**: 
+  - Input format: WAV 24kHz float32 (Kokoro output)
+  - Converted to: G.711 μ-law 8kHz (telephony input simulation)
+- **Duration**: 5-30 words per sentence (3-15 seconds)
+- **Generation Script**: `scripts/generate_test_corpus.py`
+
+**Script Implementation**:
+```python
+# scripts/generate_test_corpus.py
+import subprocess
+import wave
+
+sentences = [
+    "Wie ist das Wetter heute?",
+    "Ich möchte einen Termin vereinbaren.",
+    "Können Sie mir helfen?",
+    # ... 47 more sentences
+]
+
+for i, text in enumerate(sentences):
+    # Use Kokoro to synthesize
+    subprocess.run([
+        'python3', 'kokoro_service.py', '--text', text,
+        '--output', f'tests/test_corpus/sent_{i:02d}.wav'
+    ])
+    
+    # Convert to G.711 (using ffmpeg or sox)
+    subprocess.run([
+        'ffmpeg', '-i', f'tests/test_corpus/sent_{i:02d}.wav',
+        '-ar', '8000', '-acodec', 'pcm_mulaw',
+        f'tests/test_corpus/sent_{i:02d}_8k.wav'
+    ])
+```
+
+**Ground Truth**: `tests/test_corpus/transcripts.json`
+```json
+{
+  "sent_00.wav": "Wie ist das Wetter heute?",
+  "sent_01.wav": "Ich möchte einen Termin vereinbaren.",
+  ...
+}
+```
+
+**Validation**: Run Whisper on corpus, measure Word Error Rate (WER) <5%
+
+### 11.3 Test Execution Commands
 
 ```bash
 # Build all services
@@ -1317,7 +1462,7 @@ python3 tests/pipeline_integration_test.py --scenario stress --calls 100
 valgrind --leak-check=full ./bin/whisper-service <model>
 ```
 
-### 11.3 CI/CD Integration (Optional)
+### 11.4 CI/CD Integration (Optional)
 If CI/CD is available, add:
 ```yaml
 test:
@@ -1365,3 +1510,4 @@ test:
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2026-02-09 | Zencoder | Initial technical specification based on requirements.md |
+| 1.1 | 2026-02-09 | Zencoder | Critical fixes: Unix socket error handling, VAD buffer management, KV cache rollback, signal-first ordering, sentence buffer edge cases, metrics standardization, test data generation |
