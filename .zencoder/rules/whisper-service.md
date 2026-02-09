@@ -4,9 +4,9 @@
 The **Whisper Service** (`whisper-service.cpp`) performs Automatic Speech Recognition (ASR) on the incoming audio streams.
 
 ## Internal Function
-- **VAD**: Implements energy-based Voice Activity Detection to segment audio.
-- **Inference**: Uses `whisper.cpp` (Apple Silicon optimized via CoreML/MPS) to transcribe audio segments into text.
-- **Session Pooling**: Reuses a single "warm" Whisper context across all sessions to minimize memory and latency.
+- **VAD**: Implements a refined energy-based Voice Activity Detection using **100ms windows** to accurately segment German speech without cutting sentences.
+- **Inference**: Uses `whisper.cpp` optimized for Apple Silicon via **CoreML/Metal**, providing near-real-time transcription.
+- **Session Management**: Manages multiple concurrent transcription sessions using a pool of standalone `WhisperSession` objects.
 
 ## Inbound Connections
 - **Inbound Audio Processor (TCP)**: Receives float32 PCM audio on ports starting at 13000.
