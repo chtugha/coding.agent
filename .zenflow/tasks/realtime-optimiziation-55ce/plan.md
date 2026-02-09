@@ -79,12 +79,12 @@ Establish current system performance metrics for comparison before implementing 
 Implement Unix socket control signal infrastructure in all services.
 
 **Files**:
-- `coding.agent/sip-client-main.cpp`
-- `coding.agent/inbound-audio-processor.cpp`
-- `coding.agent/whisper-service.cpp`
-- `coding.agent/llama-service.cpp`
-- `coding.agent/kokoro_service.py`
-- `coding.agent/outbound-audio-processor.cpp`
+- `sip-client-main.cpp`
+- `inbound-audio-processor.cpp`
+- `whisper-service.cpp`
+- `llama-service.cpp`
+- `kokoro_service.py`
+- `outbound-audio-processor.cpp`
 
 **Tasks**:
 - [ ] Add `ControlSignalSender` class to SIP Client (send CALL_START/CALL_END)
@@ -114,12 +114,12 @@ Implement Unix socket control signal infrastructure in all services.
 Implement CALL_START/CALL_END signal flow through entire pipeline.
 
 **Files**:
-- `coding.agent/sip-client-main.cpp`
-- `coding.agent/inbound-audio-processor.cpp`
-- `coding.agent/whisper-service.cpp`
-- `coding.agent/llama-service.cpp`
-- `coding.agent/kokoro_service.py`
-- `coding.agent/outbound-audio-processor.cpp`
+- `sip-client-main.cpp`
+- `inbound-audio-processor.cpp`
+- `whisper-service.cpp`
+- `llama-service.cpp`
+- `kokoro_service.py`
+- `outbound-audio-processor.cpp`
 
 **Tasks**:
 - [ ] SIP Client: Send `CALL_START:<call_id>` on INVITE accept
@@ -148,7 +148,7 @@ Implement CALL_START/CALL_END signal flow through entire pipeline.
 Eliminate first-call latency spike by warming up CoreML model on Whisper startup.
 
 **Files**:
-- `coding.agent/whisper-service.cpp`
+- `whisper-service.cpp`
 
 **Tasks**:
 - [ ] Add dummy transcription on startup (100ms silent audio)
@@ -168,7 +168,7 @@ Eliminate first-call latency spike by warming up CoreML model on Whisper startup
 Support multiple SIP client instances with collision-free call IDs.
 
 **Files**:
-- `coding.agent/sip-client-main.cpp`
+- `sip-client-main.cpp`
 
 **Tasks**:
 - [ ] Add `--instance-id <0-9>` CLI argument parsing
@@ -192,7 +192,7 @@ Support multiple SIP client instances with collision-free call IDs.
 Verify and enhance crash resilience in Inbound Audio Processor.
 
 **Files**:
-- `coding.agent/inbound-audio-processor.cpp`
+- `inbound-audio-processor.cpp`
 
 **Tasks**:
 - [ ] Verify existing dump-to-null behavior when Whisper disconnected
@@ -216,7 +216,7 @@ Verify and enhance crash resilience in Inbound Audio Processor.
 Implement transcription buffering for LLaMA disconnections.
 
 **Files**:
-- `coding.agent/whisper-service.cpp`
+- `whisper-service.cpp`
 
 **Tasks**:
 - [ ] Add `TranscriptionBuffer` class (max 10 transcriptions per call)
@@ -240,7 +240,7 @@ Implement transcription buffering for LLaMA disconnections.
 Handle Whisper and Kokoro disconnections gracefully.
 
 **Files**:
-- `coding.agent/llama-service.cpp`
+- `llama-service.cpp`
 
 **Tasks**:
 - [ ] Implement non-blocking TCP accept with timeout (don't hang on startup)
@@ -263,7 +263,7 @@ Handle Whisper and Kokoro disconnections gracefully.
 Verify dump-to-null and add reconnection retry for Outbound Processor.
 
 **Files**:
-- `coding.agent/kokoro_service.py`
+- `kokoro_service.py`
 
 **Tasks**:
 - [ ] Verify existing dump-to-null when Outbound disconnected
@@ -286,7 +286,7 @@ Verify dump-to-null and add reconnection retry for Outbound Processor.
 Fix critical VAD buffer growth bug in Whisper Service.
 
 **Files**:
-- `coding.agent/whisper-service.cpp`
+- `whisper-service.cpp`
 
 **Tasks**:
 - [ ] Add window removal after processing: `audio_buffer.erase()` for each 1600-sample window
@@ -309,7 +309,7 @@ Fix critical VAD buffer growth bug in Whisper Service.
 Optimize VAD for German speech patterns with improved segmentation.
 
 **Files**:
-- `coding.agent/whisper-service.cpp`
+- `whisper-service.cpp`
 
 **Tasks**:
 - [ ] Keep 800ms silence threshold (not 300ms) to avoid cutting compound words
@@ -359,7 +359,7 @@ Create German audio test corpus for VAD and transcription accuracy testing.
 Implement sentence completion detection in LLaMA Service.
 
 **Files**:
-- `coding.agent/llama-service.cpp`
+- `llama-service.cpp`
 
 **Tasks**:
 - [ ] Add `SentenceBuffer` class with accumulation and timeout logic
@@ -384,7 +384,7 @@ Implement sentence completion detection in LLaMA Service.
 Implement response interruption and KV cache cleanup in LLaMA Service.
 
 **Files**:
-- `coding.agent/llama-service.cpp`
+- `llama-service.cpp`
 
 **Tasks**:
 - [ ] Refactor generation to token-by-token with `llama_decode` loop
@@ -499,9 +499,9 @@ Implement comprehensive integration test scenarios.
 Add optional metrics collection with minimal overhead.
 
 **Files**:
-- `coding.agent/whisper-service.cpp`
-- `coding.agent/llama-service.cpp`
-- `coding.agent/kokoro_service.py`
+- `whisper-service.cpp`
+- `llama-service.cpp`
+- `kokoro_service.py`
 
 **Tasks**:
 - [ ] Implement `CallMetrics` struct in each service

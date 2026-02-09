@@ -10,12 +10,12 @@ WhisperTalk is a high-performance, real-time speech-to-speech system designed fo
 
 ## Structure
 The project is organized as a linear pipeline of 5 core C++ programs and 1 Python service.
-- [./coding.agent/](./coding.agent/): Core workspace containing all source code.
-- [./coding.agent/whisper-cpp/](./coding.agent/whisper-cpp/): Integration for the whisper.cpp ASR engine.
-- [./coding.agent/llama-cpp/](./coding.agent/llama-cpp/): Integration for the llama.cpp LLM engine.
-- [./coding.agent/bin/](./coding.agent/bin/): Target directory for compiled binaries.
-- [./coding.agent/scripts/](./coding.agent/scripts/): Build automation scripts.
-- [./coding.agent/tests/](./coding.agent/tests/): Custom simulation tools.
+- **Root directory**: Contains all 6 core service source files
+- [./whisper-cpp/](./whisper-cpp/): Integration for the whisper.cpp ASR engine (submodule/dependency)
+- [./bin/](./bin/): Target directory for compiled binaries
+- [./scripts/](./scripts/): Build automation scripts
+- [./tests/](./tests/): Custom simulation tools and test scripts
+- [./libpiper/](./libpiper/): Piper TTS library (legacy/unused)
 
 ## Language & Runtime
 **Language**: C++ (C++17), Python 3.9+  
