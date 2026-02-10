@@ -28,15 +28,15 @@ The project is organized as a linear pipeline of 5 core C++ programs and 1 Pytho
 - **Decoupling**: Services should only communicate with their direct inbound and outbound neighbors. Database and discovery services are removed to minimize fault surface area.
 
 ## Core Components
-- **SIP Client**: [./coding.agent/sip-client-main.cpp](./coding.agent/sip-client-main.cpp) ([Summary](./sip-client.md))
-- **Inbound Audio Processor**: [./coding.agent/inbound-audio-processor.cpp](./coding.agent/inbound-audio-processor.cpp) ([Summary](./inbound-audio-processor.md))
-- **Outbound Audio Processor**: [./coding.agent/outbound-audio-processor.cpp](./coding.agent/outbound-audio-processor.cpp) ([Summary](./outbound-audio-processor.md))
-- **Whisper Service**: [./coding.agent/whisper-service.cpp](./coding.agent/whisper-service.cpp) ([Summary](./whisper-service.md))
-- **LLaMA Service**: [./coding.agent/llama-service.cpp](./coding.agent/llama-service.cpp) ([Summary](./llama-service.md))
-- **Kokoro TTS Service**: [./coding.agent/kokoro_service.py](./coding.agent/kokoro_service.py) ([Summary](./kokoro-service.md))
+- **SIP Client**: [./sip-client-main.cpp](./sip-client-main.cpp) ([Summary](./sip-client.md))
+- **Inbound Audio Processor**: [./inbound-audio-processor.cpp](./inbound-audio-processor.cpp) ([Summary](./inbound-audio-processor.md))
+- **Outbound Audio Processor**: [./outbound-audio-processor.cpp](./outbound-audio-processor.cpp) ([Summary](./outbound-audio-processor.md))
+- **Whisper Service**: [./whisper-service.cpp](./whisper-service.cpp) ([Summary](./whisper-service.md))
+- **LLaMA Service**: [./llama-service.cpp](./llama-service.cpp) ([Summary](./llama-service.md))
+- **Kokoro TTS Service**: [./kokoro_service.py](./kokoro_service.py) ([Summary](./kokoro-service.md))
 
 ## Build & Installation
 ```bash
 # Build main components
-cd coding.agent && mkdir -p build && cd build && cmake .. && make
+mkdir -p build && cd build && cmake .. && make
 ```

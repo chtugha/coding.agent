@@ -53,22 +53,62 @@ Create a detailed implementation plan based on `{@artifacts_path}/spec.md`.
 
 ## Implementation Phases
 
+### [ ] Step: Phase -1 - Prerequisites Verification
+
+Verify all dependencies and build prerequisites before starting implementation.
+
+**Files**: None (verification only)
+
+**Tasks**:
+- [ ] Verify llama-cpp dependency is available (check `llama-cpp/include` and `llama-cpp/ggml/include`)
+- [ ] Document llama-cpp version/commit if present, or note if missing
+- [ ] Verify whisper-cpp is properly set up (check `whisper-cpp/` directory)
+- [ ] Test basic build: `mkdir -p build && cd build && cmake .. && make`
+- [ ] Verify all 6 services compile successfully
+- [ ] Document dependency versions in `.zenflow/tasks/realtime-optimiziation-55ce/dependencies.md`
+- [ ] Set file descriptor limit: `ulimit -n 4096` (required for Whisper's 100 ports)
+
+**Verification**:
+- All services compile without errors
+- Dependencies documented with versions/commits
+- Build system functional
+- System limits configured
+
+**Estimated Effort**: 0.5 day
+
+---
+
 ### [ ] Step: Phase 0 - Baseline Measurement
 
 Establish current system performance metrics for comparison before implementing changes.
 
-**Files**: None (measurement only)
+**Files**: 
+- `.zenflow/tasks/realtime-optimiziation-55ce/baseline_metrics.md` (new)
+- `.zenflow/tasks/realtime-optimiziation-55ce/service_startup.md` (new - startup documentation)
 
 **Tasks**:
-- [ ] Run current system with 10 concurrent calls (no code changes)
+- [ ] **Document how to start all 6 services**:
+  - List required models (Whisper CoreML, LLaMA GGUF, Kokoro weights)
+  - Document startup order and commands for each service
+  - Document how to verify each service is running
+  - Create simple startup script or document manual process
+- [ ] **Verify services can start individually**:
+  - Start each service one by one
+  - Check for errors or missing dependencies
+  - Document any issues encountered
+- [ ] **Run current system with 10 concurrent calls** (if possible):
+  - Use existing test scripts: `tests/multi_call_test.py` or `tests/pipeline_loop_sim.cpp`
+  - If no orchestration exists, document limitation and run single call instead
 - [ ] Measure end-to-end latency, per-stage latency, memory usage, CPU utilization
 - [ ] Benchmark VAD accuracy on existing test data (if available)
-- [ ] Document results in `.zenflow/tasks/realtime-optimiziation-55ce/baseline_metrics.md`
+- [ ] Document results in `baseline_metrics.md`
 - [ ] Identify current bottlenecks and performance envelope
 
 **Verification**:
-- Baseline metrics documented and reviewed
+- Service startup documentation complete and tested
+- Baseline metrics documented (even if limited to single call)
 - Clear understanding of current performance for regression detection in Phase 6
+- Any blockers or limitations documented
 
 **Estimated Effort**: 1 day
 
@@ -105,7 +145,9 @@ Implement Unix socket control signal infrastructure in all services.
 - Test signal propagation: Send manual signal, verify logging at each stage
 - No crashes when downstream service is unavailable
 
-**Estimated Effort**: 1 day
+**Estimated Effort**: 1.5 days
+
+**Note**: This phase implements control infrastructure for ALL 6 services (11 tasks). If debugging issues arise, consider extending to 2 days.
 
 ---
 
@@ -350,6 +392,8 @@ Create German audio test corpus for VAD and transcription accuracy testing.
 - Verify: `transcripts.json` contains all 50 sentences
 - Manual spot-check: Listen to 5 random files for quality
 
+**Note**: This approach uses Kokoro to generate test audio (testing system with itself). This is acceptable for VAD testing but not ideal for TTS quality validation. For production validation, consider using publicly available German speech datasets (e.g., Mozilla Common Voice) or real recordings.
+
 **Estimated Effort**: 1 day
 
 ---
@@ -420,6 +464,10 @@ Create unit tests for each service in isolation.
 - `tests/CMakeLists.txt` (new)
 
 **Tasks**:
+- [ ] **Review existing tests**: Examine `multi_call_test.py`, `test_llama_german.py`, `pipeline_loop_sim.cpp`, `whisper_inbound_sim.cpp`, etc.
+  - Determine which tests are still relevant
+  - Integrate useful tests into new framework or document their purpose
+  - Archive or remove obsolete tests
 - [ ] **SIP Client Test**: Mock INVITE/BYE, verify control signals sent
 - [ ] **Inbound Test**: Send mock RTP, verify PCM output quality and CALL_END forwarding
 - [ ] **Whisper VAD Test**: Feed test corpus, measure accuracy (>95%) and WER (<5%)
@@ -527,6 +575,7 @@ Add optional metrics collection with minimal overhead.
 Comprehensive verification and documentation updates.
 
 **Files**:
+- `.zencoder/rules/repo.md`
 - `.zencoder/rules/sip-client.md`
 - `.zencoder/rules/inbound-audio-processor.md`
 - `.zencoder/rules/whisper-service.md`
@@ -562,24 +611,27 @@ Comprehensive verification and documentation updates.
 
 ## Summary
 
-**Total Steps**: 18 implementation steps across 8 phases (Phase 0-7)
-**Total Estimated Effort**: 14-18 days
+**Total Steps**: 19 implementation steps across 9 phases (Phase -1 through Phase 7 and Final Verification)
+**Total Estimated Effort**: 15-19 days (includes 0.5 day for prerequisites + 0.5 day buffer for Phase 1.1)
 **Calendar Duration**: ~3 weeks with parallelization
 
 **Critical Path**:
-1. Phase 0 (baseline) → Phase 1 (lifecycle) → Phase 3 (resilience)
+1. Phase -1 (prerequisites) → Phase 0 (baseline) → Phase 1 (lifecycle) → Phase 3 (resilience)
 2. Phase 4 (VAD) and Phase 5 (LLaMA) can partially overlap with Phase 3
 3. Phase 6 (testing) depends on all implementation phases
 4. Phase 7 (metrics) and Final Verification are sequential at the end
 
 **Risk Mitigation**:
+- Phase -1 verifies all dependencies before starting implementation
 - Each phase has clear verification criteria before proceeding
 - Baseline measurement (Phase 0) enables regression detection
+- Service startup documentation (Phase 0) ensures reproducibility
 - Standalone tests (Phase 6.1) catch issues before integration
 - Comprehensive test scenarios (Phase 6.3) validate crash resilience
+- Existing test review (Phase 6.1) prevents loss of valuable test coverage
 
 **Next Actions**:
 1. Review this plan with stakeholders
-2. Begin Phase 0 (Baseline Measurement) immediately
-3. Set up test infrastructure in parallel with Phase 1
+2. Begin Phase -1 (Prerequisites Verification) immediately
+3. Document service startup process in Phase 0
 4. Track progress by marking `[x]` for completed steps
