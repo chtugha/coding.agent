@@ -47,60 +47,60 @@ dyld: Library not loaded: @rpath/libwhisper.1.dylib
 
 ### 3. Required Models
 
-**CRITICAL**: None of the required ML models are currently available in the repository. All three model sets must be downloaded/created before services can start.
+**Status Update (Phase 0 Complete)**: ✅ Whisper and LLaMA models acquired and tested. ⚠️ Kokoro blocked by Python version.
 
 #### Whisper (ASR)
-- **Path**: `models/whisper/`
-- **Required Files**: CoreML model files (`.mlmodelc` bundle or `.coreml`)
-- **Recommended Models**:
-  - `ggml-base.en.bin` + CoreML encoder (English)
-  - `ggml-base.bin` + CoreML encoder (Multilingual, supports German)
+- **Path**: `models/whisper/ggml-base.bin` ✅
+- **Format**: GGML (whisper.cpp compatible)
+- **Size**: 144MB
+- **Status**: ✅ **DOWNLOADED AND WORKING**
 - **Download**: 
   ```bash
-  # Option 1: Download from whisper.cpp models
   cd models/whisper
-  curl -L -O https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-base.bin
-  
-  # Option 2: Convert to CoreML (requires whisper.cpp tools)
-  # See: https://github.com/ggerganov/whisper.cpp#core-ml-support
+  curl -L -o ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
   ```
-- **Size**: ~140MB (base model)
-- **Status**: ❌ **NOT PRESENT** - Must be downloaded
+- **Verification**: Service starts in ~5s, Metal backend confirmed
 
 #### LLaMA (LLM)
-- **Path**: `models/llama/Llama-3.2-1B-Instruct-Q8_0.gguf`
-- **Required Format**: GGUF (quantized, Q8_0 recommended)
+- **Path**: `models/llama/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` ✅
+- **Format**: GGUF (quantized, Q4_K_M)
+- **Size**: 640MB
+- **Status**: ✅ **DOWNLOADED AND WORKING** (using TinyLlama instead of Llama-3.2)
 - **Download**:
   ```bash
   mkdir -p models/llama
   cd models/llama
-  # Download from Hugging Face or llama.cpp repository
-  curl -L -O https://huggingface.co/lmstudio-community/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q8_0.gguf
+  # TinyLlama (smaller, faster for testing)
+  curl -L -o tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+    https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
   ```
-- **Size**: ~1.3GB (Q8_0 quantization)
-- **Status**: ❌ **NOT PRESENT** - Must be downloaded
+- **Verification**: Service starts in ~7s, Metal acceleration confirmed, 725MB RAM
+- **Note**: TinyLlama used for baseline. For production, upgrade to Llama-3.2-1B-Instruct (~1.3GB)
 
 #### Kokoro (TTS)
-- **Path**: `models/kokoro-german/`
+- **Path**: `models/kokoro-german/` (not downloaded)
 - **Required Files**:
   - `kokoro-german-v1_1-de.pth` (PyTorch model weights)
   - `config.json` (model configuration)
   - `voices/*.pt` (optional: pre-loaded voice tensors)
-- **Download**:
-  ```bash
-  mkdir -p models/kokoro-german/voices
-  cd models/kokoro-german
-  # Download from kokoro-tts repository
-  # See: https://github.com/thewh1teagle/kokoro-onnx
-  ```
-- **Fallback**: If German model unavailable, Kokoro will load English-only pipeline
 - **Size**: ~500MB (German model + voices)
-- **Status**: ❌ **NOT PRESENT** - Must be downloaded (German TTS will not work without this)
+- **Status**: ⚠️  **BLOCKED** - Python 3.14 incompatibility
+- **Issue**: Kokoro library requires Python <3.13, but system uses Python 3.14.2
+- **Workaround Options**:
+  1. Use virtualenv with Python 3.12: `python3.12 -m venv venv && source venv/bin/activate`
+  2. Wait for kokoro-tts library update to support Python 3.14
+  3. Downgrade system Python (not recommended)
 
 #### Python Dependencies for Kokoro
 ```bash
-pip3 install torch kokoro-tts
+# PyTorch installed successfully ✅
+pip3 install torch  # v2.10.0 with MPS support
+
+# Kokoro blocked ❌
+pip3 install kokoro-tts  # Requires Python <3.13
 ```
+
+**Current Workaround**: ASR (Whisper) → LLM (LLaMA) pipeline functional without TTS. Kokoro can be added later.
 
 ---
 
@@ -206,13 +206,11 @@ lsof -i TCP:8090
 ### 3. LLaMA Service
 ```bash
 cd /Users/ollama/.zenflow/worktrees/realtime-optimiziation-55ce
-./bin/llama-service models/llama/Llama-3.2-1B-Instruct-Q8_0.gguf
-# Or use default path:
-# ./bin/llama-service
+./bin/llama-service models/llama/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 ```
 
 **Arguments**: 
-- `[model_path]` (optional): Path to GGUF model (defaults to `models/llama/Llama-3.2-1B-Instruct-Q8_0.gguf`)
+- `[model_path]` (optional): Path to GGUF model (defaults to `models/llama/Llama-3.2-1B-Instruct-Q8_0.gguf` if no argument provided, but using TinyLlama for now)
 
 **Listeners**:
 - TCP: Port 8083 (for Whisper transcription input)
@@ -247,11 +245,11 @@ LLaMA Service listening on port 8083
 ### 4. Whisper Service
 ```bash
 cd /Users/ollama/.zenflow/worktrees/realtime-optimiziation-55ce
-./bin/whisper-service models/whisper/ggml-base-encoder.coreml
+./bin/whisper-service models/whisper/ggml-base.bin
 ```
 
 **Arguments**: 
-- `<model_path>` (required): Path to CoreML-converted Whisper model
+- `<model_path>` (required): Path to GGML Whisper model
 
 **Listeners**:
 - TCP: Ports `13000 + (call_id % 100)` (for Inbound Processor audio streams)
@@ -271,19 +269,19 @@ lsof -i TCP:13000-13099 | grep whisper
 
 **Expected Console Output**:
 ```
-Usage: whisper-service <model_path>
-# After providing model:
-Loading Whisper model from models/whisper/ggml-base-encoder.coreml...
-CoreML backend: enabled
-Model loaded successfully
+whisper_init_from_file_with_params_no_state: loading model from 'models/whisper/ggml-base.bin'
+whisper_init_with_params_no_state: use gpu    = 1
+whisper_model_load: type          = 2 (base)
+whisper_model_load:        Metal total size =   147.37 MB
+whisper_backend_init_gpu: using Metal backend
+ggml_metal_init: found device: Apple M4
 Whisper Service ready
-Listening for calls on ports 13000+
 ```
 
 **Possible Errors**:
 - `Usage: whisper-service <model_path>`: Missing model path argument
-- `Failed to load model`: CoreML model not found or incompatible
-- `CoreML not available`: macOS version too old or not on Apple Silicon
+- `Failed to load model`: Model file not found or corrupted
+- `Metal not available`: GPU acceleration unavailable (fallback to CPU)
 
 ---
 
@@ -408,7 +406,7 @@ echo "Starting LLaMA Service..."
 sleep 2
 
 echo "Starting Whisper Service..."
-./bin/whisper-service models/whisper/ggml-base-encoder.coreml &
+./bin/whisper-service models/whisper/ggml-base.bin &
 sleep 2
 
 echo "Starting Inbound Audio Processor..."
