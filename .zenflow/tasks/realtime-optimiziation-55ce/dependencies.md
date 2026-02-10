@@ -10,8 +10,8 @@
 
 - **OS**: macOS 25.2.0 (Apple Silicon)
 - **Architecture**: arm64
-- **File Descriptor Limit**: 4096 (configured)
-- **Initial Limit**: unlimited (system default)
+- **File Descriptor Limit**: unlimited (system default, exceeds 4096 requirement)
+- **Persistent Configuration**: Not set (see System Limits Configuration section)
 
 ---
 
@@ -27,17 +27,26 @@
 
 ## Core Dependencies
 
-### 1. whisper-cpp
+### Dependency Types
+
+**Integrated Components**: Maintained as part of the WhisperTalk repository  
+**External Dependencies**: Cloned from external repositories during build
+
+---
+
+### 1. whisper-cpp (Integrated Component)
 
 **Status**: ✅ Present and built  
 **Location**: `./whisper-cpp/`  
-**Library**: `whisper-cpp/build/src/libwhisper.dylib` → `libwhisper.1.dylib`
+**Library**: `whisper-cpp/build/src/libwhisper.dylib` → `libwhisper.1.dylib`  
+**Type**: **Integrated component** (tracked in WhisperTalk repository, not a git submodule)
 
-**Version Information**:
-- **Commit**: `7120b1324152bdd54a4872780b793f9a17168fbd`
-- **Date**: 2026-02-10 09:34:30 +0100
-- **Message**: Planning
-- **Short Hash**: `7120b13`
+**Upstream Version**:
+- Based on whisper.cpp **v1.7.6** (stable release)
+- Source: https://github.com/ggml-org/whisper.cpp
+- Integrated and maintained within WhisperTalk codebase
+
+**Note**: This is **not** an external dependency. It is part of the WhisperTalk repository and shares the same git history. The code is based on upstream whisper.cpp v1.7.6 but may include WhisperTalk-specific modifications.
 
 **Build Configuration**:
 - CoreML enabled (macOS optimization)
@@ -55,7 +64,7 @@
 
 ---
 
-### 2. llama-cpp
+### 2. llama-cpp (External Dependency)
 
 **Status**: ✅ Cloned and built  
 **Location**: `./llama-cpp/`  
@@ -114,12 +123,12 @@ All 6 core services compiled successfully:
 ## Build Process
 
 ### Initial State
-- whisper-cpp: Present but not built
-- llama-cpp: **Missing** (not cloned)
+- whisper-cpp: Present (integrated component) but not built
+- llama-cpp: **Missing** (external dependency not cloned)
 - Services: 3/6 could compile without libraries (SIP, Inbound, Outbound)
 
 ### Actions Taken
-1. Set file descriptor limit: `ulimit -n 4096`
+1. Verified file descriptor limit: unlimited (exceeds 4096 requirement, no action needed)
 2. Cloned llama-cpp from official repository (depth=1)
 3. Built whisper-cpp with CoreML support (~2 seconds)
 4. Built llama-cpp with CoreML support (~33 seconds)
@@ -158,27 +167,49 @@ bash scripts/build.sh --with-deps --no-piper
 
 ### File Descriptors
 - **Required**: 4096 (for Whisper's 100 ports + system overhead)
-- **Current**: 4096 ✅
-- **Command**: `ulimit -n 4096`
+- **Current**: unlimited (system default, exceeds requirement) ✅
+- **Status**: Not configured persistently
 
-**Note**: The system default was "unlimited", but we set to 4096 as specified in requirements. For production, consider keeping unlimited if system resources allow.
+**Important**: The `ulimit -n` command is **session-specific** and does not persist across shell sessions or reboots. While the system default of "unlimited" exceeds the 4096 requirement, explicit configuration is recommended for production deployments.
 
 ### Recommendations for Production
-- Verify `ulimit -n` is set in service startup scripts
-- Consider adding to shell profile: `echo "ulimit -n 4096" >> ~/.zshrc`
-- Or configure via launchd plist for system services
+
+**Option 1: Service Startup Scripts** (Recommended)
+```bash
+#!/bin/bash
+# startup-whisper-service.sh
+ulimit -n 4096  # Set limit before launching service
+exec ./bin/whisper-service /path/to/model.coreml
+```
+
+**Option 2: Shell Profile** (For development)
+```bash
+echo "ulimit -n 4096" >> ~/.zshrc
+# Restart shell or run: source ~/.zshrc
+```
+
+**Option 3: launchd Configuration** (For macOS system services)
+```xml
+<key>SoftResourceLimits</key>
+<dict>
+    <key>NumberOfFiles</key>
+    <integer>4096</integer>
+</dict>
+```
+
+**Verification**:
+```bash
+ulimit -n  # Check current limit before starting services
+```
 
 ---
 
 ## Known Issues & Notes
 
-1. **llama-cpp not tracked in git**: The llama-cpp directory is not a git submodule. Developers must manually clone it or run the build script.
+1. **llama-cpp not tracked in git**: The llama-cpp directory is not a git submodule. Developers must manually clone it or run the build script with `--with-deps`.
 
-2. **No .gitmodules**: Dependencies are not configured as git submodules. Consider adding:
+2. **whisper-cpp is integrated, not external**: Unlike llama-cpp, whisper-cpp is part of the WhisperTalk repository and should NOT be added as a git submodule. If considering dependency management improvements, only llama-cpp should be considered for submodule conversion:
    ```gitmodules
-   [submodule "whisper-cpp"]
-       path = whisper-cpp
-       url = https://github.com/ggerganov/whisper.cpp.git
    [submodule "llama-cpp"]
        path = llama-cpp
        url = https://github.com/ggerganov/llama.cpp.git
@@ -203,23 +234,49 @@ With all dependencies verified and built, the system is ready for:
 
 ## Dependency Update Procedure
 
-To update dependencies in the future:
+### Update whisper-cpp (Integrated Component)
+
+whisper-cpp is part of the WhisperTalk repository. Updates come from the main repository:
 
 ```bash
-# Update whisper-cpp
-cd whisper-cpp
-git pull
-cd build
-cmake .. && make -j6
+# Update WhisperTalk repository (includes whisper-cpp)
+git pull origin main
 
-# Update llama-cpp
-cd llama-cpp
-git pull
-cd build
+# Rebuild whisper-cpp if needed
+cd whisper-cpp/build
 cmake .. && make -j6
-
-# Rebuild WhisperTalk services
 cd ../..
+```
+
+To sync with upstream whisper.cpp (manual process):
+```bash
+# This requires manual merging - consult team before attempting
+# 1. Add upstream remote (one-time)
+cd whisper-cpp
+git remote add upstream https://github.com/ggml-org/whisper.cpp.git
+
+# 2. Fetch upstream changes
+git fetch upstream
+
+# 3. Merge carefully (may have conflicts with WhisperTalk modifications)
+git merge upstream/master
+```
+
+### Update llama-cpp (External Dependency)
+
+```bash
+cd llama-cpp
+git pull origin master  # or: git fetch && git checkout <specific-version>
+cd build
+cmake .. && make -j6
+cd ../..
+```
+
+### Rebuild WhisperTalk Services
+
+After updating any dependencies:
+
+```bash
 bash scripts/build.sh --no-deps --no-piper
 ```
 
