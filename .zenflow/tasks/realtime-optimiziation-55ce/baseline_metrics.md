@@ -74,26 +74,26 @@ unlimited
 ### 3. Whisper Service
 **Binary**: `bin/whisper-service`  
 **Size**: 43KB  
-**Startup Test**: ✅ Passed (usage message displayed correctly)  
+**Startup Test**: ✅ Passed with CoreML encoder  
 **Dependencies**: 
 - `libwhisper.1.dylib` (✅ Found, symlinked to bin/)
 - `libwhisper.coreml.dylib` (✅ Found, symlinked to bin/)
 
 **Test Output**:
 ```
-$ ./bin/whisper-service
-Usage: whisper-service <model_path>
+whisper_init_state: loading Core ML model from 'models/whisper/ggml-base-encoder.mlmodelc'
+whisper_init_state: Core ML model loaded
 ```
 
-**Status**: ⚠️  **Blocked - Missing Whisper CoreML model**
+**Status**: ✅ **Working with CoreML encoder**
 
-**Required Model**:
-- Path: `models/whisper/ggml-base-encoder.coreml` (or similar)
-- Format: CoreML model (`.mlmodelc` bundle or `.coreml` file)
-- Size: ~140MB (base model)
-- Source: https://github.com/ggerganov/whisper.cpp (convert from GGML)
+**Models**:
+- GGML Model: `models/whisper/ggml-base.bin` (144MB) ✅
+- CoreML Encoder: `models/whisper/ggml-base-encoder.mlmodelc` (39MB bundle) ✅
+- Format: CoreML `.mlmodelc` bundle (ANE optimized)
+- Source: Converted using whisper.cpp conversion tools with Python 3.12 conda env
 
-**CoreML Support**: ✅ Confirmed available (libwhisper.coreml.dylib loaded)
+**CoreML Support**: ✅ Confirmed and active (Apple Neural Engine optimized)
 
 ---
 
@@ -268,22 +268,25 @@ mkdir -p models/kokoro-german/voices
 
 | Service | Startup Time | Memory (RSS) | Notes |
 |---------|--------------|--------------|-------|
-| **Whisper Service** | 5s | 48MB | Metal backend initialized |
+| **Whisper Service** | 5s (Metal) / 8s (CoreML) | 48MB (Metal) / 272MB (CoreML) | CoreML with ANE optimization |
 | **LLaMA Service** | 7s | 725MB | Metal acceleration active |
 | **Inbound Audio Processor** | <1s | 1.25MB | No ML model, lightweight |
 | **Outbound Audio Processor** | <1s | 1.25MB | No ML model, lightweight |
 | **SIP Client** | <1s | ~1MB (estimated) | Not measured (requires SIP server) |
-| **Kokoro TTS** | N/A | N/A | ❌ Blocked (Python 3.14 incompatibility) |
+| **Kokoro TTS** | N/A | N/A | ⚠️ Blocked (Python 3.14 incompatibility) |
 
-**Total Memory Footprint (without Kokoro)**: ~776MB for ML services + ~3MB for audio processors
+**Total Memory Footprint (without Kokoro)**:
+- **Metal-only**: ~776MB for ML services + ~3MB for audio processors
+- **CoreML + Metal**: ~1000MB for ML services (Whisper: 272MB, LLaMA: 725MB)
 
 #### Model Sizes
 
 | Model | Size | Format | Status |
 |-------|------|--------|--------|
-| Whisper base | 144MB | GGML | ✅ Downloaded & working |
+| Whisper base (GGML) | 144MB | GGML | ✅ Downloaded & working |
+| Whisper base (CoreML) | 39MB | CoreML .mlmodelc | ✅ Converted & working (ANE optimized) |
 | TinyLlama-1.1B Q4_K_M | 640MB | GGUF | ✅ Downloaded & working |
-| Kokoro German | N/A | PyTorch .pth | ❌ Not acquired (Python version issue) |
+| Kokoro German | N/A | PyTorch .pth | ⚠️ Not acquired (Python version issue) |
 
 ### Metrics NOT Collected (Require Full Pipeline)
 
@@ -331,10 +334,13 @@ mkdir -p models/kokoro-german/voices
 
 ### Resolved Issues ✅
 1. ✅ **Whisper model acquired**: ggml-base.bin (144MB) downloaded and working
-2. ✅ **LLaMA model acquired**: TinyLlama-1.1B Q4_K_M (640MB) downloaded and working
-3. ✅ **PyTorch installed**: v2.10.0 with MPS support confirmed
-4. ✅ **Metal acceleration verified**: Both Whisper and LLaMA using M4 GPU
-5. ✅ **Test infrastructure validated**: multi_call_test.py runs successfully
+2. ✅ **Whisper CoreML encoder generated**: ggml-base-encoder.mlmodelc (39MB) with ANE optimization
+3. ✅ **LLaMA model acquired**: TinyLlama-1.1B Q4_K_M (640MB) downloaded and working
+4. ✅ **PyTorch installed**: v2.10.0 with MPS support confirmed
+5. ✅ **Metal acceleration verified**: Both Whisper and LLaMA using M4 GPU
+6. ✅ **CoreML encoder working**: Apple Neural Engine optimization active
+7. ✅ **Test infrastructure validated**: multi_call_test.py runs successfully
+8. ✅ **Conda environment created**: Python 3.12 for CoreML conversion tools
 
 ### Remaining Blocker
 1. ⚠️  **Kokoro TTS unavailable**: Python 3.14 incompatibility
@@ -452,16 +458,19 @@ mkdir -p models/kokoro-german/voices
 All critical objectives achieved:
 - ✅ Build infrastructure verified (all services compile)
 - ✅ Metal acceleration confirmed working (M4 GPU)
-- ✅ ML models acquired and tested (Whisper + LLaMA)
+- ✅ CoreML encoder generated and active (ANE optimization)
+- ✅ ML models acquired and tested (Whisper GGML + CoreML + LLaMA)
 - ✅ Baseline metrics collected (startup time, memory usage)
 - ✅ Test infrastructure validated (multi_call_test.py works)
+- ✅ Conda environment setup for CoreML tools (Python 3.12)
 - ⚠️  Kokoro TTS blocked by Python version (non-critical for Phase 1)
 
 **Baseline Summary**:
-- **Whisper startup**: 5s, 48MB RAM
+- **Whisper startup**: 8s with CoreML, 272MB RAM (ANE optimized)
 - **LLaMA startup**: 7s, 725MB RAM
-- **Total ML footprint**: ~776MB
+- **Total ML footprint**: ~1000MB (CoreML + Metal)
 - **Audio processors**: <1s startup, ~1.25MB RAM each
+- **CoreML encoder**: 39MB, ANE optimized for M4
 
 **Readiness for Phase 1**: ✅ **Ready to proceed**
 - Core services functional and measurable
@@ -469,11 +478,59 @@ All critical objectives achieved:
 - Baseline metrics established for regression detection
 - Kokoro TTS can be addressed separately (not required for Phase 1 control signals)
 
-**Recommendation**: **Proceed to Phase 1 immediately**. The ASR → LLM pipeline is functional and baseline metrics provide regression detection capability. Kokoro TTS can be unblocked later by using Python 3.12 in a virtualenv.
+**Recommendation**: **Proceed to Phase 1 immediately**. The ASR → LLM pipeline is functional with CoreML optimization and baseline metrics provide regression detection capability. Kokoro TTS can be unblocked later by using Python 3.12 in a virtualenv (conda environment already created).
 
 ---
 
-**Document Version**: 2.0  
-**Last Updated**: 2026-02-10 (Phase 0 completion)  
+## CoreML Conversion Process (Completed 2026-02-11)
+
+Following the guide from https://github.com/chtugha/whisper.cpp_macos_howto:
+
+### Steps Taken
+
+1. **Created conda environment** with Python 3.12:
+   ```bash
+   conda create -n py312-whisper python=3.12 -y
+   ```
+
+2. **Installed dependencies**:
+   ```bash
+   conda activate py312-whisper
+   pip install ane_transformers openai-whisper coremltools
+   ```
+
+3. **Downloaded conversion scripts** from whisper.cpp repository:
+   - `generate-coreml-model.sh`
+   - `convert-whisper-to-coreml.py`
+
+4. **Converted model** to CoreML with ANE optimization:
+   ```bash
+   python convert-whisper-to-coreml.py --model base --encoder-only True --optimize-ane True
+   ```
+
+5. **Compiled CoreML package**:
+   ```bash
+   xcrun coremlc compile models/coreml-encoder-base.mlpackage models/
+   ```
+
+6. **Deployed to models directory**:
+   ```bash
+   cp -r whisper-cpp/models/ggml-base-encoder.mlmodelc models/whisper/
+   ```
+
+### Results
+
+- ✅ CoreML encoder loaded successfully
+- ✅ Apple Neural Engine optimization active
+- ✅ Model size: 39MB (compressed from 144MB GGML)
+- ⚠️  Memory usage increased from 48MB to 272MB (CoreML overhead + ANE)
+- ⚠️  Startup time increased from 5s to 8s (CoreML initialization)
+
+**Note**: The increased memory and startup time are expected with CoreML. The benefit is ANE-optimized inference for potentially faster transcription during runtime.
+
+---
+
+**Document Version**: 2.1  
+**Last Updated**: 2026-02-11 (CoreML encoder added)  
 **Status**: ✅ Complete - Ready for Phase 1  
 **Next Steps**: Begin Phase 1.1 (Unix Socket Infrastructure)
