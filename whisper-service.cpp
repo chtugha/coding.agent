@@ -162,11 +162,35 @@ private:
         if (msg.find("CALL_START:") == 0) {
             int call_id = std::stoi(msg.substr(11));
             std::cout << "🚦 CALL_START received for call_id " << call_id << std::endl;
+            
+            auto call = get_or_create_call(call_id);
+            std::cout << "📋 Prepared Whisper listener for call_id " << call_id << std::endl;
+            
             ctrl_sender_.send_signal("/tmp/llama-service.ctrl", msg);
         } else if (msg.find("CALL_END:") == 0) {
             int call_id = std::stoi(msg.substr(9));
             std::cout << "🚦 CALL_END received for call_id " << call_id << std::endl;
+            
             ctrl_sender_.send_signal("/tmp/llama-service.ctrl", msg);
+            
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            if (calls_.count(call_id)) {
+                auto call = calls_[call_id];
+                std::lock_guard<std::mutex> clock(call->mutex);
+                
+                call->connected = false;
+                if (call->tcp_socket != -1) {
+                    close(call->tcp_socket);
+                    call->tcp_socket = -1;
+                }
+                
+                call->audio_buffer.clear();
+                call->in_speech = false;
+                call->silence_count = 0;
+                
+                calls_.erase(call_id);
+                std::cout << "🧹 Stopped transcription and cleaned up call_id " << call_id << std::endl;
+            }
         }
     }
 

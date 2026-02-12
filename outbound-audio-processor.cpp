@@ -138,6 +138,10 @@ private:
                 } else if (cmd.find("CALL_START:") == 0) {
                     int cid = std::stoi(cmd.substr(11));
                     std::cout << "🚦 CALL_START received for call_id " << cid << std::endl;
+                    
+                    auto state = get_or_create_call(cid);
+                    state->last_activity = std::chrono::steady_clock::now();
+                    std::cout << "📋 Pre-allocated resources for call_id " << cid << std::endl;
                 } else if (cmd.find("CALL_END:") == 0) {
                     int cid = std::stoi(cmd.substr(9));
                     std::cout << "🚦 CALL_END received for call_id " << cid << std::endl;
@@ -200,7 +204,9 @@ private:
         if (calls_.count(cid)) {
             auto state = calls_[cid];
             std::lock_guard<std::mutex> clock(state->mutex);
+            
             state->connected = false;
+            
             if (state->tcp_socket != -1) {
                 close(state->tcp_socket);
                 state->tcp_socket = -1;
@@ -209,8 +215,11 @@ private:
                 close(state->listen_socket);
                 state->listen_socket = -1;
             }
+            
+            state->buffer.clear();
+            
             calls_.erase(cid);
-            std::cout << "🔚 Call " << cid << " ended" << std::endl;
+            std::cout << "🧹 Stopped RTP scheduling and closed connections for call_id " << cid << std::endl;
         }
     }
 

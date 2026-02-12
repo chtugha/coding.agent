@@ -218,11 +218,27 @@ private:
         if (msg.find("CALL_START:") == 0) {
             int call_id = std::stoi(msg.substr(11));
             std::cout << "🚦 CALL_START received for call_id " << call_id << std::endl;
+            
+            auto call = get_or_create_call(call_id);
+            std::cout << "📋 Pre-allocated sequence ID " << call->seq_id << " for call_id " << call_id << std::endl;
+            
             ctrl_sender_.send_signal("/tmp/kokoro-service.ctrl", msg);
         } else if (msg.find("CALL_END:") == 0) {
             int call_id = std::stoi(msg.substr(9));
             std::cout << "🚦 CALL_END received for call_id " << call_id << std::endl;
+            
             ctrl_sender_.send_signal("/tmp/kokoro-service.ctrl", msg);
+            
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            if (calls_.count(call_id)) {
+                std::lock_guard<std::mutex> llama_lock(llama_mutex_);
+                
+                llama_memory_t mem = llama_get_memory(ctx_);
+                llama_memory_seq_rm(mem, calls_[call_id]->seq_id, -1, -1);
+                
+                calls_.erase(call_id);
+                std::cout << "🧹 Cleared conversation and stopped generation for call_id " << call_id << std::endl;
+            }
         }
     }
 

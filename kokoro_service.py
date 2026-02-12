@@ -394,11 +394,25 @@ class KokoroTCPService:
         if msg.startswith("CALL_START:"):
             call_id = msg[11:]
             print(f"🚦 CALL_START received for call_id {call_id}")
+            
+            with self.registered_calls_lock:
+                self.registered_calls[call_id] = time.time()
+            print(f"📋 Pre-allocated resources for call_id {call_id}")
+            
             self.send_control_signal("/tmp/outbound-audio-processor.ctrl", msg)
         elif msg.startswith("CALL_END:"):
             call_id = msg[9:]
             print(f"🚦 CALL_END received for call_id {call_id}")
+            
             self.send_control_signal("/tmp/outbound-audio-processor.ctrl", msg)
+            
+            self.close_outbound_connection(call_id)
+            
+            with self.registered_calls_lock:
+                if call_id in self.registered_calls:
+                    del self.registered_calls[call_id]
+            
+            print(f"🧹 Stopped synthesis and closed connections for call_id {call_id}")
     
     def send_control_signal(self, socket_path, msg):
         """Send control signal to Unix socket"""

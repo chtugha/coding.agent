@@ -151,11 +151,34 @@ private:
         if (msg.find("CALL_START:") == 0) {
             int call_id = std::stoi(msg.substr(11));
             std::cout << "🚦 CALL_START received for call_id " << call_id << std::endl;
+            
+            auto state = get_or_create_call(call_id);
+            state->last_activity = std::chrono::steady_clock::now();
+            std::cout << "📋 Pre-allocated CallState for call_id " << call_id << std::endl;
+            
             ctrl_sender_.send_signal("/tmp/whisper-service.ctrl", msg);
         } else if (msg.find("CALL_END:") == 0) {
             int call_id = std::stoi(msg.substr(9));
             std::cout << "🚦 CALL_END received for call_id " << call_id << std::endl;
+            
             ctrl_sender_.send_signal("/tmp/whisper-service.ctrl", msg);
+            
+            std::thread([this, call_id]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                if (calls_.count(call_id)) {
+                    auto state = calls_[call_id];
+                    std::lock_guard<std::mutex> clock(state->mutex);
+                    if (state->tcp_socket != -1) {
+                        close(state->tcp_socket);
+                        state->tcp_socket = -1;
+                    }
+                    state->connected = false;
+                    calls_.erase(call_id);
+                    std::cout << "🧹 Cleaned up call_id " << call_id << " (200ms grace period)" << std::endl;
+                }
+            }).detach();
         }
     }
 
