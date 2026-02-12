@@ -13,7 +13,111 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/un.h>
 #include "llama.h"
+
+class ControlSignalSender {
+public:
+    bool send_signal(const std::string& socket_path, const std::string& message) {
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock < 0) return false;
+
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000;
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        struct sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(sock);
+            return false;
+        }
+
+        ssize_t sent = send(sock, message.c_str(), message.length(), MSG_NOSIGNAL);
+        close(sock);
+        return sent > 0;
+    }
+};
+
+class ControlListener {
+public:
+    ControlListener(const std::string& socket_path, std::function<void(const std::string&)> callback)
+        : socket_path_(socket_path), callback_(callback), running_(false) {}
+
+    ~ControlListener() {
+        stop();
+    }
+
+    void start() {
+        running_ = true;
+        listen_thread_ = std::thread(&ControlListener::listen_loop, this);
+    }
+
+    void stop() {
+        running_ = false;
+        if (listen_thread_.joinable()) {
+            listen_thread_.join();
+        }
+        unlink(socket_path_.c_str());
+    }
+
+private:
+    void listen_loop() {
+        unlink(socket_path_.c_str());
+        int lsock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (lsock < 0) {
+            std::cerr << "❌ Failed to create control socket: " << socket_path_ << std::endl;
+            return;
+        }
+
+        struct sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
+
+        if (bind(lsock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            std::cerr << "❌ Failed to bind control socket: " << socket_path_ << std::endl;
+            close(lsock);
+            return;
+        }
+
+        listen(lsock, 10);
+        std::cout << "🎧 Control listener started: " << socket_path_ << std::endl;
+
+        while (running_) {
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(lsock, &readfds);
+            
+            struct timeval tv;
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+
+            int ret = select(lsock + 1, &readfds, NULL, NULL, &tv);
+            if (ret <= 0) continue;
+
+            int csock = accept(lsock, NULL, NULL);
+            if (csock < 0) continue;
+
+            char buf[256];
+            ssize_t n = recv(csock, buf, sizeof(buf) - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string msg(buf);
+                callback_(msg);
+            }
+            close(csock);
+        }
+        close(lsock);
+    }
+
+    std::string socket_path_;
+    std::function<void(const std::string&)> callback_;
+    std::atomic<bool> running_;
+    std::thread listen_thread_;
+};
 
 struct LlamaChatMessage {
     std::string role;
@@ -29,7 +133,9 @@ struct LlamaCall {
 
 class LlamaService {
 public:
-    LlamaService(const std::string& model_path) : running_(true) {
+    LlamaService(const std::string& model_path) : running_(true),
+        ctrl_listener_("/tmp/llama-service.ctrl",
+                       [this](const std::string& msg) { handle_control_signal(msg); }) {
         llama_backend_init();
         llama_model_params mparams = llama_model_default_params();
         mparams.n_gpu_layers = -1; // Use all layers on GPU if possible
@@ -62,6 +168,8 @@ public:
     }
 
     void run() {
+        ctrl_listener_.start();
+        
         int lsock = socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1; setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
         struct sockaddr_in addr{};
@@ -71,6 +179,7 @@ public:
         
         if (bind(lsock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
             std::cerr << "Failed to bind to port 8083" << std::endl;
+            ctrl_listener_.stop();
             return;
         }
         listen(lsock, 10);
@@ -105,6 +214,18 @@ public:
     }
 
 private:
+    void handle_control_signal(const std::string& msg) {
+        if (msg.find("CALL_START:") == 0) {
+            int call_id = std::stoi(msg.substr(11));
+            std::cout << "🚦 CALL_START received for call_id " << call_id << std::endl;
+            ctrl_sender_.send_signal("/tmp/kokoro-service.ctrl", msg);
+        } else if (msg.find("CALL_END:") == 0) {
+            int call_id = std::stoi(msg.substr(9));
+            std::cout << "🚦 CALL_END received for call_id " << call_id << std::endl;
+            ctrl_sender_.send_signal("/tmp/kokoro-service.ctrl", msg);
+        }
+    }
+
     void clear_call(int cid) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         if (calls_.count(cid)) {
@@ -247,6 +368,8 @@ private:
     std::mutex llama_mutex_;
     std::mutex calls_mutex_;
     std::map<int, std::shared_ptr<LlamaCall>> calls_;
+    ControlListener ctrl_listener_;
+    ControlSignalSender ctrl_sender_;
 };
 
 int main(int argc, char** argv) {

@@ -16,6 +16,7 @@ import threading
 import numpy as np
 import time
 from pathlib import Path
+import os
 
 # Check if kokoro is installed
 try:
@@ -42,6 +43,7 @@ class KokoroTCPService:
         self.udp_port = udp_port
         self.running = True
         self.registration_running = True
+        self.control_running = True
 
         # Track registered audio processors
         self.registered_calls = {}  # call_id -> timestamp
@@ -343,6 +345,72 @@ class KokoroTCPService:
                 pass
             print(f"🛑 UDP registration listener stopped")
 
+    def control_listener_thread(self):
+        """Listen for Unix socket control messages from LLaMA service"""
+        socket_path = "/tmp/kokoro-service.ctrl"
+        
+        try:
+            # Remove existing socket if it exists
+            if os.path.exists(socket_path):
+                os.unlink(socket_path)
+            
+            # Create Unix socket
+            ctrl_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            ctrl_socket.bind(socket_path)
+            ctrl_socket.listen(10)
+            ctrl_socket.settimeout(1.0)
+            
+            print(f"🎧 Control listener started: {socket_path}")
+            
+            while self.control_running:
+                try:
+                    conn, _ = ctrl_socket.accept()
+                    data = conn.recv(256)
+                    if data:
+                        msg = data.decode('utf-8').strip()
+                        self.handle_control_signal(msg)
+                    conn.close()
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if self.control_running:
+                        print(f"❌ Control listener error: {e}")
+        
+        except Exception as e:
+            print(f"❌ Failed to start control listener: {e}")
+        finally:
+            try:
+                ctrl_socket.close()
+            except:
+                pass
+            try:
+                os.unlink(socket_path)
+            except:
+                pass
+            print(f"🛑 Control listener stopped")
+    
+    def handle_control_signal(self, msg):
+        """Handle control signals from LLaMA service"""
+        if msg.startswith("CALL_START:"):
+            call_id = msg[11:]
+            print(f"🚦 CALL_START received for call_id {call_id}")
+            self.send_control_signal("/tmp/outbound-audio-processor.ctrl", msg)
+        elif msg.startswith("CALL_END:"):
+            call_id = msg[9:]
+            print(f"🚦 CALL_END received for call_id {call_id}")
+            self.send_control_signal("/tmp/outbound-audio-processor.ctrl", msg)
+    
+    def send_control_signal(self, socket_path, msg):
+        """Send control signal to Unix socket"""
+        try:
+            ctrl_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            ctrl_socket.settimeout(0.1)
+            ctrl_socket.connect(socket_path)
+            ctrl_socket.send(msg.encode('utf-8'))
+            ctrl_socket.close()
+        except Exception as e:
+            pass
+
     def handle_client(self, client_socket, addr):
         """Handle a single client connection"""
         call_id = "unknown"
@@ -441,6 +509,13 @@ class KokoroTCPService:
             daemon=True
         )
         registration_thread.start()
+        
+        # Start control listener in a separate thread
+        control_thread = threading.Thread(
+            target=self.control_listener_thread,
+            daemon=True
+        )
+        control_thread.start()
 
         # Create TCP socket
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -483,6 +558,7 @@ class KokoroTCPService:
         """Stop the service"""
         self.running = False
         self.registration_running = False
+        self.control_running = False
 
     def get_performance_stats(self):
         """Get performance statistics"""
