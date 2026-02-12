@@ -263,11 +263,11 @@ pgrep -f whisper-service
 # Check if any listeners are up (initially none until first call)
 lsof -i TCP:13000-13099 | grep whisper
 
-# Check CoreML loaded
-# (Look for CoreML initialization in output)
+# Check CoreML loaded (if available)
+tail -f /tmp/whisper-service.log | grep -i coreml
 ```
 
-**Expected Console Output**:
+**Expected Console Output** (with CoreML encoder):
 ```
 whisper_init_from_file_with_params_no_state: loading model from 'models/whisper/ggml-base.bin'
 whisper_init_with_params_no_state: use gpu    = 1
@@ -275,13 +275,24 @@ whisper_model_load: type          = 2 (base)
 whisper_model_load:        Metal total size =   147.37 MB
 whisper_backend_init_gpu: using Metal backend
 ggml_metal_init: found device: Apple M4
+whisper_init_state: loading Core ML model from 'models/whisper/ggml-base-encoder.mlmodelc'
+whisper_init_state: Core ML model loaded
 Whisper Service ready
 ```
+
+**CoreML Encoder** (Optional Enhancement):
+- **Status**: ✅ Available (generated during Phase 0)
+- **Location**: `models/whisper/ggml-base-encoder.mlmodelc` (39MB)
+- **Benefit**: Apple Neural Engine optimization for potentially faster transcription
+- **Trade-off**: Higher memory (272MB vs 48MB) and slower startup (8s vs 5s)
+- **Automatic**: Service auto-detects and loads `.mlmodelc` if present alongside GGML model
+- **Generation**: See [baseline_metrics.md](./baseline_metrics.md#coreml-conversion-process-completed-2026-02-11) for conversion process
 
 **Possible Errors**:
 - `Usage: whisper-service <model_path>`: Missing model path argument
 - `Failed to load model`: Model file not found or corrupted
 - `Metal not available`: GPU acceleration unavailable (fallback to CPU)
+- `failed to load Core ML model`: CoreML encoder not found or incompatible (service continues with Metal-only)
 
 ---
 

@@ -268,7 +268,7 @@ mkdir -p models/kokoro-german/voices
 
 | Service | Startup Time | Memory (RSS) | Notes |
 |---------|--------------|--------------|-------|
-| **Whisper Service** | 5s (Metal) / 8s (CoreML) | 48MB (Metal) / 272MB (CoreML) | CoreML with ANE optimization |
+| **Whisper Service** | 5s (Metal) / 8s (CoreML) | 48MB (Metal) / 229-272MB (CoreML) | CoreML with ANE optimization |
 | **LLaMA Service** | 7s | 725MB | Metal acceleration active |
 | **Inbound Audio Processor** | <1s | 1.25MB | No ML model, lightweight |
 | **Outbound Audio Processor** | <1s | 1.25MB | No ML model, lightweight |
@@ -521,12 +521,17 @@ Following the guide from https://github.com/chtugha/whisper.cpp_macos_howto:
 ### Results
 
 - ✅ CoreML encoder loaded successfully
-- ✅ Apple Neural Engine optimization active
-- ✅ Model size: 39MB (compressed from 144MB GGML)
-- ⚠️  Memory usage increased from 48MB to 272MB (CoreML overhead + ANE)
+- ✅ Apple Neural Engine optimization enabled in model (runtime usage will be verified in Phase 4.3)
+- ✅ Model size: 39MB CoreML encoder (+ 144MB GGML base model required)
+- ⚠️  Memory usage increased from 48MB to 229-272MB (expected CoreML overhead, varies by system state)
 - ⚠️  Startup time increased from 5s to 8s (CoreML initialization)
 
-**Note**: The increased memory and startup time are expected with CoreML. The benefit is ANE-optimized inference for potentially faster transcription during runtime.
+**Dependencies Confirmed**:
+- `ane_transformers` 0.1.1 ✅ (installed and used during conversion)
+- `coremltools` 9.0 ✅
+- `openai-whisper` 20250625 ✅
+
+**Note**: The increased memory and startup time are expected with CoreML. The benefit is ANE-optimized inference for potentially faster transcription during runtime. Actual ANE hardware utilization and performance benefit will be measured in Phase 4.3 (VAD Testing).
 
 ---
 
