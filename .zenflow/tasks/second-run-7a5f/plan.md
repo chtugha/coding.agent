@@ -57,17 +57,18 @@ Save to `{@artifacts_path}/plan.md`.
 
 ## Implementation Tasks
 
-### [ ] Phase 0: Dependency Setup
+### [x] Phase 0: Dependency Setup
+<!-- chat-id: 0169510e-15c5-4fb0-b224-86bbbcab0fce -->
 
-#### [ ] Step: Clone and build llama-cpp dependency
+#### [x] Step: Clone and build llama-cpp dependency
 - Clone llama.cpp repository into `llama-cpp/` directory
-- Pin to a stable release tag
+- Pin to a stable release tag (b8022)
 - Build with Metal/MPS support: `cmake -B build -DBUILD_SHARED_LIBS=OFF -DLLAMA_METAL=ON -DCMAKE_BUILD_TYPE=Release`
-- Verify `llama-cpp/build/bin/libllama.dylib` is created
+- Verify `llama-cpp/build/src/libllama.a` is created (static library)
 - Verify `llama-cpp/include/llama.h` and `llama-cpp/ggml/include/ggml.h` exist
-- **Verification**: `ls llama-cpp/build/bin/libllama.dylib` succeeds, `make -j4` in build dir completes without errors
+- **Verification**: `ls llama-cpp/build/src/libllama.a` succeeds, `make -j4` in build dir completes without errors
 
-#### [ ] Step: Set up Google Test framework
+#### [x] Step: Set up Google Test framework
 - Add Google Test via CMake FetchContent in `CMakeLists.txt`
 - Add `enable_testing()` and `BUILD_TESTS` option to CMakeLists.txt
 - Create minimal `tests/test_sanity.cpp` to verify framework works
@@ -450,8 +451,8 @@ Save to `{@artifacts_path}/plan.md`.
 ## Test Results Log
 
 ### Phase 0 Tests
-- [ ] llama-cpp builds successfully with Metal support
-- [ ] Google Test framework compiles and runs minimal test
+- [x] llama-cpp builds successfully with Metal support
+- [x] Google Test framework compiles and runs minimal test
 
 ### Phase 1 Tests
 - [ ] Interconnect unit tests pass

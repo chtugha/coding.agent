@@ -5,6 +5,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Testing support
+option(BUILD_TESTS "Build unit tests" OFF)
+if(BUILD_TESTS)
+    enable_testing()
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
+    )
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+endif()
+
 # Dependencies
 find_package(Threads REQUIRED)
 
@@ -19,7 +32,7 @@ include_directories(
 
 # External libraries (imported)
 set(DEFAULT_WHISPER_LIB ${CMAKE_SOURCE_DIR}/whisper-cpp/build/src/libwhisper.dylib)
-set(DEFAULT_LLAMA_LIB   ${CMAKE_SOURCE_DIR}/llama-cpp/build/bin/libllama.dylib)
+set(DEFAULT_LLAMA_LIB   ${CMAKE_SOURCE_DIR}/llama-cpp/build/src/libllama.a)
 
 set(WHISPER_CPP_LIB "${DEFAULT_WHISPER_LIB}" CACHE FILEPATH "Path to whisper-cpp library")
 set(LLAMA_CPP_LIB   "${DEFAULT_LLAMA_LIB}"   CACHE FILEPATH "Path to llama.cpp library")
@@ -74,3 +87,11 @@ endif()
 
 # Install
 install(TARGETS sip-client inbound-audio-processor outbound-audio-processor whisper-service llama-service RUNTIME DESTINATION bin)
+
+# Tests
+if(BUILD_TESTS)
+    add_executable(test_sanity tests/test_sanity.cpp)
+    target_link_libraries(test_sanity PRIVATE GTest::gtest_main Threads::Threads)
+    include(GoogleTest)
+    gtest_discover_tests(test_sanity)
+endif()
