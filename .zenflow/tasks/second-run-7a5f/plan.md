@@ -164,9 +164,9 @@ Save to `{@artifacts_path}/plan.md`.
 - Remove Unix socket control code (`/tmp/*.ctrl`)
 - Remove hard-coded port definitions
 - Include `interconnect.h`, initialize `InterconnectNode` with `ServiceType::SIP_CLIENT`
-- Replace UDP send with `send_to_downstream()` (sends RTP to IAP)
-- Replace UDP recv with `recv_from_upstream()` (receives G.711 from OAP — in the return path OAP is upstream, SIP is downstream per spec connection #11)
-- Note: SIP has dual role due to circular pipeline — acts as upstream when sending to IAP (`send_to_downstream()`), acts as downstream when receiving from OAP (`recv_from_upstream()`)
+- Remove old UDP send to IAP; use interconnect TCP `send_to_downstream()` instead (sends RTP to IAP)
+- Remove old UDP recv from OAP; use interconnect TCP `recv_from_upstream()` instead (receives G.711 from OAP — in the return path OAP is upstream, SIP is downstream per spec connection #11)
+- Note: SIP has dual role due to circular pipeline — acts as upstream when sending to IAP (`send_to_downstream()`), acts as downstream when receiving from OAP (`recv_from_upstream()`). All internal IPC is now TCP via interconnect.
 - Keep external SIP/RTP UDP (network-facing) unchanged
 - Add crash resilience: continue SIP signaling if IAP/OAP disconnected
 - **Verification**: `make -j4` compiles successfully, no legacy IPC code in sip-client-main.cpp
@@ -186,8 +186,8 @@ Save to `{@artifacts_path}/plan.md`.
 - Remove UDP receive code (port 9001) from `inbound-audio-processor.cpp`
 - Remove TCP send code (port 13000+)
 - Include `interconnect.h`, initialize `InterconnectNode` with `ServiceType::INBOUND_AUDIO_PROCESSOR`
-- Replace UDP recv with `recv_from_upstream()` (receives RTP from SIP Client)
-- Replace TCP send with `send_to_downstream()` (sends PCM to Whisper)
+- Remove old UDP recv from SIP Client; use interconnect TCP `recv_from_upstream()` instead (receives RTP from SIP Client)
+- Remove old TCP send to Whisper; use interconnect TCP `send_to_downstream()` instead (sends PCM to Whisper)
 - Add call_id tracking set for `RESERVE_CALL_ID` responses
 - Implement /dev/null redirection when Whisper disconnected (check `downstream_state()`)
 - Add automatic rerouting on Whisper reconnection
@@ -198,8 +198,8 @@ Save to `{@artifacts_path}/plan.md`.
 - Remove TCP receive code (port 13000+) from `whisper-service.cpp`
 - Remove TCP send code (port 8083)
 - Include `interconnect.h`, initialize `InterconnectNode` with `ServiceType::WHISPER_SERVICE`
-- Replace TCP recv with `recv_from_upstream()` (receives PCM from IAP)
-- Replace TCP send with `send_to_downstream()` (sends text to LLaMA)
+- Remove old TCP recv from IAP; use interconnect TCP `recv_from_upstream()` instead (receives PCM from IAP)
+- Remove old TCP send to LLaMA; use interconnect TCP `send_to_downstream()` instead (sends text to LLaMA)
 - Add upstream/downstream state monitoring
 - Implement /dev/null for discarded transcriptions when LLaMA down
 - Add buffer (64 packets) for temporary disconnections
@@ -210,8 +210,8 @@ Save to `{@artifacts_path}/plan.md`.
 - Remove TCP receive code (port 8083) from `llama-service.cpp`
 - Remove TCP send code (port 8090)
 - Include `interconnect.h`, initialize `InterconnectNode` with `ServiceType::LLAMA_SERVICE`
-- Replace TCP recv with `recv_from_upstream()` (receives text from Whisper)
-- Replace TCP send with `send_to_downstream()` (sends response text to Kokoro)
+- Remove old TCP recv from Whisper; use interconnect TCP `recv_from_upstream()` instead (receives text from Whisper)
+- Remove old TCP send to Kokoro; use interconnect TCP `send_to_downstream()` instead (sends response text to Kokoro)
 - Add interruption support:
   - Detect sentence completion (`.`, `?`, `!`) — wait for complete sentences before responding
   - Monitor `recv_from_upstream()` for new user input during generation
@@ -226,8 +226,8 @@ Save to `{@artifacts_path}/plan.md`.
 - Remove UDP send code (port 9002)
 - Remove Unix socket control code (`/tmp/outbound-audio-processor.ctrl`)
 - Include `interconnect.h`, initialize `InterconnectNode` with `ServiceType::OUTBOUND_AUDIO_PROCESSOR`
-- Replace TCP recv with `recv_from_upstream()` (receives PCM from Kokoro)
-- Replace UDP send with `send_to_downstream()` (sends G.711 to SIP Client)
+- Remove old TCP recv from Kokoro; use interconnect TCP `recv_from_upstream()` instead (receives PCM from Kokoro)
+- Remove old UDP send to SIP Client; use interconnect TCP `send_to_downstream()` instead (sends G.711 to SIP Client)
 - Add crash resilience for upstream (Kokoro) and downstream (SIP Client)
 - Implement CALL_END handler to close per-call conversion threads
 - **Verification**: `make -j4` compiles successfully, no legacy IPC code
