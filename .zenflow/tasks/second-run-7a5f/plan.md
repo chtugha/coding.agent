@@ -87,7 +87,7 @@ Save to `{@artifacts_path}/plan.md`.
 - Implement `ServiceType` enum for all 6 services
 - Implement `Packet` struct with serialization/deserialization (call_id, size, payload) using network byte order
 - Add packet validation (payload_size <= 1MB, call_id != 0)
-- **Verification**: Create `tests/test_interconnect_compile.cpp` that includes `interconnect.h` and instantiates `InterconnectNode`; compile with `g++ -std=c++17 -c tests/test_interconnect_compile.cpp -I.`
+- **Verification**: Create `tests/test_interconnect_compile.cpp` that includes `interconnect.h` and tests basic structs (`PortConfig`, `Packet` serialization round-trip, `ServiceType` enum); compile with `g++ -std=c++17 -c tests/test_interconnect_compile.cpp -I.`
 
 #### [ ] Step: Implement master/slave port discovery
 - Implement `scan_and_bind_ports()` in `InterconnectNode`
