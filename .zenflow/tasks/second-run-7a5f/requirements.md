@@ -133,8 +133,10 @@ Port math verification:
 **REQ-ICS-010**: The connection between services is aware of crashes/disappearances of their corresponding neighbors. Status is checked for reconnection over the Master.
 
 **REQ-ICS-016**: Each service pair uses two separate TCP connections for bidirectional communication:
-- **Connection 1** (upstream UpIn <-> downstream DownOut): Primary data flow. The upstream service sends processed data (e.g., PCM audio, transcribed text) to the downstream service.
-- **Connection 2** (upstream UpOut <-> downstream DownIn): Reverse channel. The downstream service sends control signals, acknowledgements, or back-pressure notifications to the upstream service.
+- **Connection 1** (upstream UpOut <-> downstream DownIn): Primary data flow. The upstream service sends processed data (e.g., PCM audio, transcribed text) to the downstream service via the upstream's UpOut port to the downstream's DownIn port.
+- **Connection 2** (upstream UpIn <-> downstream DownOut): Reverse channel. The downstream service sends control signals, acknowledgements, or back-pressure notifications to the upstream service via the downstream's DownOut port to the upstream's UpIn port.
+
+Port naming convention: UpOut = "send toward next service", DownIn = "receive from previous service", DownOut = "send back to previous service", UpIn = "receive from next service".
 
 Each TCP connection is unidirectional at the application level (one sender, one receiver) to avoid head-of-line blocking and simplify flow control. The downstream service initiates both TCP connections to the upstream service's listening ports.
 
@@ -524,6 +526,6 @@ All inter-service flows use the new TCP-based interconnection system with master
 
 ---
 
-**Document Status**: DRAFT v4 -- Addressed all review feedback (7 issues)
+**Document Status**: DRAFT v5 -- Fixed REQ-ICS-016 connection direction (swapped UpIn/UpOut)
 **Last Updated**: 2026-02-13
 **Author**: AI System Architect
