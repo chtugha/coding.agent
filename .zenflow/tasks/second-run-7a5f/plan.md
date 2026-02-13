@@ -165,8 +165,8 @@ Save to `{@artifacts_path}/plan.md`.
 - Remove hard-coded port definitions
 - Include `interconnect.h`, initialize `InterconnectNode` with `ServiceType::SIP_CLIENT`
 - Replace UDP send with `send_to_downstream()` (sends RTP to IAP)
-- Replace UDP recv with `recv_from_upstream()` (receives G.711 from OAP — SIP is downstream to OAP in the circular topology)
-- Note: SIP has dual role — upstream to IAP (sends via `send_to_downstream()`), downstream to OAP (receives via `recv_from_upstream()`)
+- Replace UDP recv with `recv_from_upstream()` (receives G.711 from OAP — in the return path OAP is upstream, SIP is downstream per spec connection #11)
+- Note: SIP has dual role due to circular pipeline — acts as upstream when sending to IAP (`send_to_downstream()`), acts as downstream when receiving from OAP (`recv_from_upstream()`)
 - Keep external SIP/RTP UDP (network-facing) unchanged
 - Add crash resilience: continue SIP signaling if IAP/OAP disconnected
 - **Verification**: `make -j4` compiles successfully, no legacy IPC code in sip-client-main.cpp
