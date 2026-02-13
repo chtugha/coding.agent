@@ -88,9 +88,12 @@ This document outlines the requirements for a comprehensive architectural redesi
 - Connection status (active, crashed, reconnecting)
 - Last heartbeat timestamp
 
-**REQ-ICS-005**: Slaves shall send periodic heartbeat messages (every 2 seconds) to the Master via negotiation ports.
+**REQ-ICS-005**: Slaves shall send periodic heartbeat messages (every 2 seconds) to the Master via negotiation ports. Heartbeat messages shall include:
+- Service type and instance ID
+- Current active call_id count
+- Service state (idle, processing, overloaded)
 
-**REQ-ICS-006**: The Master shall detect crashed services when heartbeat is missing for >5 seconds and notify affected upstream/downstream services.
+**REQ-ICS-006**: The Master shall detect crashed services when heartbeat is missing for >5 seconds and notify affected upstream/downstream services. The Master shall also send periodic heartbeat acknowledgements to Slaves so that Slaves can detect Master unavailability (for logging/alerting purposes).
 
 #### 4.1.2 Traffic Ports (4 per service)
 
@@ -128,6 +131,14 @@ Port math verification:
 - `GET_STATUS <service-type>` -> returns connection status
 
 **REQ-ICS-010**: The connection between services is aware of crashes/disappearances of their corresponding neighbors. Status is checked for reconnection over the Master.
+
+**REQ-ICS-016**: Each service pair uses two separate TCP connections for bidirectional communication:
+- **Connection 1** (upstream UpIn <-> downstream DownOut): Primary data flow. The upstream service sends processed data (e.g., PCM audio, transcribed text) to the downstream service.
+- **Connection 2** (upstream UpOut <-> downstream DownIn): Reverse channel. The downstream service sends control signals, acknowledgements, or back-pressure notifications to the upstream service.
+
+Each TCP connection is unidirectional at the application level (one sender, one receiver) to avoid head-of-line blocking and simplify flow control. The downstream service initiates both TCP connections to the upstream service's listening ports.
+
+**REQ-ICS-017**: If the Master crashes, all services shall continue operating with their existing traffic port connections. New service startups and call_id negotiations will fail until the Master is manually restarted. Master re-election is out of scope for this phase.
 
 #### 4.1.3 Protocol and Packet Structure
 
@@ -177,6 +188,8 @@ Port math verification:
 **REQ-SIP-008**: The SIP client shall receive encoded G.711 frames from outbound-audio-processor via traffic ports and transmit as RTP to the network.
 
 **REQ-SIP-009**: All existing UDP-based internal communication shall be removed and replaced with TCP traffic ports. External SIP/RTP to the network remains UDP.
+
+**REQ-SIP-010**: Call_id reservation shall be atomic. When multiple SIP lines attempt to create calls simultaneously, the SIP client shall serialize call_id negotiation requests to the inbound-audio-processor (e.g., via a local mutex) to prevent race conditions where two lines receive the same `HIGHEST_CALL_ID` response and both attempt to use `max_id + 1`.
 
 ### 4.3 Inbound Audio Processor Requirements
 
@@ -228,7 +241,7 @@ Port math verification:
 **REQ-LLM-004**: The German system prompt shall remain:
 ```
 Du bist ein extrem effizienter Telefon-Assistent. Antworte IMMER auf DEUTSCH. 
-Deine Antworten sind extrem kurz (max. 15 Worter). Sei hoflich aber komm sofort zum Punkt.
+Deine Antworten sind extrem kurz (max. 15 Wörter). Sei höflich aber komm sofort zum Punkt.
 ```
 
 **REQ-LLM-005**: The service shall wait patiently until sentences are finished before it talks. Sentence completion is detected by punctuation: `.`, `?`, `!`.
@@ -307,7 +320,7 @@ Deine Antworten sind extrem kurz (max. 15 Worter). Sei hoflich aber komm sofort 
 
 **REQ-BIN-003**: For whisper.cpp and llama.cpp, libraries shall be statically linked into the respective service binaries.
 
-**REQ-BIN-004**: For libtorch (Kokoro service), the PyTorch C++ libraries shall be statically linked.
+**REQ-BIN-004**: For libtorch (Kokoro service), the PyTorch C++ libraries should be statically linked where possible. Dynamic linking to libtorch and Metal frameworks is acceptable as a fallback to maintain MPS acceleration.
 
 **REQ-BIN-005**: CoreML frameworks (for Whisper and LLaMA) may remain dynamically linked as they are Apple system frameworks always present on macOS.
 
@@ -316,6 +329,8 @@ Deine Antworten sind extrem kurz (max. 15 Worter). Sei hoflich aber komm sofort 
 **REQ-BIN-007**: Binaries shall be tested on a clean macOS system without Python, pip, or development tools installed.
 
 **REQ-BIN-008**: The build system (CMake) shall support a `STATIC_BUILD=ON` option to enable full static linking.
+
+**REQ-BIN-009**: Model files shall be loaded from a default directory `./models/` relative to the binary's working directory. Each service shall accept a `--model-path <path>` command-line argument to override the default. Services shall fail with a clear error message if the required model file is not found at startup.
 
 ### 4.9 Performance Requirements
 
@@ -509,6 +524,6 @@ All inter-service flows use the new TCP-based interconnection system with master
 
 ---
 
-**Document Status**: DRAFT v3 -- Corrected traffic port mapping per updated PR #2
+**Document Status**: DRAFT v4 -- Addressed all review feedback (7 issues)
 **Last Updated**: 2026-02-13
 **Author**: AI System Architect
