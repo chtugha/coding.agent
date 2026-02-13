@@ -17,6 +17,36 @@
 #include <sstream>
 #include <iomanip>
 
+class ControlSignalSender {
+public:
+    bool send_signal(const std::string& socket_path, const std::string& message) {
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock < 0) {
+            std::cerr << "⚠️  Failed to create control socket for " << socket_path << std::endl;
+            return false;
+        }
+
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000;
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        struct sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(sock);
+            return false;
+        }
+
+        ssize_t sent = send(sock, message.c_str(), message.length(), MSG_NOSIGNAL);
+        close(sock);
+        return sent > 0;
+    }
+};
+
 struct CallSession {
     int id;
     std::string sip_call_id;
@@ -39,6 +69,20 @@ class SipClient {
 public:
     SipClient() : running_(true), next_id_(1) {
         srand(time(NULL));
+    }
+
+    void send_call_start(int call_id) {
+        std::string msg = "CALL_START:" + std::to_string(call_id);
+        if (!ctrl_sender_.send_signal("/tmp/inbound-audio-processor.ctrl", msg)) {
+            std::cout << "⚠️  Failed to send CALL_START for " << call_id << std::endl;
+        }
+    }
+
+    void send_call_end(int call_id) {
+        std::string msg = "CALL_END:" + std::to_string(call_id);
+        if (!ctrl_sender_.send_signal("/tmp/inbound-audio-processor.ctrl", msg)) {
+            std::cout << "⚠️  Failed to send CALL_END for " << call_id << std::endl;
+        }
     }
 
     bool init(const std::string& user, const std::string& server, int port) {
@@ -150,6 +194,8 @@ private:
         std::string s = resp.str();
         sendto(sip_sock_, s.c_str(), s.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
         std::cout << "📞 Accepted call " << cid << " on port " << session->local_rtp_port << std::endl;
+        
+        send_call_start(cid);
     }
 
     void handle_bye(const std::string& msg, const struct sockaddr_in& sender) {
@@ -159,9 +205,12 @@ private:
         std::string scid = msg.substr(p + 9, e - p - 9);
         std::lock_guard<std::mutex> lock(calls_mutex_);
         if (calls_.count(scid)) {
+            int cid = calls_[scid]->id;
             calls_[scid]->active = false;
             std::string resp = "SIP/2.0 200 OK\r\nCall-ID: " + scid + "\r\n\r\n";
             sendto(sip_sock_, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
+            
+            send_call_end(cid);
         }
     }
 
@@ -236,6 +285,7 @@ private:
     std::mutex calls_mutex_;
     std::map<std::string, std::shared_ptr<CallSession>> calls_;
     std::map<int, std::shared_ptr<CallSession>> id_to_call_;
+    ControlSignalSender ctrl_sender_;
 };
 
 int main(int argc, char** argv) {

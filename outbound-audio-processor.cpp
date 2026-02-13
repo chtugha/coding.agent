@@ -110,11 +110,24 @@ private:
         struct sockaddr_un addr{}; addr.sun_family = AF_UNIX; strncpy(addr.sun_path, path, sizeof(addr.sun_path)-1);
         bind(lsock, (struct sockaddr*)&addr, sizeof(addr));
         listen(lsock, 5);
+        
+        std::cout << "🎧 Control listener started: " << path << std::endl;
 
         while (running_) {
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(lsock, &readfds);
+            
+            struct timeval tv;
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            
+            int ret = select(lsock + 1, &readfds, NULL, NULL, &tv);
+            if (ret <= 0) continue;
+            
             int csock = accept(lsock, NULL, NULL);
             if (csock < 0) continue;
-            char buf[128];
+            char buf[256];
             ssize_t n = recv(csock, buf, sizeof(buf)-1, 0);
             if (n > 0) {
                 buf[n] = '\0';
@@ -122,10 +135,23 @@ private:
                 if (cmd.find("ACTIVATE:") == 0) {
                     int cid = std::stoi(cmd.substr(9));
                     activate_call(cid);
+                } else if (cmd.find("CALL_START:") == 0) {
+                    int cid = std::stoi(cmd.substr(11));
+                    std::cout << "🚦 CALL_START received for call_id " << cid << std::endl;
+                    
+                    auto state = get_or_create_call(cid);
+                    state->last_activity = std::chrono::steady_clock::now();
+                    std::cout << "📋 Pre-allocated resources for call_id " << cid << std::endl;
+                } else if (cmd.find("CALL_END:") == 0) {
+                    int cid = std::stoi(cmd.substr(9));
+                    std::cout << "🚦 CALL_END received for call_id " << cid << std::endl;
+                    end_call(cid);
                 }
             }
             close(csock);
         }
+        close(lsock);
+        unlink(path);
     }
 
     void activate_call(int cid) {
@@ -171,6 +197,30 @@ private:
             }
         }).detach();
         std::cout << "👂 Listening for TTS on port " << (8090 + cid) << std::endl;
+    }
+
+    void end_call(int cid) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        if (calls_.count(cid)) {
+            auto state = calls_[cid];
+            std::lock_guard<std::mutex> clock(state->mutex);
+            
+            state->connected = false;
+            
+            if (state->tcp_socket != -1) {
+                close(state->tcp_socket);
+                state->tcp_socket = -1;
+            }
+            if (state->listen_socket != -1) {
+                close(state->listen_socket);
+                state->listen_socket = -1;
+            }
+            
+            state->buffer.clear();
+            
+            calls_.erase(cid);
+            std::cout << "🧹 Stopped RTP scheduling and closed connections for call_id " << cid << std::endl;
+        }
     }
 
     std::shared_ptr<CallState> get_or_create_call(int cid) {
