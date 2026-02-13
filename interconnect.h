@@ -11,12 +11,16 @@
 #include <functional>
 #include <chrono>
 #include <set>
+#include <algorithm>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
+#include <cerrno>
 
 namespace whispertalk {
 
@@ -38,6 +42,30 @@ inline const char* service_type_to_string(ServiceType type) {
         case ServiceType::KOKORO_SERVICE: return "KOKORO_SERVICE";
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return "OUTBOUND_AUDIO_PROCESSOR";
         default: return "UNKNOWN";
+    }
+}
+
+inline ServiceType upstream_of(ServiceType type) {
+    switch (type) {
+        case ServiceType::INBOUND_AUDIO_PROCESSOR: return ServiceType::SIP_CLIENT;
+        case ServiceType::WHISPER_SERVICE: return ServiceType::INBOUND_AUDIO_PROCESSOR;
+        case ServiceType::LLAMA_SERVICE: return ServiceType::WHISPER_SERVICE;
+        case ServiceType::KOKORO_SERVICE: return ServiceType::LLAMA_SERVICE;
+        case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::KOKORO_SERVICE;
+        case ServiceType::SIP_CLIENT: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
+        default: return ServiceType::SIP_CLIENT;
+    }
+}
+
+inline ServiceType downstream_of(ServiceType type) {
+    switch (type) {
+        case ServiceType::SIP_CLIENT: return ServiceType::INBOUND_AUDIO_PROCESSOR;
+        case ServiceType::INBOUND_AUDIO_PROCESSOR: return ServiceType::WHISPER_SERVICE;
+        case ServiceType::WHISPER_SERVICE: return ServiceType::LLAMA_SERVICE;
+        case ServiceType::LLAMA_SERVICE: return ServiceType::KOKORO_SERVICE;
+        case ServiceType::KOKORO_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
+        case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::SIP_CLIENT;
+        default: return ServiceType::SIP_CLIENT;
     }
 }
 
@@ -140,7 +168,15 @@ public:
           running_(false),
           max_known_call_id_(0),
           neg_in_sock_(-1),
-          neg_out_sock_(-1) {}
+          neg_out_sock_(-1),
+          down_in_listen_sock_(-1),
+          down_out_listen_sock_(-1),
+          down_in_accepted_(-1),
+          down_out_accepted_(-1),
+          up_in_sock_(-1),
+          up_out_sock_(-1),
+          upstream_state_(ConnectionState::DISCONNECTED),
+          downstream_state_(ConnectionState::DISCONNECTED) {}
 
     ~InterconnectNode() {
         shutdown();
@@ -151,26 +187,152 @@ public:
             return false;
         }
 
+        if (!bind_traffic_listen_ports()) {
+            close_socket(neg_in_sock_);
+            close_socket(neg_out_sock_);
+            return false;
+        }
+
         running_ = true;
 
         neg_thread_ = std::thread(&InterconnectNode::negotiation_loop, this);
         heartbeat_thread_ = std::thread(&InterconnectNode::heartbeat_loop, this);
+        accept_thread_ = std::thread(&InterconnectNode::accept_loop, this);
+        reconnect_thread_ = std::thread(&InterconnectNode::reconnect_loop, this);
 
         return true;
     }
 
     void shutdown() {
-        running_ = false;
-        
-        if (neg_thread_.joinable()) neg_thread_.join();
-        if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
+        if (!running_.exchange(false)) return;
 
+        close_socket(up_in_sock_);
+        close_socket(up_out_sock_);
+        close_socket(down_in_accepted_);
+        close_socket(down_out_accepted_);
+        close_socket(down_in_listen_sock_);
+        close_socket(down_out_listen_sock_);
         close_socket(neg_in_sock_);
         close_socket(neg_out_sock_);
+
+        if (neg_thread_.joinable()) neg_thread_.join();
+        if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
+        if (accept_thread_.joinable()) accept_thread_.join();
+        if (reconnect_thread_.joinable()) reconnect_thread_.join();
     }
 
     bool is_master() const { return is_master_; }
     const PortConfig& ports() const { return ports_; }
+    ServiceType type() const { return type_; }
+
+    ConnectionState upstream_state() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return upstream_state_;
+    }
+
+    ConnectionState downstream_state() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return downstream_state_;
+    }
+
+    bool connect_to_downstream() {
+        PortConfig downstream_ports = query_downstream_ports();
+        if (!downstream_ports.is_valid()) {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            upstream_state_ = ConnectionState::CONNECTING;
+        }
+
+        int out_sock = connect_to_port_with_timeout("127.0.0.1", downstream_ports.down_in, 5000);
+        if (out_sock < 0) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            upstream_state_ = ConnectionState::FAILED;
+            return false;
+        }
+
+        int in_sock = connect_to_port_with_timeout("127.0.0.1", downstream_ports.down_out, 5000);
+        if (in_sock < 0) {
+            close(out_sock);
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            upstream_state_ = ConnectionState::FAILED;
+            return false;
+        }
+
+        setup_socket_options(out_sock);
+        setup_socket_options(in_sock);
+
+        {
+            std::lock_guard<std::mutex> lock(traffic_mutex_);
+            close_socket(up_out_sock_);
+            close_socket(up_in_sock_);
+            up_out_sock_ = out_sock;
+            up_in_sock_ = in_sock;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            upstream_state_ = ConnectionState::CONNECTED;
+        }
+
+        return true;
+    }
+
+    bool send_to_downstream(const Packet& pkt) {
+        std::lock_guard<std::mutex> lock(send_downstream_mutex_);
+        int sock;
+        {
+            std::lock_guard<std::mutex> tl(traffic_mutex_);
+            sock = up_out_sock_;
+        }
+        if (sock < 0) return false;
+
+        auto data = pkt.serialize();
+        if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
+            mark_upstream_failed();
+            return false;
+        }
+        return true;
+    }
+
+    bool send_to_upstream(const Packet& pkt) {
+        std::lock_guard<std::mutex> lock(send_upstream_mutex_);
+        int sock;
+        {
+            std::lock_guard<std::mutex> tl(traffic_mutex_);
+            sock = down_out_accepted_;
+        }
+        if (sock < 0) return false;
+
+        auto data = pkt.serialize();
+        if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
+            mark_downstream_failed();
+            return false;
+        }
+        return true;
+    }
+
+    bool recv_from_upstream(Packet& pkt, int timeout_ms = 100) {
+        int sock;
+        {
+            std::lock_guard<std::mutex> lock(traffic_mutex_);
+            sock = down_in_accepted_;
+        }
+        if (sock < 0) return false;
+        return recv_packet(sock, pkt, timeout_ms);
+    }
+
+    bool recv_from_downstream(Packet& pkt, int timeout_ms = 100) {
+        int sock;
+        {
+            std::lock_guard<std::mutex> lock(traffic_mutex_);
+            sock = up_in_sock_;
+        }
+        if (sock < 0) return false;
+        return recv_packet(sock, pkt, timeout_ms);
+    }
 
     uint32_t reserve_call_id(uint32_t proposed_id) {
         if (is_master_) {
@@ -190,7 +352,7 @@ public:
             }
 
             char buffer[64];
-            ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
+            ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
             close(sock);
 
             if (n <= 0) return 0;
@@ -217,21 +379,51 @@ public:
             active_call_ids_.erase(call_id);
         }
 
-        if (is_master_) {
-            std::string msg = "CALL_END " + std::to_string(call_id);
-            std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-            
-            for (const auto& [type, config] : service_registry_) {
-                int sock = connect_to_port("127.0.0.1", config.neg_in);
-                if (sock >= 0) {
-                    send_all(sock, msg.c_str(), msg.size());
-                    close(sock);
-                }
-            }
-        }
-
         if (call_end_handler_) {
             call_end_handler_(call_id);
+        }
+
+        if (is_master_) {
+            std::string msg = "CALL_END " + std::to_string(call_id);
+            std::vector<std::pair<ServiceType, uint16_t>> targets;
+
+            {
+                std::lock_guard<std::mutex> reg_lock(registry_mutex_);
+                for (const auto& [type, config] : service_registry_) {
+                    targets.push_back({type, config.neg_in});
+                }
+            }
+
+            std::set<ServiceType> acked;
+            std::mutex ack_mutex;
+
+            std::vector<std::thread> send_threads;
+            for (const auto& target : targets) {
+                ServiceType stype = target.first;
+                uint16_t port = target.second;
+                send_threads.emplace_back([&, stype, port]() {
+                    int sock = connect_to_port("127.0.0.1", port);
+                    if (sock < 0) return;
+                    if (send_all(sock, msg.c_str(), msg.size())) {
+                        char buf[64];
+                        ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, 5000);
+                        if (n > 0) {
+                            buf[n] = '\0';
+                            std::string resp(buf);
+                            std::string expected = "CALL_END_ACK " + std::to_string(call_id);
+                            if (resp == expected) {
+                                std::lock_guard<std::mutex> al(ack_mutex);
+                                acked.insert(stype);
+                            }
+                        }
+                    }
+                    close(sock);
+                });
+            }
+
+            for (auto& t : send_threads) {
+                if (t.joinable()) t.join();
+            }
         }
     }
 
@@ -250,8 +442,15 @@ public:
         return elapsed < std::chrono::seconds(5);
     }
 
-    ConnectionState upstream_state() const { return ConnectionState::DISCONNECTED; }
-    ConnectionState downstream_state() const { return ConnectionState::DISCONNECTED; }
+    PortConfig query_service_ports(ServiceType svc_type) const {
+        if (is_master_) {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            auto it = service_registry_.find(svc_type);
+            if (it != service_registry_.end()) return it->second;
+            return PortConfig();
+        }
+        return PortConfig();
+    }
 
 private:
     ServiceType type_;
@@ -266,14 +465,35 @@ private:
     int neg_in_sock_;
     int neg_out_sock_;
 
+    int down_in_listen_sock_;
+    int down_out_listen_sock_;
+    int down_in_accepted_;
+    int down_out_accepted_;
+
+    int up_in_sock_;
+    int up_out_sock_;
+
+    mutable std::mutex state_mutex_;
+    ConnectionState upstream_state_;
+    ConnectionState downstream_state_;
+
+    mutable std::mutex traffic_mutex_;
+    std::mutex send_downstream_mutex_;
+    std::mutex send_upstream_mutex_;
+
     std::thread neg_thread_;
     std::thread heartbeat_thread_;
+    std::thread accept_thread_;
+    std::thread reconnect_thread_;
 
     mutable std::mutex registry_mutex_;
     std::map<ServiceType, PortConfig> service_registry_;
     std::map<ServiceType, std::chrono::steady_clock::time_point> last_heartbeat_;
 
     std::function<void(uint32_t)> call_end_handler_;
+
+    PortConfig downstream_neighbor_ports_;
+    std::mutex downstream_neighbor_mutex_;
 
     bool scan_and_bind_ports() {
         const uint16_t BASE_NEG_IN = 22222;
@@ -285,10 +505,10 @@ private:
             uint16_t try_neg_in = BASE_NEG_IN + (attempt * INCREMENT);
             uint16_t try_neg_out = BASE_NEG_OUT + (attempt * INCREMENT);
 
-            int sock_in = create_bind_socket(try_neg_in);
+            int sock_in = create_listen_socket(try_neg_in);
             if (sock_in < 0) continue;
 
-            int sock_out = create_bind_socket(try_neg_out);
+            int sock_out = create_listen_socket(try_neg_out);
             if (sock_out < 0) {
                 close(sock_in);
                 continue;
@@ -315,6 +535,18 @@ private:
         return false;
     }
 
+    bool bind_traffic_listen_ports() {
+        down_in_listen_sock_ = create_listen_socket(ports_.down_in);
+        if (down_in_listen_sock_ < 0) return false;
+
+        down_out_listen_sock_ = create_listen_socket(ports_.down_out);
+        if (down_out_listen_sock_ < 0) {
+            close_socket(down_in_listen_sock_);
+            return false;
+        }
+        return true;
+    }
+
     bool register_with_master() {
         int sock = connect_to_port("127.0.0.1", 22222);
         if (sock < 0) return false;
@@ -328,16 +560,88 @@ private:
         }
 
         char buffer[64];
-        pollfd pfd;
-        pfd.fd = sock;
-        pfd.events = POLLIN;
+        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
+        close(sock);
 
-        if (poll(&pfd, 1, 1000) > 0) {
-            recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (n <= 0) return false;
+        buffer[n] = '\0';
+        return std::string(buffer) == "REGISTER_ACK";
+    }
+
+    PortConfig query_downstream_ports() {
+        ServiceType downstream = downstream_of(type_);
+
+        if (is_master_) {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            auto it = service_registry_.find(downstream);
+            if (it != service_registry_.end()) return it->second;
+            return PortConfig();
         }
 
+        int sock = connect_to_port("127.0.0.1", 22222);
+        if (sock < 0) return PortConfig();
+
+        std::string msg = "GET_DOWNSTREAM " + std::to_string(static_cast<int>(type_));
+        if (!send_all(sock, msg.c_str(), msg.size())) {
+            close(sock);
+            return PortConfig();
+        }
+
+        char buffer[128];
+        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
         close(sock);
-        return true;
+
+        if (n <= 0) return PortConfig();
+        buffer[n] = '\0';
+        std::string resp(buffer);
+
+        if (resp.substr(0, 6) == "PORTS ") {
+            return parse_ports_response(resp);
+        }
+
+        return PortConfig();
+    }
+
+    PortConfig query_upstream_ports() {
+        ServiceType upstream = upstream_of(type_);
+
+        if (is_master_) {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            auto it = service_registry_.find(upstream);
+            if (it != service_registry_.end()) return it->second;
+            return PortConfig();
+        }
+
+        int sock = connect_to_port("127.0.0.1", 22222);
+        if (sock < 0) return PortConfig();
+
+        std::string msg = "GET_UPSTREAM " + std::to_string(static_cast<int>(type_));
+        if (!send_all(sock, msg.c_str(), msg.size())) {
+            close(sock);
+            return PortConfig();
+        }
+
+        char buffer[128];
+        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
+        close(sock);
+
+        if (n <= 0) return PortConfig();
+        buffer[n] = '\0';
+        std::string resp(buffer);
+
+        if (resp.substr(0, 6) == "PORTS ") {
+            return parse_ports_response(resp);
+        }
+
+        return PortConfig();
+    }
+
+    PortConfig parse_ports_response(const std::string& resp) {
+        size_t sp1 = resp.find(' ', 6);
+        if (sp1 == std::string::npos) return PortConfig();
+        uint16_t ni = static_cast<uint16_t>(std::stoul(resp.substr(6, sp1 - 6)));
+        uint16_t no = static_cast<uint16_t>(std::stoul(resp.substr(sp1 + 1)));
+        return PortConfig(ni, no);
     }
 
     void negotiation_loop() {
@@ -362,7 +666,7 @@ private:
 
     void handle_negotiation_message(int sock) {
         char buffer[1024];
-        ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
         if (n <= 0) {
             close(sock);
             return;
@@ -378,8 +682,8 @@ private:
                 size_t sp2 = msg.find(' ', sp1 + 1);
                 
                 ServiceType svc_type = static_cast<ServiceType>(std::stoi(msg.substr(9, sp1 - 9)));
-                uint16_t neg_in = std::stoul(msg.substr(sp1 + 1, sp2 - sp1 - 1));
-                uint16_t neg_out = std::stoul(msg.substr(sp2 + 1));
+                uint16_t neg_in = static_cast<uint16_t>(std::stoul(msg.substr(sp1 + 1, sp2 - sp1 - 1)));
+                uint16_t neg_out = static_cast<uint16_t>(std::stoul(msg.substr(sp2 + 1)));
                 
                 std::lock_guard<std::mutex> lock(registry_mutex_);
                 service_registry_[svc_type] = PortConfig(neg_in, neg_out);
@@ -398,18 +702,54 @@ private:
                 last_heartbeat_[svc_type] = std::chrono::steady_clock::now();
                 response = "HEARTBEAT_ACK";
             }
-        } else {
+            else if (msg.substr(0, 15) == "GET_DOWNSTREAM ") {
+                ServiceType requester = static_cast<ServiceType>(std::stoi(msg.substr(15)));
+                ServiceType downstream = downstream_of(requester);
+                
+                std::lock_guard<std::mutex> lock(registry_mutex_);
+                auto it = service_registry_.find(downstream);
+                if (it != service_registry_.end()) {
+                    response = "PORTS " + std::to_string(it->second.neg_in) + " " + std::to_string(it->second.neg_out);
+                } else {
+                    response = "SERVICE_UNAVAILABLE";
+                }
+            }
+            else if (msg.substr(0, 13) == "GET_UPSTREAM ") {
+                ServiceType requester = static_cast<ServiceType>(std::stoi(msg.substr(13)));
+                ServiceType upstream = upstream_of(requester);
+
+                if (upstream == type_) {
+                    response = "PORTS " + std::to_string(ports_.neg_in) + " " + std::to_string(ports_.neg_out);
+                } else {
+                    std::lock_guard<std::mutex> lock(registry_mutex_);
+                    auto it = service_registry_.find(upstream);
+                    if (it != service_registry_.end()) {
+                        response = "PORTS " + std::to_string(it->second.neg_in) + " " + std::to_string(it->second.neg_out);
+                    } else {
+                        response = "SERVICE_UNAVAILABLE";
+                    }
+                }
+            }
+        }
+
+        if (!is_master_ || msg.substr(0, 9) == "CALL_END ") {
             if (msg.substr(0, 9) == "CALL_END ") {
                 uint32_t call_id = std::stoul(msg.substr(9));
                 
+                bool already_cleaned = false;
                 {
                     std::lock_guard<std::mutex> lock(call_id_mutex_);
+                    if (active_call_ids_.find(call_id) == active_call_ids_.end()) {
+                        already_cleaned = true;
+                    }
                     active_call_ids_.erase(call_id);
                 }
                 
-                if (call_end_handler_) {
+                if (!already_cleaned && call_end_handler_) {
                     call_end_handler_(call_id);
                 }
+
+                response = "CALL_END_ACK " + std::to_string(call_id);
             }
         }
 
@@ -420,37 +760,210 @@ private:
         close(sock);
     }
 
+    void accept_loop() {
+        while (running_) {
+            bool need_down_in = false;
+            bool need_down_out = false;
+            {
+                std::lock_guard<std::mutex> lock(traffic_mutex_);
+                need_down_in = (down_in_accepted_ < 0);
+                need_down_out = (down_out_accepted_ < 0);
+            }
+
+            if (need_down_in && down_in_listen_sock_ >= 0) {
+                pollfd pfd;
+                pfd.fd = down_in_listen_sock_;
+                pfd.events = POLLIN;
+                if (poll(&pfd, 1, 100) > 0) {
+                    sockaddr_in addr;
+                    socklen_t len = sizeof(addr);
+                    int accepted = accept(down_in_listen_sock_, (sockaddr*)&addr, &len);
+                    if (accepted >= 0) {
+                        setup_socket_options(accepted);
+                        std::lock_guard<std::mutex> lock(traffic_mutex_);
+                        if (down_in_accepted_ >= 0) {
+                            close(down_in_accepted_);
+                        }
+                        down_in_accepted_ = accepted;
+                        update_downstream_state_locked();
+                    }
+                }
+            }
+
+            if (need_down_out && down_out_listen_sock_ >= 0) {
+                pollfd pfd;
+                pfd.fd = down_out_listen_sock_;
+                pfd.events = POLLIN;
+                if (poll(&pfd, 1, 100) > 0) {
+                    sockaddr_in addr;
+                    socklen_t len = sizeof(addr);
+                    int accepted = accept(down_out_listen_sock_, (sockaddr*)&addr, &len);
+                    if (accepted >= 0) {
+                        setup_socket_options(accepted);
+                        std::lock_guard<std::mutex> lock(traffic_mutex_);
+                        if (down_out_accepted_ >= 0) {
+                            close(down_out_accepted_);
+                        }
+                        down_out_accepted_ = accepted;
+                        update_downstream_state_locked();
+                    }
+                }
+            }
+
+            if (!need_down_in && !need_down_out) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+        }
+    }
+
+    void update_downstream_state_locked() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (down_in_accepted_ >= 0 && down_out_accepted_ >= 0) {
+            downstream_state_ = ConnectionState::CONNECTED;
+        } else if (down_in_accepted_ >= 0 || down_out_accepted_ >= 0) {
+            downstream_state_ = ConnectionState::CONNECTING;
+        }
+    }
+
     void heartbeat_loop() {
         while (running_) {
             std::this_thread::sleep_for(std::chrono::seconds(2));
+            if (!running_) break;
             
             if (!is_master_) {
                 int sock = connect_to_port("127.0.0.1", 22222);
                 if (sock >= 0) {
                     std::string msg = "HEARTBEAT " + std::to_string(static_cast<int>(type_));
                     send_all(sock, msg.c_str(), msg.size());
-                    
                     char buffer[64];
-                    recv(sock, buffer, sizeof(buffer) - 1, 0);
+                    recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 1000);
                     close(sock);
                 }
             } else {
-                std::lock_guard<std::mutex> lock(registry_mutex_);
-                for (auto it = last_heartbeat_.begin(); it != last_heartbeat_.end(); ) {
-                    auto elapsed = std::chrono::steady_clock::now() - it->second;
-                    if (elapsed > std::chrono::seconds(5)) {
-                        ServiceType crashed_type = it->first;
-                        it = last_heartbeat_.erase(it);
-                        service_registry_.erase(crashed_type);
-                    } else {
-                        ++it;
+                std::vector<ServiceType> crashed;
+                {
+                    std::lock_guard<std::mutex> lock(registry_mutex_);
+                    for (auto it = last_heartbeat_.begin(); it != last_heartbeat_.end(); ) {
+                        auto elapsed = std::chrono::steady_clock::now() - it->second;
+                        if (elapsed > std::chrono::seconds(5)) {
+                            crashed.push_back(it->first);
+                            ServiceType crashed_type = it->first;
+                            it = last_heartbeat_.erase(it);
+                            service_registry_.erase(crashed_type);
+                        } else {
+                            ++it;
+                        }
                     }
+                }
+
+                for (ServiceType ct : crashed) {
+                    notify_neighbors_of_crash(ct);
+                }
+            }
+
+            check_traffic_connections();
+        }
+    }
+
+    void notify_neighbors_of_crash(ServiceType crashed_type) {
+        ServiceType up = upstream_of(crashed_type);
+        ServiceType down = downstream_of(crashed_type);
+
+        std::string msg = "SERVICE_CRASHED " + std::to_string(static_cast<int>(crashed_type));
+
+        auto send_crash_notification = [&](ServiceType target) {
+            uint16_t port = 0;
+            if (target == type_) {
+                if (call_end_handler_) {}
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(registry_mutex_);
+                auto it = service_registry_.find(target);
+                if (it != service_registry_.end()) {
+                    port = it->second.neg_in;
+                }
+            }
+            if (port > 0) {
+                int sock = connect_to_port("127.0.0.1", port);
+                if (sock >= 0) {
+                    send_all(sock, msg.c_str(), msg.size());
+                    close(sock);
+                }
+            }
+        };
+
+        send_crash_notification(up);
+        send_crash_notification(down);
+    }
+
+    void reconnect_loop() {
+        while (running_) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            if (!running_) break;
+
+            ConnectionState us;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                us = upstream_state_;
+            }
+
+            if (us == ConnectionState::DISCONNECTED || us == ConnectionState::FAILED) {
+                connect_to_downstream();
+            }
+        }
+    }
+
+    void check_traffic_connections() {
+        {
+            std::lock_guard<std::mutex> lock(traffic_mutex_);
+            if (up_out_sock_ >= 0) {
+                char probe;
+                int flags = fcntl(up_out_sock_, F_GETFL);
+                fcntl(up_out_sock_, F_SETFL, flags | O_NONBLOCK);
+                ssize_t r = recv(up_out_sock_, &probe, 1, MSG_PEEK);
+                fcntl(up_out_sock_, F_SETFL, flags);
+                if (r == 0) {
+                    close_socket(up_out_sock_);
+                    close_socket(up_in_sock_);
+                    std::lock_guard<std::mutex> sl(state_mutex_);
+                    upstream_state_ = ConnectionState::FAILED;
+                }
+            }
+
+            if (down_in_accepted_ >= 0) {
+                char probe;
+                int flags = fcntl(down_in_accepted_, F_GETFL);
+                fcntl(down_in_accepted_, F_SETFL, flags | O_NONBLOCK);
+                ssize_t r = recv(down_in_accepted_, &probe, 1, MSG_PEEK);
+                fcntl(down_in_accepted_, F_SETFL, flags);
+                if (r == 0) {
+                    close_socket(down_in_accepted_);
+                    close_socket(down_out_accepted_);
+                    std::lock_guard<std::mutex> sl(state_mutex_);
+                    downstream_state_ = ConnectionState::DISCONNECTED;
                 }
             }
         }
     }
 
-    int create_bind_socket(uint16_t port) {
+    void mark_upstream_failed() {
+        std::lock_guard<std::mutex> lock(traffic_mutex_);
+        close_socket(up_out_sock_);
+        close_socket(up_in_sock_);
+        std::lock_guard<std::mutex> sl(state_mutex_);
+        upstream_state_ = ConnectionState::FAILED;
+    }
+
+    void mark_downstream_failed() {
+        std::lock_guard<std::mutex> lock(traffic_mutex_);
+        close_socket(down_in_accepted_);
+        close_socket(down_out_accepted_);
+        std::lock_guard<std::mutex> sl(state_mutex_);
+        downstream_state_ = ConnectionState::DISCONNECTED;
+    }
+
+    int create_listen_socket(uint16_t port) {
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) return -1;
 
@@ -492,6 +1005,60 @@ private:
         return sock;
     }
 
+    int connect_to_port_with_timeout(const char* host, uint16_t port, int timeout_ms) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return -1;
+
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr(host);
+        addr.sin_port = htons(port);
+
+        int ret = connect(sock, (sockaddr*)&addr, sizeof(addr));
+        if (ret < 0 && errno != EINPROGRESS) {
+            close(sock);
+            return -1;
+        }
+
+        if (ret == 0) {
+            fcntl(sock, F_SETFL, flags);
+            return sock;
+        }
+
+        pollfd pfd;
+        pfd.fd = sock;
+        pfd.events = POLLOUT;
+        int poll_ret = poll(&pfd, 1, timeout_ms);
+
+        if (poll_ret <= 0) {
+            close(sock);
+            return -1;
+        }
+
+        int error = 0;
+        socklen_t errlen = sizeof(error);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &errlen);
+        if (error != 0) {
+            close(sock);
+            return -1;
+        }
+
+        fcntl(sock, F_SETFL, flags);
+        return sock;
+    }
+
+    void setup_socket_options(int sock) {
+#ifdef SO_NOSIGPIPE
+        int opt = 1;
+        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+#endif
+        int opt_tcp = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &opt_tcp, sizeof(opt_tcp));
+    }
+
     bool send_all(int sock, const void* data, size_t len) {
         const uint8_t* ptr = static_cast<const uint8_t*>(data);
         size_t sent = 0;
@@ -505,8 +1072,100 @@ private:
         return true;
     }
 
+    bool send_all_with_timeout(int sock, const void* data, size_t len, int timeout_ms) {
+        const uint8_t* ptr = static_cast<const uint8_t*>(data);
+        size_t sent = 0;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+        while (sent < len) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) return false;
+
+            pollfd pfd;
+            pfd.fd = sock;
+            pfd.events = POLLOUT;
+            int pr = poll(&pfd, 1, static_cast<int>(remaining));
+            if (pr <= 0) return false;
+            if (pfd.revents & (POLLERR | POLLHUP)) return false;
+
+            ssize_t n = send(sock, ptr + sent, len - sent, 0);
+            if (n <= 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                return false;
+            }
+            sent += n;
+        }
+        return true;
+    }
+
+    ssize_t recv_with_timeout(int sock, void* buf, size_t len, int timeout_ms) {
+        pollfd pfd;
+        pfd.fd = sock;
+        pfd.events = POLLIN;
+        int ret = poll(&pfd, 1, timeout_ms);
+        if (ret <= 0) return -1;
+        if (pfd.revents & (POLLERR | POLLHUP)) return -1;
+        return recv(sock, buf, len, 0);
+    }
+
+    bool recv_exact(int sock, void* buf, size_t len, int timeout_ms) {
+        uint8_t* ptr = static_cast<uint8_t*>(buf);
+        size_t received = 0;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+        while (received < len) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) return false;
+
+            pollfd pfd;
+            pfd.fd = sock;
+            pfd.events = POLLIN;
+            int pr = poll(&pfd, 1, static_cast<int>(remaining));
+            if (pr <= 0) return false;
+            if (pfd.revents & (POLLERR | POLLHUP)) return false;
+
+            ssize_t n = recv(sock, ptr + received, len - received, 0);
+            if (n <= 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                return false;
+            }
+            received += n;
+        }
+        return true;
+    }
+
+    bool recv_packet(int sock, Packet& pkt, int timeout_ms) {
+        uint8_t header[8];
+        if (!recv_exact(sock, header, 8, timeout_ms)) {
+            return false;
+        }
+
+        uint32_t net_call_id, net_size;
+        memcpy(&net_call_id, header, 4);
+        memcpy(&net_size, header + 4, 4);
+
+        pkt.call_id = ntohl(net_call_id);
+        pkt.payload_size = ntohl(net_size);
+
+        if (pkt.call_id == 0 || pkt.payload_size > Packet::MAX_PAYLOAD_SIZE) {
+            return false;
+        }
+
+        pkt.payload.resize(pkt.payload_size);
+        if (pkt.payload_size > 0) {
+            if (!recv_exact(sock, pkt.payload.data(), pkt.payload_size, 5000)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     void close_socket(int& sock) {
         if (sock >= 0) {
+            ::shutdown(sock, SHUT_RDWR);
             close(sock);
             sock = -1;
         }

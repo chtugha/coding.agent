@@ -68,6 +68,19 @@ TEST(PortConfigTest, PortCalculation) {
     EXPECT_TRUE(config.is_valid());
 }
 
+TEST(TopologyTest, UpstreamDownstreamMapping) {
+    EXPECT_EQ(downstream_of(ServiceType::SIP_CLIENT), ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_EQ(downstream_of(ServiceType::INBOUND_AUDIO_PROCESSOR), ServiceType::WHISPER_SERVICE);
+    EXPECT_EQ(downstream_of(ServiceType::WHISPER_SERVICE), ServiceType::LLAMA_SERVICE);
+    EXPECT_EQ(downstream_of(ServiceType::LLAMA_SERVICE), ServiceType::KOKORO_SERVICE);
+    EXPECT_EQ(downstream_of(ServiceType::KOKORO_SERVICE), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+    EXPECT_EQ(downstream_of(ServiceType::OUTBOUND_AUDIO_PROCESSOR), ServiceType::SIP_CLIENT);
+
+    EXPECT_EQ(upstream_of(ServiceType::INBOUND_AUDIO_PROCESSOR), ServiceType::SIP_CLIENT);
+    EXPECT_EQ(upstream_of(ServiceType::WHISPER_SERVICE), ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_EQ(upstream_of(ServiceType::SIP_CLIENT), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+}
+
 TEST(MasterElectionTest, FirstServiceIsMaster) {
     InterconnectNode node1(ServiceType::SIP_CLIENT);
     EXPECT_TRUE(node1.initialize());
@@ -146,9 +159,118 @@ TEST(PortScanningTest, NoConflictsAcrossSixServices) {
     EXPECT_EQ(nodes.size(), 6u);
     EXPECT_EQ(used_ports.size(), 36u);
     
-    for (auto& node : nodes) {
-        node->shutdown();
+    for (auto it = nodes.rbegin(); it != nodes.rend(); ++it) {
+        (*it)->shutdown();
     }
+}
+
+TEST(TrafficConnectionTest, TwoServicesEstablishConnection) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(upstream.initialize());
+    EXPECT_TRUE(upstream.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(upstream.connect_to_downstream());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    EXPECT_EQ(upstream.upstream_state(), ConnectionState::CONNECTED);
+    EXPECT_EQ(downstream.downstream_state(), ConnectionState::CONNECTED);
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(TrafficConnectionTest, SendAndReceivePackets) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(upstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const char* test_data = "Hello from upstream";
+    Packet send_pkt(1, test_data, strlen(test_data));
+    EXPECT_TRUE(upstream.send_to_downstream(send_pkt));
+
+    Packet recv_pkt;
+    EXPECT_TRUE(downstream.recv_from_upstream(recv_pkt, 2000));
+    EXPECT_EQ(recv_pkt.call_id, 1u);
+    EXPECT_EQ(recv_pkt.payload_size, strlen(test_data));
+    EXPECT_EQ(std::string(recv_pkt.payload.begin(), recv_pkt.payload.end()), std::string(test_data));
+
+    const char* reply = "Ack from downstream";
+    Packet reply_pkt(1, reply, strlen(reply));
+    EXPECT_TRUE(downstream.send_to_upstream(reply_pkt));
+
+    Packet recv_reply;
+    EXPECT_TRUE(upstream.recv_from_downstream(recv_reply, 2000));
+    EXPECT_EQ(recv_reply.call_id, 1u);
+    EXPECT_EQ(std::string(recv_reply.payload.begin(), recv_reply.payload.end()), std::string(reply));
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(TrafficConnectionTest, Send1000PacketsFullDelivery) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(upstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const int NUM_PACKETS = 1000;
+    std::atomic<int> received_count(0);
+    std::atomic<bool> all_correct(true);
+
+    std::thread receiver([&]() {
+        for (int i = 0; i < NUM_PACKETS; ++i) {
+            Packet pkt;
+            if (downstream.recv_from_upstream(pkt, 5000)) {
+                uint32_t expected_id = i + 1;
+                if (pkt.call_id != expected_id) {
+                    all_correct = false;
+                }
+                received_count++;
+            } else {
+                all_correct = false;
+                break;
+            }
+        }
+    });
+
+    for (int i = 0; i < NUM_PACKETS; ++i) {
+        std::string data = "packet_" + std::to_string(i);
+        Packet pkt(i + 1, data.c_str(), data.size());
+        EXPECT_TRUE(upstream.send_to_downstream(pkt));
+    }
+
+    receiver.join();
+
+    EXPECT_EQ(received_count.load(), NUM_PACKETS);
+    EXPECT_TRUE(all_correct.load());
+
+    downstream.shutdown();
+    upstream.shutdown();
 }
 
 TEST(CallIDReservationTest, AtomicReservationNoCollisions) {
@@ -184,7 +306,7 @@ TEST(CallIDReservationTest, AtomicReservationNoCollisions) {
     }
     
     std::set<uint32_t> unique_ids(reserved_ids.begin(), reserved_ids.end());
-    EXPECT_EQ(unique_ids.size(), NUM_THREADS);
+    EXPECT_EQ(unique_ids.size(), static_cast<size_t>(NUM_THREADS));
     
     for (auto id : reserved_ids) {
         EXPECT_GT(id, 0u);
@@ -259,7 +381,7 @@ TEST(HeartbeatTest, TimeoutDetectionWithinFiveSeconds) {
     master.shutdown();
 }
 
-TEST(CallEndTest, BroadcastAndCleanup) {
+TEST(CallEndTest, BroadcastWithAck) {
     InterconnectNode master(ServiceType::SIP_CLIENT);
     EXPECT_TRUE(master.initialize());
     
@@ -300,6 +422,35 @@ TEST(CallEndTest, BroadcastAndCleanup) {
     master.shutdown();
 }
 
+TEST(CallEndTest, DuplicateCallEndIdempotent) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(slave.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    std::atomic<int> handler_count(0);
+    slave.register_call_end_handler([&](uint32_t) {
+        handler_count++;
+    });
+
+    uint32_t cid = master.reserve_call_id(1);
+    master.broadcast_call_end(cid);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    
+    master.broadcast_call_end(cid);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    EXPECT_EQ(handler_count.load(), 1);
+
+    slave.shutdown();
+    master.shutdown();
+}
+
 TEST(ServiceTypeTest, EnumToString) {
     EXPECT_STREQ(service_type_to_string(ServiceType::SIP_CLIENT), "SIP_CLIENT");
     EXPECT_STREQ(service_type_to_string(ServiceType::INBOUND_AUDIO_PROCESSOR), "INBOUND_AUDIO_PROCESSOR");
@@ -309,21 +460,158 @@ TEST(ServiceTypeTest, EnumToString) {
     EXPECT_STREQ(service_type_to_string(ServiceType::OUTBOUND_AUDIO_PROCESSOR), "OUTBOUND_AUDIO_PROCESSOR");
 }
 
-TEST(ReconnectionTest, DownstreamStateTracking) {
+TEST(ServiceDiscoveryTest, GetDownstreamPorts) {
     InterconnectNode master(ServiceType::SIP_CLIENT);
     EXPECT_TRUE(master.initialize());
-    
+
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
+
     InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
     EXPECT_TRUE(slave.initialize());
-    
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    
-    EXPECT_EQ(slave.downstream_state(), ConnectionState::DISCONNECTED);
-    
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    PortConfig downstream = master.query_service_ports(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream.is_valid());
+    EXPECT_EQ(downstream.neg_in, slave.ports().neg_in);
+    EXPECT_EQ(downstream.neg_out, slave.ports().neg_out);
+
     slave.shutdown();
     master.shutdown();
+}
+
+TEST(ConnectionStateTest, InitialStateDisconnected) {
+    InterconnectNode node(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(node.initialize());
+
+    EXPECT_EQ(node.upstream_state(), ConnectionState::DISCONNECTED);
+    EXPECT_EQ(node.downstream_state(), ConnectionState::DISCONNECTED);
+
+    node.shutdown();
+}
+
+TEST(ConnectionStateTest, StateTransitionsOnConnect) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(upstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_EQ(upstream.upstream_state(), ConnectionState::DISCONNECTED);
+    
+    EXPECT_TRUE(upstream.connect_to_downstream());
+    EXPECT_EQ(upstream.upstream_state(), ConnectionState::CONNECTED);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(downstream.downstream_state(), ConnectionState::CONNECTED);
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(ReconnectionTest, UpstreamReconnectsAfterDownstreamRestart) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(upstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    {
+        InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+        EXPECT_TRUE(downstream.initialize());
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        EXPECT_TRUE(upstream.connect_to_downstream());
+        EXPECT_EQ(upstream.upstream_state(), ConnectionState::CONNECTED);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    InterconnectNode downstream2(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream2.initialize());
+
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+
+    EXPECT_EQ(upstream.upstream_state(), ConnectionState::CONNECTED);
+
+    const char* data = "reconnected";
+    Packet pkt(1, data, strlen(data));
+    EXPECT_TRUE(upstream.send_to_downstream(pkt));
+
+    Packet recv_pkt;
+    EXPECT_TRUE(downstream2.recv_from_upstream(recv_pkt, 2000));
+    EXPECT_EQ(recv_pkt.call_id, 1u);
+
+    downstream2.shutdown();
+    upstream.shutdown();
+}
+
+TEST(TrafficConnectionTest, BidirectionalSimultaneous) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(upstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const int COUNT = 100;
+    std::atomic<int> up_recv_count(0);
+    std::atomic<int> down_recv_count(0);
+
+    std::thread sender_up([&]() {
+        for (int i = 0; i < COUNT; ++i) {
+            std::string d = "up" + std::to_string(i);
+            Packet p(i + 1, d.c_str(), d.size());
+            upstream.send_to_downstream(p);
+        }
+    });
+
+    std::thread sender_down([&]() {
+        for (int i = 0; i < COUNT; ++i) {
+            std::string d = "down" + std::to_string(i);
+            Packet p(i + 1, d.c_str(), d.size());
+            downstream.send_to_upstream(p);
+        }
+    });
+
+    std::thread receiver_down([&]() {
+        for (int i = 0; i < COUNT; ++i) {
+            Packet p;
+            if (downstream.recv_from_upstream(p, 5000)) {
+                down_recv_count++;
+            }
+        }
+    });
+
+    std::thread receiver_up([&]() {
+        for (int i = 0; i < COUNT; ++i) {
+            Packet p;
+            if (upstream.recv_from_downstream(p, 5000)) {
+                up_recv_count++;
+            }
+        }
+    });
+
+    sender_up.join();
+    sender_down.join();
+    receiver_down.join();
+    receiver_up.join();
+
+    EXPECT_EQ(down_recv_count.load(), COUNT);
+    EXPECT_EQ(up_recv_count.load(), COUNT);
+
+    downstream.shutdown();
+    upstream.shutdown();
 }
 
 int main(int argc, char** argv) {
