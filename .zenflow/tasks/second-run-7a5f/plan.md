@@ -62,7 +62,7 @@ Save to `{@artifacts_path}/plan.md`.
 #### [ ] Step: Clone and build llama-cpp dependency
 - Clone llama.cpp repository into `llama-cpp/` directory
 - Pin to a stable release tag
-- Build with Metal/MPS support: `cmake -B build -DBUILD_SHARED_LIBS=OFF -DLLAMA_METAL=ON`
+- Build with Metal/MPS support: `cmake -B build -DBUILD_SHARED_LIBS=OFF -DLLAMA_METAL=ON -DCMAKE_BUILD_TYPE=Release`
 - Verify `llama-cpp/build/bin/libllama.dylib` is created
 - Verify `llama-cpp/include/llama.h` and `llama-cpp/ggml/include/ggml.h` exist
 - **Verification**: `ls llama-cpp/build/bin/libllama.dylib` succeeds, `make -j4` in build dir completes without errors
@@ -87,7 +87,7 @@ Save to `{@artifacts_path}/plan.md`.
 - Implement `ServiceType` enum for all 6 services
 - Implement `Packet` struct with serialization/deserialization (call_id, size, payload) using network byte order
 - Add packet validation (payload_size <= 1MB, call_id != 0)
-- **Verification**: `g++ -std=c++17 -fsyntax-only interconnect.h` compiles without errors
+- **Verification**: Create `tests/test_interconnect_compile.cpp` that includes `interconnect.h` and instantiates `InterconnectNode`; compile with `g++ -std=c++17 -c tests/test_interconnect_compile.cpp -I.`
 
 #### [ ] Step: Implement master/slave port discovery
 - Implement `scan_and_bind_ports()` in `InterconnectNode`
@@ -165,7 +165,8 @@ Save to `{@artifacts_path}/plan.md`.
 - Remove hard-coded port definitions
 - Include `interconnect.h`, initialize `InterconnectNode` with `ServiceType::SIP_CLIENT`
 - Replace UDP send with `send_to_downstream()` (sends RTP to IAP)
-- Replace UDP recv with `recv_from_downstream()` (receives G.711 from OAP)
+- Replace UDP recv with `recv_from_upstream()` (receives G.711 from OAP — SIP is downstream to OAP in the circular topology)
+- Note: SIP has dual role — upstream to IAP (sends via `send_to_downstream()`), downstream to OAP (receives via `recv_from_upstream()`)
 - Keep external SIP/RTP UDP (network-facing) unchanged
 - Add crash resilience: continue SIP signaling if IAP/OAP disconnected
 - **Verification**: `make -j4` compiles successfully, no legacy IPC code in sip-client-main.cpp
