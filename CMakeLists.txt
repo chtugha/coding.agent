@@ -92,6 +92,11 @@ install(TARGETS sip-client inbound-audio-processor outbound-audio-processor whis
 if(BUILD_TESTS)
     add_executable(test_sanity tests/test_sanity.cpp)
     target_link_libraries(test_sanity PRIVATE GTest::gtest_main Threads::Threads)
+    
+    add_executable(test_interconnect tests/test_interconnect.cpp)
+    target_link_libraries(test_interconnect PRIVATE GTest::gtest_main Threads::Threads)
+    
     include(GoogleTest)
     gtest_discover_tests(test_sanity)
+    gtest_discover_tests(test_interconnect)
 endif()

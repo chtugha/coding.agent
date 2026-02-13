@@ -76,9 +76,10 @@ Save to `{@artifacts_path}/plan.md`.
 
 ---
 
-### [ ] Phase 1: Interconnection System Foundation
+### [x] Phase 1: Interconnection System Foundation
+<!-- chat-id: cb6e068d-412e-461d-9d1a-f6debc9a48bf -->
 
-#### [ ] Step: Design and implement core interconnect.h header
+#### [x] Step: Design and implement core interconnect.h header
 - Create `interconnect.h` (root directory) with namespace `whispertalk`
 - Implement `PortConfig` struct with 6 port types:
   - `down_in = neg_in + 1` (listen: upstream neighbor connects here to send data TO us)
@@ -90,7 +91,7 @@ Save to `{@artifacts_path}/plan.md`.
 - Add packet validation (payload_size <= 1MB, call_id != 0)
 - **Verification**: Create `tests/test_interconnect_compile.cpp` that includes `interconnect.h` and tests basic structs (`PortConfig`, `Packet` serialization round-trip, `ServiceType` enum); compile with `g++ -std=c++17 -c tests/test_interconnect_compile.cpp -I.`
 
-#### [ ] Step: Implement master/slave port discovery
+#### [x] Step: Implement master/slave port discovery
 - Implement `scan_and_bind_ports()` in `InterconnectNode`
 - Add port scanning algorithm (start at 22222/33333, increment by 3, max 100 increments)
 - Rely on OS-level atomic `bind()` for race condition safety (EADDRINUSE -> next pair)
@@ -100,7 +101,7 @@ Save to `{@artifacts_path}/plan.md`.
 - After binding negotiation ports, immediately bind 4 traffic ports (neg_in+1, neg_in+2 for listening)
 - **Verification**: Unit test with 6 mock services starting simultaneously, verify no port conflicts
 
-#### [ ] Step: Implement traffic connection establishment
+#### [x] Step: Implement traffic connection establishment
 - Implement `accept_from_upstream()` — bind and listen on down_in, down_out (upstream neighbor connects here)
 - Implement `connect_to_downstream()` — connect up_out to downstream's down_in, connect up_in to downstream's down_out
 - Add connection state machine (DISCONNECTED -> CONNECTING -> CONNECTED -> FAILED -> DISCONNECTED via reconnect)
@@ -108,7 +109,7 @@ Save to `{@artifacts_path}/plan.md`.
 - Implement socket setup (SO_NOSIGPIPE, non-blocking mode, 5s connect timeout)
 - **Verification**: Two services establish bidirectional monodirectional TCP connections
 
-#### [ ] Step: Implement send/recv operations
+#### [x] Step: Implement send/recv operations
 - Implement `send_to_downstream()` with `send_downstream_mutex_` protection (sends on up_out connected socket)
 - Implement `send_to_upstream()` with `send_upstream_mutex_` protection (sends on down_out accepted socket)
 - Implement `recv_from_downstream()` with poll/timeout (recvs on up_in connected socket)
@@ -117,7 +118,7 @@ Save to `{@artifacts_path}/plan.md`.
 - Add partial packet buffering for incomplete reads (up to 5s timeout for remainder)
 - **Verification**: Send 1000 packets between two services, verify 100% delivery
 
-#### [ ] Step: Implement heartbeat and crash detection
+#### [x] Step: Implement heartbeat and crash detection
 - Implement `heartbeat_loop()` thread (started by `start_heartbeat()`)
 - Add heartbeat send every 2s (`HEARTBEAT <type> <call_count> <state>`)
 - Add master heartbeat ACK to slaves (`HEARTBEAT_ACK`)
@@ -126,7 +127,7 @@ Save to `{@artifacts_path}/plan.md`.
 - Add `is_service_alive()` query and `upstream_state()`/`downstream_state()` getters
 - **Verification**: Kill slave, verify master detects within 5s and notifies neighbors
 
-#### [ ] Step: Implement call lifecycle management
+#### [x] Step: Implement call lifecycle management
 - Implement `reserve_call_id()` with atomic reservation via `call_id_mutex_`
 - Add `RESERVE_CALL_ID <proposed_id>` / `CALL_ID_RESERVED <final_id>` protocol (SIP -> IAP via negotiation port)
 - IAP atomically: if proposed > max_known, reserve it; else reserve max_known+1
@@ -137,7 +138,7 @@ Save to `{@artifacts_path}/plan.md`.
 - Add call_id tracking set and max_known_call_id
 - **Verification**: Concurrent call_id reservations from 10 threads, no collisions
 
-#### [ ] Step: Implement reconnection logic
+#### [x] Step: Implement reconnection logic
 - Implement `reconnect_loop()` thread (retries every 2s)
 - On connection failure: mark state FAILED, query master for neighbor status via `GET_UPSTREAM`/`GET_DOWNSTREAM`
 - Master returns `SERVICE_UNAVAILABLE` if neighbor not registered or heartbeat missing
@@ -145,7 +146,7 @@ Save to `{@artifacts_path}/plan.md`.
 - State transitions: FAILED -> DISCONNECTED -> CONNECTING -> CONNECTED
 - **Verification**: Kill upstream service, verify downstream reconnects within 5s of upstream restart
 
-#### [ ] Step: Create interconnect unit tests
+#### [x] Step: Create interconnect unit tests
 - Create `tests/test_interconnect.cpp` using Google Test
 - Add test: Master election with 6 services starting simultaneously
 - Add test: Port scanning — no conflicts across 6 services
@@ -455,10 +456,10 @@ Save to `{@artifacts_path}/plan.md`.
 - [x] Google Test framework compiles and runs minimal test
 
 ### Phase 1 Tests
-- [ ] Interconnect unit tests pass
-- [ ] Master election works with 6 services
-- [ ] Heartbeat detects crash within 5s
-- [ ] Call_id reservation prevents collisions
+- [x] Interconnect unit tests pass (14/14 tests passed)
+- [x] Master election works with 6 services
+- [x] Heartbeat detects crash within 5s
+- [x] Call_id reservation prevents collisions
 
 ### Phase 2 Tests
 - [ ] End-to-end pipeline with interconnect works
