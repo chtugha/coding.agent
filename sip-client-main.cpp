@@ -1,4 +1,4 @@
-// SIP Client Module (Consolidated & Simplified)
+// SIP Client Module (Interconnect-based)
 #include <iostream>
 #include <vector>
 #include <string>
@@ -13,9 +13,9 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/un.h>
 #include <sstream>
 #include <iomanip>
+#include "interconnect.h"
 
 struct CallSession {
     int id;
@@ -37,7 +37,7 @@ struct CallSession {
 
 class SipClient {
 public:
-    SipClient() : running_(true), next_id_(1) {
+    SipClient() : running_(true), next_id_(1), interconnect_(whispertalk::ServiceType::SIP_CLIENT) {
         srand(time(NULL));
     }
 
@@ -56,13 +56,20 @@ public:
         local_port_ = ntohs(addr.sin_port);
         local_ip_ = "127.0.0.1";
 
-        inbound_udp_ = socket(AF_INET, SOCK_DGRAM, 0);
-        outbound_udp_ = socket(AF_INET, SOCK_DGRAM, 0);
-        struct sockaddr_in out_addr{};
-        out_addr.sin_family = AF_INET;
-        out_addr.sin_port = htons(9002);
-        out_addr.sin_addr.s_addr = INADDR_ANY;
-        bind(outbound_udp_, (struct sockaddr*)&out_addr, sizeof(out_addr));
+        if (!interconnect_.initialize()) {
+            std::cerr << "Failed to initialize interconnect" << std::endl;
+            return false;
+        }
+
+        std::cout << "🔗 Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
+
+        if (!interconnect_.connect_to_downstream()) {
+            std::cout << "⚠️  Downstream (IAP) not available yet - will auto-reconnect" << std::endl;
+        }
+
+        interconnect_.register_call_end_handler([this](uint32_t call_id) {
+            this->handle_call_end(call_id);
+        });
 
         return true;
     }
@@ -77,6 +84,7 @@ public:
         }
         sip_thread.join();
         out_thread.join();
+        interconnect_.shutdown();
     }
 
 private:
@@ -110,7 +118,17 @@ private:
         int cseq = 0;
         if (!cseq_str.empty()) cseq = std::stoi(cseq_str.substr(0, cseq_str.find(' ')));
 
-        int cid = next_id_++;
+        uint32_t proposed_id = next_id_++;
+        uint32_t cid = interconnect_.reserve_call_id(proposed_id);
+        if (cid == 0) {
+            std::cerr << "❌ Failed to reserve call_id, rejecting call" << std::endl;
+            std::string resp = "SIP/2.0 503 Service Unavailable\r\nCall-ID: " + scid + "\r\n\r\n";
+            sendto(sip_sock_, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
+            return;
+        }
+        if (cid >= static_cast<uint32_t>(next_id_)) {
+            next_id_ = cid + 1;
+        }
         auto session = std::make_shared<CallSession>(cid, scid);
         
         size_t m_pos = msg.find("m=audio ");
@@ -157,11 +175,34 @@ private:
         if (p == std::string::npos) return;
         size_t e = msg.find("\r\n", p);
         std::string scid = msg.substr(p + 9, e - p - 9);
+        int call_id = 0;
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            if (calls_.count(scid)) {
+                call_id = calls_[scid]->id;
+                calls_[scid]->active = false;
+                std::string resp = "SIP/2.0 200 OK\r\nCall-ID: " + scid + "\r\n\r\n";
+                sendto(sip_sock_, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
+            }
+        }
+        if (call_id > 0) {
+            interconnect_.broadcast_call_end(call_id);
+        }
+    }
+
+    void handle_call_end(uint32_t call_id) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(scid)) {
-            calls_[scid]->active = false;
-            std::string resp = "SIP/2.0 200 OK\r\nCall-ID: " + scid + "\r\n\r\n";
-            sendto(sip_sock_, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
+        for (auto it = calls_.begin(); it != calls_.end(); ++it) {
+            if (it->second->id == static_cast<int>(call_id)) {
+                std::cout << "🛑 Call " << call_id << " ended, cleaning up" << std::endl;
+                it->second->active = false;
+                if (it->second->rtp_thread.joinable()) {
+                    it->second->rtp_thread.detach();
+                }
+                id_to_call_.erase(call_id);
+                calls_.erase(it);
+                break;
+            }
         }
     }
 
@@ -169,36 +210,39 @@ private:
         char buf[2048];
         struct sockaddr_in sender{};
         socklen_t slen = sizeof(sender);
-        struct sockaddr_in inbound_addr{};
-        inbound_addr.sin_family = AF_INET;
-        inbound_addr.sin_port = htons(9001);
-        inbound_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
         while (session->active && running_) {
             struct timeval tv{1, 0};
             setsockopt(session->rtp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             ssize_t n = recvfrom(session->rtp_sock, buf, sizeof(buf), 0, (struct sockaddr*)&sender, &slen);
             if (n < 12) continue;
-            uint8_t pkt[2048];
-            uint32_t cid_net = htonl(session->id);
-            memcpy(pkt, &cid_net, 4);
-            memcpy(pkt + 4, buf, n);
-            sendto(inbound_udp_, pkt, n + 4, 0, (struct sockaddr*)&inbound_addr, sizeof(inbound_addr));
+            
+            whispertalk::Packet pkt(session->id, buf, n);
+            if (!interconnect_.send_to_downstream(pkt)) {
+                if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
+                    std::cout << "⚠️  [" << session->id << "] IAP disconnected, buffering/dropping RTP" << std::endl;
+                }
+            }
         }
         close(session->rtp_sock);
     }
 
     void outbound_audio_loop() {
-        uint8_t buf[2048];
         while (running_) {
-            ssize_t n = recv(outbound_udp_, buf, sizeof(buf), 0);
-            if (n < 164) continue;
-            uint32_t cid_net; memcpy(&cid_net, buf, 4);
-            int cid = ntohl(cid_net);
+            whispertalk::Packet pkt;
+            if (!interconnect_.recv_from_upstream(pkt, 100)) {
+                continue;
+            }
+            
+            if (!pkt.is_valid() || pkt.payload_size != 160) {
+                continue;
+            }
+            
             std::shared_ptr<CallSession> session;
             {
                 std::lock_guard<std::mutex> lock(calls_mutex_);
-                if (id_to_call_.count(cid)) session = id_to_call_[cid];
+                if (id_to_call_.count(pkt.call_id)) session = id_to_call_[pkt.call_id];
             }
+            
             if (session && session->active) {
                 uint8_t rtp[12 + 160];
                 rtp[0] = 0x80; rtp[1] = 0x00;
@@ -208,7 +252,7 @@ private:
                 memcpy(rtp + 4, &ts, 4);
                 uint32_t ssrc = htonl(session->ssrc);
                 memcpy(rtp + 8, &ssrc, 4);
-                memcpy(rtp + 12, buf + 4, 160);
+                memcpy(rtp + 12, pkt.payload.data(), 160);
                 struct sockaddr_in dest{};
                 dest.sin_family = AF_INET;
                 dest.sin_port = htons(session->remote_port);
@@ -231,11 +275,12 @@ private:
     }
 
     std::atomic<bool> running_;
-    int sip_sock_, local_port_, server_port_, inbound_udp_, outbound_udp_, next_id_;
+    int sip_sock_, local_port_, server_port_, next_id_;
     std::string user_, server_, local_ip_;
     std::mutex calls_mutex_;
     std::map<std::string, std::shared_ptr<CallSession>> calls_;
     std::map<int, std::shared_ptr<CallSession>> id_to_call_;
+    whispertalk::InterconnectNode interconnect_;
 };
 
 int main(int argc, char** argv) {

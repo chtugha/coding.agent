@@ -1,4 +1,4 @@
-// Inbound Audio Processor (Consolidated)
+// Inbound Audio Processor (Interconnect-based)
 #include <iostream>
 #include <vector>
 #include <string>
@@ -8,41 +8,55 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <sys/un.h>
-#include <fcntl.h>
+#include "interconnect.h"
 
 struct CallState {
     int id;
-    int tcp_socket = -1;
-    std::atomic<bool> connected{false};
-    std::mutex mutex;
     std::chrono::steady_clock::time_point last_activity;
-    std::chrono::steady_clock::time_point last_reconnect_attempt;
+    std::vector<float> buffer;
+    std::mutex mutex;
 };
 
 class InboundAudioProcessor {
 public:
-    InboundAudioProcessor() : running_(true) {
+    InboundAudioProcessor() : running_(true), interconnect_(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR) {
         init_g711_tables();
     }
 
+    bool init() {
+        if (!interconnect_.initialize()) {
+            std::cerr << "Failed to initialize interconnect" << std::endl;
+            return false;
+        }
+
+        std::cout << "🔗 Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
+
+        if (!interconnect_.connect_to_downstream()) {
+            std::cout << "⚠️  Downstream (Whisper) not available yet - will auto-reconnect" << std::endl;
+        }
+
+        interconnect_.register_call_end_handler([this](uint32_t call_id) {
+            this->handle_call_end(call_id);
+        });
+
+        return true;
+    }
+
     void run() {
-        std::thread udp_thread(&InboundAudioProcessor::udp_receiver_loop, this);
+        std::thread processor_thread(&InboundAudioProcessor::processing_loop, this);
+        
         while (running_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             cleanup_inactive_calls();
         }
-        udp_thread.join();
+        
+        processor_thread.join();
+        interconnect_.shutdown();
     }
 
 private:
     void init_g711_tables() {
         for (int i = 0; i < 256; ++i) {
-            // μ-law decode (simplified)
             int mu = ~i;
             int sign = (mu & 0x80);
             int exponent = (mu & 0x70) >> 4;
@@ -53,31 +67,25 @@ private:
         }
     }
 
-    void udp_receiver_loop() {
-        int sock = socket(AF_INET, SOCK_DGRAM, 0);
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(9001);
-        addr.sin_addr.s_addr = INADDR_ANY;
-        bind(sock, (struct sockaddr*)&addr, sizeof(addr));
-
-        uint8_t buf[2048];
+    void processing_loop() {
         while (running_) {
-            struct sockaddr_in sender{};
-            socklen_t slen = sizeof(sender);
-            ssize_t n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&sender, &slen);
-            if (n < 16) continue;
+            whispertalk::Packet pkt;
+            if (!interconnect_.recv_from_upstream(pkt, 100)) {
+                continue;
+            }
 
-            uint32_t cid_net; memcpy(&cid_net, buf, 4);
-            int cid = ntohl(cid_net);
-            
-            auto state = get_or_create_call(cid);
+            if (!pkt.is_valid() || pkt.payload_size < 12) {
+                continue;
+            }
+
+            auto state = get_or_create_call(pkt.call_id);
             state->last_activity = std::chrono::steady_clock::now();
 
-            // Decode and Upsample (8kHz PCMU -> 16kHz float32)
-            size_t payload_len = n - 16;
+            size_t rtp_header_size = 12;
+            size_t payload_len = pkt.payload_size - rtp_header_size;
+            const uint8_t* rtp_payload = pkt.payload.data() + rtp_header_size;
+
             std::vector<float> pcm(payload_len * 2);
-            const uint8_t* rtp_payload = buf + 16;
             for (size_t i = 0; i < payload_len; ++i) {
                 float s = ulaw_table[rtp_payload[i]];
                 pcm[i*2] = s;
@@ -85,47 +93,47 @@ private:
                 pcm[i*2 + 1] = 0.5f * (s + next);
             }
 
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (state->connected) {
-                if (send(state->tcp_socket, pcm.data(), pcm.size() * 4, MSG_NOSIGNAL) < 0) {
-                    state->connected = false;
-                    close(state->tcp_socket);
-                    state->tcp_socket = -1;
-                    std::cout << "💔 Whisper disconnected for call " << cid << ", dumping stream." << std::endl;
-                }
-            } else {
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::seconds>(now - state->last_reconnect_attempt).count() > 2) {
-                    state->last_reconnect_attempt = now;
-                    int sock = socket(AF_INET, SOCK_STREAM, 0);
-                    struct sockaddr_in addr{};
-                    addr.sin_family = AF_INET;
-                    addr.sin_port = htons(13000 + cid);
-                    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-                    
-                    struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 100000; // 100ms
-                    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->buffer.insert(state->buffer.end(), pcm.begin(), pcm.end());
+            }
 
-                    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-                        state->tcp_socket = sock;
-                        state->connected = true;
-                        std::cout << "🔗 Whisper connected for call " << cid << std::endl;
-                        send(sock, pcm.data(), pcm.size() * 4, MSG_NOSIGNAL);
-                    } else {
-                        close(sock);
+            if (state->buffer.size() >= 1600) {
+                std::vector<float> chunk;
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    size_t chunk_size = std::min(state->buffer.size(), size_t(16000));
+                    chunk.assign(state->buffer.begin(), state->buffer.begin() + chunk_size);
+                    state->buffer.erase(state->buffer.begin(), state->buffer.begin() + chunk_size);
+                }
+
+                whispertalk::Packet out_pkt(pkt.call_id, chunk.data(), chunk.size() * sizeof(float));
+                if (!interconnect_.send_to_downstream(out_pkt)) {
+                    if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
+                        std::cout << "⚠️  [" << pkt.call_id << "] Whisper disconnected, dumping stream to /dev/null" << std::endl;
                     }
                 }
             }
         }
     }
 
-    std::shared_ptr<CallState> get_or_create_call(int cid) {
+    std::shared_ptr<CallState> get_or_create_call(uint32_t cid) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         if (calls_.count(cid)) return calls_[cid];
         auto state = std::make_shared<CallState>();
         state->id = cid;
+        state->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = state;
+        std::cout << "📞 Created call state for call_id " << cid << std::endl;
         return state;
+    }
+
+    void handle_call_end(uint32_t call_id) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        if (calls_.count(call_id)) {
+            std::cout << "🛑 Call " << call_id << " ended, cleaning up" << std::endl;
+            calls_.erase(call_id);
+        }
     }
 
     void cleanup_inactive_calls() {
@@ -133,8 +141,7 @@ private:
         std::lock_guard<std::mutex> lock(calls_mutex_);
         for (auto it = calls_.begin(); it != calls_.end(); ) {
             if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count() > 60) {
-                std::lock_guard<std::mutex> clock(it->second->mutex);
-                if (it->second->tcp_socket != -1) close(it->second->tcp_socket);
+                std::cout << "🧹 Cleaning up inactive call " << it->first << std::endl;
                 it = calls_.erase(it);
             } else {
                 ++it;
@@ -145,11 +152,15 @@ private:
     std::atomic<bool> running_;
     float ulaw_table[256];
     std::mutex calls_mutex_;
-    std::map<int, std::shared_ptr<CallState>> calls_;
+    std::map<uint32_t, std::shared_ptr<CallState>> calls_;
+    whispertalk::InterconnectNode interconnect_;
 };
 
 int main() {
     InboundAudioProcessor proc;
+    if (!proc.init()) {
+        return 1;
+    }
     proc.run();
     return 0;
 }
