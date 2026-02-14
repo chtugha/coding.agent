@@ -2,16 +2,48 @@
 import sys
 import os
 import json
+import importlib
+import importlib.util
+import types
+import numpy as np
 import torch
 
-sys.path.insert(0, os.path.dirname(__file__))
+kokoro_pkg_dir = None
+for d in ['/opt/homebrew/lib', '/usr/local/lib', '/usr/lib']:
+    if not os.path.isdir(d):
+        continue
+    for pyver in sorted(os.listdir(d), reverse=True):
+        if not pyver.startswith('python3'):
+            continue
+        candidate = os.path.join(d, pyver, 'site-packages', 'kokoro')
+        if os.path.isdir(candidate):
+            kokoro_pkg_dir = candidate
+            break
+    if kokoro_pkg_dir:
+        break
 
-from kokoro.model import KModel
+if not kokoro_pkg_dir:
+    sys.path.insert(0, os.path.dirname(__file__))
+    from kokoro.model import KModel
+else:
+    kokoro = types.ModuleType('kokoro')
+    kokoro.__path__ = [kokoro_pkg_dir]
+    kokoro.__package__ = 'kokoro'
+    sys.modules['kokoro'] = kokoro
+    for submod in ['istftnet', 'modules', 'model']:
+        spec = importlib.util.spec_from_file_location(
+            f'kokoro.{submod}', f'{kokoro_pkg_dir}/{submod}.py', submodule_search_locations=[])
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[f'kokoro.{submod}'] = mod
+        spec.loader.exec_module(mod)
+    from kokoro.model import KModel
 
-MODELS_DIR = os.path.join(os.path.dirname(__file__), 'bin', 'models', 'kokoro-german')
+MODELS_DIR = os.path.join(os.path.dirname(__file__), '..', 'bin', 'models', 'kokoro-german')
 CONFIG_PATH = os.path.join(MODELS_DIR, 'config.json')
 MODEL_PATH = os.path.join(MODELS_DIR, 'kokoro-german-v1_1-de.pth')
 OUTPUT_DIR = MODELS_DIR
+
+BUCKET_SIZES = [8, 16, 32, 64, 128, 256, 512]
 
 
 class KModelTraceWrapper(torch.nn.Module):
@@ -31,7 +63,6 @@ class KModelTraceWrapper(torch.nn.Module):
             device=input_ids.device,
             dtype=torch.long
         )
-
         text_mask = torch.arange(input_lengths.max()).unsqueeze(0).expand(input_lengths.shape[0], -1).type_as(input_lengths)
         text_mask = torch.gt(text_mask + 1, input_lengths.unsqueeze(1)).to(input_ids.device)
         bert_dur = self.bert(input_ids, attention_mask=(~text_mask).int())
@@ -54,6 +85,15 @@ class KModelTraceWrapper(torch.nn.Module):
         return audio
 
 
+def make_example_ids(L):
+    ids = torch.zeros(1, L, dtype=torch.long)
+    ids[0, 0] = 0
+    ids[0, -1] = 0
+    for i in range(1, L - 1):
+        ids[0, i] = 43 + (i % 25)
+    return ids
+
+
 def main():
     print(f"Loading model from {MODEL_PATH}...")
     kmodel = KModel(config=CONFIG_PATH, model=MODEL_PATH)
@@ -66,25 +106,31 @@ def main():
     voice_pack = torch.load(voice_path, weights_only=True, map_location='cpu').float()
     print(f"Voice pack shape: {voice_pack.shape}")
 
-    phoneme_len = 3
-    ref_s = voice_pack[phoneme_len - 1]
-    print(f"ref_s shape (for {phoneme_len} phonemes): {ref_s.shape}")
+    successful = []
+    for L in BUCKET_SIZES:
+        print(f"\n=== Bucket L={L} ===")
+        example_ids = make_example_ids(L)
+        ref_s = voice_pack[min(L - 2, voice_pack.shape[0] - 1)]
+        example_speed = torch.tensor(1.0)
 
-    example_ids = torch.LongTensor([[0, 43, 54, 57, 0]])
-    example_speed = torch.tensor(1.0)
+        print("  Testing inference...")
+        try:
+            with torch.no_grad():
+                test_out = wrapper(example_ids, ref_s, example_speed)
+            print(f"  Output: {test_out.shape}, range=[{test_out.min():.4f}, {test_out.max():.4f}]")
+        except Exception as e:
+            print(f"  Forward FAILED: {e}")
+            continue
 
-    print("Testing inference first...")
-    with torch.no_grad():
-        test_out = wrapper(example_ids, ref_s, example_speed)
-    print(f"Test audio shape: {test_out.shape}")
+        print("  Tracing model...")
+        with torch.no_grad():
+            traced = torch.jit.trace(wrapper, (example_ids, ref_s, example_speed))
 
-    print("Tracing model...")
-    with torch.no_grad():
-        traced = torch.jit.trace(wrapper, (example_ids, ref_s, example_speed))
-
-    output_path = os.path.join(OUTPUT_DIR, 'kokoro_german.pt')
-    traced.save(output_path)
-    print(f"Saved TorchScript model to {output_path}")
+        output_path = os.path.join(OUTPUT_DIR, f'kokoro_german_L{L}.pt')
+        traced.save(output_path)
+        fsize = os.path.getsize(output_path) / 1024 / 1024
+        print(f"  Saved: {output_path} ({fsize:.1f}MB)")
+        successful.append(L)
 
     for voice_name in ['df_eva', 'dm_bernd']:
         vp = os.path.join(MODELS_DIR, 'voices', f'{voice_name}.pt')
@@ -92,6 +138,9 @@ def main():
         out = os.path.join(OUTPUT_DIR, f'{voice_name}_embedding.pt')
         torch.save(v, out)
         print(f"Saved voice embedding {voice_name} shape={v.shape} to {out}")
+        raw_out = os.path.join(OUTPUT_DIR, f'{voice_name}_voice.bin')
+        v.squeeze(1).numpy().astype(np.float32).tofile(raw_out)
+        print(f"Saved voice raw binary {voice_name} to {raw_out}")
 
     with open(os.path.join(OUTPUT_DIR, 'config.json'), 'r') as f:
         config = json.load(f)
@@ -100,15 +149,12 @@ def main():
         json.dump(config['vocab'], f, ensure_ascii=False, indent=2)
     print(f"Saved vocab to {vocab_path}")
 
-    print("\nVerifying exported model...")
-    loaded = torch.jit.load(output_path)
-    with torch.no_grad():
-        test_audio = loaded(example_ids, ref_s, example_speed)
-    print(f"Verification output shape: {test_audio.shape}")
-    print(f"Output range: [{test_audio.min():.4f}, {test_audio.max():.4f}]")
-    print(f"Non-zero samples: {(test_audio.abs() > 1e-6).sum().item()}/{test_audio.numel()}")
+    bucket_json = os.path.join(OUTPUT_DIR, 'buckets.json')
+    with open(bucket_json, 'w') as f:
+        json.dump({'bucket_sizes': successful, 'voice_dim': 256, 'voice_entries': int(voice_pack.shape[0])}, f)
+    print(f"Saved bucket config to {bucket_json}")
 
-    print("\nExport complete!")
+    print(f"\nExport complete! {len(successful)}/{len(BUCKET_SIZES)} buckets: {successful}")
     return 0
 
 

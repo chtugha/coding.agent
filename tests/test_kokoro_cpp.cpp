@@ -1,5 +1,5 @@
-#include <torch/script.h>
 #include <torch/torch.h>
+#include <torch/script.h>
 #include <espeak-ng/speak_lib.h>
 #include <cstdio>
 #include <cstring>
@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <algorithm>
 #include <sys/stat.h>
 
 #ifndef WHISPERTALK_MODELS_DIR
@@ -128,16 +129,22 @@ std::string phonemize_german(const std::string& text) {
     return result;
 }
 
+static int select_bucket(int64_t input_len, const std::vector<int>& bucket_sizes) {
+    for (int sz : bucket_sizes) {
+        if (sz >= input_len) return sz;
+    }
+    return -1;
+}
+
 int main() {
     std::string models_dir = WHISPERTALK_MODELS_DIR;
-    std::string model_path = models_dir + "/kokoro-german/kokoro_german.pt";
-    std::string voice_path = models_dir + "/kokoro-german/df_eva_embedding.pt";
-    std::string vocab_path = models_dir + "/kokoro-german/vocab.json";
+    std::string base_dir = models_dir + "/kokoro-german";
+    std::string vocab_path = base_dir + "/vocab.json";
 
     int passed = 0;
     int failed = 0;
 
-    std::printf("=== Kokoro C++ TTS Test Suite ===\n\n");
+    std::printf("=== Kokoro C++ TTS Test Suite (Bucketed Models) ===\n\n");
 
     std::string espeak_data = resolve_espeak_data_dir();
     if (espeak_data.empty()) {
@@ -206,43 +213,108 @@ int main() {
         }
     }
 
-    torch::jit::script::Module model;
+    std::map<int, torch::jit::script::Module> bucket_models;
+    std::vector<int> bucket_sizes;
     torch::Tensor voice_pack;
+    int voice_entries = 0;
 
-    std::printf("\n[TEST 4] Model loading\n");
-    try {
-        model = torch::jit::load(model_path);
-        model.eval();
-        passed++;
-        std::printf("  PASS: Model loaded from %s\n", model_path.c_str());
-    } catch (const c10::Error& e) {
-        failed++;
-        std::printf("  FAIL: %s\n", e.what());
-        goto done;
+    std::printf("\n[TEST 4] Bucket model loading\n");
+    {
+        const int candidates[] = {8, 16, 32, 64, 128, 256, 512};
+        for (int sz : candidates) {
+            std::string path = base_dir + "/kokoro_german_L" + std::to_string(sz) + ".pt";
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0) continue;
+            try {
+                auto model = torch::jit::load(path);
+                model.eval();
+                bucket_models[sz] = std::move(model);
+                bucket_sizes.push_back(sz);
+                std::printf("  Loaded L=%d\n", sz);
+            } catch (const c10::Error& e) {
+                std::printf("  FAIL loading L=%d: %s\n", sz, e.what());
+            }
+        }
+        std::sort(bucket_sizes.begin(), bucket_sizes.end());
+        if (bucket_sizes.size() >= 3) {
+            passed++;
+            std::printf("  PASS: %zu bucket models loaded\n", bucket_sizes.size());
+        } else {
+            std::string single = base_dir + "/kokoro_german.pt";
+            struct stat st;
+            if (stat(single.c_str(), &st) == 0) {
+                try {
+                    auto model = torch::jit::load(single);
+                    model.eval();
+                    bucket_models[0] = std::move(model);
+                    bucket_sizes.push_back(0);
+                    passed++;
+                    std::printf("  PASS: single model loaded (no buckets)\n");
+                } catch (const c10::Error& e) {
+                    failed++;
+                    std::printf("  FAIL: %s\n", e.what());
+                    goto done;
+                }
+            } else {
+                failed++;
+                std::printf("  FAIL: no models found\n");
+                goto done;
+            }
+        }
     }
 
-    std::printf("\n[TEST 5] Voice embedding loading\n");
-    try {
-        std::ifstream f(voice_path, std::ios::binary);
-        std::vector<char> data((std::istreambuf_iterator<char>(f)),
-                              std::istreambuf_iterator<char>());
-        voice_pack = torch::jit::pickle_load(data).toTensor().to(torch::kFloat32);
-        std::printf("  Voice pack shape: [%lld, %lld, %lld]\n",
-                   voice_pack.size(0), voice_pack.size(1), voice_pack.size(2));
-        if (voice_pack.size(0) > 100 && voice_pack.size(2) == 256) {
-            passed++;
-            std::printf("  PASS\n");
+    std::printf("\n[TEST 5] Voice pack loading (bin format)\n");
+    {
+        std::string bin_path = base_dir + "/df_eva_voice.bin";
+        std::string pt_path = base_dir + "/df_eva_embedding.pt";
+        struct stat st;
+        if (stat(bin_path.c_str(), &st) == 0) {
+            std::ifstream f(bin_path, std::ios::binary);
+            size_t file_size = static_cast<size_t>(st.st_size);
+            size_t num_floats = file_size / sizeof(float);
+            voice_entries = static_cast<int>(num_floats / 256);
+            std::vector<float> raw(num_floats);
+            f.read(reinterpret_cast<char*>(raw.data()), file_size);
+            voice_pack = torch::from_blob(raw.data(),
+                                          {voice_entries, 256}, torch::kFloat32).clone();
+            std::printf("  Loaded from bin: [%d, 256]\n", voice_entries);
+            if (voice_entries > 100) {
+                passed++;
+                std::printf("  PASS\n");
+            } else {
+                failed++;
+                std::printf("  FAIL: too few voice entries\n");
+            }
+        } else if (stat(pt_path.c_str(), &st) == 0) {
+            try {
+                std::ifstream f(pt_path, std::ios::binary);
+                std::vector<char> data((std::istreambuf_iterator<char>(f)),
+                                      std::istreambuf_iterator<char>());
+                auto loaded = torch::pickle_load(data).toTensor().to(torch::kFloat32);
+                voice_pack = loaded.squeeze(1);
+                voice_entries = static_cast<int>(voice_pack.size(0));
+                std::printf("  Loaded from pt (fallback): [%d, %lld]\n",
+                           voice_entries, voice_pack.size(1));
+                if (voice_entries > 100) {
+                    passed++;
+                    std::printf("  PASS\n");
+                } else {
+                    failed++;
+                    std::printf("  FAIL: unexpected shape\n");
+                }
+            } catch (const c10::Error& e) {
+                failed++;
+                std::printf("  FAIL: %s\n", e.what());
+                goto done;
+            }
         } else {
             failed++;
-            std::printf("  FAIL: unexpected shape\n");
+            std::printf("  FAIL: no voice file found\n");
+            goto done;
         }
-    } catch (const c10::Error& e) {
-        failed++;
-        std::printf("  FAIL: %s\n", e.what());
-        goto done;
     }
 
-    std::printf("\n[TEST 6] End-to-end synthesis (German)\n");
+    std::printf("\n[TEST 6] End-to-end synthesis with bucket selection (German)\n");
     {
         std::vector<std::string> test_texts = {
             "Hallo Welt",
@@ -256,13 +328,24 @@ int main() {
             auto phonemes = phonemize_german(text);
             auto ids = vocab.encode(phonemes);
 
-            int phoneme_count = static_cast<int>(ids.size()) - 2;
-            int voice_idx = std::min(phoneme_count - 1, static_cast<int>(voice_pack.size(0)) - 1);
-            voice_idx = std::max(0, voice_idx);
-            auto ref_s = voice_pack[voice_idx];
+            int64_t input_len = static_cast<int64_t>(ids.size());
+            int bucket = select_bucket(input_len, bucket_sizes);
+            if (bucket < 0) {
+                std::printf("  FAIL: no bucket for %lld tokens\n", input_len);
+                all_ok = false;
+                continue;
+            }
 
-            auto input_ids = torch::from_blob(ids.data(),
-                                             {1, static_cast<int64_t>(ids.size())},
+            std::vector<int64_t> padded_ids(bucket, 0);
+            std::copy(ids.begin(), ids.end(), padded_ids.begin());
+
+            int phoneme_count = static_cast<int>(ids.size()) - 2;
+            int voice_idx = std::min(phoneme_count - 1, voice_entries - 1);
+            voice_idx = std::max(0, voice_idx);
+            auto ref_s = voice_pack.index({voice_idx}).unsqueeze(0);
+
+            auto input_ids = torch::from_blob(padded_ids.data(),
+                                             {1, static_cast<int64_t>(bucket)},
                                              torch::kLong).clone();
             auto speed = torch::tensor(1.0f);
 
@@ -273,7 +356,7 @@ int main() {
                 inputs.push_back(input_ids);
                 inputs.push_back(ref_s);
                 inputs.push_back(speed);
-                audio = model.forward(inputs).toTensor();
+                audio = bucket_models[bucket].forward(inputs).toTensor();
             }
 
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -283,8 +366,8 @@ int main() {
 
             std::printf("  \"%s\"\n", text.c_str());
             std::printf("    phonemes: %s\n", phonemes.c_str());
-            std::printf("    tokens: %zu, audio: %lld samples (%.2fs @ 24kHz)\n",
-                       ids.size(), audio.numel(), duration_sec);
+            std::printf("    tokens: %zu (padded to bucket %d), audio: %lld samples (%.2fs @ 24kHz)\n",
+                       ids.size(), bucket, audio.numel(), duration_sec);
             std::printf("    range: [%.4f, %.4f], latency: %lldms\n",
                        audio.min().item<float>(), audio.max().item<float>(), elapsed);
 

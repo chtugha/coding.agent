@@ -23,8 +23,10 @@ bin/models/*.pt
 bin/models/*.pth
 bin/models/**/*.pt
 bin/models/**/*.pth
+bin/models/**/*.bin
 bin/models/**/*.mlmodelc
 bin/models/**/*.mlpackage
+bin/models/**/*.onnx
 
 # Compiled binaries
 whisper-service-local
