@@ -503,6 +503,15 @@ Save to `{@artifacts_path}/plan.md`.
 - [x] Python Kokoro files deleted (kokoro_service.py, kokoro_interconnect_adapter.py, bin/kokoro_service.py)
 - [x] All 6 C++ services compile (make -j4), 25/25 interconnect tests pass, 6/6 kokoro tests pass
 - [x] CMakeLists.txt includes kokoro-service in install targets, RPATH configured for libtorch
+- [x] Multi-call threading: per-call worker threads via CallContext + std::thread, CALL_END joins threads
+- [x] Portable espeak-ng data path: CMake auto-detection + env var + fallback chain (no hardcoded path)
+- [x] MPS acceleration: tested but unsupported (SDPA kernel not available on MPS for TorchScript); CPU-only is correct
+- [x] Model files (.pt, .pth) removed from git tracking, .gitignore updated with bin/models/**/*.pt and .pth patterns
+- [x] Voice selection: --voice=df_eva or --voice=dm_bernd CLI argument
+- [x] Export script moved to scripts/export_kokoro_model.py
+- [x] Phoneme cache: LRU-style with 10,000 entry limit and full-clear eviction
+- [x] UTF-8 handling: fixed to use (c & 0x80) != 0 check with bounds validation
+- [x] Audio validation: reject empty or >10s output samples
 
 ### Phase 4 Tests
 - [ ] Self-contained distribution runs on clean macOS

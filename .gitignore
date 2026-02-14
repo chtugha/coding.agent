@@ -20,6 +20,9 @@ models/
 bin/models/*.bin
 bin/models/*.gguf
 bin/models/*.pt
+bin/models/*.pth
+bin/models/**/*.pt
+bin/models/**/*.pth
 bin/models/**/*.mlmodelc
 bin/models/**/*.mlpackage
 

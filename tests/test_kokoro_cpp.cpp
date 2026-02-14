@@ -9,10 +9,39 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <sys/stat.h>
 
 #ifndef WHISPERTALK_MODELS_DIR
 #define WHISPERTALK_MODELS_DIR "bin/models"
 #endif
+
+#ifndef ESPEAK_NG_DATA_DIR
+#define ESPEAK_NG_DATA_DIR ""
+#endif
+
+static std::string resolve_espeak_data_dir() {
+    const char* env = std::getenv("ESPEAK_NG_DATA");
+    if (env && env[0] != '\0') return env;
+
+    const char* compiled = ESPEAK_NG_DATA_DIR;
+    if (compiled[0] != '\0') {
+        struct stat st;
+        if (stat(compiled, &st) == 0) return compiled;
+    }
+
+    const char* candidates[] = {
+        "./espeak-ng-data",
+        "/opt/homebrew/share/espeak-ng-data",
+        "/usr/local/share/espeak-ng-data",
+        "/usr/share/espeak-ng-data",
+        nullptr
+    };
+    for (int i = 0; candidates[i]; i++) {
+        struct stat st;
+        if (stat(candidates[i], &st) == 0) return candidates[i];
+    }
+    return "";
+}
 
 struct KokoroVocab {
     std::map<std::string, int64_t> phoneme_to_id;
@@ -65,15 +94,17 @@ struct KokoroVocab {
             }
             if (!found) {
                 unsigned char c = static_cast<unsigned char>(phonemes[i]);
-                if ((c & 0xC0) == 0xC0) {
+                if ((c & 0x80) != 0) {
                     int bytes = 1;
                     if ((c & 0xE0) == 0xC0) bytes = 2;
                     else if ((c & 0xF0) == 0xE0) bytes = 3;
                     else if ((c & 0xF8) == 0xF0) bytes = 4;
-                    std::string utf8char = phonemes.substr(i, bytes);
-                    auto it = phoneme_to_id.find(utf8char);
-                    if (it != phoneme_to_id.end()) {
-                        ids.push_back(it->second);
+                    if (i + bytes <= phonemes.size()) {
+                        std::string utf8char = phonemes.substr(i, bytes);
+                        auto it = phoneme_to_id.find(utf8char);
+                        if (it != phoneme_to_id.end()) {
+                            ids.push_back(it->second);
+                        }
                     }
                     i += bytes;
                 } else {
@@ -102,15 +133,21 @@ int main() {
     std::string model_path = models_dir + "/kokoro-german/kokoro_german.pt";
     std::string voice_path = models_dir + "/kokoro-german/df_eva_embedding.pt";
     std::string vocab_path = models_dir + "/kokoro-german/vocab.json";
-    
+
     int passed = 0;
     int failed = 0;
 
     std::printf("=== Kokoro C++ TTS Test Suite ===\n\n");
 
+    std::string espeak_data = resolve_espeak_data_dir();
+    if (espeak_data.empty()) {
+        std::printf("FATAL: Cannot find espeak-ng-data. Set ESPEAK_NG_DATA env var.\n");
+        return 1;
+    }
+
     std::printf("[TEST 1] espeak-ng initialization and phonemization\n");
     int result = espeak_Initialize(AUDIO_OUTPUT_RETRIEVAL, 0,
-                                  "/opt/homebrew/share/espeak-ng-data", 0);
+                                  espeak_data.c_str(), 0);
     if (result == -1) {
         std::printf("  FAIL: espeak_Initialize returned -1\n");
         failed++;
@@ -215,20 +252,20 @@ int main() {
         bool all_ok = true;
         for (auto& text : test_texts) {
             auto start = std::chrono::steady_clock::now();
-            
+
             auto phonemes = phonemize_german(text);
             auto ids = vocab.encode(phonemes);
-            
+
             int phoneme_count = static_cast<int>(ids.size()) - 2;
             int voice_idx = std::min(phoneme_count - 1, static_cast<int>(voice_pack.size(0)) - 1);
             voice_idx = std::max(0, voice_idx);
             auto ref_s = voice_pack[voice_idx];
-            
+
             auto input_ids = torch::from_blob(ids.data(),
                                              {1, static_cast<int64_t>(ids.size())},
                                              torch::kLong).clone();
             auto speed = torch::tensor(1.0f);
-            
+
             torch::Tensor audio;
             {
                 torch::NoGradGuard no_grad;
@@ -238,19 +275,19 @@ int main() {
                 inputs.push_back(speed);
                 audio = model.forward(inputs).toTensor();
             }
-            
+
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
-            
+
             float duration_sec = static_cast<float>(audio.numel()) / 24000.0f;
-            
+
             std::printf("  \"%s\"\n", text.c_str());
             std::printf("    phonemes: %s\n", phonemes.c_str());
             std::printf("    tokens: %zu, audio: %lld samples (%.2fs @ 24kHz)\n",
                        ids.size(), audio.numel(), duration_sec);
             std::printf("    range: [%.4f, %.4f], latency: %lldms\n",
                        audio.min().item<float>(), audio.max().item<float>(), elapsed);
-            
+
             if (audio.numel() < 1000 || audio.max().item<float>() < 0.01f) {
                 std::printf("    FAIL: audio seems empty\n");
                 all_ok = false;
@@ -262,7 +299,7 @@ int main() {
 
 done:
     espeak_Terminate();
-    
+
     std::printf("\n=== Results: %d passed, %d failed ===\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }
