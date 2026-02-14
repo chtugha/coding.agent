@@ -4,6 +4,9 @@ project(WhisperTalk LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_SKIP_BUILD_RPATH FALSE)
+set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 # Testing support
 option(BUILD_TESTS "Build unit tests" OFF)
@@ -215,8 +218,49 @@ if(TARGET thirdparty_ggml)
     target_link_libraries(llama-service PRIVATE thirdparty_ggml)
 endif()
 
+# 6. Kokoro TTS Service (libtorch + espeak-ng)
+set(TORCH_CMAKE_PREFIX "" CACHE PATH "Path to libtorch cmake config")
+if(NOT TORCH_CMAKE_PREFIX)
+    execute_process(
+        COMMAND python3 -c "import torch; print(torch.utils.cmake_prefix_path)"
+        OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif()
+if(TORCH_CMAKE_PREFIX)
+    list(APPEND CMAKE_PREFIX_PATH "${TORCH_CMAKE_PREFIX}")
+endif()
+find_package(Torch QUIET)
+find_library(ESPEAK_NG_LIB espeak-ng PATHS /opt/homebrew/lib)
+find_path(ESPEAK_NG_INCLUDE espeak-ng/speak_lib.h PATHS /opt/homebrew/include)
+if(Torch_FOUND AND ESPEAK_NG_LIB AND ESPEAK_NG_INCLUDE)
+    add_executable(kokoro-service kokoro-service.cpp)
+    target_link_libraries(kokoro-service PRIVATE Threads::Threads ${TORCH_LIBRARIES} ${ESPEAK_NG_LIB})
+    target_include_directories(kokoro-service PRIVATE ${ESPEAK_NG_INCLUDE})
+    set_property(TARGET kokoro-service PROPERTY CXX_STANDARD 17)
+    if(APPLE)
+        set_target_properties(kokoro-service PROPERTIES
+            BUILD_RPATH "${TORCH_CMAKE_PREFIX}/../../lib"
+            INSTALL_RPATH "@executable_path;@executable_path/../lib")
+    endif()
+    message(STATUS "Kokoro TTS Service: ENABLED (libtorch + espeak-ng)")
+else()
+    message(WARNING "Kokoro TTS Service: DISABLED (libtorch or espeak-ng not found)")
+    if(NOT Torch_FOUND)
+        message(WARNING "  libtorch not found. Set TORCH_CMAKE_PREFIX or install PyTorch.")
+    endif()
+    if(NOT ESPEAK_NG_LIB)
+        message(WARNING "  espeak-ng not found. Install via: brew install espeak-ng")
+    endif()
+endif()
+
 # Install
-install(TARGETS sip-client inbound-audio-processor outbound-audio-processor whisper-service llama-service RUNTIME DESTINATION bin)
+set(INSTALL_TARGETS sip-client inbound-audio-processor outbound-audio-processor whisper-service llama-service)
+if(TARGET kokoro-service)
+    list(APPEND INSTALL_TARGETS kokoro-service)
+endif()
+install(TARGETS ${INSTALL_TARGETS} RUNTIME DESTINATION bin)
 
 # Tests
 if(BUILD_TESTS)
@@ -226,6 +270,17 @@ if(BUILD_TESTS)
     add_executable(test_interconnect tests/test_interconnect.cpp)
     target_link_libraries(test_interconnect PRIVATE GTest::gtest_main Threads::Threads)
     
+    if(TARGET kokoro-service)
+        add_executable(test_kokoro_cpp tests/test_kokoro_cpp.cpp)
+        target_link_libraries(test_kokoro_cpp PRIVATE Threads::Threads ${TORCH_LIBRARIES} ${ESPEAK_NG_LIB})
+        target_include_directories(test_kokoro_cpp PRIVATE ${ESPEAK_NG_INCLUDE})
+        set_property(TARGET test_kokoro_cpp PROPERTY CXX_STANDARD 17)
+        if(APPLE)
+            set_target_properties(test_kokoro_cpp PROPERTIES
+                BUILD_RPATH "${TORCH_CMAKE_PREFIX}/../../lib")
+        endif()
+    endif()
+
     include(GoogleTest)
     gtest_discover_tests(test_sanity)
     gtest_discover_tests(test_interconnect)
