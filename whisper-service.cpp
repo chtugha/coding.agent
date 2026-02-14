@@ -22,6 +22,8 @@ struct WhisperCall {
 };
 
 class WhisperService {
+    static constexpr size_t MAX_BUFFER_PACKETS = 64;
+
 public:
     WhisperService(const std::string& model_path) 
         : running_(true), 
@@ -168,7 +170,10 @@ private:
                         std::cout << "⚠️  [" << call_id << "] LLaMA disconnected, discarding transcription to /dev/null" << std::endl;
                         
                         std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
-                        if (buffered_packets_.size() < 64) {
+                        if (buffered_packets_.size() < MAX_BUFFER_PACKETS) {
+                            buffered_packets_.push_back(pkt);
+                        } else {
+                            buffered_packets_.pop_front();
                             buffered_packets_.push_back(pkt);
                         }
                     }
