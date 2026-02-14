@@ -374,12 +374,17 @@ public:
     }
 
     void broadcast_call_end(uint32_t call_id) {
+        bool already_ended = false;
         {
             std::lock_guard<std::mutex> lock(call_id_mutex_);
+            if (ended_call_ids_.count(call_id) > 0) {
+                already_ended = true;
+            }
+            ended_call_ids_.insert(call_id);
             active_call_ids_.erase(call_id);
         }
 
-        if (call_end_handler_) {
+        if (!already_ended && call_end_handler_) {
             call_end_handler_(call_id);
         }
 
@@ -461,6 +466,7 @@ private:
     std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;
     std::set<uint32_t> active_call_ids_;
+    std::set<uint32_t> ended_call_ids_;
 
     int neg_in_sock_;
     int neg_out_sock_;
@@ -732,25 +738,24 @@ private:
             }
         }
 
-        if (!is_master_ || msg.substr(0, 9) == "CALL_END ") {
-            if (msg.substr(0, 9) == "CALL_END ") {
-                uint32_t call_id = std::stoul(msg.substr(9));
-                
-                bool already_cleaned = false;
-                {
-                    std::lock_guard<std::mutex> lock(call_id_mutex_);
-                    if (active_call_ids_.find(call_id) == active_call_ids_.end()) {
-                        already_cleaned = true;
-                    }
-                    active_call_ids_.erase(call_id);
+        if (msg.substr(0, 9) == "CALL_END ") {
+            uint32_t call_id = std::stoul(msg.substr(9));
+            
+            bool already_cleaned = false;
+            {
+                std::lock_guard<std::mutex> lock(call_id_mutex_);
+                if (ended_call_ids_.count(call_id) > 0) {
+                    already_cleaned = true;
                 }
-                
-                if (!already_cleaned && call_end_handler_) {
-                    call_end_handler_(call_id);
-                }
-
-                response = "CALL_END_ACK " + std::to_string(call_id);
+                ended_call_ids_.insert(call_id);
+                active_call_ids_.erase(call_id);
             }
+            
+            if (!already_cleaned && call_end_handler_) {
+                call_end_handler_(call_id);
+            }
+
+            response = "CALL_END_ACK " + std::to_string(call_id);
         }
 
         if (!response.empty()) {
@@ -1105,8 +1110,10 @@ private:
         pfd.events = POLLIN;
         int ret = poll(&pfd, 1, timeout_ms);
         if (ret <= 0) return -1;
-        if (pfd.revents & (POLLERR | POLLHUP)) return -1;
-        return recv(sock, buf, len, 0);
+        if (pfd.revents & POLLERR) return -1;
+        if (pfd.revents & POLLIN) return recv(sock, buf, len, 0);
+        if (pfd.revents & POLLHUP) return -1;
+        return -1;
     }
 
     bool recv_exact(int sock, void* buf, size_t len, int timeout_ms) {
@@ -1124,7 +1131,8 @@ private:
             pfd.events = POLLIN;
             int pr = poll(&pfd, 1, static_cast<int>(remaining));
             if (pr <= 0) return false;
-            if (pfd.revents & (POLLERR | POLLHUP)) return false;
+            if (pfd.revents & POLLERR) return false;
+            if (!(pfd.revents & POLLIN)) return false;
 
             ssize_t n = recv(sock, ptr + received, len - received, 0);
             if (n <= 0) {

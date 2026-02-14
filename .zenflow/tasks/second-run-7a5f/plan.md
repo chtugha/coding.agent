@@ -456,10 +456,18 @@ Save to `{@artifacts_path}/plan.md`.
 - [x] Google Test framework compiles and runs minimal test
 
 ### Phase 1 Tests
-- [x] Interconnect unit tests pass (14/14 tests passed)
+- [x] Interconnect unit tests pass (23/23 tests passed)
 - [x] Master election works with 6 services
+- [x] Port scanning — no conflicts across 6 services (36 unique ports)
+- [x] Traffic connection establishment (upstream/downstream bidirectional TCP)
+- [x] Send/recv operations — 1000 packets 100% delivery
+- [x] Bidirectional simultaneous transfer — 100 packets each direction
 - [x] Heartbeat detects crash within 5s
-- [x] Call_id reservation prevents collisions
+- [x] Call_id reservation prevents collisions (10 concurrent threads)
+- [x] CALL_END broadcast with ACK and idempotent duplicate handling
+- [x] Service discovery (GET_DOWNSTREAM ports)
+- [x] Connection state machine (DISCONNECTED → CONNECTED transitions)
+- [x] Reconnection after downstream restart — upstream auto-reconnects within 5s
 
 ### Phase 2 Tests
 - [ ] End-to-end pipeline with interconnect works
