@@ -61,6 +61,7 @@ public:
         for (int i = 0; i < num_lines; ++i) {
             auto line = std::make_shared<SipLine>();
             line->index = i;
+            // Single line: use base user as-is; multi-line: append 1-based index (e.g. "alice1", "alice2")
             line->user = (num_lines == 1) ? user : user + std::to_string(i + 1);
 
             line->sip_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -328,7 +329,7 @@ private:
     }
 
     std::atomic<bool> running_;
-    std::atomic<uint32_t> next_id_;
+    uint32_t next_id_;
     std::mutex call_id_mutex_;
     int server_port_;
     std::string server_, local_ip_;
