@@ -472,13 +472,20 @@ Save to `{@artifacts_path}/plan.md`.
 
 ### Phase 2 Tests
 - [x] All 5 C++ services compile successfully (sip-client, inbound-audio-processor, whisper-service, llama-service, outbound-audio-processor)
-- [x] whisper-service links correctly with whisper-cpp static library + ggml + Apple frameworks
+- [x] whisper-service links correctly with whisper-cpp static library + ggml + Apple frameworks + CoreML
 - [x] Multi-line SIP support: --lines CLI parameter, per-line threads, per-line registration
 - [x] 64-packet buffer limit enforced in whisper-service with oldest-drop overflow
 - [x] 25/25 interconnect unit tests still pass after migration
-- [ ] End-to-end pipeline with interconnect works (requires models + SIP infrastructure)
-- [ ] Multi-call (3 concurrent) works (requires models + SIP infrastructure)
-- [ ] Crash recovery (Whisper) works (requires models + SIP infrastructure)
+- [x] bin/models/ directory created with .gitkeep (protected from clean builds)
+- [x] whisper.cpp rebuilt with CoreML support (WHISPER_COREML=ON, WHISPER_METAL=ON)
+- [x] Whisper large-v3 model downloaded and quantized to q5_0 (~1GB) in bin/models/
+- [x] CoreML encoder model generated (.mlpackage) and compiled (.mlmodelc) in bin/models/
+- [x] LLaMA-3.2-1B-Instruct-Q8_0.gguf downloaded (~1.2GB) to bin/models/
+- [x] WHISPERTALK_MODELS_DIR compile definition added for absolute model path resolution
+- [x] Services default to compile-time WHISPERTALK_MODELS_DIR, fallback to relative models/ path
+- [ ] End-to-end pipeline with interconnect works (requires SIP infrastructure)
+- [ ] Multi-call (3 concurrent) works (requires SIP infrastructure)
+- [ ] Crash recovery (Whisper) works (requires SIP infrastructure)
 
 ### Phase 3 Tests
 - [ ] Phonemization accuracy >95% (target >98% after normalization)

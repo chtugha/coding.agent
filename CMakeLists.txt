@@ -58,9 +58,17 @@ set(WHISPER_GGML_CPU_LIB   "${DEFAULT_WHISPER_GGML_CPU_LIB}"   CACHE FILEPATH "P
 set(WHISPER_GGML_BLAS_LIB  "${DEFAULT_WHISPER_GGML_BLAS_LIB}"  CACHE FILEPATH "Path to whisper ggml-blas library")
 set(WHISPER_GGML_METAL_LIB "${DEFAULT_WHISPER_GGML_METAL_LIB}" CACHE FILEPATH "Path to whisper ggml-metal library")
 
+set(DEFAULT_WHISPER_COREML_LIB ${CMAKE_SOURCE_DIR}/whisper-cpp/build/src/libwhisper.coreml.a)
+set(WHISPER_COREML_LIB "${DEFAULT_WHISPER_COREML_LIB}" CACHE FILEPATH "Path to whisper CoreML library")
+
 if(EXISTS ${WHISPER_CPP_LIB})
     add_library(thirdparty_whisper STATIC IMPORTED)
     set_target_properties(thirdparty_whisper PROPERTIES IMPORTED_LOCATION ${WHISPER_CPP_LIB})
+endif()
+
+if(EXISTS ${WHISPER_COREML_LIB})
+    add_library(thirdparty_whisper_coreml STATIC IMPORTED)
+    set_target_properties(thirdparty_whisper_coreml PROPERTIES IMPORTED_LOCATION ${WHISPER_COREML_LIB})
 endif()
 
 if(EXISTS ${LLAMA_CPP_LIB})
@@ -124,6 +132,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/bin/models)
 set_directory_properties(PROPERTIES ADDITIONAL_CLEAN_FILES "")
 
+set(WHISPERTALK_MODELS_DIR "${CMAKE_SOURCE_DIR}/bin/models" CACHE PATH "Path to model files")
+add_compile_definitions(WHISPERTALK_MODELS_DIR="${WHISPERTALK_MODELS_DIR}")
+
 # macOS rpath
 if(APPLE)
     set(CMAKE_INSTALL_RPATH "@executable_path;@loader_path")
@@ -171,8 +182,12 @@ endif()
 if(TARGET thirdparty_whisper_ggml)
     target_link_libraries(whisper-service PRIVATE thirdparty_whisper_ggml)
 endif()
+if(TARGET thirdparty_whisper_coreml)
+    target_link_libraries(whisper-service PRIVATE thirdparty_whisper_coreml)
+endif()
 if(APPLE)
-    target_link_libraries(whisper-service PRIVATE ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK})
+    find_library(COREML_FRAMEWORK CoreML)
+    target_link_libraries(whisper-service PRIVATE ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK} ${COREML_FRAMEWORK})
 endif()
 
 # 5. LLaMA Service

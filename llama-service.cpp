@@ -274,7 +274,11 @@ private:
 };
 
 int main(int argc, char** argv) {
+#ifdef WHISPERTALK_MODELS_DIR
+    std::string model_path = std::string(WHISPERTALK_MODELS_DIR) + "/Llama-3.2-1B-Instruct-Q8_0.gguf";
+#else
     std::string model_path = "models/Llama-3.2-1B-Instruct-Q8_0.gguf";
+#endif
     if (argc >= 2) model_path = argv[1];
     
     try {

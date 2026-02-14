@@ -224,7 +224,11 @@ private:
 };
 
 int main(int argc, char** argv) {
+#ifdef WHISPERTALK_MODELS_DIR
+    std::string model_path = std::string(WHISPERTALK_MODELS_DIR) + "/ggml-large-v3-q5_0.bin";
+#else
     std::string model_path = "models/ggml-large-v3-q5_0.bin";
+#endif
     if (argc >= 2) model_path = argv[1];
 
     try {
