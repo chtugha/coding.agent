@@ -22,6 +22,10 @@ The project is organized as a linear pipeline of 5 core C++ programs and 1 Pytho
 **Build System**: CMake (Minimum version 3.22)  
 **Optimization**: macOS (Apple Silicon optimized with CoreML and MPS)
 
+## Mandatory Development Rules
+- **No Stubs or Simulated Features**: NEVER implement stubs, placeholder methods, simulated processes, or hardcoded return values. Every function and method MUST contain a real, working implementation. If a dependency is not yet available, the step MUST NOT be marked complete.
+- **Fix All Bugs Before Proceeding**: ALL bugs, test failures, and edge cases MUST be fixed before moving to the next step. A step is NOT complete until every test passes and every known issue is resolved. Do not defer fixes to later phases.
+
 ## Documentation Rules
 - **Summary Updates**: The program summaries in this folder MUST be updated every time changes are made to the internal function or connection mechanisms of the respective programs.
 - **Complexity**: Keep services consolidated into single files whenever possible.

@@ -822,12 +822,16 @@ private:
     }
 
     void update_downstream_state_locked() {
-        std::lock_guard<std::mutex> lock(state_mutex_);
+        ConnectionState new_state;
         if (down_in_accepted_ >= 0 && down_out_accepted_ >= 0) {
-            downstream_state_ = ConnectionState::CONNECTED;
+            new_state = ConnectionState::CONNECTED;
         } else if (down_in_accepted_ >= 0 || down_out_accepted_ >= 0) {
-            downstream_state_ = ConnectionState::CONNECTING;
+            new_state = ConnectionState::CONNECTING;
+        } else {
+            new_state = ConnectionState::DISCONNECTED;
         }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        downstream_state_ = new_state;
     }
 
     void heartbeat_loop() {
@@ -920,6 +924,9 @@ private:
     }
 
     void check_traffic_connections() {
+        bool upstream_dead = false;
+        bool downstream_dead = false;
+
         {
             std::lock_guard<std::mutex> lock(traffic_mutex_);
             if (up_out_sock_ >= 0) {
@@ -931,8 +938,7 @@ private:
                 if (r == 0) {
                     close_socket(up_out_sock_);
                     close_socket(up_in_sock_);
-                    std::lock_guard<std::mutex> sl(state_mutex_);
-                    upstream_state_ = ConnectionState::FAILED;
+                    upstream_dead = true;
                 }
             }
 
@@ -945,25 +951,34 @@ private:
                 if (r == 0) {
                     close_socket(down_in_accepted_);
                     close_socket(down_out_accepted_);
-                    std::lock_guard<std::mutex> sl(state_mutex_);
-                    downstream_state_ = ConnectionState::DISCONNECTED;
+                    downstream_dead = true;
                 }
             }
+        }
+
+        if (upstream_dead || downstream_dead) {
+            std::lock_guard<std::mutex> sl(state_mutex_);
+            if (upstream_dead) upstream_state_ = ConnectionState::FAILED;
+            if (downstream_dead) downstream_state_ = ConnectionState::DISCONNECTED;
         }
     }
 
     void mark_upstream_failed() {
-        std::lock_guard<std::mutex> lock(traffic_mutex_);
-        close_socket(up_out_sock_);
-        close_socket(up_in_sock_);
+        {
+            std::lock_guard<std::mutex> lock(traffic_mutex_);
+            close_socket(up_out_sock_);
+            close_socket(up_in_sock_);
+        }
         std::lock_guard<std::mutex> sl(state_mutex_);
         upstream_state_ = ConnectionState::FAILED;
     }
 
     void mark_downstream_failed() {
-        std::lock_guard<std::mutex> lock(traffic_mutex_);
-        close_socket(down_in_accepted_);
-        close_socket(down_out_accepted_);
+        {
+            std::lock_guard<std::mutex> lock(traffic_mutex_);
+            close_socket(down_in_accepted_);
+            close_socket(down_out_accepted_);
+        }
         std::lock_guard<std::mutex> sl(state_mutex_);
         downstream_state_ = ConnectionState::DISCONNECTED;
     }
