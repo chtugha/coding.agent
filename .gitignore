@@ -4,8 +4,17 @@ whisper-cpp/build/
 
 # Models (too large for git)
 models/
-*.bin
+*.gguf
 *.mlmodelc/
+*.mlpackage/
+# Keep the bin/models directory structure but ignore actual model files
+!bin/models/
+!bin/models/.gitkeep
+bin/models/*.bin
+bin/models/*.gguf
+bin/models/*.pt
+bin/models/**/*.mlmodelc
+bin/models/**/*.mlpackage
 
 # Compiled binaries
 whisper-service-local
@@ -55,7 +64,9 @@ llama-cpp/
 
 
 # Binaries and symbol files
-bin/
+bin/*
+!bin/models/
+!bin/models/.gitkeep
 *.dSYM/
 
 # Downloads and vendor archives

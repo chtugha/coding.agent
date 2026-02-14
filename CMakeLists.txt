@@ -120,6 +120,10 @@ add_compile_options(-O2 -Wall -Wextra)
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
+# Ensure bin/models directory exists (protected from clean builds)
+file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/bin/models)
+set_directory_properties(PROPERTIES ADDITIONAL_CLEAN_FILES "")
+
 # macOS rpath
 if(APPLE)
     set(CMAKE_INSTALL_RPATH "@executable_path;@loader_path")

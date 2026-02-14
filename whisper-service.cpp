@@ -224,13 +224,11 @@ private:
 };
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cout << "Usage: whisper-service <model_path>" << std::endl;
-        return 1;
-    }
-    
+    std::string model_path = "models/ggml-large-v3-q5_0.bin";
+    if (argc >= 2) model_path = argv[1];
+
     try {
-        WhisperService service(argv[1]);
+        WhisperService service(model_path);
         if (!service.init()) {
             return 1;
         }
@@ -239,6 +237,6 @@ int main(int argc, char** argv) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
         return 1;
     }
-    
+
     return 0;
 }

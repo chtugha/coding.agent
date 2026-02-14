@@ -274,7 +274,7 @@ private:
 };
 
 int main(int argc, char** argv) {
-    std::string model_path = "models/llama/Llama-3.2-1B-Instruct-Q8_0.gguf";
+    std::string model_path = "models/Llama-3.2-1B-Instruct-Q8_0.gguf";
     if (argc >= 2) model_path = argv[1];
     
     try {
