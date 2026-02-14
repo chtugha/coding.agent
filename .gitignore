@@ -2,6 +2,13 @@
 build/
 whisper-cpp/build/
 
+# whisper-cpp non-essential directories (only library headers + src needed)
+whisper-cpp/examples/
+whisper-cpp/bindings/
+whisper-cpp/models/
+whisper-cpp/samples/
+whisper-cpp/tests/
+
 # Models (too large for git)
 models/
 *.gguf
