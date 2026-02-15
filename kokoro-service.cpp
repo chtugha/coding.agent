@@ -405,51 +405,13 @@ public:
 private:
     void try_mps_acceleration() {
 #ifdef __APPLE__
-        try {
-            if (torch::mps::is_available()) {
-                std::printf("MPS device available, attempting migration...\n");
-                auto test_bucket = bucket_sizes_.front();
-                auto& test_model = bucket_models_[test_bucket];
-                test_model.to(torch::kMPS);
-
-                auto test_input = torch::zeros({1, static_cast<int64_t>(test_bucket)}, torch::kLong).to(torch::kMPS);
-                auto test_ref = voice_pack_.index({0}).unsqueeze(0).to(torch::kMPS);
-                auto test_speed = torch::tensor(1.0f).to(torch::kMPS);
-                torch::NoGradGuard no_grad;
-                std::vector<torch::jit::IValue> inputs;
-                inputs.push_back(test_input);
-                inputs.push_back(test_ref);
-                inputs.push_back(test_speed);
-                test_model.forward(inputs);
-
-                for (auto& [sz, model] : bucket_models_) {
-                    if (sz != test_bucket) model.to(torch::kMPS);
-                }
-                voice_pack_ = voice_pack_.to(torch::kMPS);
-                device_ = torch::kMPS;
-                std::printf("MPS acceleration ENABLED\n");
-                return;
-            }
-        } catch (const c10::Error& e) {
-            std::string msg = e.what();
-            auto pos = msg.find("scaled_dot_product_attention");
-            if (pos != std::string::npos) {
-                std::fprintf(stderr, "MPS unavailable: scaled_dot_product_attention not supported on MPS for TorchScript\n");
-            } else {
-                pos = msg.find("RuntimeError:");
-                std::fprintf(stderr, "MPS acceleration failed: %s\n",
-                    pos != std::string::npos ? msg.substr(pos).c_str() : msg.c_str());
-            }
-            for (auto& [sz, model] : bucket_models_) {
-                try { model.to(torch::kCPU); } catch (...) {}
-            }
-            try { voice_pack_ = voice_pack_.to(torch::kCPU); } catch (...) {}
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "MPS probe failed: %s\n", e.what());
+        if (torch::mps::is_available()) {
+            std::printf("MPS hardware available but TorchScript has placeholder storage incompatibility\n");
+            std::printf("GPU acceleration via CoreML (ANE) for duration model instead\n");
         }
 #endif
         device_ = torch::kCPU;
-        std::printf("Using CPU inference\n");
+        std::printf("Using CPU inference for TorchScript decoder\n");
     }
 
     bool load_bucket_models(const std::string& base_dir) {

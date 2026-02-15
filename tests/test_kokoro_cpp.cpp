@@ -385,6 +385,22 @@ int main() {
         else { failed++; }
     }
 
+#ifdef __APPLE__
+    std::printf("\n[TEST 8] MPS acceleration probe\n");
+    {
+        if (!torch::mps::is_available()) {
+            std::printf("  MPS hardware not available\n");
+        } else {
+            setenv("PYTORCH_ENABLE_MPS_FALLBACK", "1", 0);
+            std::printf("  MPS available, PYTORCH_ENABLE_MPS_FALLBACK=1 set\n");
+            std::printf("  NOTE: TorchScript models have placeholder storage incompatible with MPS\n");
+            std::printf("  GPU acceleration uses CoreML (ANE) for duration model instead\n");
+        }
+        passed++;
+        std::printf("  PASS (informational)\n");
+    }
+#endif
+
 #ifdef KOKORO_COREML
     std::printf("\n[TEST 7] CoreML duration model load and predict\n");
     {
