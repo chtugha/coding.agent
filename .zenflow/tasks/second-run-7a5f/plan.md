@@ -519,6 +519,12 @@ Save to `{@artifacts_path}/plan.md`.
 - [x] Phoneme cache: LRU-style with 10,000 entry limit and full-clear eviction
 - [x] UTF-8 handling: fixed to use (c & 0x80) != 0 check with bounds validation
 - [x] Audio validation: reject empty or >10s output samples
+- [x] CoreML hybrid approach: duration model exported to CoreML (.mlmodelc), loaded via Objective-C++ CoreML API, inference 67ms on ANE
+- [x] CoreML test (Test 7): loads compiled .mlmodelc, runs prediction, verifies output shapes (pred_dur, d, t_en, s) — PASS
+- [x] Bucketed TorchScript models (7 buckets L8-L512): primary inference path at ~260-600ms per sentence
+- [x] Binary voice format (.bin): ~10x faster load than pickle, both df_eva and dm_bernd exported
+- [x] Generated JSON files (vocab.json, config.json, buckets.json, coreml_config.json) removed from git tracking
+- [x] 25/25 interconnect tests + 7/7 kokoro tests all pass
 
 ### Phase 4 Tests
 - [ ] Self-contained distribution runs on clean macOS

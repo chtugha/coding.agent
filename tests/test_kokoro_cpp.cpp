@@ -12,6 +12,11 @@
 #include <algorithm>
 #include <sys/stat.h>
 
+#ifdef KOKORO_COREML
+#import <CoreML/CoreML.h>
+#import <Foundation/Foundation.h>
+#endif
+
 #ifndef WHISPERTALK_MODELS_DIR
 #define WHISPERTALK_MODELS_DIR "bin/models"
 #endif
@@ -379,6 +384,98 @@ int main() {
         if (all_ok) { passed++; std::printf("  PASS\n"); }
         else { failed++; }
     }
+
+#ifdef KOKORO_COREML
+    std::printf("\n[TEST 7] CoreML duration model load and predict\n");
+    {
+        std::string mlmodelc_path = base_dir + "/coreml/kokoro_duration.mlmodelc";
+        struct stat st;
+        if (stat(mlmodelc_path.c_str(), &st) != 0) {
+            std::printf("  SKIP: CoreML model not found at %s\n", mlmodelc_path.c_str());
+        } else {
+            @autoreleasepool {
+                NSString* path = [NSString stringWithUTF8String:mlmodelc_path.c_str()];
+                NSURL* url = [NSURL fileURLWithPath:path];
+                MLModelConfiguration* config = [[MLModelConfiguration alloc] init];
+                config.computeUnits = MLComputeUnitsAll;
+                NSError* error = nil;
+                MLModel* model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
+                if (error || !model) {
+                    std::printf("  FAIL: Could not load CoreML model: %s\n",
+                        error ? [[error description] UTF8String] : "unknown");
+                    failed++;
+                } else {
+                    std::printf("  Loaded CoreML duration model\n");
+
+                    NSArray<NSNumber*>* ids_shape = @[@1, @512];
+                    MLMultiArray* input_ids_arr = [[MLMultiArray alloc]
+                        initWithShape:ids_shape dataType:MLMultiArrayDataTypeInt32 error:&error];
+                    int32_t* ids_ptr = (int32_t*)input_ids_arr.dataPointer;
+                    for (int i = 0; i < 512; i++) ids_ptr[i] = (i < 10) ? (i + 1) : 0;
+
+                    NSArray<NSNumber*>* ref_shape = @[@1, @256];
+                    MLMultiArray* ref_s_arr = [[MLMultiArray alloc]
+                        initWithShape:ref_shape dataType:MLMultiArrayDataTypeFloat32 error:&error];
+                    float* ref_ptr = (float*)ref_s_arr.dataPointer;
+                    if (voice_pack.defined() && voice_entries > 0) {
+                        auto accessor = voice_pack.index({0}).contiguous().data_ptr<float>();
+                        std::memcpy(ref_ptr, accessor, 256 * sizeof(float));
+                    }
+
+                    NSArray<NSNumber*>* speed_shape = @[@1];
+                    MLMultiArray* speed_arr = [[MLMultiArray alloc]
+                        initWithShape:speed_shape dataType:MLMultiArrayDataTypeFloat32 error:&error];
+                    ((float*)speed_arr.dataPointer)[0] = 1.0f;
+
+                    MLMultiArray* mask_arr = [[MLMultiArray alloc]
+                        initWithShape:ids_shape dataType:MLMultiArrayDataTypeInt32 error:&error];
+                    int32_t* mask_ptr = (int32_t*)mask_arr.dataPointer;
+                    for (int i = 0; i < 512; i++) mask_ptr[i] = (i < 10) ? 1 : 0;
+
+                    NSDictionary* input_dict = @{
+                        @"input_ids": input_ids_arr,
+                        @"ref_s": ref_s_arr,
+                        @"speed": speed_arr,
+                        @"attention_mask": mask_arr
+                    };
+                    id<MLFeatureProvider> features = [[MLDictionaryFeatureProvider alloc]
+                        initWithDictionary:input_dict error:&error];
+
+                    auto coreml_start = std::chrono::steady_clock::now();
+                    id<MLFeatureProvider> result = [model predictionFromFeatures:features error:&error];
+                    auto coreml_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - coreml_start).count();
+
+                    if (error || !result) {
+                        std::printf("  FAIL: CoreML prediction failed: %s\n",
+                            error ? [[error description] UTF8String] : "unknown");
+                        failed++;
+                    } else {
+                        MLMultiArray* pred_dur = [result featureValueForName:@"pred_dur"].multiArrayValue;
+                        MLMultiArray* d_out = [result featureValueForName:@"d"].multiArrayValue;
+                        MLMultiArray* t_en_out = [result featureValueForName:@"t_en"].multiArrayValue;
+                        MLMultiArray* s_out = [result featureValueForName:@"s"].multiArrayValue;
+                        if (pred_dur && d_out && t_en_out && s_out) {
+                            std::printf("  CoreML outputs: pred_dur=%s, d=%s, t_en=%s, s=%s\n",
+                                [[pred_dur shape] description].UTF8String,
+                                [[d_out shape] description].UTF8String,
+                                [[t_en_out shape] description].UTF8String,
+                                [[s_out shape] description].UTF8String);
+                            std::printf("  CoreML inference: %lldms\n", coreml_elapsed);
+                            passed++;
+                            std::printf("  PASS\n");
+                        } else {
+                            std::printf("  FAIL: Missing output tensors\n");
+                            failed++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#else
+    std::printf("\n[TEST 7] CoreML duration model (SKIPPED - not compiled with KOKORO_COREML)\n");
+#endif
 
 done:
     espeak_Terminate();

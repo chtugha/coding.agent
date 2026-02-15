@@ -27,6 +27,7 @@ bin/models/**/*.bin
 bin/models/**/*.mlmodelc
 bin/models/**/*.mlpackage
 bin/models/**/*.onnx
+bin/models/**/*.json
 
 # Compiled binaries
 whisper-service-local

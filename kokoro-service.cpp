@@ -20,6 +20,11 @@
 #include <vector>
 #include <sys/stat.h>
 
+#ifdef KOKORO_COREML
+#import <CoreML/CoreML.h>
+#import <Foundation/Foundation.h>
+#endif
+
 using namespace whispertalk;
 
 static const int KOKORO_SAMPLE_RATE = 24000;
@@ -128,9 +133,132 @@ static std::string resolve_espeak_data_dir() {
     return "";
 }
 
+#ifdef KOKORO_COREML
+class CoreMLDurationModel {
+public:
+    bool load(const std::string& mlmodelc_path) {
+        @autoreleasepool {
+            NSString* path = [NSString stringWithUTF8String:mlmodelc_path.c_str()];
+            NSURL* url = [NSURL fileURLWithPath:path];
+
+            MLModelConfiguration* config = [[MLModelConfiguration alloc] init];
+            config.computeUnits = MLComputeUnitsAll;
+
+            NSError* error = nil;
+            model_ = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
+            if (error || !model_) {
+                std::fprintf(stderr, "CoreML: Failed to load duration model: %s\n",
+                    error ? [[error description] UTF8String] : "unknown error");
+                return false;
+            }
+
+            std::printf("CoreML duration model loaded from %s\n", mlmodelc_path.c_str());
+            available_ = true;
+            return true;
+        }
+    }
+
+    struct DurationOutput {
+        torch::Tensor pred_dur;  // [1, 512] int32
+        torch::Tensor d;         // [1, 512, 640]
+        torch::Tensor t_en;      // [1, 512, 512]
+        torch::Tensor s;         // [1, 128]
+        torch::Tensor ref_s_out; // [1, 256]
+    };
+
+    bool predict(const std::vector<int32_t>& input_ids_vec,
+                 const torch::Tensor& ref_s_tensor,
+                 float speed_val,
+                 const std::vector<int32_t>& attention_mask_vec,
+                 DurationOutput& output) {
+        if (!available_) return false;
+
+        @autoreleasepool {
+            NSError* error = nil;
+
+            NSArray<NSNumber*>* ids_shape = @[@1, @512];
+            MLMultiArray* input_ids_arr = [[MLMultiArray alloc]
+                initWithShape:ids_shape dataType:MLMultiArrayDataTypeInt32 error:&error];
+            if (error) return false;
+            int32_t* ids_ptr = (int32_t*)input_ids_arr.dataPointer;
+            for (int i = 0; i < 512; i++) {
+                ids_ptr[i] = (i < (int)input_ids_vec.size()) ? input_ids_vec[i] : 0;
+            }
+
+            NSArray<NSNumber*>* ref_shape = @[@1, @256];
+            MLMultiArray* ref_s_arr = [[MLMultiArray alloc]
+                initWithShape:ref_shape dataType:MLMultiArrayDataTypeFloat32 error:&error];
+            if (error) return false;
+            float* ref_ptr = (float*)ref_s_arr.dataPointer;
+            auto ref_accessor = ref_s_tensor.contiguous().cpu().data_ptr<float>();
+            std::memcpy(ref_ptr, ref_accessor, 256 * sizeof(float));
+
+            NSArray<NSNumber*>* speed_shape = @[@1];
+            MLMultiArray* speed_arr = [[MLMultiArray alloc]
+                initWithShape:speed_shape dataType:MLMultiArrayDataTypeFloat32 error:&error];
+            if (error) return false;
+            ((float*)speed_arr.dataPointer)[0] = speed_val;
+
+            MLMultiArray* mask_arr = [[MLMultiArray alloc]
+                initWithShape:ids_shape dataType:MLMultiArrayDataTypeInt32 error:&error];
+            if (error) return false;
+            int32_t* mask_ptr = (int32_t*)mask_arr.dataPointer;
+            for (int i = 0; i < 512; i++) {
+                mask_ptr[i] = (i < (int)attention_mask_vec.size()) ? attention_mask_vec[i] : 0;
+            }
+
+            id<MLFeatureProvider> input_features;
+            NSDictionary* input_dict = @{
+                @"input_ids": input_ids_arr,
+                @"ref_s": ref_s_arr,
+                @"speed": speed_arr,
+                @"attention_mask": mask_arr
+            };
+            input_features = [[MLDictionaryFeatureProvider alloc]
+                initWithDictionary:input_dict error:&error];
+            if (error) return false;
+
+            id<MLFeatureProvider> result = [model_ predictionFromFeatures:input_features error:&error];
+            if (error || !result) {
+                std::fprintf(stderr, "CoreML prediction failed: %s\n",
+                    error ? [[error description] UTF8String] : "unknown");
+                return false;
+            }
+
+            MLMultiArray* pred_dur_ml = [result featureValueForName:@"pred_dur"].multiArrayValue;
+            MLMultiArray* d_ml = [result featureValueForName:@"d"].multiArrayValue;
+            MLMultiArray* t_en_ml = [result featureValueForName:@"t_en"].multiArrayValue;
+            MLMultiArray* s_ml = [result featureValueForName:@"s"].multiArrayValue;
+            MLMultiArray* ref_s_out_ml = [result featureValueForName:@"ref_s_out"].multiArrayValue;
+
+            if (!pred_dur_ml || !d_ml || !t_en_ml || !s_ml || !ref_s_out_ml) return false;
+
+            output.pred_dur = torch::from_blob(
+                (int32_t*)pred_dur_ml.dataPointer, {1, 512}, torch::kInt32).clone();
+            output.d = torch::from_blob(
+                (float*)d_ml.dataPointer, {1, 512, 640}, torch::kFloat32).clone();
+            output.t_en = torch::from_blob(
+                (float*)t_en_ml.dataPointer, {1, 512, 512}, torch::kFloat32).clone();
+            output.s = torch::from_blob(
+                (float*)s_ml.dataPointer, {1, 128}, torch::kFloat32).clone();
+            output.ref_s_out = torch::from_blob(
+                (float*)ref_s_out_ml.dataPointer, {1, 256}, torch::kFloat32).clone();
+
+            return true;
+        }
+    }
+
+    bool is_available() const { return available_; }
+
+private:
+    MLModel* model_ = nil;
+    bool available_ = false;
+};
+#endif
+
 class KokoroPipeline {
 public:
-    bool initialize(const std::string& models_dir, const std::string& voice_name) {
+    bool initialize(const std::string& models_dir, const std::string& voice_name, bool enable_coreml) {
         std::string base_dir = models_dir + "/kokoro-german";
         std::string vocab_path = base_dir + "/vocab.json";
         std::string voice_path = base_dir + "/" + voice_name + "_voice.bin";
@@ -150,6 +278,27 @@ public:
         if (!load_voice_pack(voice_path, voice_fallback, voice_name)) {
             return false;
         }
+
+#ifdef KOKORO_COREML
+        if (enable_coreml) {
+            std::string coreml_path = base_dir + "/coreml/kokoro_duration.mlmodelc";
+            struct stat st;
+            if (stat(coreml_path.c_str(), &st) == 0) {
+                coreml_duration_ = std::make_unique<CoreMLDurationModel>();
+                if (coreml_duration_->load(coreml_path)) {
+                    std::printf("CoreML acceleration ENABLED for duration model (ANE)\n");
+                    coreml_available_ = true;
+                } else {
+                    coreml_duration_.reset();
+                    std::printf("CoreML load failed, using TorchScript fallback\n");
+                }
+            } else {
+                std::printf("CoreML model not found at %s, using TorchScript\n", coreml_path.c_str());
+            }
+        }
+#else
+        (void)enable_coreml;
+#endif
 
         try_mps_acceleration();
 
@@ -250,6 +399,8 @@ public:
         }
         return samples;
     }
+
+    bool has_coreml() const { return coreml_available_; }
 
 private:
     void try_mps_acceleration() {
@@ -406,6 +557,10 @@ private:
     std::mutex espeak_mutex_;
     std::unordered_map<std::string, std::string> phoneme_cache_;
     std::mutex cache_mutex_;
+    bool coreml_available_ = false;
+#ifdef KOKORO_COREML
+    std::unique_ptr<CoreMLDurationModel> coreml_duration_;
+#endif
 };
 
 struct CallContext {
@@ -421,14 +576,14 @@ class KokoroService {
 public:
     KokoroService() : node_(ServiceType::KOKORO_SERVICE) {}
 
-    bool initialize(const std::string& voice_name) {
+    bool initialize(const std::string& voice_name, bool enable_coreml) {
         if (!node_.initialize()) {
             std::fprintf(stderr, "Failed to initialize interconnect node\n");
             return false;
         }
 
         std::string models_dir = WHISPERTALK_MODELS_DIR;
-        if (!pipeline_.initialize(models_dir, voice_name)) {
+        if (!pipeline_.initialize(models_dir, voice_name, enable_coreml)) {
             std::fprintf(stderr, "Failed to initialize Kokoro pipeline\n");
             return false;
         }
@@ -437,6 +592,7 @@ public:
                    voice_name.c_str());
         std::printf("  Negotiation ports: IN=%u OUT=%u\n", node_.ports().neg_in, node_.ports().neg_out);
         std::printf("  Is master: %s\n", node_.is_master() ? "yes" : "no");
+        std::printf("  CoreML: %s\n", pipeline_.has_coreml() ? "ENABLED (duration model on ANE)" : "DISABLED (TorchScript only)");
 
         node_.register_call_end_handler([this](uint32_t call_id) {
             handle_call_end(call_id);
@@ -602,25 +758,30 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
 
     std::string voice = "df_eva";
+    bool enable_coreml = true;
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg.rfind("--voice=", 0) == 0) {
             voice = arg.substr(8);
         } else if (arg == "--voice" && i + 1 < argc) {
             voice = argv[++i];
+        } else if (arg == "--no-coreml") {
+            enable_coreml = false;
         } else if (arg == "--help" || arg == "-h") {
-            std::printf("Usage: kokoro-service [--voice=NAME]\n");
+            std::printf("Usage: kokoro-service [OPTIONS]\n");
             std::printf("  --voice=NAME   Voice to use (default: df_eva, also: dm_bernd)\n");
+            std::printf("  --no-coreml    Disable CoreML acceleration\n");
             return 0;
         }
     }
 
-    std::printf("Starting Kokoro TTS Service (libtorch + espeak-ng, voice=%s)\n", voice.c_str());
+    std::printf("Starting Kokoro TTS Service (libtorch + espeak-ng, voice=%s, coreml=%s)\n",
+               voice.c_str(), enable_coreml ? "auto" : "disabled");
 
     KokoroService service;
     g_service = &service;
 
-    if (!service.initialize(voice)) {
+    if (!service.initialize(voice, enable_coreml)) {
         return 1;
     }
 
