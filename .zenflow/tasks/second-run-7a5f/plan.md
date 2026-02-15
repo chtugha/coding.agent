@@ -506,6 +506,13 @@ Save to `{@artifacts_path}/plan.md`.
 - [x] Multi-call threading: per-call worker threads via CallContext + std::thread, CALL_END joins threads
 - [x] Portable espeak-ng data path: CMake auto-detection + env var + fallback chain (no hardcoded path)
 - [x] MPS acceleration: tested but unsupported (SDPA kernel not available on MPS for TorchScript); CPU-only is correct
+- [x] CoreML acceleration: exhaustively tested via 3 paths:
+  - TorchScript→CoreML (coremltools 7.1-9.0): fails on `cs` attribute in `_jit_pass_lower_graph`, then `repeat_interleave` dynamic shapes
+  - PyTorch→ONNX→CoreML: coremltools dropped ONNX source support in v7.x+
+  - ONNX Runtime CoreML EP: supports 84% of decoder nodes but 51 partitions cause overhead (0.95x slower than CPU)
+  - Root cause: Kokoro's dynamic alignment (`repeat_interleave` with data-dependent repeats) creates dynamic output shapes incompatible with CoreML's static computation graph
+  - TorchScript CPU (260ms) benchmarked 1.56x faster than ONNX Runtime CPU (409ms) for L16
+  - Conclusion: TorchScript + libtorch CPU is the optimal inference path for this model architecture
 - [x] Model files (.pt, .pth) removed from git tracking, .gitignore updated with bin/models/**/*.pt and .pth patterns
 - [x] Voice selection: --voice=df_eva or --voice=dm_bernd CLI argument
 - [x] Export script moved to scripts/export_kokoro_model.py
