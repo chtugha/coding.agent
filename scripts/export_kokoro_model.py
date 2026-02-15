@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""
+Export Kokoro TTS German model to TorchScript bucketed format for C++ inference.
+
+Prerequisites:
+  - PyTorch (pip install torch)
+  - Kokoro package (pip install kokoro) or local checkout
+  - Model files in bin/models/kokoro-german/ (config.json, kokoro-german-v1_1-de.pth, voices/)
+
+Usage:
+  python3 scripts/export_kokoro_model.py
+
+Output (in bin/models/kokoro-german/):
+  - kokoro_german_L{8,16,32,64,128,256,512}.pt  (bucketed TorchScript models)
+  - {df_eva,dm_bernd}_voice.bin                  (raw float32 voice embeddings)
+  - {df_eva,dm_bernd}_embedding.pt               (pickle voice embeddings)
+  - vocab.json                                    (phoneme-to-id mapping)
+  - buckets.json                                  (bucket size metadata)
+"""
 import sys
 import os
 import json

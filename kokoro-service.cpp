@@ -1,5 +1,8 @@
-#include <torch/script.h>
 #include <torch/torch.h>
+#include <torch/script.h>
+#ifdef __APPLE__
+#include <torch/mps.h>
+#endif
 #include <espeak-ng/speak_lib.h>
 #include "interconnect.h"
 #include <atomic>
@@ -148,6 +151,8 @@ public:
             return false;
         }
 
+        try_mps_acceleration();
+
         std::string espeak_data = resolve_espeak_data_dir();
         if (espeak_data.empty()) {
             std::fprintf(stderr, "Cannot find espeak-ng-data directory. "
@@ -219,11 +224,11 @@ public:
         int voice_idx = std::min(phoneme_count - 1, voice_entries_ - 1);
         voice_idx = std::max(0, voice_idx);
 
-        auto ref_s = voice_pack_.index({voice_idx}).unsqueeze(0);
+        auto ref_s = voice_pack_.index({voice_idx}).unsqueeze(0).to(device_);
         auto input_ids = torch::from_blob(padded_ids.data(),
                                          {1, static_cast<int64_t>(bucket)},
-                                         torch::kLong).clone();
-        auto speed_tensor = torch::tensor(speed);
+                                         torch::kLong).clone().to(device_);
+        auto speed_tensor = torch::tensor(speed).to(device_);
 
         torch::Tensor audio;
         {
@@ -247,6 +252,55 @@ public:
     }
 
 private:
+    void try_mps_acceleration() {
+#ifdef __APPLE__
+        try {
+            if (torch::mps::is_available()) {
+                std::printf("MPS device available, attempting migration...\n");
+                auto test_bucket = bucket_sizes_.front();
+                auto& test_model = bucket_models_[test_bucket];
+                test_model.to(torch::kMPS);
+
+                auto test_input = torch::zeros({1, static_cast<int64_t>(test_bucket)}, torch::kLong).to(torch::kMPS);
+                auto test_ref = voice_pack_.index({0}).unsqueeze(0).to(torch::kMPS);
+                auto test_speed = torch::tensor(1.0f).to(torch::kMPS);
+                torch::NoGradGuard no_grad;
+                std::vector<torch::jit::IValue> inputs;
+                inputs.push_back(test_input);
+                inputs.push_back(test_ref);
+                inputs.push_back(test_speed);
+                test_model.forward(inputs);
+
+                for (auto& [sz, model] : bucket_models_) {
+                    if (sz != test_bucket) model.to(torch::kMPS);
+                }
+                voice_pack_ = voice_pack_.to(torch::kMPS);
+                device_ = torch::kMPS;
+                std::printf("MPS acceleration ENABLED\n");
+                return;
+            }
+        } catch (const c10::Error& e) {
+            std::string msg = e.what();
+            auto pos = msg.find("scaled_dot_product_attention");
+            if (pos != std::string::npos) {
+                std::fprintf(stderr, "MPS unavailable: scaled_dot_product_attention not supported on MPS for TorchScript\n");
+            } else {
+                pos = msg.find("RuntimeError:");
+                std::fprintf(stderr, "MPS acceleration failed: %s\n",
+                    pos != std::string::npos ? msg.substr(pos).c_str() : msg.c_str());
+            }
+            for (auto& [sz, model] : bucket_models_) {
+                try { model.to(torch::kCPU); } catch (...) {}
+            }
+            try { voice_pack_ = voice_pack_.to(torch::kCPU); } catch (...) {}
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "MPS probe failed: %s\n", e.what());
+        }
+#endif
+        device_ = torch::kCPU;
+        std::printf("Using CPU inference\n");
+    }
+
     bool load_bucket_models(const std::string& base_dir) {
         const int candidates[] = {8, 16, 32, 64, 128, 256, 512};
         for (int sz : candidates) {
@@ -346,6 +400,7 @@ private:
     std::vector<int> bucket_sizes_;
     torch::Tensor voice_pack_;
     int voice_entries_ = 0;
+    torch::Device device_{torch::kCPU};
     KokoroVocab vocab_;
     std::mutex model_mutex_;
     std::mutex espeak_mutex_;
