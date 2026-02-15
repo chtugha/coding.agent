@@ -224,11 +224,14 @@ private:
 };
 
 int main(int argc, char** argv) {
+    const char* env_models = std::getenv("WHISPERTALK_MODELS_DIR");
+    std::string models_dir = env_models ? env_models :
 #ifdef WHISPERTALK_MODELS_DIR
-    std::string model_path = std::string(WHISPERTALK_MODELS_DIR) + "/ggml-large-v3-q5_0.bin";
+        WHISPERTALK_MODELS_DIR;
 #else
-    std::string model_path = "models/ggml-large-v3-q5_0.bin";
+        "models";
 #endif
+    std::string model_path = models_dir + "/ggml-large-v3-q5_0.bin";
     if (argc >= 2) model_path = argv[1];
 
     try {

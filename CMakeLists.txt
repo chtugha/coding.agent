@@ -8,6 +8,8 @@ set(CMAKE_SKIP_BUILD_RPATH FALSE)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries by default")
+
 # Testing support
 option(BUILD_TESTS "Build unit tests" OFF)
 if(BUILD_TESTS)

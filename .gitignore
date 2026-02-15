@@ -1,5 +1,6 @@
 # Build directories
 build/
+dist/
 whisper-cpp/build/
 
 # whisper-cpp non-essential directories (only library headers + src needed)

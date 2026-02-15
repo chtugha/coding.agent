@@ -582,7 +582,13 @@ public:
             return false;
         }
 
-        std::string models_dir = WHISPERTALK_MODELS_DIR;
+        const char* env_models = std::getenv("WHISPERTALK_MODELS_DIR");
+        std::string models_dir = env_models ? env_models :
+#ifdef WHISPERTALK_MODELS_DIR
+            WHISPERTALK_MODELS_DIR;
+#else
+            "models";
+#endif
         if (!pipeline_.initialize(models_dir, voice_name, enable_coreml)) {
             std::fprintf(stderr, "Failed to initialize Kokoro pipeline\n");
             return false;
