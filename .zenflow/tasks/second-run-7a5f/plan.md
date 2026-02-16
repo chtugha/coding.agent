@@ -524,7 +524,15 @@ Save to `{@artifacts_path}/plan.md`.
 - [x] Bucketed TorchScript models (7 buckets L8-L512): primary inference path at ~260-600ms per sentence
 - [x] Binary voice format (.bin): ~10x faster load than pickle, both df_eva and dm_bernd exported
 - [x] Generated JSON files (vocab.json, config.json, buckets.json, coreml_config.json) removed from git tracking
-- [x] 25/25 interconnect tests + 7/7 kokoro tests all pass
+- [x] 25/25 interconnect tests + 8/8 kokoro tests all pass
+- [x] Three decoder backends implemented and benchmarked (ONNX, CoreML-Split, TorchScript):
+  - ONNX decoder models exported (3 buckets: 3s/5s/10s, ~650MB total)
+  - CoreML split decoder models exported + compiled (3 buckets, ~321MB total) with HAR TorchScript models
+  - ONNX/CoreML-split synthesize paths wired with CoreML duration model → alignment → decoder
+- [x] Decoder benchmark (Test 9): TorchScript avg=365ms, ONNX avg=301ms, CoreML-Split avg=70ms (ANE)
+- [x] Model size comparison (Test 10): TorchScript=2296MB, ONNX=650MB, CoreML-Split=321MB
+- [x] CoreML Split is clear winner: 5x faster than TorchScript, 7x smaller models
+- [x] 10/10 kokoro tests pass (including benchmark + model size tests), 23/23 interconnect tests pass
 
 ### Phase 4 Tests
 - [x] Self-contained distribution: all 6 binaries + 6 bundled dylibs pass otool portability check (no /opt/homebrew or /usr/local refs)

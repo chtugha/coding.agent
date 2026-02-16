@@ -25,6 +25,10 @@
 #import <Foundation/Foundation.h>
 #endif
 
+#ifdef KOKORO_ONNX
+#include <onnxruntime_cxx_api.h>
+#endif
+
 using namespace whispertalk;
 
 static const int KOKORO_SAMPLE_RATE = 24000;
@@ -254,15 +258,269 @@ private:
     MLModel* model_ = nil;
     bool available_ = false;
 };
+
+class CoreMLSplitDecoder {
+public:
+    struct BucketInfo {
+        std::string name;
+        int asr_frames;
+        int f0_frames;
+        int har_channels;
+        int har_time;
+        MLModel* model = nil;
+    };
+
+    bool load(const std::string& variants_dir) {
+        @autoreleasepool {
+            struct { const char* name; int asr; int f0; int harc; int hart; } buckets[] = {
+                {"3s", 72, 144, 11, 8641},
+                {"5s", 120, 240, 11, 14401},
+                {"10s", 240, 480, 11, 28801},
+            };
+
+            MLModelConfiguration* config = [[MLModelConfiguration alloc] init];
+            config.computeUnits = MLComputeUnitsAll;
+
+            for (auto& b : buckets) {
+                std::string path = variants_dir + "/kokoro_decoder_split_" + b.name + ".mlmodelc";
+                struct stat st;
+                if (stat(path.c_str(), &st) != 0) continue;
+
+                NSString* ns_path = [NSString stringWithUTF8String:path.c_str()];
+                NSURL* url = [NSURL fileURLWithPath:ns_path];
+                NSError* error = nil;
+                MLModel* model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
+                if (error || !model) {
+                    std::fprintf(stderr, "CoreML: Failed to load split decoder %s: %s\n",
+                        b.name, error ? [[error description] UTF8String] : "unknown");
+                    continue;
+                }
+
+                BucketInfo info;
+                info.name = b.name;
+                info.asr_frames = b.asr;
+                info.f0_frames = b.f0;
+                info.har_channels = b.harc;
+                info.har_time = b.hart;
+                info.model = model;
+                buckets_.push_back(info);
+                std::printf("CoreML split decoder loaded: %s (asr=%d, f0=%d)\n", b.name, b.asr, b.f0);
+            }
+
+            if (buckets_.empty()) return false;
+
+            for (auto& b : buckets_) {
+                std::string har_path = variants_dir + "/kokoro_har_" + b.name + ".pt";
+                struct stat st2;
+                if (stat(har_path.c_str(), &st2) != 0) {
+                    std::fprintf(stderr, "HAR model not found: %s\n", har_path.c_str());
+                    continue;
+                }
+                try {
+                    auto har = torch::jit::load(har_path);
+                    har.eval();
+                    har_models_[b.name] = std::move(har);
+                    std::printf("HAR model loaded: %s\n", b.name.c_str());
+                } catch (const c10::Error& e) {
+                    std::fprintf(stderr, "Failed to load HAR model %s: %s\n", b.name.c_str(), e.what());
+                }
+            }
+
+            available_ = true;
+            return true;
+        }
+    }
+
+    const BucketInfo* select_bucket(int f0_frames) const {
+        for (auto& b : buckets_) {
+            if (b.f0_frames >= f0_frames) return &b;
+        }
+        return buckets_.empty() ? nullptr : &buckets_.back();
+    }
+
+    std::vector<float> decode(const BucketInfo& bucket, 
+                               const torch::Tensor& asr,
+                               const torch::Tensor& f0_pred,
+                               const torch::Tensor& n_pred,
+                               const torch::Tensor& ref_s,
+                               const torch::Tensor& har) {
+        @autoreleasepool {
+            NSError* error = nil;
+
+            auto make_array = [&](NSArray<NSNumber*>* shape, const torch::Tensor& t) -> MLMultiArray* {
+                MLMultiArray* arr = [[MLMultiArray alloc] initWithShape:shape
+                    dataType:MLMultiArrayDataTypeFloat32 error:&error];
+                if (error) return nil;
+                auto src = t.contiguous().cpu().data_ptr<float>();
+                std::memcpy((float*)arr.dataPointer, src, t.numel() * sizeof(float));
+                return arr;
+            };
+
+            auto asr_arr = make_array(@[@1, @512, @(bucket.asr_frames)], asr);
+            auto f0_arr = make_array(@[@1, @(bucket.f0_frames)], f0_pred);
+            auto n_arr = make_array(@[@1, @(bucket.f0_frames)], n_pred);
+            auto refs_arr = make_array(@[@1, @256], ref_s);
+            auto har_arr = make_array(@[@1, @(bucket.har_channels * 2), @(bucket.har_time)], har);
+
+            if (!asr_arr || !f0_arr || !n_arr || !refs_arr || !har_arr) return {};
+
+            NSDictionary* input_dict = @{
+                @"asr": asr_arr, @"F0_pred": f0_arr, @"N_pred": n_arr,
+                @"ref_s": refs_arr, @"har": har_arr
+            };
+            auto features = [[MLDictionaryFeatureProvider alloc] initWithDictionary:input_dict error:&error];
+            if (error) return {};
+
+            auto result = [bucket.model predictionFromFeatures:features error:&error];
+            if (error || !result) {
+                std::fprintf(stderr, "CoreML split decoder predict failed: %s\n",
+                    error ? [[error description] UTF8String] : "unknown");
+                return {};
+            }
+
+            MLMultiArray* wav = [result featureValueForName:@"waveform"].multiArrayValue;
+            if (!wav) return {};
+
+            int64_t n_samples = wav.count;
+            std::vector<float> samples(n_samples);
+            std::memcpy(samples.data(), (float*)wav.dataPointer, n_samples * sizeof(float));
+            return samples;
+        }
+    }
+
+    torch::Tensor compute_har(const std::string& bucket_name, const torch::Tensor& f0) {
+        auto it = har_models_.find(bucket_name);
+        if (it == har_models_.end()) return {};
+        torch::NoGradGuard no_grad;
+        return it->second.forward({f0}).toTensor();
+    }
+
+    bool is_available() const { return available_; }
+
+private:
+    std::vector<BucketInfo> buckets_;
+    std::map<std::string, torch::jit::script::Module> har_models_;
+    bool available_ = false;
+};
 #endif
+
+#ifdef KOKORO_ONNX
+class OnnxDecoder {
+public:
+    struct BucketInfo {
+        std::string name;
+        int asr_frames;
+        int f0_frames;
+        std::unique_ptr<Ort::Session> session;
+    };
+
+    bool load(const std::string& variants_dir) {
+        env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "kokoro_decoder");
+        Ort::SessionOptions opts;
+        opts.SetIntraOpNumThreads(4);
+        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+        struct { const char* name; int asr; int f0; } sizes[] = {
+            {"3s", 72, 144}, {"5s", 120, 240}, {"10s", 240, 480},
+        };
+
+        for (auto& s : sizes) {
+            std::string path = variants_dir + "/kokoro_decoder_" + s.name + ".onnx";
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0) continue;
+            try {
+                auto session = std::make_unique<Ort::Session>(*env_, path.c_str(), opts);
+                BucketInfo info;
+                info.name = s.name;
+                info.asr_frames = s.asr;
+                info.f0_frames = s.f0;
+                info.session = std::move(session);
+                buckets_.push_back(std::move(info));
+                std::printf("ONNX decoder loaded: %s (asr=%d, f0=%d)\n", s.name, s.asr, s.f0);
+            } catch (const Ort::Exception& e) {
+                std::fprintf(stderr, "Failed to load ONNX decoder %s: %s\n", s.name, e.what());
+            }
+        }
+
+        available_ = !buckets_.empty();
+        return available_;
+    }
+
+    BucketInfo* select_bucket(int f0_frames) {
+        for (auto& b : buckets_) {
+            if (b.f0_frames >= f0_frames) return &b;
+        }
+        return buckets_.empty() ? nullptr : &buckets_.back();
+    }
+
+    std::vector<float> decode(BucketInfo& bucket,
+                               const std::vector<float>& asr_data,
+                               const std::vector<float>& f0_data,
+                               const std::vector<float>& n_data,
+                               const std::vector<float>& ref_s_data) {
+        auto alloc = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+        std::array<int64_t, 3> asr_shape = {1, 512, (int64_t)bucket.asr_frames};
+        std::array<int64_t, 2> f0_shape = {1, (int64_t)bucket.f0_frames};
+        std::array<int64_t, 2> refs_shape = {1, 256};
+
+        auto asr_val = Ort::Value::CreateTensor<float>(alloc, (float*)asr_data.data(), asr_data.size(), asr_shape.data(), 3);
+        auto f0_val = Ort::Value::CreateTensor<float>(alloc, (float*)f0_data.data(), f0_data.size(), f0_shape.data(), 2);
+        auto n_val = Ort::Value::CreateTensor<float>(alloc, (float*)n_data.data(), n_data.size(), f0_shape.data(), 2);
+        auto refs_val = Ort::Value::CreateTensor<float>(alloc, (float*)ref_s_data.data(), ref_s_data.size(), refs_shape.data(), 2);
+
+        const char* input_names[] = {"asr", "F0_pred", "N_pred", "ref_s"};
+        const char* output_names[] = {"waveform"};
+        std::array<Ort::Value, 4> inputs;
+        inputs[0] = std::move(asr_val);
+        inputs[1] = std::move(f0_val);
+        inputs[2] = std::move(n_val);
+        inputs[3] = std::move(refs_val);
+
+        try {
+            auto outputs = bucket.session->Run(Ort::RunOptions{nullptr},
+                input_names, inputs.data(), 4, output_names, 1);
+            auto& out_tensor = outputs[0];
+            auto* data = out_tensor.GetTensorData<float>();
+            auto shape = out_tensor.GetTensorTypeAndShapeInfo().GetShape();
+            int64_t n = 1;
+            for (auto s : shape) n *= s;
+            return std::vector<float>(data, data + n);
+        } catch (const Ort::Exception& e) {
+            std::fprintf(stderr, "ONNX decode failed: %s\n", e.what());
+            return {};
+        }
+    }
+
+    bool is_available() const { return available_; }
+
+private:
+    std::unique_ptr<Ort::Env> env_;
+    std::vector<BucketInfo> buckets_;
+    bool available_ = false;
+};
+#endif
+
+enum class DecoderBackend { TORCHSCRIPT, ONNX, COREML_SPLIT };
+
+static const char* backend_name(DecoderBackend b) {
+    switch (b) {
+        case DecoderBackend::TORCHSCRIPT: return "torchscript";
+        case DecoderBackend::ONNX: return "onnx";
+        case DecoderBackend::COREML_SPLIT: return "coreml-split";
+    }
+    return "unknown";
+}
 
 class KokoroPipeline {
 public:
-    bool initialize(const std::string& models_dir, const std::string& voice_name, bool enable_coreml) {
+    bool initialize(const std::string& models_dir, const std::string& voice_name,
+                    bool enable_coreml, DecoderBackend requested_backend = DecoderBackend::TORCHSCRIPT) {
         std::string base_dir = models_dir + "/kokoro-german";
         std::string vocab_path = base_dir + "/vocab.json";
         std::string voice_path = base_dir + "/" + voice_name + "_voice.bin";
         std::string voice_fallback = base_dir + "/" + voice_name + "_embedding.pt";
+        std::string variants_dir = base_dir + "/decoder_variants";
 
         if (!vocab_.load(vocab_path)) {
             std::fprintf(stderr, "Failed to load vocab from %s\n", vocab_path.c_str());
@@ -295,10 +553,38 @@ public:
             } else {
                 std::printf("CoreML model not found at %s, using TorchScript\n", coreml_path.c_str());
             }
+
+            if (requested_backend == DecoderBackend::COREML_SPLIT) {
+                coreml_split_decoder_ = std::make_unique<CoreMLSplitDecoder>();
+                if (coreml_split_decoder_->load(variants_dir)) {
+                    active_backend_ = DecoderBackend::COREML_SPLIT;
+                    std::printf("CoreML split decoder ENABLED (ANE)\n");
+                } else {
+                    coreml_split_decoder_.reset();
+                    std::printf("CoreML split decoder load failed, using TorchScript\n");
+                }
+            }
         }
 #else
         (void)enable_coreml;
 #endif
+
+#ifdef KOKORO_ONNX
+        if (requested_backend == DecoderBackend::ONNX) {
+            onnx_decoder_ = std::make_unique<OnnxDecoder>();
+            if (onnx_decoder_->load(variants_dir)) {
+                active_backend_ = DecoderBackend::ONNX;
+                std::printf("ONNX decoder ENABLED\n");
+            } else {
+                onnx_decoder_.reset();
+                std::printf("ONNX decoder load failed, using TorchScript\n");
+            }
+        }
+#endif
+
+        if (active_backend_ == DecoderBackend::TORCHSCRIPT) {
+            std::printf("Using TorchScript decoder (baseline)\n");
+        }
 
         try_mps_acceleration();
 
@@ -321,6 +607,8 @@ public:
 
         return true;
     }
+
+    DecoderBackend active_backend() const { return active_backend_; }
 
     std::string phonemize(const std::string& text) {
         {
@@ -379,6 +667,33 @@ public:
                                          torch::kLong).clone().to(device_);
         auto speed_tensor = torch::tensor(speed).to(device_);
 
+        return synthesize_with_backend(input_ids, ref_s, speed_tensor, bucket);
+    }
+
+    std::vector<float> synthesize_with_backend(const torch::Tensor& input_ids,
+                                                const torch::Tensor& ref_s,
+                                                const torch::Tensor& speed_tensor,
+                                                int bucket) {
+        if (active_backend_ == DecoderBackend::TORCHSCRIPT) {
+            return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+        }
+#ifdef KOKORO_ONNX
+        if (active_backend_ == DecoderBackend::ONNX && onnx_decoder_) {
+            return synthesize_onnx(input_ids, ref_s, speed_tensor, bucket);
+        }
+#endif
+#ifdef KOKORO_COREML
+        if (active_backend_ == DecoderBackend::COREML_SPLIT && coreml_split_decoder_) {
+            return synthesize_coreml_split(input_ids, ref_s, speed_tensor, bucket);
+        }
+#endif
+        return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+    }
+
+    std::vector<float> synthesize_torchscript(const torch::Tensor& input_ids,
+                                               const torch::Tensor& ref_s,
+                                               const torch::Tensor& speed_tensor,
+                                               int bucket) {
         torch::Tensor audio;
         {
             std::lock_guard<std::mutex> lock(model_mutex_);
@@ -390,9 +705,191 @@ public:
             auto& model = bucket_models_[bucket];
             audio = model.forward(inputs).toTensor();
         }
+        return tensor_to_vector(audio);
+    }
 
-        audio = audio.contiguous().cpu();
-        auto accessor = audio.accessor<float, 1>();
+#ifdef KOKORO_ONNX
+    std::vector<float> synthesize_onnx(const torch::Tensor& input_ids,
+                                        const torch::Tensor& ref_s,
+                                        const torch::Tensor& speed_tensor,
+                                        int bucket) {
+        if (!coreml_available_ || !onnx_decoder_) {
+            return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+        }
+#ifdef KOKORO_COREML
+        auto intermediates = run_duration_and_align(input_ids, ref_s, speed_tensor);
+        if (!intermediates.valid) {
+            return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+        }
+
+        int f0_len = static_cast<int>(intermediates.f0_pred.size(1));
+        auto* ob = onnx_decoder_->select_bucket(f0_len);
+        if (!ob) {
+            return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+        }
+
+        auto asr_cpu = intermediates.asr.contiguous().cpu();
+        auto f0_cpu = intermediates.f0_pred.contiguous().cpu();
+        auto n_cpu = intermediates.n_pred.contiguous().cpu();
+        auto refs_cpu = intermediates.ref_s_dec.contiguous().cpu();
+
+        int asr_frames = ob->asr_frames;
+        int f0_frames = ob->f0_frames;
+        std::vector<float> asr_data(512 * asr_frames, 0.0f);
+        std::vector<float> f0_data(f0_frames, 0.0f);
+        std::vector<float> n_data(f0_frames, 0.0f);
+        std::vector<float> refs_data(256, 0.0f);
+
+        int asr_actual = std::min((int)asr_cpu.size(2), asr_frames);
+        for (int c = 0; c < 512; c++) {
+            std::memcpy(asr_data.data() + c * asr_frames,
+                       asr_cpu.data_ptr<float>() + c * asr_cpu.size(2),
+                       asr_actual * sizeof(float));
+        }
+        int f0_actual = std::min((int)f0_cpu.size(1), f0_frames);
+        std::memcpy(f0_data.data(), f0_cpu.data_ptr<float>(), f0_actual * sizeof(float));
+        std::memcpy(n_data.data(), n_cpu.data_ptr<float>(), f0_actual * sizeof(float));
+        std::memcpy(refs_data.data(), refs_cpu.data_ptr<float>(), 256 * sizeof(float));
+
+        return onnx_decoder_->decode(*ob, asr_data, f0_data, n_data, refs_data);
+#else
+        return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+#endif
+    }
+#endif
+
+#ifdef KOKORO_COREML
+    std::vector<float> synthesize_coreml_split(const torch::Tensor& input_ids,
+                                                const torch::Tensor& ref_s,
+                                                const torch::Tensor& speed_tensor,
+                                                int bucket) {
+        if (!coreml_available_ || !coreml_split_decoder_) {
+            return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+        }
+
+        auto intermediates = run_duration_and_align(input_ids, ref_s, speed_tensor);
+        if (!intermediates.valid) {
+            return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+        }
+
+        int f0_len = static_cast<int>(intermediates.f0_pred.size(1));
+        auto* sb = coreml_split_decoder_->select_bucket(f0_len);
+        if (!sb) {
+            return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+        }
+
+        auto f0_for_har = intermediates.f0_pred.unsqueeze(0);
+        auto har = coreml_split_decoder_->compute_har(sb->name, f0_for_har);
+        if (!har.defined() || har.numel() == 0) {
+            return synthesize_torchscript(input_ids, ref_s, speed_tensor, bucket);
+        }
+
+        int asr_frames = sb->asr_frames;
+        int f0_frames = sb->f0_frames;
+        auto asr_padded = torch::zeros({1, 512, asr_frames});
+        int asr_actual = std::min((int)intermediates.asr.size(2), asr_frames);
+        asr_padded.slice(2, 0, asr_actual) = intermediates.asr.slice(2, 0, asr_actual);
+
+        auto f0_padded = torch::zeros({1, f0_frames});
+        auto n_padded = torch::zeros({1, f0_frames});
+        int f0_actual = std::min(f0_len, f0_frames);
+        f0_padded.slice(1, 0, f0_actual) = intermediates.f0_pred.slice(1, 0, f0_actual);
+        n_padded.slice(1, 0, f0_actual) = intermediates.n_pred.slice(1, 0, f0_actual);
+
+        int har_time = sb->har_time;
+        int har_channels = sb->har_channels * 2;
+        auto har_padded = torch::zeros({1, har_channels, har_time});
+        int har_actual_t = std::min((int)har.size(2), har_time);
+        int har_actual_c = std::min((int)har.size(1), har_channels);
+        har_padded.slice(1, 0, har_actual_c).slice(2, 0, har_actual_t) =
+            har.slice(1, 0, har_actual_c).slice(2, 0, har_actual_t);
+
+        return coreml_split_decoder_->decode(*sb, asr_padded, f0_padded, n_padded,
+                                              intermediates.ref_s_dec, har_padded);
+    }
+#endif
+
+    struct AlignedIntermediates {
+        torch::Tensor asr;        // [1, 512, T_aligned]
+        torch::Tensor f0_pred;    // [1, T_f0]
+        torch::Tensor n_pred;     // [1, T_f0]
+        torch::Tensor ref_s_dec;  // [1, 128] (decoder style)
+        bool valid = false;
+    };
+
+#ifdef KOKORO_COREML
+    AlignedIntermediates run_duration_and_align(const torch::Tensor& input_ids,
+                                                 const torch::Tensor& ref_s,
+                                                 const torch::Tensor& speed_tensor) {
+        AlignedIntermediates result;
+        if (!coreml_duration_ || !coreml_duration_->is_available()) return result;
+
+        auto ids_cpu = input_ids.contiguous().cpu();
+        int64_t seq_len = ids_cpu.size(1);
+        std::vector<int32_t> ids_vec(seq_len);
+        auto ids_ptr = ids_cpu.data_ptr<int64_t>();
+        for (int64_t i = 0; i < seq_len; i++) ids_vec[i] = static_cast<int32_t>(ids_ptr[i]);
+
+        int actual_len = 0;
+        for (int i = 0; i < (int)ids_vec.size(); i++) {
+            if (ids_vec[i] != 0) actual_len = i + 1;
+        }
+        std::vector<int32_t> mask_vec(seq_len);
+        for (int i = 0; i < actual_len; i++) mask_vec[i] = 1;
+
+        float speed_val = speed_tensor.item<float>();
+
+        CoreMLDurationModel::DurationOutput dur_out;
+        if (!coreml_duration_->predict(ids_vec, ref_s.squeeze(0), speed_val, mask_vec, dur_out)) {
+            return result;
+        }
+
+        auto pred_dur = dur_out.pred_dur.squeeze(0).to(torch::kLong);
+        auto t_en = dur_out.t_en;
+
+        int64_t total_frames = 0;
+        auto dur_acc = pred_dur.accessor<int64_t, 1>();
+        for (int i = 0; i < actual_len && i < pred_dur.size(0); i++) {
+            total_frames += dur_acc[i];
+        }
+        if (total_frames <= 0) return result;
+
+        auto t_en_cpu = t_en.squeeze(0).contiguous().cpu();
+        int t_en_dim = static_cast<int>(t_en_cpu.size(0));
+        auto asr = torch::zeros({1, t_en_dim, total_frames});
+        int64_t pos = 0;
+        for (int i = 0; i < actual_len && i < pred_dur.size(0); i++) {
+            int64_t dur = dur_acc[i];
+            if (dur <= 0) continue;
+            auto col = t_en_cpu.select(1, i);
+            for (int64_t j = 0; j < dur && (pos + j) < total_frames; j++) {
+                asr[0].select(1, pos + j) = col;
+            }
+            pos += dur;
+        }
+
+        int64_t f0_frames = total_frames * 2;
+        result.asr = asr;
+        result.f0_pred = torch::zeros({1, f0_frames});
+        result.n_pred = torch::zeros({1, f0_frames});
+        result.ref_s_dec = dur_out.ref_s_out.slice(1, 0, 128);
+        if (!result.ref_s_dec.defined() || result.ref_s_dec.size(1) < 128) {
+            result.ref_s_dec = ref_s.slice(1, 0, 128);
+        }
+        result.valid = true;
+        return result;
+    }
+#else
+    AlignedIntermediates run_duration_and_align(const torch::Tensor&,
+                                                 const torch::Tensor&,
+                                                 const torch::Tensor&) {
+        return {};
+    }
+#endif
+
+    static std::vector<float> tensor_to_vector(const torch::Tensor& audio) {
+        auto t = audio.contiguous().cpu();
+        auto accessor = t.accessor<float, 1>();
         std::vector<float> samples(accessor.size(0));
         for (int64_t i = 0; i < accessor.size(0); i++) {
             samples[i] = accessor[i];
@@ -520,8 +1017,13 @@ private:
     std::unordered_map<std::string, std::string> phoneme_cache_;
     std::mutex cache_mutex_;
     bool coreml_available_ = false;
+    DecoderBackend active_backend_ = DecoderBackend::TORCHSCRIPT;
 #ifdef KOKORO_COREML
     std::unique_ptr<CoreMLDurationModel> coreml_duration_;
+    std::unique_ptr<CoreMLSplitDecoder> coreml_split_decoder_;
+#endif
+#ifdef KOKORO_ONNX
+    std::unique_ptr<OnnxDecoder> onnx_decoder_;
 #endif
 };
 
@@ -538,7 +1040,7 @@ class KokoroService {
 public:
     KokoroService() : node_(ServiceType::KOKORO_SERVICE) {}
 
-    bool initialize(const std::string& voice_name, bool enable_coreml) {
+    bool initialize(const std::string& voice_name, bool enable_coreml, DecoderBackend backend) {
         if (!node_.initialize()) {
             std::fprintf(stderr, "Failed to initialize interconnect node\n");
             return false;
@@ -551,16 +1053,16 @@ public:
 #else
             "models";
 #endif
-        if (!pipeline_.initialize(models_dir, voice_name, enable_coreml)) {
+        if (!pipeline_.initialize(models_dir, voice_name, enable_coreml, backend)) {
             std::fprintf(stderr, "Failed to initialize Kokoro pipeline\n");
             return false;
         }
 
-        std::printf("Kokoro TTS Service initialized (German, libtorch + espeak-ng, voice=%s)\n",
-                   voice_name.c_str());
+        std::printf("Kokoro TTS Service initialized (German, voice=%s, decoder=%s)\n",
+                   voice_name.c_str(), backend_name(pipeline_.active_backend()));
         std::printf("  Negotiation ports: IN=%u OUT=%u\n", node_.ports().neg_in, node_.ports().neg_out);
         std::printf("  Is master: %s\n", node_.is_master() ? "yes" : "no");
-        std::printf("  CoreML: %s\n", pipeline_.has_coreml() ? "ENABLED (duration model on ANE)" : "DISABLED (TorchScript only)");
+        std::printf("  CoreML duration: %s\n", pipeline_.has_coreml() ? "ENABLED (ANE)" : "DISABLED");
 
         node_.register_call_end_handler([this](uint32_t call_id) {
             handle_call_end(call_id);
@@ -727,6 +1229,7 @@ int main(int argc, char* argv[]) {
 
     std::string voice = "df_eva";
     bool enable_coreml = true;
+    DecoderBackend backend = DecoderBackend::TORCHSCRIPT;
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg.rfind("--voice=", 0) == 0) {
@@ -735,21 +1238,31 @@ int main(int argc, char* argv[]) {
             voice = argv[++i];
         } else if (arg == "--no-coreml") {
             enable_coreml = false;
+        } else if (arg.rfind("--decoder=", 0) == 0) {
+            std::string dec = arg.substr(10);
+            if (dec == "torchscript" || dec == "ts") backend = DecoderBackend::TORCHSCRIPT;
+            else if (dec == "onnx") backend = DecoderBackend::ONNX;
+            else if (dec == "coreml-split" || dec == "coreml") backend = DecoderBackend::COREML_SPLIT;
+            else {
+                std::fprintf(stderr, "Unknown decoder backend: %s\n", dec.c_str());
+                return 1;
+            }
         } else if (arg == "--help" || arg == "-h") {
             std::printf("Usage: kokoro-service [OPTIONS]\n");
-            std::printf("  --voice=NAME   Voice to use (default: df_eva, also: dm_bernd)\n");
-            std::printf("  --no-coreml    Disable CoreML acceleration\n");
+            std::printf("  --voice=NAME      Voice to use (default: df_eva, also: dm_bernd)\n");
+            std::printf("  --decoder=BACKEND  Decoder backend: torchscript, onnx, coreml-split (default: torchscript)\n");
+            std::printf("  --no-coreml       Disable CoreML acceleration for duration model\n");
             return 0;
         }
     }
 
-    std::printf("Starting Kokoro TTS Service (libtorch + espeak-ng, voice=%s, coreml=%s)\n",
-               voice.c_str(), enable_coreml ? "auto" : "disabled");
+    std::printf("Starting Kokoro TTS Service (voice=%s, decoder=%s, coreml=%s)\n",
+               voice.c_str(), backend_name(backend), enable_coreml ? "auto" : "disabled");
 
     KokoroService service;
     g_service = &service;
 
-    if (!service.initialize(voice, enable_coreml)) {
+    if (!service.initialize(voice, enable_coreml, backend)) {
         return 1;
     }
 
