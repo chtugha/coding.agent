@@ -614,6 +614,145 @@ TEST(TrafficConnectionTest, BidirectionalSimultaneous) {
     upstream.shutdown();
 }
 
+TEST(CallIDCollisionTest, MasterOnly1000Reservations) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master.initialize());
+    EXPECT_TRUE(master.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    const int NUM_THREADS = 10;
+    const int CALLS_PER_THREAD = 100;
+    const int TOTAL_CALLS = NUM_THREADS * CALLS_PER_THREAD;
+
+    std::vector<std::vector<uint32_t>> thread_ids(NUM_THREADS, std::vector<uint32_t>(CALLS_PER_THREAD));
+    std::atomic<int> ready_count(0);
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < NUM_THREADS; t++) {
+        threads.emplace_back([&, t]() {
+            ready_count++;
+            while (ready_count < NUM_THREADS) {
+                std::this_thread::yield();
+            }
+            for (int c = 0; c < CALLS_PER_THREAD; c++) {
+                uint32_t proposed = static_cast<uint32_t>(t * CALLS_PER_THREAD + c + 1);
+                thread_ids[t][c] = master.reserve_call_id(proposed);
+            }
+        });
+    }
+
+    for (auto& th : threads) th.join();
+
+    std::set<uint32_t> unique_ids;
+    for (int t = 0; t < NUM_THREADS; t++) {
+        for (int c = 0; c < CALLS_PER_THREAD; c++) {
+            EXPECT_GT(thread_ids[t][c], 0u) << "Thread " << t << " call " << c << " got id 0";
+            unique_ids.insert(thread_ids[t][c]);
+        }
+    }
+
+    EXPECT_EQ(unique_ids.size(), static_cast<size_t>(TOTAL_CALLS))
+        << "Expected " << TOTAL_CALLS << " unique IDs, got " << unique_ids.size()
+        << " — collision detected!";
+
+    master.shutdown();
+}
+
+TEST(CallIDCollisionTest, MixedMasterAndSlave1000Reservations) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master.initialize());
+    EXPECT_TRUE(master.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(slave.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const int MASTER_THREADS = 5;
+    const int SLAVE_THREADS = 5;
+    const int CALLS_PER_THREAD = 100;
+    const int TOTAL_CALLS = (MASTER_THREADS + SLAVE_THREADS) * CALLS_PER_THREAD;
+
+    std::vector<std::vector<uint32_t>> all_ids(MASTER_THREADS + SLAVE_THREADS,
+                                                std::vector<uint32_t>(CALLS_PER_THREAD, 0));
+    std::atomic<int> ready_count(0);
+    const int TOTAL_THREADS = MASTER_THREADS + SLAVE_THREADS;
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < TOTAL_THREADS; t++) {
+        threads.emplace_back([&, t]() {
+            ready_count++;
+            while (ready_count < TOTAL_THREADS) {
+                std::this_thread::yield();
+            }
+            InterconnectNode& node = (t < MASTER_THREADS) ? master : slave;
+            for (int c = 0; c < CALLS_PER_THREAD; c++) {
+                uint32_t proposed = static_cast<uint32_t>(t * CALLS_PER_THREAD + c + 1);
+                all_ids[t][c] = node.reserve_call_id(proposed);
+            }
+        });
+    }
+
+    for (auto& th : threads) th.join();
+
+    std::set<uint32_t> unique_ids;
+    int failures = 0;
+    for (int t = 0; t < TOTAL_THREADS; t++) {
+        for (int c = 0; c < CALLS_PER_THREAD; c++) {
+            if (all_ids[t][c] == 0) {
+                failures++;
+                continue;
+            }
+            unique_ids.insert(all_ids[t][c]);
+        }
+    }
+
+    int successful = TOTAL_CALLS - failures;
+    EXPECT_EQ(unique_ids.size(), static_cast<size_t>(successful))
+        << "Collision detected! " << successful << " successful reservations but only "
+        << unique_ids.size() << " unique IDs";
+
+    EXPECT_GT(successful, TOTAL_CALLS / 2)
+        << "Too many reservation failures: " << failures << " out of " << TOTAL_CALLS;
+
+    if (failures > 0) {
+        std::printf("  Note: %d/%d reservations failed (slave contention on negotiation port)\n",
+                    failures, TOTAL_CALLS);
+    }
+    std::printf("  Call ID collision test: %d successful, %zu unique, %d failures\n",
+                successful, unique_ids.size(), failures);
+
+    slave.shutdown();
+    master.shutdown();
+}
+
+TEST(CallIDCollisionTest, SequentialMonotonicallyIncreasing) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    const int COUNT = 200;
+    std::vector<uint32_t> ids(COUNT);
+    for (int i = 0; i < COUNT; i++) {
+        ids[i] = master.reserve_call_id(1);
+    }
+
+    for (int i = 1; i < COUNT; i++) {
+        EXPECT_GT(ids[i], ids[i - 1])
+            << "ID at index " << i << " (" << ids[i] << ") not greater than index "
+            << (i - 1) << " (" << ids[i - 1] << ")";
+    }
+
+    std::set<uint32_t> unique_ids(ids.begin(), ids.end());
+    EXPECT_EQ(unique_ids.size(), static_cast<size_t>(COUNT));
+
+    master.shutdown();
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

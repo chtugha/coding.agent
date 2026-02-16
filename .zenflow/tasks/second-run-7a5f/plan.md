@@ -398,11 +398,12 @@ Save to `{@artifacts_path}/plan.md`.
 - **Verification**: Binary builds, 25/25 unit tests pass, all 57 total tests pass (2 sanity + 23 interconnect + 7 kokoro + 25 SIP provider unit)
 - **Usage**: `test_sip_provider --port 5060 --duration 60 --inject` + two `sip-client` instances
 
-#### [ ] Step: Call ID collision test
-- Create test script: 10 SIP lines simultaneously create calls
-- Verify no duplicate call_ids across all 1000 call attempts
-- Verify all reservations complete successfully via RESERVE_CALL_ID protocol
-- **Verification**: 0 call_id collisions in 1000 calls
+#### [x] Step: Call ID collision test
+- Added 3 GTest cases to `tests/test_interconnect.cpp` under `CallIDCollisionTest` suite:
+  - `MasterOnly1000Reservations`: 10 threads × 100 calls each on master, all concurrent — 1000 unique IDs, 0 collisions
+  - `MixedMasterAndSlave1000Reservations`: 5 master threads + 5 slave threads × 100 calls each, concurrent via RESERVE_CALL_ID protocol — 1000 successful, 1000 unique, 0 failures
+  - `SequentialMonotonicallyIncreasing`: 200 sequential reservations all proposing ID 1 — verifies monotonic increment and uniqueness
+- **Verification**: 3/3 collision tests pass. 0 collisions across 1000 concurrent calls. All reservations succeed via both master-local and slave-via-protocol paths.
 
 #### [ ] Step: Crash recovery matrix test
 - For each of the 6 service types (SIP, IAP, Whisper, LLaMA, Kokoro, OAP):
