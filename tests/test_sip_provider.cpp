@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <cmath>
+#include <cerrno>
 #include <sstream>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -46,6 +47,7 @@ struct ActiveCall {
     std::thread relay_b_to_a;
     std::thread inject_thread;
     std::atomic<bool> active{true};
+    std::atomic<bool> relay_started{false};
     std::atomic<uint64_t> pkts_a_to_b{0};
     std::atomic<uint64_t> pkts_b_to_a{0};
     std::atomic<uint64_t> bytes_a_to_b{0};
@@ -76,12 +78,14 @@ public:
 
         sip_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (sip_sock_ < 0) {
-            std::cerr << "Failed to create SIP socket\n";
+            std::fprintf(stderr, "Failed to create SIP socket: %s\n", strerror(errno));
             return false;
         }
 
         int reuse = 1;
-        setsockopt(sip_sock_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        if (setsockopt(sip_sock_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+            std::fprintf(stderr, "setsockopt(SO_REUSEADDR) failed: %s\n", strerror(errno));
+        }
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -89,8 +93,9 @@ public:
         addr.sin_port = htons(sip_port);
 
         if (bind(sip_sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            std::cerr << "Failed to bind SIP port " << sip_port << "\n";
+            std::fprintf(stderr, "Failed to bind SIP port %d: %s\n", sip_port, strerror(errno));
             close(sip_sock_);
+            sip_sock_ = -1;
             return false;
         }
 
@@ -131,7 +136,7 @@ public:
 
         print_results();
         shutdown_call();
-        close(sip_sock_);
+        if (sip_sock_ >= 0) close(sip_sock_);
     }
 
 private:
@@ -145,6 +150,31 @@ private:
         if (end == std::string::npos) end = msg.find("\n", start);
         if (end == std::string::npos) end = msg.size();
         return msg.substr(start, end - start);
+    }
+
+    int get_sdp_media_port(const std::string& msg) {
+        size_t m_pos = msg.find("m=audio ");
+        if (m_pos == std::string::npos) return -1;
+        std::string m_line = msg.substr(m_pos + 8);
+        size_t sp = m_line.find(' ');
+        if (sp == std::string::npos) sp = m_line.find('\r');
+        if (sp == std::string::npos) return -1;
+        try {
+            int port = std::stoi(m_line.substr(0, sp));
+            if (port < 1 || port > 65535) return -1;
+            return port;
+        } catch (...) {
+            return -1;
+        }
+    }
+
+    std::string get_sdp_connection_ip(const std::string& msg) {
+        size_t c_pos = msg.find("c=IN IP4 ");
+        if (c_pos == std::string::npos) return "";
+        std::string c_line = msg.substr(c_pos + 9);
+        size_t end = c_line.find_first_of("\r\n ");
+        if (end == std::string::npos) end = c_line.size();
+        return c_line.substr(0, end);
     }
 
     void handle_sip_message(const std::string& msg, const struct sockaddr_in& sender) {
@@ -169,6 +199,11 @@ private:
             if (at_pos != std::string::npos) {
                 username = from.substr(sip_pos + 4, at_pos - sip_pos - 4);
             }
+        }
+
+        if (username.empty()) {
+            std::fprintf(stderr, "REGISTER: could not extract username from From header\n");
+            return;
         }
 
         std::string sender_ip = inet_ntoa(sender.sin_addr);
@@ -198,13 +233,28 @@ private:
 
     int create_relay_socket(int& bound_port) {
         int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0) {
+            std::fprintf(stderr, "Failed to create relay socket: %s\n", strerror(errno));
+            bound_port = -1;
+            return -1;
+        }
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = 0;
-        bind(sock, (struct sockaddr*)&addr, sizeof(addr));
+        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            std::fprintf(stderr, "Failed to bind relay socket: %s\n", strerror(errno));
+            close(sock);
+            bound_port = -1;
+            return -1;
+        }
         socklen_t alen = sizeof(addr);
-        getsockname(sock, (struct sockaddr*)&addr, &alen);
+        if (getsockname(sock, (struct sockaddr*)&addr, &alen) < 0) {
+            std::fprintf(stderr, "getsockname failed: %s\n", strerror(errno));
+            close(sock);
+            bound_port = -1;
+            return -1;
+        }
         bound_port = ntohs(addr.sin_port);
         return sock;
     }
@@ -235,6 +285,12 @@ private:
         call_->leg_b.answered = false;
         call_->leg_b.client_rtp_port = 0;
         call_->leg_b.relay_sock = create_relay_socket(call_->leg_b.relay_port);
+
+        if (call_->leg_a.relay_sock < 0 || call_->leg_b.relay_sock < 0) {
+            std::fprintf(stderr, "Failed to create relay sockets — aborting call\n");
+            call_->active = false;
+            return;
+        }
 
         send_invite(call_->leg_a, ub.username);
         send_invite(call_->leg_b, ua.username);
@@ -270,11 +326,31 @@ private:
         dest.sin_addr.s_addr = inet_addr(leg.ip.c_str());
 
         std::string s = inv.str();
-        sendto(sip_sock_, s.c_str(), s.length(), 0,
-               (struct sockaddr*)&dest, sizeof(dest));
+        if (sendto(sip_sock_, s.c_str(), s.length(), 0,
+                   (struct sockaddr*)&dest, sizeof(dest)) < 0) {
+            std::fprintf(stderr, "Failed to send INVITE to %s: %s\n",
+                        leg.user.c_str(), strerror(errno));
+        }
     }
 
-    void handle_200_ok(const std::string& msg, const struct sockaddr_in&) {
+    void send_ack(const CallLeg& leg, const struct sockaddr_in& dest) {
+        std::ostringstream ack;
+        ack << "ACK sip:" << leg.user << "@" << leg.ip << " SIP/2.0\r\n";
+        ack << "Via: SIP/2.0/UDP " << local_ip_ << ":" << sip_port_ << "\r\n";
+        ack << "From: <sip:provider@" << local_ip_ << ">;tag=prov" << leg.sip_call_id << "\r\n";
+        ack << "To: <sip:" << leg.user << "@" << leg.ip << ">\r\n";
+        ack << "Call-ID: " << leg.sip_call_id << "\r\n";
+        ack << "CSeq: 1 ACK\r\n\r\n";
+
+        std::string s = ack.str();
+        if (sendto(sip_sock_, s.c_str(), s.length(), 0,
+                   (struct sockaddr*)&dest, sizeof(dest)) < 0) {
+            std::fprintf(stderr, "Failed to send ACK to %s: %s\n",
+                        leg.user.c_str(), strerror(errno));
+        }
+    }
+
+    void handle_200_ok(const std::string& msg, const struct sockaddr_in& sender) {
         std::string call_id = get_header(msg, "Call-ID");
         if (!call_) return;
 
@@ -284,29 +360,41 @@ private:
         else if (call_->leg_b.sip_call_id == call_id) leg = &call_->leg_b;
         if (!leg || leg->answered) return;
 
-        size_t m_pos = msg.find("m=audio ");
-        if (m_pos != std::string::npos) {
-            std::string m_line = msg.substr(m_pos + 8);
-            leg->client_rtp_port = std::stoi(m_line.substr(0, m_line.find(' ')));
+        int rtp_port = get_sdp_media_port(msg);
+        if (rtp_port > 0) {
+            leg->client_rtp_port = rtp_port;
+        } else {
+            std::fprintf(stderr, "200 OK from %s: could not parse RTP port from SDP\n",
+                        leg->user.c_str());
+            return;
         }
+
+        std::string sdp_ip = get_sdp_connection_ip(msg);
+        if (!sdp_ip.empty()) {
+            leg->ip = sdp_ip;
+        }
+
         leg->answered = true;
 
-        std::printf("200 OK from %s (RTP port %d)\n",
-                    leg->user.c_str(), leg->client_rtp_port);
+        send_ack(*leg, sender);
 
-        if (call_->leg_a.answered && call_->leg_b.answered) {
+        std::printf("200 OK from %s (RTP %s:%d) — ACK sent\n",
+                    leg->user.c_str(), leg->ip.c_str(), leg->client_rtp_port);
+
+        if (call_->leg_a.answered && call_->leg_b.answered && !call_->relay_started) {
+            call_->relay_started = true;
             start_relay();
         }
     }
 
     void start_relay() {
         std::printf("\n=== Both legs answered — starting RTP relay ===\n");
-        std::printf("  Leg A: %s RTP %d <-> relay %d\n",
-                    call_->leg_a.user.c_str(), call_->leg_a.client_rtp_port,
-                    call_->leg_a.relay_port);
-        std::printf("  Leg B: %s RTP %d <-> relay %d\n",
-                    call_->leg_b.user.c_str(), call_->leg_b.client_rtp_port,
-                    call_->leg_b.relay_port);
+        std::printf("  Leg A: %s RTP %s:%d <-> relay %d\n",
+                    call_->leg_a.user.c_str(), call_->leg_a.ip.c_str(),
+                    call_->leg_a.client_rtp_port, call_->leg_a.relay_port);
+        std::printf("  Leg B: %s RTP %s:%d <-> relay %d\n",
+                    call_->leg_b.user.c_str(), call_->leg_b.ip.c_str(),
+                    call_->leg_b.client_rtp_port, call_->leg_b.relay_port);
 
         call_->relay_a_to_b = std::thread(&TestSipProvider::relay_thread, this,
             call_, &call_->leg_a, &call_->leg_b, &call_->pkts_a_to_b, &call_->bytes_a_to_b);
@@ -341,18 +429,26 @@ private:
         dest.sin_port = htons(to_leg->client_rtp_port);
         dest.sin_addr.s_addr = inet_addr(to_leg->ip.c_str());
 
+        int from_sock = from_leg->relay_sock;
+        int to_sock = to_leg->relay_sock;
+
         while (call->active && g_running) {
             slen = sizeof(sender);
             struct timeval tv{0, 100000};
-            setsockopt(from_leg->relay_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(from_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-            ssize_t n = recvfrom(from_leg->relay_sock, buf, sizeof(buf), 0,
+            ssize_t n = recvfrom(from_sock, buf, sizeof(buf), 0,
                                  (struct sockaddr*)&sender, &slen);
             if (n > 0) {
-                sendto(to_leg->relay_sock, buf, n, 0,
+                sendto(to_sock, buf, n, 0,
                        (struct sockaddr*)&dest, sizeof(dest));
                 (*pkt_count)++;
                 (*byte_count) += n;
+            } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                if (call->active && g_running) {
+                    std::fprintf(stderr, "Relay recvfrom error: %s\n", strerror(errno));
+                }
+                break;
             }
         }
     }
@@ -464,10 +560,12 @@ private:
         std::printf("   Test SIP Provider — Call Results\n");
         std::printf("=========================================\n");
         std::printf("  Duration:     %llds\n", elapsed);
-        std::printf("  Leg A:        %s (RTP %d)\n",
-                    call_->leg_a.user.c_str(), call_->leg_a.client_rtp_port);
-        std::printf("  Leg B:        %s (RTP %d)\n",
-                    call_->leg_b.user.c_str(), call_->leg_b.client_rtp_port);
+        std::printf("  Leg A:        %s (RTP %s:%d)\n",
+                    call_->leg_a.user.c_str(), call_->leg_a.ip.c_str(),
+                    call_->leg_a.client_rtp_port);
+        std::printf("  Leg B:        %s (RTP %s:%d)\n",
+                    call_->leg_b.user.c_str(), call_->leg_b.ip.c_str(),
+                    call_->leg_b.client_rtp_port);
         std::printf("-----------------------------------------\n");
         std::printf("  A -> B:       %llu packets  (%llu KB)\n",
                     call_->pkts_a_to_b.load(), call_->bytes_a_to_b.load() / 1024);
@@ -503,8 +601,8 @@ private:
         if (stats_thread_.joinable()) stats_thread_.join();
         if (end_thread_.joinable()) end_thread_.join();
 
-        close(call_->leg_a.relay_sock);
-        close(call_->leg_b.relay_sock);
+        if (call_->leg_a.relay_sock >= 0) close(call_->leg_a.relay_sock);
+        if (call_->leg_b.relay_sock >= 0) close(call_->leg_b.relay_sock);
     }
 
     int sip_sock_ = -1;

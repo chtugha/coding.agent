@@ -327,7 +327,12 @@ if(BUILD_TESTS)
     target_link_libraries(test_sip_provider PRIVATE Threads::Threads)
     set_property(TARGET test_sip_provider PROPERTY CXX_STANDARD 17)
 
+    add_executable(test_sip_provider_unit tests/test_sip_provider_unit.cpp)
+    target_link_libraries(test_sip_provider_unit PRIVATE GTest::gtest_main Threads::Threads)
+    set_property(TARGET test_sip_provider_unit PROPERTY CXX_STANDARD 17)
+
     include(GoogleTest)
     gtest_discover_tests(test_sanity)
     gtest_discover_tests(test_interconnect)
+    gtest_discover_tests(test_sip_provider_unit)
 endif()

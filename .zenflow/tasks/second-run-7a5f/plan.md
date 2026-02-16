@@ -382,10 +382,20 @@ Save to `{@artifacts_path}/plan.md`.
 #### [x] Step: Test SIP Provider (B2BUA)
 - Created `tests/test_sip_provider.cpp` — standalone B2BUA that bridges two SIP clients
 - Accepts REGISTER from two clients, sends INVITE to both, relays RTP between them
+- Proper SIP 3-way handshake with ACK after 200 OK (RFC 3261 compliant)
+- Comprehensive error handling on all socket operations
+- SDP parsing with port validation and connection IP extraction
+- Race condition fixes: relay threads copy socket FDs locally, atomic relay_started flag
 - Optional `--inject` flag sends 3s 400Hz G.711 test tone to kick-start pipeline
 - Reports bidirectional packet flow statistics (pass/fail)
 - Added to CMakeLists.txt as `test_sip_provider` target under BUILD_TESTS
-- **Verification**: Binary builds, runs, shows help. All 25 existing tests still pass.
+- Created `tests/test_sip_provider_unit.cpp` — 25 GTest unit tests covering:
+  - G.711 μ-law encoding (silence, positive/negative range, symmetry, clipping, sine wave)
+  - SIP header parsing (basic, leading spaces, missing, end-of-message, LF-only, multiple)
+  - SDP parsing (media port, multi-codec, no media, invalid port, connection IP)
+  - RTP packet structure (header fields, payload size)
+  - SIP username extraction (URI, tags, numbered lines)
+- **Verification**: Binary builds, 25/25 unit tests pass, all 57 total tests pass (2 sanity + 23 interconnect + 7 kokoro + 25 SIP provider unit)
 - **Usage**: `test_sip_provider --port 5060 --duration 60 --inject` + two `sip-client` instances
 
 #### [ ] Step: Call ID collision test
