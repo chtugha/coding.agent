@@ -1,4 +1,3 @@
-#include <torch/torch.h>
 #include <torch/script.h>
 #include <espeak-ng/speak_lib.h>
 #include <cstdio>
@@ -16,10 +15,6 @@
 #ifdef KOKORO_COREML
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
-#endif
-
-#ifdef KOKORO_ONNX
-#include <onnxruntime_cxx_api.h>
 #endif
 
 #ifndef WHISPERTALK_MODELS_DIR
@@ -139,13 +134,6 @@ std::string phonemize_german(const std::string& text) {
     return result;
 }
 
-static int select_bucket(int64_t input_len, const std::vector<int>& bucket_sizes) {
-    for (int sz : bucket_sizes) {
-        if (sz >= input_len) return sz;
-    }
-    return -1;
-}
-
 int main() {
     std::string models_dir = WHISPERTALK_MODELS_DIR;
     std::string base_dir = models_dir + "/kokoro-german";
@@ -154,7 +142,7 @@ int main() {
     int passed = 0;
     int failed = 0;
 
-    std::printf("=== Kokoro C++ TTS Test Suite (Bucketed Models) ===\n\n");
+    std::printf("=== Kokoro C++ TTS Test Suite (CoreML Split Decoder) ===\n\n");
 
     std::string espeak_data = resolve_espeak_data_dir();
     if (espeak_data.empty()) {
@@ -223,57 +211,10 @@ int main() {
         }
     }
 
-    std::map<int, torch::jit::script::Module> bucket_models;
-    std::vector<int> bucket_sizes;
     torch::Tensor voice_pack;
     int voice_entries = 0;
 
-    std::printf("\n[TEST 4] Bucket model loading\n");
-    {
-        const int candidates[] = {8, 16, 32, 64, 128, 256, 512};
-        for (int sz : candidates) {
-            std::string path = base_dir + "/kokoro_german_L" + std::to_string(sz) + ".pt";
-            struct stat st;
-            if (stat(path.c_str(), &st) != 0) continue;
-            try {
-                auto model = torch::jit::load(path);
-                model.eval();
-                bucket_models[sz] = std::move(model);
-                bucket_sizes.push_back(sz);
-                std::printf("  Loaded L=%d\n", sz);
-            } catch (const c10::Error& e) {
-                std::printf("  FAIL loading L=%d: %s\n", sz, e.what());
-            }
-        }
-        std::sort(bucket_sizes.begin(), bucket_sizes.end());
-        if (bucket_sizes.size() >= 3) {
-            passed++;
-            std::printf("  PASS: %zu bucket models loaded\n", bucket_sizes.size());
-        } else {
-            std::string single = base_dir + "/kokoro_german.pt";
-            struct stat st;
-            if (stat(single.c_str(), &st) == 0) {
-                try {
-                    auto model = torch::jit::load(single);
-                    model.eval();
-                    bucket_models[0] = std::move(model);
-                    bucket_sizes.push_back(0);
-                    passed++;
-                    std::printf("  PASS: single model loaded (no buckets)\n");
-                } catch (const c10::Error& e) {
-                    failed++;
-                    std::printf("  FAIL: %s\n", e.what());
-                    goto done;
-                }
-            } else {
-                failed++;
-                std::printf("  FAIL: no models found\n");
-                goto done;
-            }
-        }
-    }
-
-    std::printf("\n[TEST 5] Voice pack loading (bin format)\n");
+    std::printf("\n[TEST 4] Voice pack loading (bin format)\n");
     {
         std::string bin_path = base_dir + "/df_eva_voice.bin";
         std::string pt_path = base_dir + "/df_eva_embedding.pt";
@@ -300,7 +241,7 @@ int main() {
                 std::ifstream f(pt_path, std::ios::binary);
                 std::vector<char> data((std::istreambuf_iterator<char>(f)),
                                       std::istreambuf_iterator<char>());
-                auto loaded = torch::pickle_load(data).toTensor().to(torch::kFloat32);
+                auto loaded = torch::jit::pickle_load(data).toTensor().to(torch::kFloat32);
                 voice_pack = loaded.squeeze(1);
                 voice_entries = static_cast<int>(voice_pack.size(0));
                 std::printf("  Loaded from pt (fallback): [%d, %lld]\n",
@@ -324,90 +265,8 @@ int main() {
         }
     }
 
-    std::printf("\n[TEST 6] End-to-end synthesis with bucket selection (German)\n");
-    {
-        std::vector<std::string> test_texts = {
-            "Hallo Welt",
-            "Guten Tag, wie kann ich Ihnen helfen?",
-            "Das Wetter ist heute sehr schoen.",
-        };
-        bool all_ok = true;
-        for (auto& text : test_texts) {
-            auto start = std::chrono::steady_clock::now();
-
-            auto phonemes = phonemize_german(text);
-            auto ids = vocab.encode(phonemes);
-
-            int64_t input_len = static_cast<int64_t>(ids.size());
-            int bucket = select_bucket(input_len, bucket_sizes);
-            if (bucket < 0) {
-                std::printf("  FAIL: no bucket for %lld tokens\n", input_len);
-                all_ok = false;
-                continue;
-            }
-
-            std::vector<int64_t> padded_ids(bucket, 0);
-            std::copy(ids.begin(), ids.end(), padded_ids.begin());
-
-            int phoneme_count = static_cast<int>(ids.size()) - 2;
-            int voice_idx = std::min(phoneme_count - 1, voice_entries - 1);
-            voice_idx = std::max(0, voice_idx);
-            auto ref_s = voice_pack.index({voice_idx}).unsqueeze(0);
-
-            auto input_ids = torch::from_blob(padded_ids.data(),
-                                             {1, static_cast<int64_t>(bucket)},
-                                             torch::kLong).clone();
-            auto speed = torch::tensor(1.0f);
-
-            torch::Tensor audio;
-            {
-                torch::NoGradGuard no_grad;
-                std::vector<torch::jit::IValue> inputs;
-                inputs.push_back(input_ids);
-                inputs.push_back(ref_s);
-                inputs.push_back(speed);
-                audio = bucket_models[bucket].forward(inputs).toTensor();
-            }
-
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-
-            float duration_sec = static_cast<float>(audio.numel()) / 24000.0f;
-
-            std::printf("  \"%s\"\n", text.c_str());
-            std::printf("    phonemes: %s\n", phonemes.c_str());
-            std::printf("    tokens: %zu (padded to bucket %d), audio: %lld samples (%.2fs @ 24kHz)\n",
-                       ids.size(), bucket, audio.numel(), duration_sec);
-            std::printf("    range: [%.4f, %.4f], latency: %lldms\n",
-                       audio.min().item<float>(), audio.max().item<float>(), elapsed);
-
-            if (audio.numel() < 1000 || audio.max().item<float>() < 0.01f) {
-                std::printf("    FAIL: audio seems empty\n");
-                all_ok = false;
-            }
-        }
-        if (all_ok) { passed++; std::printf("  PASS\n"); }
-        else { failed++; }
-    }
-
-#ifdef __APPLE__
-    std::printf("\n[TEST 8] MPS acceleration probe\n");
-    {
-        if (!torch::mps::is_available()) {
-            std::printf("  MPS hardware not available\n");
-        } else {
-            setenv("PYTORCH_ENABLE_MPS_FALLBACK", "1", 0);
-            std::printf("  MPS available, PYTORCH_ENABLE_MPS_FALLBACK=1 set\n");
-            std::printf("  NOTE: TorchScript models have placeholder storage incompatible with MPS\n");
-            std::printf("  GPU acceleration uses CoreML (ANE) for duration model instead\n");
-        }
-        passed++;
-        std::printf("  PASS (informational)\n");
-    }
-#endif
-
 #ifdef KOKORO_COREML
-    std::printf("\n[TEST 7] CoreML duration model load and predict\n");
+    std::printf("\n[TEST 5] CoreML duration model load and predict\n");
     {
         std::string mlmodelc_path = base_dir + "/coreml/kokoro_duration.mlmodelc";
         struct stat st;
@@ -463,19 +322,19 @@ int main() {
                         initWithDictionary:input_dict error:&error];
 
                     auto coreml_start = std::chrono::steady_clock::now();
-                    id<MLFeatureProvider> result = [model predictionFromFeatures:features error:&error];
+                    id<MLFeatureProvider> coreml_result = [model predictionFromFeatures:features error:&error];
                     auto coreml_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - coreml_start).count();
 
-                    if (error || !result) {
+                    if (error || !coreml_result) {
                         std::printf("  FAIL: CoreML prediction failed: %s\n",
                             error ? [[error description] UTF8String] : "unknown");
                         failed++;
                     } else {
-                        MLMultiArray* pred_dur = [result featureValueForName:@"pred_dur"].multiArrayValue;
-                        MLMultiArray* d_out = [result featureValueForName:@"d"].multiArrayValue;
-                        MLMultiArray* t_en_out = [result featureValueForName:@"t_en"].multiArrayValue;
-                        MLMultiArray* s_out = [result featureValueForName:@"s"].multiArrayValue;
+                        MLMultiArray* pred_dur = [coreml_result featureValueForName:@"pred_dur"].multiArrayValue;
+                        MLMultiArray* d_out = [coreml_result featureValueForName:@"d"].multiArrayValue;
+                        MLMultiArray* t_en_out = [coreml_result featureValueForName:@"t_en"].multiArrayValue;
+                        MLMultiArray* s_out = [coreml_result featureValueForName:@"s"].multiArrayValue;
                         if (pred_dur && d_out && t_en_out && s_out) {
                             std::printf("  CoreML outputs: pred_dur=%s, d=%s, t_en=%s, s=%s\n",
                                 [[pred_dur shape] description].UTF8String,
@@ -494,307 +353,133 @@ int main() {
             }
         }
     }
-#else
-    std::printf("\n[TEST 7] CoreML duration model (SKIPPED - not compiled with KOKORO_COREML)\n");
-#endif
 
-    std::printf("\n[TEST 9] Decoder backend benchmark (TorchScript vs ONNX vs CoreML-Split)\n");
-    {
-        std::string variants_dir = base_dir + "/decoder_variants";
-        std::vector<std::string> bench_texts = {
-            "Hallo Welt",
-            "Guten Tag, wie kann ich Ihnen helfen?",
-            "Das Wetter ist heute sehr schoen und die Sonne scheint.",
-        };
-
-        auto bench_torchscript = [&](int runs) -> std::vector<double> {
-            std::vector<double> times;
-            for (auto& text : bench_texts) {
-                auto ph = phonemize_german(text);
-                auto ids = vocab.encode(ph);
-                int bucket = select_bucket(static_cast<int64_t>(ids.size()), bucket_sizes);
-                if (bucket < 0) continue;
-                std::vector<int64_t> padded(bucket, 0);
-                std::copy(ids.begin(), ids.end(), padded.begin());
-                int pc = std::max(0, std::min((int)ids.size() - 3, voice_entries - 1));
-                auto ref_s = voice_pack.index({pc}).unsqueeze(0);
-                auto input_ids = torch::from_blob(padded.data(), {1, (int64_t)bucket}, torch::kLong).clone();
-                auto speed = torch::tensor(1.0f);
-
-                for (int r = 0; r < runs; r++) {
-                    auto t0 = std::chrono::steady_clock::now();
-                    torch::NoGradGuard ng;
-                    std::vector<torch::jit::IValue> inputs;
-                    inputs.push_back(input_ids);
-                    inputs.push_back(ref_s);
-                    inputs.push_back(speed);
-                    auto audio = bucket_models[bucket].forward(inputs).toTensor();
-                    auto ms = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - t0).count();
-                    if (r > 0) times.push_back(ms);
-                }
-            }
-            return times;
-        };
-
-        std::printf("  --- TorchScript (CPU) ---\n");
-        auto ts_times = bench_torchscript(4);
-        if (!ts_times.empty()) {
-            std::sort(ts_times.begin(), ts_times.end());
-            double ts_avg = std::accumulate(ts_times.begin(), ts_times.end(), 0.0) / ts_times.size();
-            double ts_min = ts_times.front();
-            double ts_p50 = ts_times[ts_times.size() / 2];
-            std::printf("    avg=%.0fms, min=%.0fms, p50=%.0fms (%zu samples)\n",
-                       ts_avg, ts_min, ts_p50, ts_times.size());
-        }
-
-#ifdef KOKORO_ONNX
-        std::printf("  --- ONNX Runtime (CPU) ---\n");
-        {
-            struct stat st;
-            std::string onnx_3s = variants_dir + "/kokoro_decoder_3s.onnx";
-            if (stat(onnx_3s.c_str(), &st) == 0) {
-                try {
-                    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "bench");
-                    Ort::SessionOptions opts;
-                    opts.SetIntraOpNumThreads(4);
-                    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-                    struct { const char* name; int asr; int f0; } onnx_buckets[] = {
-                        {"3s", 72, 144}, {"5s", 120, 240}, {"10s", 240, 480},
-                    };
-                    std::map<std::string, std::unique_ptr<Ort::Session>> onnx_sessions;
-                    for (auto& b : onnx_buckets) {
-                        std::string p = variants_dir + "/kokoro_decoder_" + b.name + ".onnx";
-                        struct stat st2;
-                        if (stat(p.c_str(), &st2) != 0) continue;
-                        onnx_sessions[b.name] = std::make_unique<Ort::Session>(env, p.c_str(), opts);
-                    }
-
-                    auto select_onnx = [&](int f0) -> std::pair<std::string, int> {
-                        for (auto& b : onnx_buckets) {
-                            if (b.f0 >= f0) return {b.name, b.f0};
-                        }
-                        return {"10s", 480};
-                    };
-
-                    std::vector<double> onnx_times;
-                    for (auto& text : bench_texts) {
-                        auto ph = phonemize_german(text);
-                        auto ids = vocab.encode(ph);
-                        int bucket = select_bucket(static_cast<int64_t>(ids.size()), bucket_sizes);
-                        if (bucket < 0) continue;
-                        std::vector<int64_t> padded(bucket, 0);
-                        std::copy(ids.begin(), ids.end(), padded.begin());
-                        int pc = std::max(0, std::min((int)ids.size() - 3, voice_entries - 1));
-                        auto ref_s_t = voice_pack.index({pc}).unsqueeze(0);
-                        auto input_ids_t = torch::from_blob(padded.data(), {1, (int64_t)bucket}, torch::kLong).clone();
-                        auto speed_t = torch::tensor(1.0f);
-
-                        torch::Tensor full_out;
-                        {
-                            torch::NoGradGuard ng;
-                            std::vector<torch::jit::IValue> ins;
-                            ins.push_back(input_ids_t);
-                            ins.push_back(ref_s_t);
-                            ins.push_back(speed_t);
-                            full_out = bucket_models[bucket].forward(ins).toTensor();
-                        }
-
-                        (void)full_out;
-
-                        auto [bname, bf0] = select_onnx(144);
-                        auto it = onnx_sessions.find(bname);
-                        if (it == onnx_sessions.end()) continue;
-
-                        int asr_f = (bname == "3s") ? 72 : (bname == "5s") ? 120 : 240;
-                        std::vector<float> asr_data(512 * asr_f, 0.0f);
-                        std::vector<float> f0_data(bf0, 0.0f);
-                        std::vector<float> n_data(bf0, 0.0f);
-                        std::vector<float> refs_data(256, 0.0f);
-                        auto ref_ptr = ref_s_t.contiguous().data_ptr<float>();
-                        std::memcpy(refs_data.data(), ref_ptr, 256 * sizeof(float));
-
-                        auto alloc = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-                        std::array<int64_t, 3> asr_shape = {1, 512, (int64_t)asr_f};
-                        std::array<int64_t, 2> f0_shape = {1, (int64_t)bf0};
-                        std::array<int64_t, 2> refs_shape = {1, 256};
-
-                        for (int r = 0; r < 4; r++) {
-                            auto asr_val = Ort::Value::CreateTensor<float>(alloc, asr_data.data(), asr_data.size(), asr_shape.data(), 3);
-                            auto f0_val = Ort::Value::CreateTensor<float>(alloc, f0_data.data(), f0_data.size(), f0_shape.data(), 2);
-                            auto n_val = Ort::Value::CreateTensor<float>(alloc, n_data.data(), n_data.size(), f0_shape.data(), 2);
-                            auto refs_val = Ort::Value::CreateTensor<float>(alloc, refs_data.data(), refs_data.size(), refs_shape.data(), 2);
-
-                            const char* input_names[] = {"asr", "F0_pred", "N_pred", "ref_s"};
-                            const char* output_names[] = {"waveform"};
-                            std::array<Ort::Value, 4> inputs;
-                            inputs[0] = std::move(asr_val);
-                            inputs[1] = std::move(f0_val);
-                            inputs[2] = std::move(n_val);
-                            inputs[3] = std::move(refs_val);
-
-                            auto t0 = std::chrono::steady_clock::now();
-                            auto outputs = it->second->Run(Ort::RunOptions{nullptr},
-                                input_names, inputs.data(), 4, output_names, 1);
-                            auto ms = std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - t0).count();
-                            if (r > 0) onnx_times.push_back(ms);
-                        }
-                    }
-                    if (!onnx_times.empty()) {
-                        std::sort(onnx_times.begin(), onnx_times.end());
-                        double avg = std::accumulate(onnx_times.begin(), onnx_times.end(), 0.0) / onnx_times.size();
-                        std::printf("    avg=%.0fms, min=%.0fms, p50=%.0fms (%zu samples)\n",
-                                   avg, onnx_times.front(), onnx_times[onnx_times.size()/2], onnx_times.size());
-                    }
-                } catch (const Ort::Exception& e) {
-                    std::printf("    ONNX bench failed: %s\n", e.what());
-                }
-            } else {
-                std::printf("    SKIP: ONNX models not found\n");
-            }
-        }
-#else
-        std::printf("  --- ONNX Runtime (SKIPPED - not compiled) ---\n");
-#endif
-
-#ifdef KOKORO_COREML
-        std::printf("  --- CoreML Split Decoder (ANE) ---\n");
-        {
-            struct stat st;
-            std::string cml_3s = variants_dir + "/kokoro_decoder_split_3s.mlmodelc";
-            if (stat(cml_3s.c_str(), &st) == 0) {
-                @autoreleasepool {
-                    MLModelConfiguration* cfg = [[MLModelConfiguration alloc] init];
-                    cfg.computeUnits = MLComputeUnitsAll;
-
-                    struct { const char* name; int asr; int f0; int harc; int hart; } cml_buckets[] = {
-                        {"3s", 72, 144, 11, 8641},
-                        {"5s", 120, 240, 11, 14401},
-                        {"10s", 240, 480, 11, 28801},
-                    };
-
-                    std::map<std::string, MLModel*> cml_models;
-                    std::map<std::string, torch::jit::script::Module> har_models;
-                    for (auto& b : cml_buckets) {
-                        std::string p = variants_dir + "/kokoro_decoder_split_" + std::string(b.name) + ".mlmodelc";
-                        struct stat st2;
-                        if (stat(p.c_str(), &st2) != 0) continue;
-                        NSString* ns_p = [NSString stringWithUTF8String:p.c_str()];
-                        NSError* err = nil;
-                        MLModel* m = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:ns_p] configuration:cfg error:&err];
-                        if (m && !err) cml_models[b.name] = m;
-
-                        std::string hp = variants_dir + "/kokoro_har_" + std::string(b.name) + ".pt";
-                        struct stat st3;
-                        if (stat(hp.c_str(), &st3) == 0) {
-                            try {
-                                auto hm = torch::jit::load(hp);
-                                hm.eval();
-                                har_models[b.name] = std::move(hm);
-                            } catch (...) {}
-                        }
-                    }
-
-                    if (cml_models.empty() || har_models.empty()) {
-                        std::printf("    SKIP: CoreML split models or HAR models not loaded\n");
-                    } else {
-                        std::vector<double> cml_times;
-                        for (auto& text : bench_texts) {
-                            auto ph = phonemize_german(text);
-                            auto ids = vocab.encode(ph);
-
-                            auto& bk = cml_buckets[0];
-                            auto cml_it = cml_models.find(bk.name);
-                            auto har_it = har_models.find(bk.name);
-                            if (cml_it == cml_models.end() || har_it == har_models.end()) continue;
-
-                            torch::Tensor f0_t = torch::zeros({1, bk.f0});
-
-                            for (int r = 0; r < 4; r++) {
-                                auto t0 = std::chrono::steady_clock::now();
-
-                                torch::Tensor har;
-                                {
-                                    torch::NoGradGuard ng;
-                                    har = har_it->second.forward({f0_t}).toTensor();
-                                }
-
-                                NSError* err = nil;
-                                auto make_arr = [&](NSArray<NSNumber*>* shape, const float* data, size_t count) -> MLMultiArray* {
-                                    MLMultiArray* arr = [[MLMultiArray alloc] initWithShape:shape
-                                        dataType:MLMultiArrayDataTypeFloat32 error:&err];
-                                    if (err) return nil;
-                                    std::memcpy((float*)arr.dataPointer, data, count * sizeof(float));
-                                    return arr;
-                                };
-
-                                std::vector<float> asr_data(512 * bk.asr, 0.0f);
-                                std::vector<float> f0_data(bk.f0, 0.0f);
-                                std::vector<float> refs_data(256, 0.0f);
-                                if (voice_pack.defined()) {
-                                    auto vp = voice_pack.index({0}).contiguous().data_ptr<float>();
-                                    std::memcpy(refs_data.data(), vp, 256 * sizeof(float));
-                                }
-                                auto har_data = har.contiguous().data_ptr<float>();
-
-                                auto asr_a = make_arr(@[@1, @512, @(bk.asr)], asr_data.data(), asr_data.size());
-                                auto f0_a = make_arr(@[@1, @(bk.f0)], f0_data.data(), f0_data.size());
-                                auto n_a = make_arr(@[@1, @(bk.f0)], f0_data.data(), f0_data.size());
-                                auto refs_a = make_arr(@[@1, @256], refs_data.data(), 256);
-                                auto har_a = make_arr(@[@1, @(bk.harc * 2), @(bk.hart)], har_data, har.numel());
-
-                                NSDictionary* dict = @{@"asr": asr_a, @"F0_pred": f0_a, @"N_pred": n_a,
-                                                       @"ref_s": refs_a, @"har": har_a};
-                                auto feats = [[MLDictionaryFeatureProvider alloc] initWithDictionary:dict error:&err];
-                                auto res = [cml_it->second predictionFromFeatures:feats error:&err];
-
-                                auto ms = std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - t0).count();
-                                if (r > 0 && res && !err) cml_times.push_back(ms);
-                            }
-                        }
-                        if (!cml_times.empty()) {
-                            std::sort(cml_times.begin(), cml_times.end());
-                            double avg = std::accumulate(cml_times.begin(), cml_times.end(), 0.0) / cml_times.size();
-                            std::printf("    avg=%.0fms, min=%.0fms, p50=%.0fms (%zu samples)\n",
-                                       avg, cml_times.front(), cml_times[cml_times.size()/2], cml_times.size());
-                        }
-                    }
-                }
-            } else {
-                std::printf("    SKIP: CoreML split models not found\n");
-            }
-        }
-#else
-        std::printf("  --- CoreML Split Decoder (SKIPPED - not compiled) ---\n");
-#endif
-
-        passed++;
-        std::printf("  PASS (benchmark)\n");
-    }
-
-    std::printf("\n[TEST 10] Binary/model size comparison\n");
+    std::printf("\n[TEST 6] CoreML split decoder load and benchmark\n");
     {
         std::string variants_dir = base_dir + "/decoder_variants";
         struct stat st;
+        std::string cml_3s = variants_dir + "/kokoro_decoder_split_3s.mlmodelc";
+        if (stat(cml_3s.c_str(), &st) == 0) {
+            @autoreleasepool {
+                MLModelConfiguration* cfg = [[MLModelConfiguration alloc] init];
+                cfg.computeUnits = MLComputeUnitsAll;
 
-        long ts_total = 0;
-        for (int sz : bucket_sizes) {
-            std::string p = base_dir + "/kokoro_german_L" + std::to_string(sz) + ".pt";
-            if (stat(p.c_str(), &st) == 0) ts_total += st.st_size;
-        }
-        std::printf("  TorchScript models: %.1f MB (%d buckets)\n", ts_total / 1e6, (int)bucket_sizes.size());
+                struct { const char* name; int asr; int f0; int harc; int hart; } cml_buckets[] = {
+                    {"3s", 72, 144, 11, 8641},
+                    {"5s", 120, 240, 11, 14401},
+                    {"10s", 240, 480, 11, 28801},
+                };
 
-        long onnx_total = 0;
-        for (auto* name : {"3s", "5s", "10s"}) {
-            std::string p = variants_dir + "/kokoro_decoder_" + name + ".onnx";
-            std::string pd = p + ".data";
-            if (stat(p.c_str(), &st) == 0) onnx_total += st.st_size;
-            if (stat(pd.c_str(), &st) == 0) onnx_total += st.st_size;
+                std::map<std::string, MLModel*> cml_models;
+                std::map<std::string, torch::jit::script::Module> har_models;
+                for (auto& b : cml_buckets) {
+                    std::string p = variants_dir + "/kokoro_decoder_split_" + std::string(b.name) + ".mlmodelc";
+                    struct stat st2;
+                    if (stat(p.c_str(), &st2) != 0) continue;
+                    NSString* ns_p = [NSString stringWithUTF8String:p.c_str()];
+                    NSError* err = nil;
+                    MLModel* m = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:ns_p] configuration:cfg error:&err];
+                    if (m && !err) cml_models[b.name] = m;
+
+                    std::string hp = variants_dir + "/kokoro_har_" + std::string(b.name) + ".pt";
+                    struct stat st3;
+                    if (stat(hp.c_str(), &st3) == 0) {
+                        try {
+                            auto hm = torch::jit::load(hp);
+                            hm.eval();
+                            har_models[b.name] = std::move(hm);
+                        } catch (...) {}
+                    }
+                }
+
+                if (cml_models.empty() || har_models.empty()) {
+                    std::printf("  SKIP: CoreML split models or HAR models not loaded\n");
+                } else {
+                    std::printf("  Loaded %zu decoder buckets, %zu HAR models\n",
+                               cml_models.size(), har_models.size());
+
+                    std::vector<std::string> bench_texts = {
+                        "Hallo Welt",
+                        "Guten Tag, wie kann ich Ihnen helfen?",
+                        "Das Wetter ist heute sehr schoen und die Sonne scheint.",
+                    };
+                    std::vector<double> cml_times;
+                    for (auto& text : bench_texts) {
+                        auto ph = phonemize_german(text);
+                        auto ids = vocab.encode(ph);
+
+                        auto& bk = cml_buckets[0];
+                        auto cml_it = cml_models.find(bk.name);
+                        auto har_it = har_models.find(bk.name);
+                        if (cml_it == cml_models.end() || har_it == har_models.end()) continue;
+
+                        torch::Tensor f0_t = torch::zeros({1, bk.f0});
+
+                        for (int r = 0; r < 4; r++) {
+                            auto t0 = std::chrono::steady_clock::now();
+
+                            torch::Tensor har;
+                            {
+                                torch::NoGradGuard ng;
+                                har = har_it->second.forward({f0_t}).toTensor();
+                            }
+
+                            NSError* err = nil;
+                            auto make_arr = [&](NSArray<NSNumber*>* shape, const float* data, size_t count) -> MLMultiArray* {
+                                MLMultiArray* arr = [[MLMultiArray alloc] initWithShape:shape
+                                    dataType:MLMultiArrayDataTypeFloat32 error:&err];
+                                if (err) return nil;
+                                std::memcpy((float*)arr.dataPointer, data, count * sizeof(float));
+                                return arr;
+                            };
+
+                            std::vector<float> asr_data(512 * bk.asr, 0.0f);
+                            std::vector<float> f0_data(bk.f0, 0.0f);
+                            std::vector<float> refs_data(256, 0.0f);
+                            if (voice_pack.defined()) {
+                                auto vp = voice_pack.index({0}).contiguous().data_ptr<float>();
+                                std::memcpy(refs_data.data(), vp, 256 * sizeof(float));
+                            }
+                            auto har_data = har.contiguous().data_ptr<float>();
+
+                            auto asr_a = make_arr(@[@1, @512, @(bk.asr)], asr_data.data(), asr_data.size());
+                            auto f0_a = make_arr(@[@1, @(bk.f0)], f0_data.data(), f0_data.size());
+                            auto n_a = make_arr(@[@1, @(bk.f0)], f0_data.data(), f0_data.size());
+                            auto refs_a = make_arr(@[@1, @256], refs_data.data(), 256);
+                            auto har_a = make_arr(@[@1, @(bk.harc * 2), @(bk.hart)], har_data, har.numel());
+
+                            NSDictionary* dict = @{@"asr": asr_a, @"F0_pred": f0_a, @"N_pred": n_a,
+                                                   @"ref_s": refs_a, @"har": har_a};
+                            auto feats = [[MLDictionaryFeatureProvider alloc] initWithDictionary:dict error:&err];
+                            auto res = [cml_it->second predictionFromFeatures:feats error:&err];
+
+                            auto ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t0).count();
+                            if (r > 0 && res && !err) cml_times.push_back(ms);
+                        }
+                    }
+                    if (!cml_times.empty()) {
+                        std::sort(cml_times.begin(), cml_times.end());
+                        double avg = std::accumulate(cml_times.begin(), cml_times.end(), 0.0) / cml_times.size();
+                        std::printf("  CoreML Split (ANE): avg=%.0fms, min=%.0fms, p50=%.0fms (%zu samples)\n",
+                                   avg, cml_times.front(), cml_times[cml_times.size()/2], cml_times.size());
+                        passed++;
+                        std::printf("  PASS\n");
+                    } else {
+                        failed++;
+                        std::printf("  FAIL: no benchmark samples collected\n");
+                    }
+                }
+            }
+        } else {
+            std::printf("  SKIP: CoreML split models not found at %s\n", cml_3s.c_str());
         }
-        std::printf("  ONNX models: %.1f MB (3 buckets)\n", onnx_total / 1e6);
+    }
+
+    std::printf("\n[TEST 7] Model size inventory\n");
+    {
+        std::string variants_dir = base_dir + "/decoder_variants";
+        struct stat st;
 
         long cml_total = 0;
         for (auto* name : {"3s", "5s", "10s"}) {
@@ -805,11 +490,31 @@ int main() {
             std::string hp = variants_dir + "/kokoro_har_" + std::string(name) + ".pt";
             if (stat(hp.c_str(), &st) == 0) cml_total += st.st_size;
         }
-        std::printf("  CoreML split models: %.1f MB (3 buckets + HAR)\n", cml_total / 1e6);
+        std::printf("  CoreML split decoder models: %.1f MB (3 buckets + HAR)\n", cml_total / 1e6);
+
+        std::string dur_path = base_dir + "/coreml/kokoro_duration.mlmodelc";
+        if (stat(dur_path.c_str(), &st) == 0) {
+            std::printf("  CoreML duration model: present\n");
+        }
+
+        std::string voice_bin = base_dir + "/df_eva_voice.bin";
+        if (stat(voice_bin.c_str(), &st) == 0) {
+            std::printf("  Voice pack (df_eva): %.1f MB\n", st.st_size / 1e6);
+        }
+
+        std::string vocab_p = base_dir + "/vocab.json";
+        if (stat(vocab_p.c_str(), &st) == 0) {
+            std::printf("  Vocab: %.1f KB\n", st.st_size / 1e3);
+        }
 
         passed++;
         std::printf("  PASS\n");
     }
+#else
+    std::printf("\n[TEST 5] CoreML duration model (SKIPPED - not compiled with KOKORO_COREML)\n");
+    std::printf("[TEST 6] CoreML split decoder (SKIPPED - not compiled with KOKORO_COREML)\n");
+    std::printf("[TEST 7] Model size inventory (SKIPPED - not compiled with KOKORO_COREML)\n");
+#endif
 
 done:
     espeak_Terminate();

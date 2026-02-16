@@ -147,7 +147,8 @@ fi
 KOKORO_SRC="$MODELS_SRC/kokoro-german"
 if [[ -d "$KOKORO_SRC" ]]; then
     mkdir -p "$DIST_DIR/models/kokoro-german/coreml"
-    for f in "$KOKORO_SRC"/kokoro_german_L*.pt "$KOKORO_SRC"/*_voice.bin "$KOKORO_SRC"/vocab.json "$KOKORO_SRC"/buckets.json "$KOKORO_SRC"/config.json; do
+    mkdir -p "$DIST_DIR/models/kokoro-german/decoder_variants"
+    for f in "$KOKORO_SRC"/*_voice.bin "$KOKORO_SRC"/vocab.json; do
         [[ -f "$f" ]] && cp "$f" "$DIST_DIR/models/kokoro-german/"
     done
     if [[ -d "$KOKORO_SRC/coreml/kokoro_duration.mlmodelc" ]]; then
@@ -155,6 +156,15 @@ if [[ -d "$KOKORO_SRC" ]]; then
     fi
     if [[ -f "$KOKORO_SRC/coreml/coreml_config.json" ]]; then
         cp "$KOKORO_SRC/coreml/coreml_config.json" "$DIST_DIR/models/kokoro-german/coreml/"
+    fi
+    for f in "$KOKORO_SRC/decoder_variants"/kokoro_decoder_split_*.mlmodelc; do
+        [[ -d "$f" ]] && cp -R "$f" "$DIST_DIR/models/kokoro-german/decoder_variants/"
+    done
+    for f in "$KOKORO_SRC/decoder_variants"/kokoro_har_*.pt; do
+        [[ -f "$f" ]] && cp "$f" "$DIST_DIR/models/kokoro-german/decoder_variants/"
+    done
+    if [[ -f "$KOKORO_SRC/decoder_variants/split_config.json" ]]; then
+        cp "$KOKORO_SRC/decoder_variants/split_config.json" "$DIST_DIR/models/kokoro-german/decoder_variants/"
     fi
     log "  Kokoro models ($(du -sh "$DIST_DIR/models/kokoro-german" | cut -f1))"
 fi
