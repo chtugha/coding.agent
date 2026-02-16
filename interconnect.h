@@ -165,7 +165,9 @@ public:
     InterconnectNode(ServiceType type) 
         : type_(type), 
           is_master_(false),
+          was_original_master_(false),
           running_(false),
+          master_heartbeat_failures_(0),
           max_known_call_id_(0),
           neg_in_sock_(-1),
           neg_out_sock_(-1),
@@ -222,6 +224,7 @@ public:
     }
 
     bool is_master() const { return is_master_; }
+    bool was_promoted() const { return is_master_ && !was_original_master_; }
     const PortConfig& ports() const { return ports_; }
     ServiceType type() const { return type_; }
 
@@ -342,7 +345,7 @@ public:
             active_call_ids_.insert(final_id);
             return final_id;
         } else {
-            int sock = connect_to_port("127.0.0.1", 22222);
+            int sock = connect_to_master();
             if (sock < 0) return 0;
 
             std::string msg = "RESERVE_CALL_ID " + std::to_string(proposed_id);
@@ -371,6 +374,10 @@ public:
 
             return 0;
         }
+    }
+
+    int connect_to_master() {
+        return connect_to_port("127.0.0.1", 22222);
     }
 
     void broadcast_call_end(uint32_t call_id) {
@@ -460,7 +467,10 @@ public:
 private:
     ServiceType type_;
     bool is_master_;
+    bool was_original_master_;
     std::atomic<bool> running_;
+    int master_heartbeat_failures_;
+    static constexpr int MASTER_FAILURE_THRESHOLD = 3;
     PortConfig ports_;
 
     std::mutex call_id_mutex_;
@@ -501,17 +511,40 @@ private:
     PortConfig downstream_neighbor_ports_;
     std::mutex downstream_neighbor_mutex_;
 
+    std::mutex synced_registry_mutex_;
+    std::map<ServiceType, PortConfig> synced_registry_;
+    uint32_t synced_max_call_id_ = 0;
+
     bool scan_and_bind_ports() {
         const uint16_t BASE_NEG_IN = 22222;
         const uint16_t BASE_NEG_OUT = 33333;
         const uint16_t INCREMENT = 3;
         const int MAX_ATTEMPTS = 100;
 
-        for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
+        int sock_in = create_listen_socket(BASE_NEG_IN);
+        if (sock_in >= 0) {
+            int sock_out = create_listen_socket(BASE_NEG_OUT);
+            if (sock_out >= 0) {
+                neg_in_sock_ = sock_in;
+                neg_out_sock_ = sock_out;
+                ports_ = PortConfig(BASE_NEG_IN, BASE_NEG_OUT);
+                is_master_ = true;
+                was_original_master_ = true;
+                check_and_reclaim_master();
+                return true;
+            }
+            close(sock_in);
+        } else {
+            if (try_reclaim_master_port()) {
+                return true;
+            }
+        }
+
+        for (int attempt = 1; attempt < MAX_ATTEMPTS; ++attempt) {
             uint16_t try_neg_in = BASE_NEG_IN + (attempt * INCREMENT);
             uint16_t try_neg_out = BASE_NEG_OUT + (attempt * INCREMENT);
 
-            int sock_in = create_listen_socket(try_neg_in);
+            sock_in = create_listen_socket(try_neg_in);
             if (sock_in < 0) continue;
 
             int sock_out = create_listen_socket(try_neg_out);
@@ -523,22 +556,77 @@ private:
             neg_in_sock_ = sock_in;
             neg_out_sock_ = sock_out;
             ports_ = PortConfig(try_neg_in, try_neg_out);
+            is_master_ = false;
 
-            if (attempt == 0) {
-                is_master_ = true;
-            } else {
-                is_master_ = false;
-                if (!register_with_master()) {
-                    close_socket(neg_in_sock_);
-                    close_socket(neg_out_sock_);
-                    return false;
-                }
+            if (!register_with_master()) {
+                close_socket(neg_in_sock_);
+                close_socket(neg_out_sock_);
+                return false;
             }
 
             return true;
         }
 
         return false;
+    }
+
+    bool try_reclaim_master_port() {
+        int sock = connect_to_port("127.0.0.1", 22222);
+        if (sock < 0) return false;
+
+        std::string msg = "STEP_DOWN";
+        if (!send_all(sock, msg.c_str(), msg.size())) {
+            close(sock);
+            return false;
+        }
+
+        char buf[256];
+        ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, 3000);
+        close(sock);
+
+        std::string state_str;
+        if (n > 0) {
+            buf[n] = '\0';
+            std::string resp(buf);
+            if (resp.substr(0, 12) == "STEPPED_DOWN") {
+                if (resp.size() > 13) {
+                    state_str = resp.substr(13);
+                }
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        int sock_in = create_listen_socket(22222);
+        if (sock_in < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            sock_in = create_listen_socket(22222);
+            if (sock_in < 0) return false;
+        }
+
+        int sock_out = create_listen_socket(33333);
+        if (sock_out < 0) {
+            close(sock_in);
+            return false;
+        }
+
+        neg_in_sock_ = sock_in;
+        neg_out_sock_ = sock_out;
+        ports_ = PortConfig(22222, 33333);
+        is_master_ = true;
+        was_original_master_ = true;
+
+        if (!state_str.empty()) {
+            absorb_stepped_down_state(state_str);
+        }
+
+        std::fprintf(stderr, "[%s] Reclaimed master role from promoted slave\n",
+                    service_type_to_string(type_));
+        return true;
     }
 
     bool bind_traffic_listen_ports() {
@@ -738,6 +826,73 @@ private:
             }
         }
 
+        if (msg.substr(0, 14) == "SYNC_REGISTRY ") {
+            std::string data = msg.substr(14);
+            size_t sp = data.find(' ');
+            uint32_t max_cid = std::stoul(sp == std::string::npos ? data : data.substr(0, sp));
+
+            std::map<ServiceType, PortConfig> registry;
+            if (sp != std::string::npos) {
+                std::string entries = data.substr(sp + 1);
+                size_t pos = 0;
+                while (pos < entries.size()) {
+                    size_t next = entries.find(' ', pos);
+                    std::string entry = (next == std::string::npos) ? entries.substr(pos) : entries.substr(pos, next - pos);
+                    if (!entry.empty()) {
+                        size_t c1 = entry.find(':');
+                        size_t c2 = entry.find(':', c1 + 1);
+                        if (c1 != std::string::npos && c2 != std::string::npos) {
+                            ServiceType svc = static_cast<ServiceType>(std::stoi(entry.substr(0, c1)));
+                            uint16_t ni = static_cast<uint16_t>(std::stoul(entry.substr(c1 + 1, c2 - c1 - 1)));
+                            uint16_t no = static_cast<uint16_t>(std::stoul(entry.substr(c2 + 1)));
+                            registry[svc] = PortConfig(ni, no);
+                        }
+                    }
+                    if (next == std::string::npos) break;
+                    pos = next + 1;
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(synced_registry_mutex_);
+                synced_registry_ = registry;
+                synced_max_call_id_ = max_cid;
+            }
+            response = "SYNC_ACK";
+        }
+        else if (msg == "STEP_DOWN") {
+            if (is_master_ && !was_original_master_) {
+                std::string state;
+                {
+                    std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
+                    state = std::to_string(max_known_call_id_);
+                }
+                {
+                    std::lock_guard<std::mutex> reg_lock(registry_mutex_);
+                    for (const auto& [svc, cfg] : service_registry_) {
+                        state += " " + std::to_string(static_cast<int>(svc)) +
+                                 ":" + std::to_string(cfg.neg_in) +
+                                 ":" + std::to_string(cfg.neg_out);
+                    }
+                }
+                response = "STEPPED_DOWN " + state;
+                send_all(sock, response.c_str(), response.size());
+                close(sock);
+
+                std::thread([this]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    demote_to_slave();
+                }).detach();
+                return;
+            } else {
+                response = "NOT_PROMOTED";
+            }
+        }
+        else if (msg.substr(0, 11) == "NEW_MASTER ") {
+            master_heartbeat_failures_ = 0;
+            response = "NEW_MASTER_ACK";
+        }
+
         if (msg.substr(0, 9) == "CALL_END ") {
             uint32_t call_id = std::stoul(msg.substr(9));
             
@@ -840,13 +995,18 @@ private:
             if (!running_) break;
             
             if (!is_master_) {
-                int sock = connect_to_port("127.0.0.1", 22222);
-                if (sock >= 0) {
-                    std::string msg = "HEARTBEAT " + std::to_string(static_cast<int>(type_));
-                    send_all(sock, msg.c_str(), msg.size());
-                    char buffer[64];
-                    recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 1000);
-                    close(sock);
+                bool hb_ok = send_heartbeat_to_master();
+                if (hb_ok) {
+                    master_heartbeat_failures_ = 0;
+                } else {
+                    master_heartbeat_failures_++;
+                    if (master_heartbeat_failures_ >= MASTER_FAILURE_THRESHOLD) {
+                        std::fprintf(stderr, "[%s] Master unreachable (%d failures) — attempting promotion\n",
+                                    service_type_to_string(type_), master_heartbeat_failures_);
+                        if (attempt_promote_to_master()) {
+                            master_heartbeat_failures_ = 0;
+                        }
+                    }
                 }
             } else {
                 std::vector<ServiceType> crashed;
@@ -868,10 +1028,295 @@ private:
                 for (ServiceType ct : crashed) {
                     notify_neighbors_of_crash(ct);
                 }
+
+                sync_registry_to_slaves();
             }
 
             check_traffic_connections();
         }
+    }
+
+    bool send_heartbeat_to_master() {
+        int sock = connect_to_port("127.0.0.1", 22222);
+        if (sock < 0) return false;
+
+        std::string msg = "HEARTBEAT " + std::to_string(static_cast<int>(type_));
+        if (!send_all(sock, msg.c_str(), msg.size())) {
+            close(sock);
+            return false;
+        }
+
+        char buffer[64];
+        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 1000);
+        close(sock);
+        return (n > 0);
+    }
+
+    void sync_registry_to_slaves() {
+        std::string payload;
+        {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
+            payload = "SYNC_REGISTRY " + std::to_string(max_known_call_id_);
+            for (const auto& [svc, cfg] : service_registry_) {
+                payload += " " + std::to_string(static_cast<int>(svc)) +
+                           ":" + std::to_string(cfg.neg_in) +
+                           ":" + std::to_string(cfg.neg_out);
+            }
+        }
+
+        std::vector<std::pair<ServiceType, uint16_t>> targets;
+        {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            for (const auto& [svc, cfg] : service_registry_) {
+                targets.push_back({svc, cfg.neg_in});
+            }
+        }
+
+        for (const auto& [svc, port] : targets) {
+            int sock = connect_to_port("127.0.0.1", port);
+            if (sock < 0) continue;
+            send_all(sock, payload.c_str(), payload.size());
+            char buf[32];
+            recv_with_timeout(sock, buf, sizeof(buf) - 1, 500);
+            close(sock);
+        }
+    }
+
+    bool attempt_promote_to_master() {
+        const uint16_t MASTER_NEG_IN = 22222;
+        const uint16_t MASTER_NEG_OUT = 33333;
+
+        int new_neg_in = create_listen_socket(MASTER_NEG_IN);
+        if (new_neg_in < 0) {
+            return false;
+        }
+
+        int new_neg_out = create_listen_socket(MASTER_NEG_OUT);
+        if (new_neg_out < 0) {
+            close(new_neg_in);
+            return false;
+        }
+
+        close_socket(neg_in_sock_);
+        close_socket(neg_out_sock_);
+
+        neg_in_sock_ = new_neg_in;
+        neg_out_sock_ = new_neg_out;
+
+        PortConfig old_ports = ports_;
+        ports_ = PortConfig(MASTER_NEG_IN, MASTER_NEG_OUT);
+        is_master_ = true;
+
+        {
+            std::lock_guard<std::mutex> lock(synced_registry_mutex_);
+            std::lock_guard<std::mutex> reg_lock(registry_mutex_);
+            service_registry_ = synced_registry_;
+            service_registry_.erase(type_);
+            {
+                std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
+                if (synced_max_call_id_ > max_known_call_id_) {
+                    max_known_call_id_ = synced_max_call_id_;
+                }
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            for (auto it = last_heartbeat_.begin(); it != last_heartbeat_.end(); ) {
+                it = last_heartbeat_.erase(it);
+            }
+        }
+
+        rebind_traffic_ports_for_promotion(old_ports);
+
+        std::fprintf(stderr, "[%s] PROMOTED to master (port 22222)\n",
+                    service_type_to_string(type_));
+
+        notify_slaves_of_new_master();
+
+        return true;
+    }
+
+    void rebind_traffic_ports_for_promotion(const PortConfig& /*old_ports*/) {
+        close_socket(down_in_listen_sock_);
+        close_socket(down_out_listen_sock_);
+        close_socket(down_in_accepted_);
+        close_socket(down_out_accepted_);
+
+        down_in_listen_sock_ = create_listen_socket(ports_.down_in);
+        down_out_listen_sock_ = create_listen_socket(ports_.down_out);
+
+        if (down_in_listen_sock_ < 0 || down_out_listen_sock_ < 0) {
+            std::fprintf(stderr, "[%s] Warning: could not rebind traffic ports after promotion\n",
+                        service_type_to_string(type_));
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            downstream_state_ = ConnectionState::DISCONNECTED;
+        }
+    }
+
+    void notify_slaves_of_new_master() {
+        std::vector<std::pair<ServiceType, uint16_t>> targets;
+        {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            for (const auto& [svc, cfg] : service_registry_) {
+                targets.push_back({svc, cfg.neg_in});
+            }
+        }
+
+        std::string msg = "NEW_MASTER " + std::to_string(static_cast<int>(type_));
+        for (const auto& [svc, port] : targets) {
+            int sock = connect_to_port("127.0.0.1", port);
+            if (sock < 0) continue;
+            send_all(sock, msg.c_str(), msg.size());
+            char buf[32];
+            recv_with_timeout(sock, buf, sizeof(buf) - 1, 500);
+            close(sock);
+        }
+    }
+
+    void check_and_reclaim_master() {
+        std::vector<uint16_t> slave_ports;
+        {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            for (const auto& [svc, cfg] : service_registry_) {
+                slave_ports.push_back(cfg.neg_in);
+            }
+        }
+
+        for (uint16_t port : slave_ports) {
+            int sock = connect_to_port("127.0.0.1", port);
+            if (sock < 0) continue;
+            std::string msg = "STEP_DOWN";
+            send_all(sock, msg.c_str(), msg.size());
+            char buf[64];
+            ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, 2000);
+            close(sock);
+
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string resp(buf);
+                if (resp.substr(0, 12) == "STEPPED_DOWN") {
+                    std::fprintf(stderr, "[%s] Reclaimed master from promoted slave at port %u\n",
+                                service_type_to_string(type_), port);
+                    if (resp.size() > 13) {
+                        absorb_stepped_down_state(resp.substr(13));
+                    }
+                }
+            }
+        }
+    }
+
+    void absorb_stepped_down_state(const std::string& state_str) {
+        size_t sp = state_str.find(' ');
+        if (sp == std::string::npos && !state_str.empty()) {
+            uint32_t their_max = std::stoul(state_str);
+            std::lock_guard<std::mutex> lock(call_id_mutex_);
+            if (their_max > max_known_call_id_) {
+                max_known_call_id_ = their_max;
+            }
+            return;
+        }
+        if (sp == std::string::npos) return;
+
+        uint32_t their_max = std::stoul(state_str.substr(0, sp));
+        {
+            std::lock_guard<std::mutex> lock(call_id_mutex_);
+            if (their_max > max_known_call_id_) {
+                max_known_call_id_ = their_max;
+            }
+        }
+
+        std::string entries = state_str.substr(sp + 1);
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        size_t pos = 0;
+        while (pos < entries.size()) {
+            size_t next = entries.find(' ', pos);
+            std::string entry = (next == std::string::npos) ? entries.substr(pos) : entries.substr(pos, next - pos);
+            if (!entry.empty()) {
+                size_t c1 = entry.find(':');
+                size_t c2 = entry.find(':', c1 + 1);
+                if (c1 != std::string::npos && c2 != std::string::npos) {
+                    ServiceType svc = static_cast<ServiceType>(std::stoi(entry.substr(0, c1)));
+                    uint16_t ni = static_cast<uint16_t>(std::stoul(entry.substr(c1 + 1, c2 - c1 - 1)));
+                    uint16_t no = static_cast<uint16_t>(std::stoul(entry.substr(c2 + 1)));
+                    if (service_registry_.find(svc) == service_registry_.end()) {
+                        service_registry_[svc] = PortConfig(ni, no);
+                        last_heartbeat_[svc] = std::chrono::steady_clock::now();
+                    }
+                }
+            }
+            if (next == std::string::npos) break;
+            pos = next + 1;
+        }
+    }
+
+    bool demote_to_slave() {
+        std::fprintf(stderr, "[%s] Demoting from master to slave\n", service_type_to_string(type_));
+
+        is_master_ = false;
+        was_original_master_ = false;
+
+        close_socket(neg_in_sock_);
+        close_socket(neg_out_sock_);
+        close_socket(down_in_listen_sock_);
+        close_socket(down_out_listen_sock_);
+        close_socket(down_in_accepted_);
+        close_socket(down_out_accepted_);
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            downstream_state_ = ConnectionState::DISCONNECTED;
+        }
+
+        const uint16_t BASE_NEG_IN = 22222;
+        const uint16_t BASE_NEG_OUT = 33333;
+        const uint16_t INCREMENT = 3;
+        const int MAX_ATTEMPTS = 100;
+        bool bound = false;
+
+        for (int attempt = 1; attempt < MAX_ATTEMPTS; ++attempt) {
+            uint16_t try_neg_in = BASE_NEG_IN + (attempt * INCREMENT);
+            uint16_t try_neg_out = BASE_NEG_OUT + (attempt * INCREMENT);
+
+            int sock_in = create_listen_socket(try_neg_in);
+            if (sock_in < 0) continue;
+
+            int sock_out = create_listen_socket(try_neg_out);
+            if (sock_out < 0) {
+                close(sock_in);
+                continue;
+            }
+
+            neg_in_sock_ = sock_in;
+            neg_out_sock_ = sock_out;
+            ports_ = PortConfig(try_neg_in, try_neg_out);
+            bound = true;
+            break;
+        }
+
+        if (!bound) {
+            std::fprintf(stderr, "[%s] Failed to bind slave ports after demotion\n",
+                        service_type_to_string(type_));
+            return false;
+        }
+
+        down_in_listen_sock_ = create_listen_socket(ports_.down_in);
+        down_out_listen_sock_ = create_listen_socket(ports_.down_out);
+
+        if (!register_with_master()) {
+            std::fprintf(stderr, "[%s] Failed to register with new master after demotion\n",
+                        service_type_to_string(type_));
+        }
+
+        master_heartbeat_failures_ = 0;
+
+        std::fprintf(stderr, "[%s] Demoted to slave (ports %u/%u)\n",
+                    service_type_to_string(type_), ports_.neg_in, ports_.neg_out);
+        return true;
     }
 
     void notify_neighbors_of_crash(ServiceType crashed_type) {

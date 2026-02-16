@@ -753,6 +753,187 @@ TEST(CallIDCollisionTest, SequentialMonotonicallyIncreasing) {
     master.shutdown();
 }
 
+TEST(MasterFailoverTest, SlavePromotesAfterMasterCrash) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master.initialize());
+    EXPECT_TRUE(master.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(slave.initialize());
+    EXPECT_FALSE(slave.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    uint32_t id1 = master.reserve_call_id(1);
+    uint32_t id2 = master.reserve_call_id(2);
+    EXPECT_GT(id1, 0u);
+    EXPECT_GT(id2, 0u);
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    master.shutdown();
+
+    auto start = std::chrono::steady_clock::now();
+    bool promoted = false;
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(12)) {
+        if (slave.is_master()) {
+            promoted = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    EXPECT_TRUE(promoted) << "Slave did not promote to master within 12s";
+    EXPECT_TRUE(slave.was_promoted());
+
+    uint32_t id3 = slave.reserve_call_id(3);
+    EXPECT_GT(id3, 0u);
+    EXPECT_GT(id3, id2) << "Post-promotion call ID should be greater than pre-crash IDs";
+
+    slave.shutdown();
+}
+
+TEST(MasterFailoverTest, CallIDsSurviveFailover) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(slave.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    for (int i = 0; i < 50; i++) {
+        uint32_t id = master.reserve_call_id(1);
+        EXPECT_GT(id, 0u);
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    master.shutdown();
+
+    auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(12)) {
+        if (slave.is_master()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    ASSERT_TRUE(slave.is_master());
+
+    std::set<uint32_t> post_ids;
+    for (int i = 0; i < 10; i++) {
+        uint32_t id = slave.reserve_call_id(1);
+        EXPECT_GT(id, 50u) << "Post-failover ID " << id << " should be > 50 (max pre-crash)";
+        post_ids.insert(id);
+    }
+
+    EXPECT_EQ(post_ids.size(), 10u) << "Post-failover IDs must be unique";
+
+    slave.shutdown();
+}
+
+TEST(MasterFailoverTest, OriginalMasterReclaims) {
+    InterconnectNode* master1 = new InterconnectNode(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master1->initialize());
+    EXPECT_TRUE(master1->is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(slave.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    uint32_t pre_id = master1->reserve_call_id(100);
+    EXPECT_EQ(pre_id, 100u);
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    master1->shutdown();
+    delete master1;
+    master1 = nullptr;
+
+    auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(12)) {
+        if (slave.is_master()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    ASSERT_TRUE(slave.is_master());
+
+    uint32_t mid_id = slave.reserve_call_id(1);
+    EXPECT_GT(mid_id, 100u);
+
+    InterconnectNode master2(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master2.initialize());
+    EXPECT_TRUE(master2.is_master());
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    auto reclaim_start = std::chrono::steady_clock::now();
+    bool slave_demoted = false;
+    while (std::chrono::steady_clock::now() - reclaim_start < std::chrono::seconds(5)) {
+        if (!slave.is_master()) {
+            slave_demoted = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    EXPECT_TRUE(slave_demoted) << "Slave should have demoted after original master reclaimed";
+    EXPECT_TRUE(master2.is_master());
+
+    uint32_t post_id = master2.reserve_call_id(1);
+    EXPECT_GT(post_id, mid_id) << "Reclaimed master should have absorbed promoted slave's max_call_id";
+
+    slave.shutdown();
+    master2.shutdown();
+}
+
+TEST(MasterFailoverTest, ThirdPartySlaveSeesNewMaster) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave1(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(slave1.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave2(ServiceType::WHISPER_SERVICE);
+    EXPECT_TRUE(slave2.initialize());
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    master.shutdown();
+
+    auto start = std::chrono::steady_clock::now();
+    bool any_promoted = false;
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(12)) {
+        if (slave1.is_master() || slave2.is_master()) {
+            any_promoted = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    EXPECT_TRUE(any_promoted) << "At least one slave should have promoted";
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    InterconnectNode& new_master = slave1.is_master() ? slave1 : slave2;
+    InterconnectNode& remaining_slave = slave1.is_master() ? slave2 : slave1;
+
+    uint32_t id = remaining_slave.reserve_call_id(1);
+    EXPECT_GT(id, 0u) << "Remaining slave should be able to reserve call IDs from new master";
+
+    new_master.shutdown();
+    remaining_slave.shutdown();
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

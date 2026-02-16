@@ -405,6 +405,21 @@ Save to `{@artifacts_path}/plan.md`.
   - `SequentialMonotonicallyIncreasing`: 200 sequential reservations all proposing ID 1 — verifies monotonic increment and uniqueness
 - **Verification**: 3/3 collision tests pass. 0 collisions across 1000 concurrent calls. All reservations succeed via both master-local and slave-via-protocol paths.
 
+#### [x] Step: Master failover implementation and tests
+- Implemented master failover in `interconnect.h`:
+  - `SYNC_REGISTRY`: Master broadcasts service_registry + max_known_call_id to all slaves every heartbeat cycle (2s)
+  - `STEP_DOWN`: Original master sends to promoted slave on restart; promoted slave responds with `STEPPED_DOWN` + serialized state, then demotes itself
+  - `NEW_MASTER`: Promoted master notifies all slaves of leadership change
+  - `attempt_promote_to_master()`: Slave binds 22222/33333 after 3 consecutive heartbeat failures (~6s), absorbs synced registry state
+  - `try_reclaim_master_port()`: Original master sends STEP_DOWN to promoted slave during init, waits for port release, then reclaims 22222
+  - `demote_to_slave()`: Promoted slave releases master ports, rebinds as slave, re-registers with new master
+- Added 4 GTest cases to `tests/test_interconnect.cpp` under `MasterFailoverTest` suite:
+  - `SlavePromotesAfterMasterCrash`: Slave detects master death via heartbeat timeout, promotes to master, reserves new call IDs
+  - `CallIDsSurviveFailover`: 50 pre-crash call IDs preserved; post-failover IDs continue from synced max (>50)
+  - `OriginalMasterReclaims`: Original master restarts, sends STEP_DOWN, promoted slave demotes, master reclaims port 22222 and absorbs state
+  - `ThirdPartySlaveSeesNewMaster`: Two slaves present; one promotes after master crash; remaining slave can reserve call IDs from new master
+- **Verification**: 4/4 failover tests pass. All 30/30 interconnect tests pass. Total 57 tests pass (2 sanity + 30 interconnect + 25 SIP provider unit).
+
 #### [ ] Step: Crash recovery matrix test
 - For each of the 6 service types (SIP, IAP, Whisper, LLaMA, Kokoro, OAP):
   - Start pipeline with active call
@@ -585,7 +600,7 @@ Save to `{@artifacts_path}/plan.md`.
 - Total estimated effort: 30-35 working days (6-7 weeks), includes 10-20% buffer for unforeseen issues
 - Kokoro C++ port is highest risk (10-12 days base + potential 5 days for phonemization issues)
 - Fallback plan for phonemization issues documented in spec Section 2.4.3
-- Master failover deferred to future work
+- Master failover implemented in Phase 5 (SYNC_REGISTRY, STEP_DOWN, NEW_MASTER protocol; slave promotion + original master reclaim)
 - Phase 4 is "self-contained distribution" (hybrid approach: static where possible, bundled .dylib for libtorch/espeak-ng)
 - Connection terminology: "upstream" = closer to SIP-in (data source); upstream service connects TO downstream service's listen ports
 - All file paths are relative to project root (not `coding.agent/` subdirectory)
