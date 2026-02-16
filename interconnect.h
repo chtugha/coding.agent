@@ -471,6 +471,13 @@ private:
     std::atomic<bool> running_;
     int master_heartbeat_failures_;
     static constexpr int MASTER_FAILURE_THRESHOLD = 3;
+    static constexpr int PORT_RECLAIM_WAIT_MS = 500;
+    static constexpr int HEARTBEAT_INTERVAL_S = 2;
+    static constexpr int HEARTBEAT_RECV_TIMEOUT_MS = 1000;
+    static constexpr int SYNC_RECV_TIMEOUT_MS = 500;
+    static constexpr int STEP_DOWN_RECV_TIMEOUT_MS = 3000;
+    static constexpr int DEMOTION_REGISTER_RETRIES = 3;
+    static constexpr int DEMOTION_REGISTER_BACKOFF_MS = 200;
     PortConfig ports_;
 
     std::mutex call_id_mutex_;
@@ -581,7 +588,7 @@ private:
         }
 
         char buf[256];
-        ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, 3000);
+        ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, STEP_DOWN_RECV_TIMEOUT_MS);
         close(sock);
 
         std::string state_str;
@@ -599,11 +606,11 @@ private:
             return false;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(PORT_RECLAIM_WAIT_MS));
 
         int sock_in = create_listen_socket(22222);
         if (sock_in < 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(PORT_RECLAIM_WAIT_MS));
             sock_in = create_listen_socket(22222);
             if (sock_in < 0) return false;
         }
@@ -879,10 +886,7 @@ private:
                 send_all(sock, response.c_str(), response.size());
                 close(sock);
 
-                std::thread([this]() {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    demote_to_slave();
-                }).detach();
+                demote_to_slave();
                 return;
             } else {
                 response = "NOT_PROMOTED";
@@ -991,7 +995,7 @@ private:
 
     void heartbeat_loop() {
         while (running_) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::this_thread::sleep_for(std::chrono::seconds(HEARTBEAT_INTERVAL_S));
             if (!running_) break;
             
             if (!is_master_) {
@@ -1047,13 +1051,14 @@ private:
         }
 
         char buffer[64];
-        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 1000);
+        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, HEARTBEAT_RECV_TIMEOUT_MS);
         close(sock);
         return (n > 0);
     }
 
     void sync_registry_to_slaves() {
         std::string payload;
+        std::vector<std::pair<ServiceType, uint16_t>> targets;
         {
             std::lock_guard<std::mutex> lock(registry_mutex_);
             std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
@@ -1062,13 +1067,6 @@ private:
                 payload += " " + std::to_string(static_cast<int>(svc)) +
                            ":" + std::to_string(cfg.neg_in) +
                            ":" + std::to_string(cfg.neg_out);
-            }
-        }
-
-        std::vector<std::pair<ServiceType, uint16_t>> targets;
-        {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            for (const auto& [svc, cfg] : service_registry_) {
                 targets.push_back({svc, cfg.neg_in});
             }
         }
@@ -1078,7 +1076,7 @@ private:
             if (sock < 0) continue;
             send_all(sock, payload.c_str(), payload.size());
             char buf[32];
-            recv_with_timeout(sock, buf, sizeof(buf) - 1, 500);
+            recv_with_timeout(sock, buf, sizeof(buf) - 1, SYNC_RECV_TIMEOUT_MS);
             close(sock);
         }
     }
@@ -1307,9 +1305,18 @@ private:
         down_in_listen_sock_ = create_listen_socket(ports_.down_in);
         down_out_listen_sock_ = create_listen_socket(ports_.down_out);
 
-        if (!register_with_master()) {
-            std::fprintf(stderr, "[%s] Failed to register with new master after demotion\n",
-                        service_type_to_string(type_));
+        bool registered = false;
+        for (int retry = 0; retry < DEMOTION_REGISTER_RETRIES; ++retry) {
+            if (register_with_master()) {
+                registered = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(
+                DEMOTION_REGISTER_BACKOFF_MS * (1 << retry)));
+        }
+        if (!registered) {
+            std::fprintf(stderr, "[%s] Failed to register with master after %d retries\n",
+                        service_type_to_string(type_), DEMOTION_REGISTER_RETRIES);
         }
 
         master_heartbeat_failures_ = 0;
