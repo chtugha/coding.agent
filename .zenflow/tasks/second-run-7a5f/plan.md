@@ -278,13 +278,15 @@ Save to `{@artifacts_path}/plan.md`.
 - Add kokoro-service target to CMakeLists.txt
 - **Verification**: `cmake .. && make kokoro-service` finds both libraries and compiles skeleton
 
-#### [x] Step: Export Kokoro models to TorchScript
-- Create `export_kokoro_model.py` (root directory, one-time script)
-- Load existing Python Kokoro model from `kokoro_service.py`
-- Export to TorchScript via `torch.jit.script()`
-- Save model to `models/kokoro_german.pt`
-- Export voice embeddings (`df_eva`, `dm_bernd`) to `.pt` files
-- **Verification**: TorchScript files created and loadable in both Python and C++ (`torch::jit::load()`)
+#### [x] Step: Export Kokoro models to CoreML + HAR TorchScript
+- Create unified `scripts/export_kokoro_models.py` (self-contained, downloads model, installs deps via conda)
+- Export CoreML duration model (BERT + prosody) -> `coreml/kokoro_duration.mlmodelc` (ANE, ~65ms)
+- Export CoreML split decoder (3 buckets: 3s/5s/10s) -> `decoder_variants/kokoro_decoder_split_*.mlmodelc` (ANE, ~70ms)
+- Export HAR TorchScript models (SineGen+STFT, ~20KB each) -> `decoder_variants/kokoro_har_*.pt` (CPU)
+- Export voice embeddings (`df_eva`, `dm_bernd`) to `.bin` raw float32 format
+- Export vocab.json (phoneme-to-ID mapping)
+- Requires conda env with torch==2.5.0, coremltools==8.3.0, numpy==1.26.4
+- **Verification**: CoreML models loadable in C++ via CoreML.framework, HAR via `torch::jit::load()`
 
 #### [x] Step: Implement espeak-ng phonemization in C++
 - Create `KokoroPipeline` class in `kokoro-service.cpp`
@@ -294,12 +296,13 @@ Save to `{@artifacts_path}/plan.md`.
 - Add phoneme normalization for Kokoro model compatibility
 - **Verification**: Phonemize 100 German sentences, compare with Python `phonemizer` output
 
-#### [x] Step: Implement Kokoro model inference in C++
-- Load TorchScript model via `torch::jit::load()`
-- Load voice embeddings via `torch::load()`
-- Set device to MPS (`torch::Device(torch::kMPS)`)
-- Implement `synthesize()` method: phonemes -> sequence tensor -> model forward -> float32 audio (24kHz)
-- **Verification**: Synthesize "Hallo Welt", verify non-silent audio output
+#### [x] Step: Implement Kokoro model inference in C++ (CoreML split pipeline)
+- Load CoreML duration model via `CoreMLDurationModel` class (Objective-C++ / CoreML.framework)
+- Load CoreML split decoder via `CoreMLSplitDecoder` class (3 ANE buckets)
+- Load HAR TorchScript models via `torch::jit::load()` (CPU)
+- Load voice embeddings from `.bin` raw float32 format
+- Implement `synthesize_coreml()`: phonemes -> CoreML duration -> CPU alignment -> HAR -> CoreML decoder -> float32 audio (24kHz)
+- **Verification**: Synthesize "Hallo Welt", verify non-silent audio output, ~145ms total latency
 
 #### [x] Step: Validate phonemization accuracy and add normalization
 - Create `tests/test_phoneme_diff.cpp`
@@ -519,20 +522,17 @@ Save to `{@artifacts_path}/plan.md`.
 - [x] Phoneme cache: LRU-style with 10,000 entry limit and full-clear eviction
 - [x] UTF-8 handling: fixed to use (c & 0x80) != 0 check with bounds validation
 - [x] Audio validation: reject empty or >10s output samples
-- [x] CoreML hybrid approach: duration model exported to CoreML (.mlmodelc), loaded via Objective-C++ CoreML API, inference 67ms on ANE
-- [x] CoreML test (Test 7): loads compiled .mlmodelc, runs prediction, verifies output shapes (pred_dur, d, t_en, s) — PASS
-- [x] Bucketed TorchScript models (7 buckets L8-L512): primary inference path at ~260-600ms per sentence
+- [x] CoreML duration model: exported to .mlmodelc, loaded via Objective-C++ CoreML API, inference 65ms on ANE
+- [x] CoreML split decoder: 3 buckets (3s/5s/10s) on ANE, avg 70ms — 5x faster than TorchScript (365ms), 7x smaller (321MB vs 2296MB)
+- [x] HAR TorchScript models: SineGen+STFT source on CPU (~20KB each)
 - [x] Binary voice format (.bin): ~10x faster load than pickle, both df_eva and dm_bernd exported
-- [x] Generated JSON files (vocab.json, config.json, buckets.json, coreml_config.json) removed from git tracking
-- [x] 25/25 interconnect tests + 8/8 kokoro tests all pass
-- [x] Three decoder backends implemented and benchmarked (ONNX, CoreML-Split, TorchScript):
-  - ONNX decoder models exported (3 buckets: 3s/5s/10s, ~650MB total)
-  - CoreML split decoder models exported + compiled (3 buckets, ~321MB total) with HAR TorchScript models
-  - ONNX/CoreML-split synthesize paths wired with CoreML duration model → alignment → decoder
-- [x] Decoder benchmark (Test 9): TorchScript avg=365ms, ONNX avg=301ms, CoreML-Split avg=70ms (ANE)
-- [x] Model size comparison (Test 10): TorchScript=2296MB, ONNX=650MB, CoreML-Split=321MB
-- [x] CoreML Split is clear winner: 5x faster than TorchScript, 7x smaller models
-- [x] 10/10 kokoro tests pass (including benchmark + model size tests), 23/23 interconnect tests pass
+- [x] ONNX and TorchScript decoder backends removed — CoreML-only architecture
+- [x] Obsolete files cleaned: 7 TorchScript bucket models (~2.2GB), ONNX files (~620MB), old export scripts (4 files)
+- [x] Unified export script: scripts/export_kokoro_models.py (downloads model, creates conda env, exports all artifacts)
+- [x] Generated JSON files removed from git tracking; .gitignore updated with *.onnx.data pattern
+- [x] KOKORO.md documentation: architecture, export process, building, benchmarks, known limitations
+- [x] 7/7 kokoro tests pass (phonemization, vocab, encoding, voice, CoreML duration, CoreML decoder benchmark, model inventory)
+- [x] 23/23 interconnect tests pass, 2/2 sanity tests pass — total 32/32 all pass
 
 ### Phase 4 Tests
 - [x] Self-contained distribution: all 6 binaries + 6 bundled dylibs pass otool portability check (no /opt/homebrew or /usr/local refs)

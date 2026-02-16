@@ -28,6 +28,7 @@ bin/models/**/*.bin
 bin/models/**/*.mlmodelc
 bin/models/**/*.mlpackage
 bin/models/**/*.onnx
+bin/models/**/*.onnx.data
 bin/models/**/*.json
 
 # Compiled binaries
