@@ -438,7 +438,8 @@ Save to `{@artifacts_path}/plan.md`.
   - `CallEndDuringActiveTraffic`: 20 calls with continuous traffic, 10 calls ended mid-stream via CALL_END broadcast, verifies all 10 CALL_END delivered to slave while remaining calls continue
   - `BidirectionalMultiCallRouting`: 20 calls with simultaneous upstream + downstream traffic (2,000 packets each direction), cross-talk detection on both paths
 - Cross-talk detection: each packet embeds its call_id in payload bytes 0-3; receiver verifies payload call_id == header call_id
-- **Verification**: 3/3 stress tests pass. 10,000 packets delivered (min=500, max=500 per call). Zero cross-talk. CALL_END propagation 10/10. Bidirectional 2,000+2,000 packets. All 39 interconnect tests pass (36 previous + 3 new). Total 66 tests pass (2 sanity + 39 interconnect + 25 SIP provider unit).
+- Added `TenMinuteSustainedLoad`: 20 concurrent calls for 10 minutes, 20ms packet interval per call, embedded timestamps for latency measurement, minute-by-minute reporting, cross-talk detection, per-call delivery verification
+- **Verification**: 4/4 stress tests pass. 10-minute test results: 468,155 packets sent/received (0.0000% loss), per-call min=23,391 max=23,429 (balanced). Latency: avg=0.09ms, p50=0.07ms, p95=0.16ms, p99=0.23ms, max=20.98ms (well under 1.5s target). Zero cross-talk. All 40 interconnect tests pass.
 
 #### [x] Step: Memory leak and CALL_END propagation tests
 - Added 5 tests to `tests/test_interconnect.cpp`:

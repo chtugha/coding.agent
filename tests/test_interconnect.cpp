@@ -1250,6 +1250,213 @@ TEST(ConcurrencyStressTest, BidirectionalMultiCallRouting) {
     upstream.shutdown();
 }
 
+TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(upstream.initialize());
+    ASSERT_TRUE(upstream.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    ASSERT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ASSERT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const int NUM_CALLS = 20;
+    const auto TEST_DURATION = std::chrono::minutes(10);
+
+    std::vector<uint32_t> call_ids(NUM_CALLS);
+    for (int i = 0; i < NUM_CALLS; i++) {
+        call_ids[i] = upstream.reserve_call_id(i + 1);
+        ASSERT_GT(call_ids[i], 0u);
+    }
+    std::set<uint32_t> valid_ids(call_ids.begin(), call_ids.end());
+
+    struct LatencyStats {
+        std::mutex mu;
+        std::vector<double> samples;
+        void record(double ms) {
+            std::lock_guard<std::mutex> lock(mu);
+            samples.push_back(ms);
+        }
+    };
+
+    std::map<uint32_t, std::atomic<uint64_t>> sent_per_call;
+    std::map<uint32_t, std::atomic<uint64_t>> recv_per_call;
+    for (int i = 0; i < NUM_CALLS; i++) {
+        sent_per_call[call_ids[i]].store(0);
+        recv_per_call[call_ids[i]].store(0);
+    }
+
+    std::atomic<uint64_t> total_sent{0};
+    std::atomic<uint64_t> total_received{0};
+    std::atomic<bool> crosstalk{false};
+    std::atomic<bool> stop{false};
+    LatencyStats latency;
+
+    std::thread receiver([&]() {
+        while (!stop) {
+            Packet pkt;
+            if (downstream.recv_from_upstream(pkt, 200)) {
+                auto now = std::chrono::steady_clock::now();
+                if (valid_ids.count(pkt.call_id) == 0) {
+                    crosstalk = true;
+                    continue;
+                }
+                if (pkt.payload_size >= 12) {
+                    uint32_t embedded_id;
+                    memcpy(&embedded_id, pkt.payload.data(), 4);
+                    if (embedded_id != pkt.call_id) {
+                        crosstalk = true;
+                    }
+                    uint64_t send_us;
+                    memcpy(&send_us, pkt.payload.data() + 4, 8);
+                    auto send_tp = std::chrono::steady_clock::time_point(
+                        std::chrono::microseconds(send_us));
+                    double lat_ms = std::chrono::duration<double, std::milli>(
+                        now - send_tp).count();
+                    latency.record(lat_ms);
+                }
+                recv_per_call[pkt.call_id]++;
+                total_received++;
+            }
+        }
+    });
+
+    std::vector<std::thread> senders;
+    for (int c = 0; c < NUM_CALLS; c++) {
+        senders.emplace_back([&, c]() {
+            uint32_t cid = call_ids[c];
+            uint32_t seq = 0;
+            while (!stop) {
+                uint8_t payload[64];
+                memcpy(payload, &cid, 4);
+                auto now_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                memcpy(payload + 4, &now_us, 8);
+                memcpy(payload + 12, &seq, 4);
+                memset(payload + 16, static_cast<uint8_t>(c), 48);
+                Packet pkt(cid, payload, sizeof(payload));
+                if (upstream.send_to_downstream(pkt)) {
+                    sent_per_call[cid]++;
+                    total_sent++;
+                }
+                seq++;
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        });
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    auto last_report = start;
+    int report_num = 0;
+
+    while (std::chrono::steady_clock::now() - start < TEST_DURATION) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+
+        if (now - last_report >= std::chrono::minutes(1)) {
+            report_num++;
+            double avg_lat = 0;
+            {
+                std::lock_guard<std::mutex> lock(latency.mu);
+                if (!latency.samples.empty()) {
+                    double sum = 0;
+                    for (double s : latency.samples) sum += s;
+                    avg_lat = sum / latency.samples.size();
+                }
+            }
+            std::printf("  [10MIN] t=%llds: sent=%llu recv=%llu avg_lat=%.2fms xtalk=%s\n",
+                        elapsed_s, total_sent.load(), total_received.load(),
+                        avg_lat, crosstalk.load() ? "YES" : "NO");
+            last_report = now;
+        }
+
+        if (crosstalk) {
+            std::fprintf(stderr, "  [10MIN] CROSS-TALK DETECTED at t=%llds — aborting\n", elapsed_s);
+            break;
+        }
+    }
+
+    stop = true;
+    for (auto& t : senders) t.join();
+
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    receiver.join();
+
+    EXPECT_FALSE(crosstalk) << "Cross-talk detected during 10-minute test";
+
+    uint64_t min_sent = UINT64_MAX, max_sent = 0;
+    uint64_t min_recv = UINT64_MAX, max_recv = 0;
+    bool any_call_failed = false;
+    for (int i = 0; i < NUM_CALLS; i++) {
+        uint64_t s = sent_per_call[call_ids[i]].load();
+        uint64_t r = recv_per_call[call_ids[i]].load();
+        min_sent = std::min(min_sent, s);
+        max_sent = std::max(max_sent, s);
+        min_recv = std::min(min_recv, r);
+        max_recv = std::max(max_recv, r);
+        if (s == 0 || r == 0) any_call_failed = true;
+    }
+
+    EXPECT_FALSE(any_call_failed) << "At least one call had zero packets";
+
+    double loss_pct = 0;
+    if (total_sent > 0) {
+        loss_pct = 100.0 * (1.0 - static_cast<double>(total_received) / total_sent);
+    }
+    EXPECT_LT(loss_pct, 1.0) << "Packet loss >1%";
+
+    double avg_latency = 0, p50 = 0, p95 = 0, p99 = 0, max_latency = 0;
+    {
+        std::lock_guard<std::mutex> lock(latency.mu);
+        if (!latency.samples.empty()) {
+            std::sort(latency.samples.begin(), latency.samples.end());
+            double sum = 0;
+            for (double s : latency.samples) sum += s;
+            avg_latency = sum / latency.samples.size();
+            size_t n = latency.samples.size();
+            p50 = latency.samples[n / 2];
+            p95 = latency.samples[static_cast<size_t>(n * 0.95)];
+            p99 = latency.samples[static_cast<size_t>(n * 0.99)];
+            max_latency = latency.samples.back();
+        }
+    }
+
+    EXPECT_LT(avg_latency, 1500.0) << "Avg latency >1.5s";
+
+    std::printf("\n  ========== 10-MINUTE SUSTAINED LOAD RESULTS ==========\n");
+    std::printf("  Duration:     10 minutes\n");
+    std::printf("  Calls:        %d concurrent\n", NUM_CALLS);
+    std::printf("  Packets sent: %llu (per-call min=%llu max=%llu)\n",
+                total_sent.load(), min_sent, max_sent);
+    std::printf("  Packets recv: %llu (per-call min=%llu max=%llu)\n",
+                total_received.load(), min_recv, max_recv);
+    std::printf("  Packet loss:  %.4f%%\n", loss_pct);
+    std::printf("  Latency avg:  %.2f ms\n", avg_latency);
+    std::printf("  Latency p50:  %.2f ms\n", p50);
+    std::printf("  Latency p95:  %.2f ms\n", p95);
+    std::printf("  Latency p99:  %.2f ms\n", p99);
+    std::printf("  Latency max:  %.2f ms\n", max_latency);
+    std::printf("  Cross-talk:   %s\n", crosstalk.load() ? "DETECTED" : "NONE");
+    size_t sample_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(latency.mu);
+        sample_count = latency.samples.size();
+    }
+    std::printf("  Samples:      %zu latency measurements\n", sample_count);
+    std::printf("  ==============================================\n\n");
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
 TEST(ResourceLeakTest, HundredCallsNoLeak) {
     InterconnectNode master(ServiceType::SIP_CLIENT);
     ASSERT_TRUE(master.initialize());
