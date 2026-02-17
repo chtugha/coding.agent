@@ -85,6 +85,17 @@ public:
             this->handle_call_end(call_id);
         });
 
+        interconnect_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
+            if (active) {
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                auto it = calls_.find(call_id);
+                if (it != calls_.end() && it->second->generating) {
+                    std::cout << "🤫 [" << call_id << "] Speech detected — interrupting generation" << std::endl;
+                    it->second->generating = false;
+                }
+            }
+        });
+
         return true;
     }
 
@@ -143,6 +154,11 @@ private:
                 item = std::move(work_queue_.front());
                 work_queue_.pop();
             }
+
+            while (interconnect_.is_speech_active(item.call_id) && running_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (!running_) break;
 
             std::string response = process_call(item.call_id, item.text);
             if (!response.empty()) {

@@ -546,6 +546,54 @@ public:
         call_end_handler_ = handler;
     }
 
+    void broadcast_speech_signal(uint32_t call_id, bool active) {
+        std::string msg = (active ? "SPEECH_ACTIVE " : "SPEECH_IDLE ") + std::to_string(call_id);
+
+        if (is_master_) {
+            if (active) {
+                std::lock_guard<std::mutex> lock(speech_mutex_);
+                speech_active_calls_.insert(call_id);
+            } else {
+                std::lock_guard<std::mutex> lock(speech_mutex_);
+                speech_active_calls_.erase(call_id);
+            }
+            if (speech_signal_handler_) {
+                speech_signal_handler_(call_id, active);
+            }
+
+            std::vector<std::pair<ServiceType, uint16_t>> targets;
+            {
+                std::lock_guard<std::mutex> reg_lock(registry_mutex_);
+                for (const auto& [type, config] : service_registry_) {
+                    targets.push_back({type, config.neg_in});
+                }
+            }
+
+            for (const auto& [stype, port] : targets) {
+                int sock = connect_to_port("127.0.0.1", port);
+                if (sock < 0) continue;
+                send_all(sock, msg.c_str(), msg.size());
+                close(sock);
+            }
+        } else {
+            uint16_t master_port = 22222;
+            int sock = connect_to_port("127.0.0.1", master_port);
+            if (sock >= 0) {
+                send_all(sock, msg.c_str(), msg.size());
+                close(sock);
+            }
+        }
+    }
+
+    void register_speech_signal_handler(std::function<void(uint32_t, bool)> handler) {
+        speech_signal_handler_ = handler;
+    }
+
+    bool is_speech_active(uint32_t call_id) const {
+        std::lock_guard<std::mutex> lock(speech_mutex_);
+        return speech_active_calls_.count(call_id) > 0;
+    }
+
     bool is_service_alive(ServiceType svc_type) const {
         if (!is_master_) return false;
         
@@ -634,6 +682,9 @@ private:
     std::map<ServiceType, std::chrono::steady_clock::time_point> last_heartbeat_;
 
     std::function<void(uint32_t)> call_end_handler_;
+    std::function<void(uint32_t, bool)> speech_signal_handler_;
+    mutable std::mutex speech_mutex_;
+    std::set<uint32_t> speech_active_calls_;
 
     PortConfig downstream_neighbor_ports_;
     std::mutex downstream_neighbor_mutex_;
@@ -1015,6 +1066,40 @@ private:
         else if (msg.substr(0, 11) == "NEW_MASTER ") {
             master_heartbeat_failures_ = 0;
             response = "NEW_MASTER_ACK";
+        }
+
+        if (msg.substr(0, 14) == "SPEECH_ACTIVE " || msg.substr(0, 12) == "SPEECH_IDLE ") {
+            bool active = (msg.substr(0, 14) == "SPEECH_ACTIVE ");
+            uint32_t call_id = std::stoul(msg.substr(active ? 14 : 12));
+
+            {
+                std::lock_guard<std::mutex> lock(speech_mutex_);
+                if (active) speech_active_calls_.insert(call_id);
+                else speech_active_calls_.erase(call_id);
+            }
+
+            if (speech_signal_handler_) {
+                speech_signal_handler_(call_id, active);
+            }
+
+            if (is_master_) {
+                std::vector<std::pair<ServiceType, uint16_t>> targets;
+                {
+                    std::lock_guard<std::mutex> reg_lock(registry_mutex_);
+                    for (const auto& [type, config] : service_registry_) {
+                        targets.push_back({type, config.neg_in});
+                    }
+                }
+                std::string relay = msg;
+                for (const auto& [stype, port] : targets) {
+                    int rsock = connect_to_port("127.0.0.1", port);
+                    if (rsock < 0) continue;
+                    send_all(rsock, relay.c_str(), relay.size());
+                    ::close(rsock);
+                }
+            }
+
+            response = active ? "SPEECH_ACTIVE_ACK" : "SPEECH_IDLE_ACK";
         }
 
         if (msg.substr(0, 9) == "CALL_END ") {

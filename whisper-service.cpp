@@ -216,7 +216,9 @@ private:
             }
             if (!text.empty()) {
                 std::cout << "📝 [" << call_id << "] Transcription (" << whisper_ms << "ms): " << text << std::endl;
-                
+
+                interconnect_.broadcast_speech_signal(call_id, false);
+
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 1);

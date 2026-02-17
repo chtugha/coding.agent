@@ -532,6 +532,11 @@ Save to `{@artifacts_path}/plan.md`.
 
 ---
 
+
+### [ ] Step: llama shutup while talking
+<!-- agent: opus -->
+
+llama tends to start babbling if the person is talking too long. it doesn't let a person finish talking, but starts impatiently. implement a "shutup and wait while i'm talking" signal that is sent via the interconnection communication line. the signal should be a boolean switch that is switched on by the IAP while the IAP processes speech and turned off by whisper service when the speaker on the phone finished its sentences/question/whatever and the audio has been processed by whisper .As long as it is switched on, llama service will not start talking, but waits patiently for input. also llama will interrupt text generation immediately and wait for input again if the switch is turned on again.
 ## Test Results Log
 
 ### Phase 0 Tests

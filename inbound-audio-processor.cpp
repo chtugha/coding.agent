@@ -15,6 +15,7 @@ struct CallState {
     std::chrono::steady_clock::time_point last_activity;
     std::vector<float> buffer;
     std::mutex mutex;
+    bool speech_signaled = false;
 };
 
 class InboundAudioProcessor {
@@ -37,6 +38,16 @@ public:
 
         interconnect_.register_call_end_handler([this](uint32_t call_id) {
             this->handle_call_end(call_id);
+        });
+
+        interconnect_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
+            if (!active) {
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                auto it = calls_.find(call_id);
+                if (it != calls_.end()) {
+                    it->second->speech_signaled = false;
+                }
+            }
         });
 
         return true;
@@ -92,6 +103,17 @@ private:
                 pcm[i*2] = s;
                 float next = (i+1 < payload_len) ? ulaw_table[rtp_payload[i+1]] : s;
                 pcm[i*2 + 1] = 0.5f * (s + next);
+            }
+
+            float energy = 0;
+            for (size_t i = 0; i < pcm.size(); ++i) {
+                energy += pcm[i] * pcm[i];
+            }
+            energy /= static_cast<float>(pcm.size());
+
+            if (energy > 0.00003f && !state->speech_signaled) {
+                state->speech_signaled = true;
+                interconnect_.broadcast_speech_signal(pkt.call_id, true);
             }
 
             {
