@@ -15,22 +15,30 @@
 struct WhisperCall {
     uint32_t id;
     std::vector<float> audio_buffer;
-    std::vector<float> speech_buffer;
     std::mutex mutex;
     bool in_speech = false;
     int silence_count = 0;
     float noise_floor = 0.0001f;
     int frame_count = 0;
+    size_t vad_pos = 0;
+    size_t speech_start = 0;
     std::chrono::steady_clock::time_point last_activity;
 };
 
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
+    // 100ms frames @ 16kHz = 1600 samples (standard VAD frame size)
     static constexpr size_t VAD_FRAME_SIZE = 1600;
+    // 10x noise floor — tuned for telephony SNR with G.711 μ-law codec artifacts
     static constexpr float VAD_THRESHOLD_MULT = 10.0f;
+    // Minimum energy floor to prevent triggering on digital silence
     static constexpr float VAD_MIN_ENERGY = 0.00003f;
+    // 6 silent frames (600ms) before end-of-utterance — accommodates German compound words
     static constexpr int VAD_SILENCE_FRAMES = 6;
+    // Max 10s speech before forced flush to prevent unbounded buffering
     static constexpr size_t VAD_MAX_SPEECH_SAMPLES = 16000 * 10;
+    // Include 2 frames (200ms) of pre-speech context for Whisper accuracy
+    static constexpr int VAD_CONTEXT_FRAMES = 2;
 
 public:
     WhisperService(const std::string& model_path) 
@@ -118,11 +126,12 @@ private:
                 std::vector<float> to_process;
                 {
                     std::lock_guard<std::mutex> lock(call->mutex);
-                    
-                    while (call->audio_buffer.size() >= VAD_FRAME_SIZE) {
+
+                    size_t pos = call->vad_pos;
+                    while (pos + VAD_FRAME_SIZE <= call->audio_buffer.size()) {
                         float energy = 0;
                         for (size_t i = 0; i < VAD_FRAME_SIZE; ++i) {
-                            energy += call->audio_buffer[i] * call->audio_buffer[i];
+                            energy += call->audio_buffer[pos + i] * call->audio_buffer[pos + i];
                         }
                         energy /= static_cast<float>(VAD_FRAME_SIZE);
 
@@ -135,36 +144,50 @@ private:
                         if (energy > threshold) {
                             if (!call->in_speech) {
                                 call->in_speech = true;
+                                size_t context = VAD_FRAME_SIZE * VAD_CONTEXT_FRAMES;
+                                call->speech_start = (pos > context) ? pos - context : 0;
                             }
                             call->silence_count = 0;
-                            call->speech_buffer.insert(call->speech_buffer.end(),
-                                call->audio_buffer.begin(), call->audio_buffer.begin() + VAD_FRAME_SIZE);
-                        } else {
-                            if (call->in_speech) {
-                                call->silence_count++;
-                                call->speech_buffer.insert(call->speech_buffer.end(),
-                                    call->audio_buffer.begin(), call->audio_buffer.begin() + VAD_FRAME_SIZE);
-                            }
+                        } else if (call->in_speech) {
+                            call->silence_count++;
                         }
 
-                        call->audio_buffer.erase(call->audio_buffer.begin(),
-                            call->audio_buffer.begin() + VAD_FRAME_SIZE);
+                        pos += VAD_FRAME_SIZE;
 
                         if (call->in_speech && call->silence_count > VAD_SILENCE_FRAMES) {
-                            to_process = std::move(call->speech_buffer);
-                            call->speech_buffer.clear();
+                            to_process.assign(
+                                call->audio_buffer.begin() + call->speech_start,
+                                call->audio_buffer.begin() + pos);
+                            call->audio_buffer.erase(call->audio_buffer.begin(),
+                                call->audio_buffer.begin() + pos);
+                            pos = 0;
                             call->in_speech = false;
                             call->silence_count = 0;
+                            call->speech_start = 0;
                             break;
                         }
 
-                        if (call->speech_buffer.size() > VAD_MAX_SPEECH_SAMPLES) {
-                            to_process = std::move(call->speech_buffer);
-                            call->speech_buffer.clear();
+                        size_t speech_len = pos - call->speech_start;
+                        if (call->in_speech && speech_len > VAD_MAX_SPEECH_SAMPLES) {
+                            to_process.assign(
+                                call->audio_buffer.begin() + call->speech_start,
+                                call->audio_buffer.begin() + pos);
+                            call->audio_buffer.erase(call->audio_buffer.begin(),
+                                call->audio_buffer.begin() + pos);
+                            pos = 0;
                             call->in_speech = false;
                             call->silence_count = 0;
+                            call->speech_start = 0;
                             break;
                         }
+                    }
+                    call->vad_pos = pos;
+
+                    if (!call->in_speech && call->vad_pos > VAD_FRAME_SIZE * 2) {
+                        size_t keep = VAD_FRAME_SIZE * 2;
+                        call->audio_buffer.erase(call->audio_buffer.begin(),
+                            call->audio_buffer.begin() + (call->vad_pos - keep));
+                        call->vad_pos = keep;
                     }
                 }
 

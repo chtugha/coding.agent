@@ -521,6 +521,15 @@ Save to `{@artifacts_path}/plan.md`.
 - **OneHourStressTest**: 48 sequential calls over 3600 seconds (60s each), with tone injection. Zero crashes, all 6 services alive throughout. **PASSED** (3637s)
 - **Verification**: All 78 tests pass (74 unit + 3 integration + 1 flaky excluded), zero crashes, zero leaks, CPU usage 0.0-0.1%
 
+#### [x] Review fixes applied
+- **CRITICAL: Fixed Whisper VAD audio chunking** — VAD no longer erases `audio_buffer` frame-by-frame. Instead uses `vad_pos` cursor to scan in-place, extracts complete utterances (speech + 200ms pre-speech context) from `audio_buffer`, and only erases consumed data after extraction. Removes unused `speech_buffer` field. Non-speech silence is trimmed when not in speech to prevent unbounded growth.
+- **MAJOR: Added `gtest_discover_tests(test_integration)`** to CMakeLists.txt so integration tests are discovered by CTest.
+- **MAJOR: Added packet size validation** in `Packet` constructor — truncates payloads exceeding `MAX_PAYLOAD_SIZE` (1MB) with stderr warning. Added stderr warnings for heap fallback when packets exceed `SEND_BUF_SIZE` (64KB) in `send_to_downstream()` and `send_to_upstream()`.
+- **MAJOR: Fixed LLaMA worker thread exception safety** — `run()` now uses try/catch to ensure `running_` is set to false on any exception, and checks `joinable()` before joining threads.
+- **MAJOR: Documented all Whisper VAD constants** — added inline comments explaining rationale for `VAD_FRAME_SIZE` (100ms @ 16kHz), `VAD_THRESHOLD_MULT` (10× telephony SNR), `VAD_MIN_ENERGY` (digital silence floor), `VAD_SILENCE_FRAMES` (600ms for German compounds), `VAD_MAX_SPEECH_SAMPLES` (10s cap), `VAD_CONTEXT_FRAMES` (200ms pre-speech).
+- **MINOR: Added OAP trace recording** — `outbound-audio-processor.cpp` now records IN (0) and OUT (1) traces, matching all other 5 services.
+- **Verification**: All 75 tests pass (48 interconnect + 2 sanity + 25 SIP provider unit), SingleCallFullPipeline PASSED (61s), MultipleSequentialCalls PASSED (167s)
+
 ---
 
 ## Test Results Log

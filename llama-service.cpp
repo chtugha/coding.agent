@@ -94,13 +94,18 @@ public:
         
         std::cout << "🇩🇪 LLaMA German Service running" << std::endl;
         
-        while (running_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        try {
+            while (running_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        } catch (...) {
+            running_ = false;
         }
         
+        running_ = false;
         work_cv_.notify_all();
-        receiver_thread.join();
-        worker_thread.join();
+        if (receiver_thread.joinable()) receiver_thread.join();
+        if (worker_thread.joinable()) worker_thread.join();
         interconnect_.shutdown();
     }
 

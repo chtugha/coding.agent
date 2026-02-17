@@ -90,6 +90,7 @@ private:
                 continue;
             }
 
+            pkt.trace.record(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, 0);
             auto state = get_or_create_call(pkt.call_id);
             state->last_activity = std::chrono::steady_clock::now();
 
@@ -131,6 +132,7 @@ private:
                 }
 
                 whispertalk::Packet pkt(state->id, frame, 160);
+                pkt.trace.record(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, 1);
                 if (!interconnect_.send_to_downstream(pkt)) {
                     if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                         std::cout << "⚠️  [" << state->id << "] SIP disconnected, discarding audio" << std::endl;

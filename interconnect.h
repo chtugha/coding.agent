@@ -165,10 +165,14 @@ struct Packet {
     Packet() : call_id(0), payload_size(0) {}
     
     Packet(uint32_t cid, const void* data, uint32_t size) 
-        : call_id(cid), payload_size(size) {
-        if (size > 0 && data != nullptr) {
-            payload.resize(size);
-            memcpy(payload.data(), data, size);
+        : call_id(cid), payload_size(std::min(size, MAX_PAYLOAD_SIZE)) {
+        if (size > MAX_PAYLOAD_SIZE) {
+            std::fprintf(stderr, "Packet: payload %u exceeds max %u, truncating\n",
+                         size, MAX_PAYLOAD_SIZE);
+        }
+        if (payload_size > 0 && data != nullptr) {
+            payload.resize(payload_size);
+            memcpy(payload.data(), data, payload_size);
         }
     }
 
@@ -370,6 +374,8 @@ public:
                 return false;
             }
         } else {
+            std::fprintf(stderr, "send_to_downstream: packet %zu > %zu, heap fallback\n",
+                         total, SEND_BUF_SIZE);
             auto data = pkt.serialize();
             if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
                 mark_upstream_failed();
@@ -397,6 +403,8 @@ public:
                 return false;
             }
         } else {
+            std::fprintf(stderr, "send_to_upstream: packet %zu > %zu, heap fallback\n",
+                         total, SEND_BUF_SIZE);
             auto data = pkt.serialize();
             if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
                 mark_downstream_failed();
