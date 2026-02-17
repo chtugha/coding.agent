@@ -1250,6 +1250,236 @@ TEST(ConcurrencyStressTest, BidirectionalMultiCallRouting) {
     upstream.shutdown();
 }
 
+TEST(ResourceLeakTest, HundredCallsNoLeak) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    ASSERT_TRUE(slave.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    std::atomic<int> slave_ends{0};
+    slave.register_call_end_handler([&](uint32_t) {
+        slave_ends++;
+    });
+
+    const int NUM_CALLS = 100;
+    for (int i = 0; i < NUM_CALLS; i++) {
+        uint32_t cid = master.reserve_call_id(i + 1);
+        ASSERT_GT(cid, 0u);
+        master.broadcast_call_end(cid);
+        if (i % 10 == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    EXPECT_EQ(master.active_call_count(), 0u)
+        << "Master should have 0 active calls after all ended";
+    EXPECT_EQ(master.ended_call_count(), static_cast<size_t>(NUM_CALLS))
+        << "Master should track " << NUM_CALLS << " ended calls";
+    EXPECT_EQ(slave_ends.load(), NUM_CALLS)
+        << "Slave should have received " << NUM_CALLS << " CALL_END";
+    EXPECT_EQ(slave.active_call_count(), 0u)
+        << "Slave should have 0 active calls";
+
+    std::printf("  [LEAK] %d calls: active=%zu ended=%zu slave_ends=%d\n",
+                NUM_CALLS, master.active_call_count(),
+                master.ended_call_count(), slave_ends.load());
+
+    slave.shutdown();
+    master.shutdown();
+}
+
+TEST(ResourceLeakTest, RapidCreateEndCycle) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave1(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    InterconnectNode slave2(ServiceType::WHISPER_SERVICE);
+    ASSERT_TRUE(slave1.initialize());
+    ASSERT_TRUE(slave2.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    std::atomic<int> s1_ends{0}, s2_ends{0};
+    slave1.register_call_end_handler([&](uint32_t) { s1_ends++; });
+    slave2.register_call_end_handler([&](uint32_t) { s2_ends++; });
+
+    const int CYCLES = 50;
+    for (int i = 0; i < CYCLES; i++) {
+        uint32_t cid = master.reserve_call_id(1);
+        ASSERT_GT(cid, 0u);
+        master.broadcast_call_end(cid);
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    EXPECT_EQ(master.active_call_count(), 0u);
+    EXPECT_EQ(s1_ends.load(), CYCLES);
+    EXPECT_EQ(s2_ends.load(), CYCLES);
+
+    std::printf("  [RAPID_CYCLE] %d cycles: s1_ends=%d s2_ends=%d active=%zu\n",
+                CYCLES, s1_ends.load(), s2_ends.load(), master.active_call_count());
+
+    slave2.shutdown();
+    slave1.shutdown();
+    master.shutdown();
+}
+
+TEST(CallEndPropagationTest, AllFiveSlavesReceiveCallEnd) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode iap(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    InterconnectNode whisper(ServiceType::WHISPER_SERVICE);
+    InterconnectNode llama(ServiceType::LLAMA_SERVICE);
+    InterconnectNode kokoro(ServiceType::KOKORO_SERVICE);
+    InterconnectNode oap(ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+
+    ASSERT_TRUE(iap.initialize());
+    ASSERT_TRUE(whisper.initialize());
+    ASSERT_TRUE(llama.initialize());
+    ASSERT_TRUE(kokoro.initialize());
+    ASSERT_TRUE(oap.initialize());
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    ASSERT_EQ(master.registered_service_count(), 5u)
+        << "Master should have 5 registered slaves";
+
+    std::atomic<int> ack_count{0};
+    std::map<ServiceType, std::atomic<bool>> received;
+    received[ServiceType::INBOUND_AUDIO_PROCESSOR].store(false);
+    received[ServiceType::WHISPER_SERVICE].store(false);
+    received[ServiceType::LLAMA_SERVICE].store(false);
+    received[ServiceType::KOKORO_SERVICE].store(false);
+    received[ServiceType::OUTBOUND_AUDIO_PROCESSOR].store(false);
+
+    auto make_handler = [&](ServiceType type) {
+        return [&, type](uint32_t) {
+            received[type] = true;
+            ack_count++;
+        };
+    };
+
+    iap.register_call_end_handler(make_handler(ServiceType::INBOUND_AUDIO_PROCESSOR));
+    whisper.register_call_end_handler(make_handler(ServiceType::WHISPER_SERVICE));
+    llama.register_call_end_handler(make_handler(ServiceType::LLAMA_SERVICE));
+    kokoro.register_call_end_handler(make_handler(ServiceType::KOKORO_SERVICE));
+    oap.register_call_end_handler(make_handler(ServiceType::OUTBOUND_AUDIO_PROCESSOR));
+
+    uint32_t cid = master.reserve_call_id(1);
+    ASSERT_GT(cid, 0u);
+
+    auto start = std::chrono::steady_clock::now();
+    master.broadcast_call_end(cid);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    EXPECT_EQ(ack_count.load(), 5) << "All 5 slaves must receive CALL_END";
+    EXPECT_TRUE(received[ServiceType::INBOUND_AUDIO_PROCESSOR]) << "IAP missed CALL_END";
+    EXPECT_TRUE(received[ServiceType::WHISPER_SERVICE]) << "WHISPER missed CALL_END";
+    EXPECT_TRUE(received[ServiceType::LLAMA_SERVICE]) << "LLAMA missed CALL_END";
+    EXPECT_TRUE(received[ServiceType::KOKORO_SERVICE]) << "KOKORO missed CALL_END";
+    EXPECT_TRUE(received[ServiceType::OUTBOUND_AUDIO_PROCESSOR]) << "OAP missed CALL_END";
+    EXPECT_LT(elapsed, 5000) << "CALL_END broadcast took >5s";
+
+    std::printf("  [CALL_END_ALL5] %d/5 slaves ACKed in %lldms\n",
+                ack_count.load(), elapsed);
+
+    oap.shutdown();
+    kokoro.shutdown();
+    llama.shutdown();
+    whisper.shutdown();
+    iap.shutdown();
+    master.shutdown();
+}
+
+TEST(CallEndPropagationTest, ImmediateHangup) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    ASSERT_TRUE(slave.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    ASSERT_TRUE(master.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    std::atomic<bool> end_received{false};
+    uint32_t ended_id = 0;
+    slave.register_call_end_handler([&](uint32_t call_id) {
+        end_received = true;
+        ended_id = call_id;
+    });
+
+    uint32_t cid = master.reserve_call_id(1);
+    ASSERT_GT(cid, 0u);
+
+    Packet pkt(cid, "hello", 5);
+    EXPECT_TRUE(master.send_to_downstream(pkt));
+
+    master.broadcast_call_end(cid);
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    EXPECT_TRUE(end_received) << "Slave did not receive CALL_END for immediate hangup";
+    EXPECT_EQ(ended_id, cid);
+    EXPECT_EQ(master.active_call_count(), 0u);
+    EXPECT_EQ(slave.active_call_count(), 0u);
+
+    std::printf("  [IMMEDIATE_HANGUP] call %u ended, slave_received=%d\n",
+                cid, end_received.load());
+
+    slave.shutdown();
+    master.shutdown();
+}
+
+TEST(PortConflictTest, DualSipClientInstances) {
+    InterconnectNode client1(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(client1.initialize());
+    ASSERT_TRUE(client1.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode client2(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(client2.initialize());
+
+    EXPECT_NE(client1.ports().neg_in, client2.ports().neg_in)
+        << "Two SIP_CLIENT instances must have different ports";
+    EXPECT_NE(client1.ports().neg_out, client2.ports().neg_out);
+    EXPECT_NE(client1.ports().down_in, client2.ports().down_in);
+
+    uint32_t id1 = client1.reserve_call_id(1);
+    uint32_t id2 = client2.reserve_call_id(2);
+    EXPECT_GT(id1, 0u);
+    EXPECT_GT(id2, 0u);
+    EXPECT_NE(id1, id2);
+
+    std::printf("  [PORT_CONFLICT] client1 ports: %u/%u, client2 ports: %u/%u\n",
+                client1.ports().neg_in, client1.ports().neg_out,
+                client2.ports().neg_in, client2.ports().neg_out);
+    std::printf("  [PORT_CONFLICT] call_ids: %u, %u (unique=%s)\n",
+                id1, id2, (id1 != id2) ? "YES" : "NO");
+
+    client2.shutdown();
+    client1.shutdown();
+}
+
 class CrashRecoveryMatrixTest : public ::testing::TestWithParam<ServiceType> {};
 
 TEST_P(CrashRecoveryMatrixTest, ServiceCrashAndRecovery) {

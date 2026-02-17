@@ -454,6 +454,22 @@ public:
         return elapsed < std::chrono::seconds(5);
     }
 
+    size_t active_call_count() const {
+        std::lock_guard<std::mutex> lock(call_id_mutex_);
+        return active_call_ids_.size();
+    }
+
+    size_t ended_call_count() const {
+        std::lock_guard<std::mutex> lock(call_id_mutex_);
+        return ended_call_ids_.size();
+    }
+
+    size_t registered_service_count() const {
+        if (!is_master_) return 0;
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        return service_registry_.size();
+    }
+
     PortConfig query_service_ports(ServiceType svc_type) const {
         if (is_master_) {
             std::lock_guard<std::mutex> lock(registry_mutex_);
@@ -480,7 +496,7 @@ private:
     static constexpr int DEMOTION_REGISTER_BACKOFF_MS = 200;
     PortConfig ports_;
 
-    std::mutex call_id_mutex_;
+    mutable std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;
     std::set<uint32_t> active_call_ids_;
     std::set<uint32_t> ended_call_ids_;
