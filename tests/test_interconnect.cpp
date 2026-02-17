@@ -1251,6 +1251,17 @@ TEST(ConcurrencyStressTest, BidirectionalMultiCallRouting) {
 }
 
 TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
+    constexpr int NUM_CALLS = 20;
+    constexpr int PACKET_INTERVAL_MS = 20;
+    constexpr size_t PAYLOAD_SIZE = 64;
+    constexpr int RECV_TIMEOUT_MS = 200;
+    constexpr size_t RESERVOIR_SIZE = 50000;
+
+    const auto TEST_DURATION = []() {
+        const char* env = std::getenv("SUSTAINED_LOAD_DURATION_SECONDS");
+        return env ? std::chrono::seconds(std::atoi(env)) : std::chrono::minutes(10);
+    }();
+
     InterconnectNode upstream(ServiceType::SIP_CLIENT);
     ASSERT_TRUE(upstream.initialize());
     ASSERT_TRUE(upstream.is_master());
@@ -1265,9 +1276,6 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
     ASSERT_TRUE(upstream.connect_to_downstream());
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
-    const int NUM_CALLS = 20;
-    const auto TEST_DURATION = std::chrono::minutes(10);
-
     std::vector<uint32_t> call_ids(NUM_CALLS);
     for (int i = 0; i < NUM_CALLS; i++) {
         call_ids[i] = upstream.reserve_call_id(i + 1);
@@ -1277,10 +1285,27 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
 
     struct LatencyStats {
         std::mutex mu;
-        std::vector<double> samples;
+        std::vector<double> reservoir;
+        size_t total_count = 0;
+        double running_sum = 0;
+        double running_max = 0;
+
         void record(double ms) {
             std::lock_guard<std::mutex> lock(mu);
-            samples.push_back(ms);
+            running_sum += ms;
+            if (ms > running_max) running_max = ms;
+            total_count++;
+            if (reservoir.size() < RESERVOIR_SIZE) {
+                reservoir.push_back(ms);
+            } else {
+                size_t idx = rand() % total_count;
+                if (idx < RESERVOIR_SIZE) reservoir[idx] = ms;
+            }
+        }
+
+        double avg() {
+            std::lock_guard<std::mutex> lock(mu);
+            return total_count > 0 ? running_sum / total_count : 0;
         }
     };
 
@@ -1293,20 +1318,27 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
 
     std::atomic<uint64_t> total_sent{0};
     std::atomic<uint64_t> total_received{0};
+    std::atomic<uint64_t> send_failures{0};
     std::atomic<bool> crosstalk{false};
+    std::atomic<uint64_t> seq_errors{0};
     std::atomic<bool> stop{false};
     LatencyStats latency;
+
+    std::map<uint32_t, std::atomic<uint64_t>> last_seq_per_call;
+    for (int i = 0; i < NUM_CALLS; i++) {
+        last_seq_per_call[call_ids[i]].store(0);
+    }
 
     std::thread receiver([&]() {
         while (!stop) {
             Packet pkt;
-            if (downstream.recv_from_upstream(pkt, 200)) {
+            if (downstream.recv_from_upstream(pkt, RECV_TIMEOUT_MS)) {
                 auto now = std::chrono::steady_clock::now();
                 if (valid_ids.count(pkt.call_id) == 0) {
                     crosstalk = true;
                     continue;
                 }
-                if (pkt.payload_size >= 12) {
+                if (pkt.payload_size >= PAYLOAD_SIZE) {
                     uint32_t embedded_id;
                     memcpy(&embedded_id, pkt.payload.data(), 4);
                     if (embedded_id != pkt.call_id) {
@@ -1319,6 +1351,27 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
                     double lat_ms = std::chrono::duration<double, std::milli>(
                         now - send_tp).count();
                     latency.record(lat_ms);
+
+                    uint64_t seq;
+                    memcpy(&seq, pkt.payload.data() + 12, 8);
+                    uint64_t prev = last_seq_per_call[pkt.call_id].exchange(seq);
+                    if (prev > 0 && seq != prev + 1) {
+                        seq_errors++;
+                    }
+
+                    uint8_t expected_fill = 0;
+                    for (int ci = 0; ci < NUM_CALLS; ci++) {
+                        if (call_ids[ci] == pkt.call_id) {
+                            expected_fill = static_cast<uint8_t>(ci);
+                            break;
+                        }
+                    }
+                    for (size_t b = 20; b < PAYLOAD_SIZE; b++) {
+                        if (pkt.payload.data()[b] != expected_fill) {
+                            crosstalk = true;
+                            break;
+                        }
+                    }
                 }
                 recv_per_call[pkt.call_id]++;
                 total_received++;
@@ -1330,30 +1383,31 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
     for (int c = 0; c < NUM_CALLS; c++) {
         senders.emplace_back([&, c]() {
             uint32_t cid = call_ids[c];
-            uint32_t seq = 0;
+            uint64_t seq = 0;
             while (!stop) {
-                uint8_t payload[64];
+                uint8_t payload[PAYLOAD_SIZE];
                 memcpy(payload, &cid, 4);
+                memcpy(payload + 12, &seq, 8);
+                memset(payload + 20, static_cast<uint8_t>(c), PAYLOAD_SIZE - 20);
                 auto now_us = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count());
                 memcpy(payload + 4, &now_us, 8);
-                memcpy(payload + 12, &seq, 4);
-                memset(payload + 16, static_cast<uint8_t>(c), 48);
-                Packet pkt(cid, payload, sizeof(payload));
+                Packet pkt(cid, payload, PAYLOAD_SIZE);
                 if (upstream.send_to_downstream(pkt)) {
                     sent_per_call[cid]++;
                     total_sent++;
+                } else {
+                    send_failures++;
                 }
                 seq++;
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                std::this_thread::sleep_for(std::chrono::milliseconds(PACKET_INTERVAL_MS));
             }
         });
     }
 
     auto start = std::chrono::steady_clock::now();
     auto last_report = start;
-    int report_num = 0;
 
     while (std::chrono::steady_clock::now() - start < TEST_DURATION) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -1362,24 +1416,16 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
         auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
 
         if (now - last_report >= std::chrono::minutes(1)) {
-            report_num++;
-            double avg_lat = 0;
-            {
-                std::lock_guard<std::mutex> lock(latency.mu);
-                if (!latency.samples.empty()) {
-                    double sum = 0;
-                    for (double s : latency.samples) sum += s;
-                    avg_lat = sum / latency.samples.size();
-                }
-            }
-            std::printf("  [10MIN] t=%llds: sent=%llu recv=%llu avg_lat=%.2fms xtalk=%s\n",
+            std::printf("  [10MIN] t=%llds: sent=%llu recv=%llu avg_lat=%.2fms send_fail=%llu seq_err=%llu xtalk=%s\n",
                         elapsed_s, total_sent.load(), total_received.load(),
-                        avg_lat, crosstalk.load() ? "YES" : "NO");
+                        latency.avg(), send_failures.load(), seq_errors.load(),
+                        crosstalk.load() ? "YES" : "NO");
             last_report = now;
         }
 
         if (crosstalk) {
             std::fprintf(stderr, "  [10MIN] CROSS-TALK DETECTED at t=%llds — aborting\n", elapsed_s);
+            stop = true;
             break;
         }
     }
@@ -1387,10 +1433,15 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
     stop = true;
     for (auto& t : senders) t.join();
 
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (total_received < total_sent &&
+           std::chrono::steady_clock::now() < drain_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     receiver.join();
 
-    EXPECT_FALSE(crosstalk) << "Cross-talk detected during 10-minute test";
+    EXPECT_FALSE(crosstalk) << "Cross-talk detected during sustained load test";
+    EXPECT_EQ(send_failures.load(), 0u) << "Sends should never fail in sustained operation";
 
     uint64_t min_sent = UINT64_MAX, max_sent = 0;
     uint64_t min_recv = UINT64_MAX, max_recv = 0;
@@ -1414,30 +1465,33 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
     EXPECT_LT(loss_pct, 1.0) << "Packet loss >1%";
 
     double avg_latency = 0, p50 = 0, p95 = 0, p99 = 0, max_latency = 0;
+    size_t sample_count = 0;
     {
         std::lock_guard<std::mutex> lock(latency.mu);
-        if (!latency.samples.empty()) {
-            std::sort(latency.samples.begin(), latency.samples.end());
-            double sum = 0;
-            for (double s : latency.samples) sum += s;
-            avg_latency = sum / latency.samples.size();
-            size_t n = latency.samples.size();
-            p50 = latency.samples[n / 2];
-            p95 = latency.samples[static_cast<size_t>(n * 0.95)];
-            p99 = latency.samples[static_cast<size_t>(n * 0.99)];
-            max_latency = latency.samples.back();
+        sample_count = latency.total_count;
+        avg_latency = latency.total_count > 0 ? latency.running_sum / latency.total_count : 0;
+        max_latency = latency.running_max;
+        if (!latency.reservoir.empty()) {
+            std::sort(latency.reservoir.begin(), latency.reservoir.end());
+            size_t n = latency.reservoir.size();
+            p50 = latency.reservoir[n / 2];
+            p95 = latency.reservoir[static_cast<size_t>(n * 0.95)];
+            p99 = latency.reservoir[static_cast<size_t>(n * 0.99)];
         }
     }
 
     EXPECT_LT(avg_latency, 1500.0) << "Avg latency >1.5s";
 
-    std::printf("\n  ========== 10-MINUTE SUSTAINED LOAD RESULTS ==========\n");
-    std::printf("  Duration:     10 minutes\n");
+    auto dur_s = std::chrono::duration_cast<std::chrono::seconds>(TEST_DURATION).count();
+    std::printf("\n  ========== SUSTAINED LOAD RESULTS ==========\n");
+    std::printf("  Duration:     %lld seconds\n", dur_s);
     std::printf("  Calls:        %d concurrent\n", NUM_CALLS);
     std::printf("  Packets sent: %llu (per-call min=%llu max=%llu)\n",
                 total_sent.load(), min_sent, max_sent);
     std::printf("  Packets recv: %llu (per-call min=%llu max=%llu)\n",
                 total_received.load(), min_recv, max_recv);
+    std::printf("  Send fails:   %llu\n", send_failures.load());
+    std::printf("  Seq errors:   %llu\n", seq_errors.load());
     std::printf("  Packet loss:  %.4f%%\n", loss_pct);
     std::printf("  Latency avg:  %.2f ms\n", avg_latency);
     std::printf("  Latency p50:  %.2f ms\n", p50);
@@ -1445,12 +1499,7 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
     std::printf("  Latency p99:  %.2f ms\n", p99);
     std::printf("  Latency max:  %.2f ms\n", max_latency);
     std::printf("  Cross-talk:   %s\n", crosstalk.load() ? "DETECTED" : "NONE");
-    size_t sample_count = 0;
-    {
-        std::lock_guard<std::mutex> lock(latency.mu);
-        sample_count = latency.samples.size();
-    }
-    std::printf("  Samples:      %zu latency measurements\n", sample_count);
+    std::printf("  Samples:      %zu (reservoir %zu)\n", sample_count, std::min(sample_count, RESERVOIR_SIZE));
     std::printf("  ==============================================\n\n");
 
     downstream.shutdown();

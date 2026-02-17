@@ -438,8 +438,17 @@ Save to `{@artifacts_path}/plan.md`.
   - `CallEndDuringActiveTraffic`: 20 calls with continuous traffic, 10 calls ended mid-stream via CALL_END broadcast, verifies all 10 CALL_END delivered to slave while remaining calls continue
   - `BidirectionalMultiCallRouting`: 20 calls with simultaneous upstream + downstream traffic (2,000 packets each direction), cross-talk detection on both paths
 - Cross-talk detection: each packet embeds its call_id in payload bytes 0-3; receiver verifies payload call_id == header call_id
-- Added `TenMinuteSustainedLoad`: 20 concurrent calls for 10 minutes, 20ms packet interval per call, embedded timestamps for latency measurement, minute-by-minute reporting, cross-talk detection, per-call delivery verification
-- **Verification**: 4/4 stress tests pass. 10-minute test results: 468,155 packets sent/received (0.0000% loss), per-call min=23,391 max=23,429 (balanced). Latency: avg=0.09ms, p50=0.07ms, p95=0.16ms, p99=0.23ms, max=20.98ms (well under 1.5s target). Zero cross-talk. All 40 interconnect tests pass.
+- Added `TenMinuteSustainedLoad`: 20 concurrent calls for 10 minutes (configurable via `SUSTAINED_LOAD_DURATION_SECONDS` env var), 20ms packet interval per call, embedded timestamps for latency measurement, minute-by-minute reporting, cross-talk detection, per-call delivery verification
+  - Reservoir sampling (50,000 samples) for bounded memory usage during percentile calculation
+  - Running sum/max for O(1) avg latency in progress reports (no full-vector iteration under lock)
+  - Timestamp captured immediately before send to exclude payload preparation overhead
+  - Per-call monotonic sequence validation (detects reordering/drops/duplication)
+  - Payload pattern fill validation (detects memory corruption)
+  - Send failure tracking with assertion (send_failures must be 0)
+  - `stop = true` on crosstalk for immediate abort
+  - Drain-wait loop before receiver join (waits for total_received == total_sent up to 5s)
+  - `uint64_t` sequence numbers (no overflow risk)
+- **Verification**: 4/4 stress tests pass. 10-minute test results: 496,532 packets sent/received (0.0000% loss), per-call min=24,793 max=24,849 (balanced). Latency: avg=0.08ms, p50=0.07ms, p95=0.16ms, p99=0.24ms, max=18.44ms (well under 1.5s target). Zero cross-talk. Zero send failures. Zero sequence errors. All interconnect tests pass.
 
 #### [x] Step: Memory leak and CALL_END propagation tests
 - Added 5 tests to `tests/test_interconnect.cpp`:
