@@ -8,6 +8,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <queue>
+#include <condition_variable>
 #include "interconnect.h"
 #include "llama.h"
 
@@ -23,6 +25,11 @@ struct LlamaCall {
     std::vector<LlamaChatMessage> messages;
     std::chrono::steady_clock::time_point last_activity;
     std::atomic<bool> generating{false};
+};
+
+struct WorkItem {
+    uint32_t call_id;
+    std::string text;
 };
 
 class LlamaService {
@@ -41,8 +48,8 @@ public:
         
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx = 2048;
-        cparams.n_threads = 8;
-        cparams.n_threads_batch = 8;
+        cparams.n_threads = 4;
+        cparams.n_threads_batch = 4;
         ctx_ = llama_init_from_model(model_, cparams);
         if (!ctx_) {
             throw std::runtime_error("Failed to initialize context");
@@ -83,6 +90,7 @@ public:
 
     void run() {
         std::thread receiver_thread(&LlamaService::receiver_loop, this);
+        std::thread worker_thread(&LlamaService::worker_loop, this);
         
         std::cout << "🇩🇪 LLaMA German Service running" << std::endl;
         
@@ -90,7 +98,9 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         
+        work_cv_.notify_all();
         receiver_thread.join();
+        worker_thread.join();
         interconnect_.shutdown();
     }
 
@@ -108,12 +118,31 @@ private:
 
             std::string text(reinterpret_cast<const char*>(pkt.payload.data()), pkt.payload_size);
             
-            std::thread([this, call_id = pkt.call_id, text]() {
-                std::string response = this->process_call(call_id, text);
-                if (!response.empty()) {
-                    this->send_to_tts(call_id, response);
-                }
-            }).detach();
+            {
+                std::lock_guard<std::mutex> lock(work_mutex_);
+                work_queue_.push({pkt.call_id, text});
+            }
+            work_cv_.notify_one();
+        }
+    }
+
+    void worker_loop() {
+        while (running_) {
+            WorkItem item;
+            {
+                std::unique_lock<std::mutex> lock(work_mutex_);
+                work_cv_.wait_for(lock, std::chrono::milliseconds(100),
+                    [this]{ return !work_queue_.empty() || !running_; });
+                if (!running_ && work_queue_.empty()) break;
+                if (work_queue_.empty()) continue;
+                item = std::move(work_queue_.front());
+                work_queue_.pop();
+            }
+
+            std::string response = process_call(item.call_id, item.text);
+            if (!response.empty()) {
+                send_to_tts(item.call_id, response);
+            }
         }
     }
 
@@ -175,9 +204,11 @@ private:
         call->n_past = tokens.size();
         llama_batch_free(batch);
 
+        static constexpr int MAX_TOKENS = 48;
+        auto gen_start = std::chrono::steady_clock::now();
         std::string response;
         llama_token id;
-        for (int i = 0; i < 64; ++i) {
+        for (int i = 0; i < MAX_TOKENS; ++i) {
             if (!call->generating) {
                 std::cout << "⚠️  [" << cid << "] Generation interrupted" << std::endl;
                 break;
@@ -188,12 +219,10 @@ private:
             
             char piece[128];
             int n = llama_token_to_piece(vocab_, id, piece, sizeof(piece), 0, false);
-            if (n > 0) response.append(piece, n);
-
-            if (response.find('.') != std::string::npos || 
-                response.find('?') != std::string::npos || 
-                response.find('!') != std::string::npos) {
-                break;
+            if (n > 0) {
+                response.append(piece, n);
+                char last = response.back();
+                if (last == '.' || last == '?' || last == '!') break;
             }
 
             llama_batch b = llama_batch_init(1, 0, 1);
@@ -213,12 +242,14 @@ private:
         }
 
         call->generating = false;
+        auto gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - gen_start).count();
 
         size_t start = response.find_first_not_of(" \n\r\t");
         if (start != std::string::npos) response = response.substr(start);
 
         call->messages.push_back({"assistant", response});
-        std::cout << "🦙 [" << cid << "] DE: " << response << std::endl;
+        std::cout << "🦙 [" << cid << "] DE (" << gen_ms << "ms): " << response << std::endl;
         return response;
     }
 
@@ -231,6 +262,8 @@ private:
 
     void send_to_tts(uint32_t cid, const std::string& text) {
         whispertalk::Packet pkt(cid, text.c_str(), text.length());
+        pkt.trace.record(whispertalk::ServiceType::LLAMA_SERVICE, 0);
+        pkt.trace.record(whispertalk::ServiceType::LLAMA_SERVICE, 1);
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                 std::cout << "⚠️  [" << cid << "] Kokoro disconnected, discarding response to /dev/null" << std::endl;
@@ -270,6 +303,9 @@ private:
     std::mutex llama_mutex_;
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<LlamaCall>> calls_;
+    std::queue<WorkItem> work_queue_;
+    std::mutex work_mutex_;
+    std::condition_variable work_cv_;
     whispertalk::InterconnectNode interconnect_;
 };
 

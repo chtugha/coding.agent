@@ -21,6 +21,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <cerrno>
+#include <cstdio>
 
 namespace whispertalk {
 
@@ -69,6 +70,67 @@ inline ServiceType downstream_of(ServiceType type) {
     }
 }
 
+struct PacketTrace {
+    static constexpr int MAX_HOPS = 8;
+    struct Hop {
+        uint8_t service_id;
+        uint8_t direction;
+        uint64_t timestamp_us;
+    };
+    Hop hops[MAX_HOPS];
+    uint8_t hop_count = 0;
+
+    void record(ServiceType svc, uint8_t dir) {
+        if (hop_count < MAX_HOPS) {
+            hops[hop_count].service_id = static_cast<uint8_t>(svc);
+            hops[hop_count].direction = dir;
+            hops[hop_count].timestamp_us = now_us();
+            hop_count++;
+        }
+    }
+
+    static uint64_t now_us() {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    double total_ms() const {
+        if (hop_count < 2) return 0;
+        return (hops[hop_count - 1].timestamp_us - hops[0].timestamp_us) / 1000.0;
+    }
+
+    double hop_ms(int i) const {
+        if (i <= 0 || i >= hop_count) return 0;
+        return (hops[i].timestamp_us - hops[i - 1].timestamp_us) / 1000.0;
+    }
+
+    void print_trace() const {
+        if (hop_count == 0) return;
+        std::fprintf(stderr, "  TRACE: ");
+        for (int i = 0; i < hop_count; i++) {
+            if (i > 0) std::fprintf(stderr, " -> ");
+            std::fprintf(stderr, "%s[%s](+%.2fms)",
+                service_type_name(hops[i].service_id),
+                hops[i].direction == 0 ? "IN" : "OUT",
+                i > 0 ? hop_ms(i) : 0.0);
+        }
+        std::fprintf(stderr, " = %.2fms total\n", total_ms());
+    }
+
+    static const char* service_type_name(uint8_t id) {
+        switch (id) {
+            case 1: return "SIP";
+            case 2: return "IAP";
+            case 3: return "WHI";
+            case 4: return "LLM";
+            case 5: return "KOK";
+            case 6: return "OAP";
+            default: return "???";
+        }
+    }
+};
+
 struct PortConfig {
     uint16_t neg_in;
     uint16_t neg_out;
@@ -98,6 +160,7 @@ struct Packet {
     uint32_t call_id;
     uint32_t payload_size;
     std::vector<uint8_t> payload;
+    PacketTrace trace;
 
     Packet() : call_id(0), payload_size(0) {}
     
@@ -115,15 +178,21 @@ struct Packet {
 
     std::vector<uint8_t> serialize() const {
         std::vector<uint8_t> buffer(8 + payload_size);
-        uint32_t net_call_id = htonl(call_id);
-        uint32_t net_size = htonl(payload_size);
-        memcpy(buffer.data(), &net_call_id, 4);
-        memcpy(buffer.data() + 4, &net_size, 4);
-        if (payload_size > 0) {
-            memcpy(buffer.data() + 8, payload.data(), payload_size);
-        }
+        serialize_into(buffer.data());
         return buffer;
     }
+
+    void serialize_into(uint8_t* buffer) const {
+        uint32_t net_call_id = htonl(call_id);
+        uint32_t net_size = htonl(payload_size);
+        memcpy(buffer, &net_call_id, 4);
+        memcpy(buffer + 4, &net_size, 4);
+        if (payload_size > 0) {
+            memcpy(buffer + 8, payload.data(), payload_size);
+        }
+    }
+
+    size_t serialized_size() const { return 8 + payload_size; }
 
     static bool deserialize(const void* data, size_t len, Packet& out) {
         if (len < 8) return false;
@@ -292,10 +361,20 @@ public:
         }
         if (sock < 0) return false;
 
-        auto data = pkt.serialize();
-        if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
-            mark_upstream_failed();
-            return false;
+        size_t total = pkt.serialized_size();
+        if (total <= SEND_BUF_SIZE) {
+            thread_local uint8_t buf[SEND_BUF_SIZE];
+            pkt.serialize_into(buf);
+            if (!send_all_with_timeout(sock, buf, total, 100)) {
+                mark_upstream_failed();
+                return false;
+            }
+        } else {
+            auto data = pkt.serialize();
+            if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
+                mark_upstream_failed();
+                return false;
+            }
         }
         return true;
     }
@@ -309,10 +388,20 @@ public:
         }
         if (sock < 0) return false;
 
-        auto data = pkt.serialize();
-        if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
-            mark_downstream_failed();
-            return false;
+        size_t total = pkt.serialized_size();
+        if (total <= SEND_BUF_SIZE) {
+            thread_local uint8_t buf[SEND_BUF_SIZE];
+            pkt.serialize_into(buf);
+            if (!send_all_with_timeout(sock, buf, total, 100)) {
+                mark_downstream_failed();
+                return false;
+            }
+        } else {
+            auto data = pkt.serialize();
+            if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
+                mark_downstream_failed();
+                return false;
+            }
         }
         return true;
     }
@@ -323,7 +412,10 @@ public:
             std::lock_guard<std::mutex> lock(traffic_mutex_);
             sock = down_in_accepted_;
         }
-        if (sock < 0) return false;
+        if (sock < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+            return false;
+        }
         return recv_packet(sock, pkt, timeout_ms);
     }
 
@@ -333,7 +425,10 @@ public:
             std::lock_guard<std::mutex> lock(traffic_mutex_);
             sock = up_in_sock_;
         }
-        if (sock < 0) return false;
+        if (sock < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+            return false;
+        }
         return recv_packet(sock, pkt, timeout_ms);
     }
 
@@ -486,6 +581,7 @@ private:
     bool was_original_master_;
     std::atomic<bool> running_;
     int master_heartbeat_failures_;
+    static constexpr size_t SEND_BUF_SIZE = 65536;
     static constexpr int MASTER_FAILURE_THRESHOLD = 3;
     static constexpr int PORT_RECLAIM_WAIT_MS = 500;
     static constexpr int HEARTBEAT_INTERVAL_S = 2;

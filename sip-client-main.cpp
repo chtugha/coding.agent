@@ -152,8 +152,11 @@ private:
         auto get_header = [&](const std::string& h) {
             size_t p = msg.find(h + ":");
             if (p == std::string::npos) return std::string("");
-            size_t e = msg.find("\r\n", p);
-            return msg.substr(p + h.length() + 1, e - p - h.length() - 1);
+            size_t start = p + h.length() + 1;
+            while (start < msg.size() && msg[start] == ' ') start++;
+            size_t e = msg.find("\r\n", start);
+            if (e == std::string::npos) e = msg.size();
+            return msg.substr(start, e - start);
         };
 
         std::string scid = get_header("Call-ID");
@@ -264,16 +267,18 @@ private:
         char buf[2048];
         struct sockaddr_in sender{};
         socklen_t slen = sizeof(sender);
+        struct timeval tv{0, 100000};
+        setsockopt(session->rtp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         while (session->active && running_) {
-            struct timeval tv{1, 0};
-            setsockopt(session->rtp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             ssize_t n = recvfrom(session->rtp_sock, buf, sizeof(buf), 0, (struct sockaddr*)&sender, &slen);
             if (n < 12) continue;
 
             whispertalk::Packet pkt(session->id, buf, n);
+            pkt.trace.record(whispertalk::ServiceType::SIP_CLIENT, 0);
+            pkt.trace.record(whispertalk::ServiceType::SIP_CLIENT, 1);
             if (!interconnect_.send_to_downstream(pkt)) {
                 if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                    std::cout << "[" << session->id << "] IAP disconnected, dropping RTP" << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 }
             }
         }

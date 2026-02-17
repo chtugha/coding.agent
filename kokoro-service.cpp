@@ -843,6 +843,8 @@ private:
         std::memcpy(audio_pkt.payload.data() + header_size, samples.data(),
                    samples.size() * sizeof(float));
 
+        audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 0);
+        audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 1);
         if (node_.send_to_downstream(audio_pkt)) {
             std::printf("Sent %zu samples @ %d Hz for call %u to OAP\n",
                        samples.size(), KOKORO_SAMPLE_RATE, call_id);

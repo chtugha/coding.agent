@@ -1442,6 +1442,7 @@ TEST(ConcurrencyStressTest, TenMinuteSustainedLoad) {
 
     EXPECT_FALSE(crosstalk) << "Cross-talk detected during sustained load test";
     EXPECT_EQ(send_failures.load(), 0u) << "Sends should never fail in sustained operation";
+    EXPECT_EQ(seq_errors.load(), 0u) << "Sequence errors detected (reordering/drops/duplication)";
 
     uint64_t min_sent = UINT64_MAX, max_sent = 0;
     uint64_t min_recv = UINT64_MAX, max_recv = 0;
@@ -1885,6 +1886,205 @@ INSTANTIATE_TEST_SUITE_P(
         return std::string(service_type_to_string(info.param));
     }
 );
+
+TEST(InterconnectLatencyTest, SingleHopOverheadUnder10ms) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(upstream.initialize());
+    ASSERT_TRUE(upstream.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    ASSERT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ASSERT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    uint32_t cid = upstream.reserve_call_id(1);
+    ASSERT_GT(cid, 0u);
+
+    constexpr int WARMUP = 50;
+    constexpr int MEASURE = 1000;
+    constexpr int PAYLOAD_SIZE = 172;
+
+    for (int i = 0; i < WARMUP; i++) {
+        uint8_t data[PAYLOAD_SIZE];
+        memset(data, 0, PAYLOAD_SIZE);
+        Packet pkt(cid, data, PAYLOAD_SIZE);
+        upstream.send_to_downstream(pkt);
+        Packet recv_pkt;
+        downstream.recv_from_upstream(recv_pkt, 200);
+    }
+
+    std::vector<double> latencies;
+    latencies.reserve(MEASURE);
+
+    for (int i = 0; i < MEASURE; i++) {
+        uint8_t data[PAYLOAD_SIZE];
+        memset(data, static_cast<uint8_t>(i), PAYLOAD_SIZE);
+
+        auto t0 = std::chrono::steady_clock::now();
+        Packet pkt(cid, data, PAYLOAD_SIZE);
+        upstream.send_to_downstream(pkt);
+
+        Packet recv_pkt;
+        bool ok = downstream.recv_from_upstream(recv_pkt, 200);
+        auto t1 = std::chrono::steady_clock::now();
+
+        if (ok) {
+            double lat_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            latencies.push_back(lat_ms);
+        }
+    }
+
+    ASSERT_GT(latencies.size(), 0u);
+
+    std::sort(latencies.begin(), latencies.end());
+    size_t n = latencies.size();
+    double sum = 0;
+    for (double l : latencies) sum += l;
+    double avg = sum / n;
+    double p50 = latencies[n / 2];
+    double p95 = latencies[static_cast<size_t>(n * 0.95)];
+    double p99 = latencies[static_cast<size_t>(n * 0.99)];
+    double max_lat = latencies.back();
+
+    std::printf("\n  ========== INTERCONNECT LATENCY (single hop) ==========\n");
+    std::printf("  Packets:  %d sent, %zu received (%.1f%% delivery)\n",
+                MEASURE, n, 100.0 * n / MEASURE);
+    std::printf("  Payload:  %d bytes\n", PAYLOAD_SIZE);
+    std::printf("  Latency avg:  %.3f ms\n", avg);
+    std::printf("  Latency p50:  %.3f ms\n", p50);
+    std::printf("  Latency p95:  %.3f ms\n", p95);
+    std::printf("  Latency p99:  %.3f ms\n", p99);
+    std::printf("  Latency max:  %.3f ms\n", max_lat);
+    std::printf("  ========================================================\n\n");
+
+    EXPECT_LT(avg, 10.0) << "Avg interconnect overhead >10ms";
+    EXPECT_LT(p95, 10.0) << "P95 interconnect overhead >10ms";
+    EXPECT_EQ(n, static_cast<size_t>(MEASURE)) << "Packet loss in single-hop test";
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(InterconnectLatencyTest, MultiHopThreeServicesOverheadUnder10ms) {
+    InterconnectNode svc1(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(svc1.initialize());
+    ASSERT_TRUE(svc1.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode svc2(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    ASSERT_TRUE(svc2.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode svc3(ServiceType::WHISPER_SERVICE);
+    ASSERT_TRUE(svc3.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    ASSERT_TRUE(svc1.connect_to_downstream());
+    ASSERT_TRUE(svc2.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    uint32_t cid = svc1.reserve_call_id(1);
+    ASSERT_GT(cid, 0u);
+
+    constexpr int MEASURE = 500;
+    constexpr int PAYLOAD_SIZE = 172;
+
+    std::atomic<bool> relay_stop{false};
+    std::thread relay([&]() {
+        while (!relay_stop) {
+            Packet pkt;
+            if (svc2.recv_from_upstream(pkt, 100)) {
+                svc2.send_to_downstream(pkt);
+            }
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::vector<double> latencies;
+    latencies.reserve(MEASURE);
+
+    for (int i = 0; i < MEASURE; i++) {
+        uint8_t data[PAYLOAD_SIZE];
+        memset(data, static_cast<uint8_t>(i), PAYLOAD_SIZE);
+
+        auto t0 = std::chrono::steady_clock::now();
+        Packet pkt(cid, data, PAYLOAD_SIZE);
+        svc1.send_to_downstream(pkt);
+
+        Packet recv_pkt;
+        bool ok = svc3.recv_from_upstream(recv_pkt, 500);
+        auto t1 = std::chrono::steady_clock::now();
+
+        if (ok) {
+            double lat_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            latencies.push_back(lat_ms);
+        }
+    }
+
+    relay_stop = true;
+    relay.join();
+
+    ASSERT_GT(latencies.size(), 0u);
+
+    std::sort(latencies.begin(), latencies.end());
+    size_t n = latencies.size();
+    double sum = 0;
+    for (double l : latencies) sum += l;
+    double avg = sum / n;
+    double p50 = latencies[n / 2];
+    double p95 = latencies[static_cast<size_t>(n * 0.95)];
+    double p99 = latencies[static_cast<size_t>(n * 0.99)];
+    double max_lat = latencies.back();
+
+    std::printf("\n  ========== INTERCONNECT LATENCY (2-hop relay) ==========\n");
+    std::printf("  Path:     SIP -> IAP -> WHISPER\n");
+    std::printf("  Packets:  %d sent, %zu received (%.1f%% delivery)\n",
+                MEASURE, n, 100.0 * n / MEASURE);
+    std::printf("  Latency avg:  %.3f ms\n", avg);
+    std::printf("  Latency p50:  %.3f ms\n", p50);
+    std::printf("  Latency p95:  %.3f ms\n", p95);
+    std::printf("  Latency p99:  %.3f ms\n", p99);
+    std::printf("  Latency max:  %.3f ms\n", max_lat);
+    std::printf("  Per-hop avg:  %.3f ms\n", avg / 2.0);
+    std::printf("  ========================================================\n\n");
+
+    EXPECT_LT(avg, 10.0) << "Avg 2-hop interconnect overhead >10ms";
+    EXPECT_LT(p95, 10.0) << "P95 2-hop interconnect overhead >10ms";
+
+    svc3.shutdown();
+    svc2.shutdown();
+    svc1.shutdown();
+}
+
+TEST(InterconnectLatencyTest, PacketTraceAccuracy) {
+    PacketTrace trace;
+    trace.record(ServiceType::SIP_CLIENT, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    trace.record(ServiceType::SIP_CLIENT, 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    trace.record(ServiceType::INBOUND_AUDIO_PROCESSOR, 0);
+    trace.record(ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
+
+    EXPECT_EQ(trace.hop_count, 4);
+    EXPECT_GE(trace.hop_ms(1), 4.0);
+    EXPECT_LE(trace.hop_ms(1), 15.0);
+    EXPECT_GE(trace.hop_ms(2), 9.0);
+    EXPECT_LE(trace.hop_ms(2), 20.0);
+    EXPECT_GE(trace.total_ms(), 14.0);
+    EXPECT_LE(trace.total_ms(), 35.0);
+
+    std::printf("  [TRACE] Hops: %d, total: %.2fms, hop1: %.2fms, hop2: %.2fms\n",
+                trace.hop_count, trace.total_ms(), trace.hop_ms(1), trace.hop_ms(2));
+}
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

@@ -78,6 +78,7 @@ private:
                 continue;
             }
 
+            pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 0);
             auto state = get_or_create_call(pkt.call_id);
             state->last_activity = std::chrono::steady_clock::now();
 
@@ -108,6 +109,8 @@ private:
                 }
 
                 whispertalk::Packet out_pkt(pkt.call_id, chunk.data(), chunk.size() * sizeof(float));
+                out_pkt.trace = pkt.trace;
+                out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
                 if (!interconnect_.send_to_downstream(out_pkt)) {
                     if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                         std::cout << "⚠️  [" << pkt.call_id << "] Whisper disconnected, dumping stream to /dev/null" << std::endl;

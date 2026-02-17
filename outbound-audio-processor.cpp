@@ -15,7 +15,15 @@ struct CallState {
     uint32_t id;
     std::mutex mutex;
     std::vector<uint8_t> buffer;
+    size_t read_pos = 0;
     std::chrono::steady_clock::time_point last_activity;
+
+    void compact() {
+        if (read_pos > 4096 && read_pos > buffer.size() / 2) {
+            buffer.erase(buffer.begin(), buffer.begin() + read_pos);
+            read_pos = 0;
+        }
+    }
 };
 
 class OutboundAudioProcessor {
@@ -112,9 +120,11 @@ private:
                 uint8_t frame[160];
                 {
                     std::lock_guard<std::mutex> lock(state->mutex);
-                    if (state->buffer.size() >= 160) {
-                        memcpy(frame, state->buffer.data(), 160);
-                        state->buffer.erase(state->buffer.begin(), state->buffer.begin() + 160);
+                    size_t avail = state->buffer.size() - state->read_pos;
+                    if (avail >= 160) {
+                        memcpy(frame, state->buffer.data() + state->read_pos, 160);
+                        state->read_pos += 160;
+                        state->compact();
                     } else {
                         memset(frame, 0xFF, 160);
                     }

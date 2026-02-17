@@ -15,14 +15,22 @@
 struct WhisperCall {
     uint32_t id;
     std::vector<float> audio_buffer;
+    std::vector<float> speech_buffer;
     std::mutex mutex;
     bool in_speech = false;
     int silence_count = 0;
+    float noise_floor = 0.0001f;
+    int frame_count = 0;
     std::chrono::steady_clock::time_point last_activity;
 };
 
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
+    static constexpr size_t VAD_FRAME_SIZE = 1600;
+    static constexpr float VAD_THRESHOLD_MULT = 10.0f;
+    static constexpr float VAD_MIN_ENERGY = 0.00003f;
+    static constexpr int VAD_SILENCE_FRAMES = 6;
+    static constexpr size_t VAD_MAX_SPEECH_SAMPLES = 16000 * 10;
 
 public:
     WhisperService(const std::string& model_path) 
@@ -111,33 +119,52 @@ private:
                 {
                     std::lock_guard<std::mutex> lock(call->mutex);
                     
-                    while (call->audio_buffer.size() >= 1600) {
+                    while (call->audio_buffer.size() >= VAD_FRAME_SIZE) {
                         float energy = 0;
-                        for (int i = 0; i < 1600; ++i) {
+                        for (size_t i = 0; i < VAD_FRAME_SIZE; ++i) {
                             energy += call->audio_buffer[i] * call->audio_buffer[i];
                         }
-                        energy /= 1600.0f;
+                        energy /= static_cast<float>(VAD_FRAME_SIZE);
 
-                        if (energy > 0.00005f) {
-                            call->in_speech = true;
+                        call->frame_count++;
+                        if (!call->in_speech) {
+                            call->noise_floor = call->noise_floor * 0.95f + energy * 0.05f;
+                        }
+                        float threshold = std::max(call->noise_floor * VAD_THRESHOLD_MULT, VAD_MIN_ENERGY);
+
+                        if (energy > threshold) {
+                            if (!call->in_speech) {
+                                call->in_speech = true;
+                            }
                             call->silence_count = 0;
+                            call->speech_buffer.insert(call->speech_buffer.end(),
+                                call->audio_buffer.begin(), call->audio_buffer.begin() + VAD_FRAME_SIZE);
                         } else {
-                            if (call->in_speech) call->silence_count++;
+                            if (call->in_speech) {
+                                call->silence_count++;
+                                call->speech_buffer.insert(call->speech_buffer.end(),
+                                    call->audio_buffer.begin(), call->audio_buffer.begin() + VAD_FRAME_SIZE);
+                            }
                         }
 
-                        if (call->in_speech && call->silence_count > 8) {
-                            to_process = std::move(call->audio_buffer);
-                            call->in_speech = false;
-                            call->silence_count = 0;
-                            break;
-                        } else if (call->audio_buffer.size() > 16000 * 8) {
-                            to_process = std::move(call->audio_buffer);
+                        call->audio_buffer.erase(call->audio_buffer.begin(),
+                            call->audio_buffer.begin() + VAD_FRAME_SIZE);
+
+                        if (call->in_speech && call->silence_count > VAD_SILENCE_FRAMES) {
+                            to_process = std::move(call->speech_buffer);
+                            call->speech_buffer.clear();
                             call->in_speech = false;
                             call->silence_count = 0;
                             break;
                         }
-                        
-                        break;
+
+                        if (call->speech_buffer.size() > VAD_MAX_SPEECH_SAMPLES) {
+                            to_process = std::move(call->speech_buffer);
+                            call->speech_buffer.clear();
+                            call->in_speech = false;
+                            call->silence_count = 0;
+                            break;
+                        }
                     }
                 }
 
@@ -154,17 +181,22 @@ private:
         wparams.n_threads = 4;
         wparams.no_timestamps = true;
 
+        auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);
         if (whisper_full(ctx_, wparams, audio.data(), audio.size()) == 0) {
+            auto t1 = std::chrono::steady_clock::now();
+            auto whisper_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
             int n_segments = whisper_full_n_segments(ctx_);
             std::string text;
             for (int i = 0; i < n_segments; ++i) {
                 text += whisper_full_get_segment_text(ctx_, i);
             }
             if (!text.empty()) {
-                std::cout << "📝 [" << call_id << "] Transcription: " << text << std::endl;
+                std::cout << "📝 [" << call_id << "] Transcription (" << whisper_ms << "ms): " << text << std::endl;
                 
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
+                pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
+                pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 1);
                 if (!interconnect_.send_to_downstream(pkt)) {
                     if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                         std::cout << "⚠️  [" << call_id << "] LLaMA disconnected, discarding transcription to /dev/null" << std::endl;
