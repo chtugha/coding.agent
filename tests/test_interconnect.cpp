@@ -934,6 +934,322 @@ TEST(MasterFailoverTest, ThirdPartySlaveSeesNewMaster) {
     remaining_slave.shutdown();
 }
 
+TEST(ConcurrencyStressTest, TwentyConcurrentCallsNoXtalk) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(upstream.initialize());
+    ASSERT_TRUE(upstream.is_master());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    ASSERT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ASSERT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const int NUM_CALLS = 20;
+    const int PACKETS_PER_CALL = 500;
+    const int TOTAL_PACKETS = NUM_CALLS * PACKETS_PER_CALL;
+
+    std::vector<uint32_t> call_ids(NUM_CALLS);
+    for (int i = 0; i < NUM_CALLS; i++) {
+        call_ids[i] = upstream.reserve_call_id(i + 1);
+        ASSERT_GT(call_ids[i], 0u) << "Failed to reserve call_id for call " << i;
+    }
+
+    std::set<uint32_t> unique_call_ids(call_ids.begin(), call_ids.end());
+    ASSERT_EQ(unique_call_ids.size(), static_cast<size_t>(NUM_CALLS));
+
+    std::atomic<int> total_sent{0};
+    std::atomic<int> total_received{0};
+    std::atomic<bool> sender_done{false};
+    std::atomic<bool> crosstalk_detected{false};
+
+    std::map<uint32_t, std::atomic<int>> recv_per_call;
+    for (int i = 0; i < NUM_CALLS; i++) {
+        recv_per_call[call_ids[i]].store(0);
+    }
+
+    std::thread receiver([&]() {
+        while (!sender_done || total_received < total_sent) {
+            Packet pkt;
+            if (downstream.recv_from_upstream(pkt, 200)) {
+                if (unique_call_ids.count(pkt.call_id) == 0) {
+                    crosstalk_detected = true;
+                    continue;
+                }
+                if (pkt.payload_size >= 4) {
+                    uint32_t embedded_id;
+                    memcpy(&embedded_id, pkt.payload.data(), 4);
+                    if (embedded_id != pkt.call_id) {
+                        crosstalk_detected = true;
+                    }
+                }
+                recv_per_call[pkt.call_id]++;
+                total_received++;
+            }
+            if (sender_done && total_received >= TOTAL_PACKETS) break;
+        }
+    });
+
+    std::vector<std::thread> senders;
+    std::atomic<int> ready_count{0};
+    for (int c = 0; c < NUM_CALLS; c++) {
+        senders.emplace_back([&, c]() {
+            ready_count++;
+            while (ready_count < NUM_CALLS) {
+                std::this_thread::yield();
+            }
+            uint32_t cid = call_ids[c];
+            for (int p = 0; p < PACKETS_PER_CALL; p++) {
+                uint8_t payload[64];
+                memcpy(payload, &cid, 4);
+                uint32_t seq = static_cast<uint32_t>(p);
+                memcpy(payload + 4, &seq, 4);
+                memset(payload + 8, static_cast<uint8_t>(c), 56);
+                Packet pkt(cid, payload, sizeof(payload));
+                if (upstream.send_to_downstream(pkt)) {
+                    total_sent++;
+                }
+                if (p % 50 == 0) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+            }
+        });
+    }
+
+    for (auto& t : senders) t.join();
+    sender_done = true;
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (total_received < total_sent &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    receiver.join();
+
+    EXPECT_FALSE(crosstalk_detected) << "Cross-talk detected: payload call_id mismatch";
+    EXPECT_EQ(total_sent.load(), TOTAL_PACKETS) << "Not all packets were sent";
+    EXPECT_EQ(total_received.load(), total_sent.load()) << "Packet loss detected";
+
+    int min_recv = PACKETS_PER_CALL;
+    int max_recv = 0;
+    for (int i = 0; i < NUM_CALLS; i++) {
+        int count = recv_per_call[call_ids[i]].load();
+        EXPECT_EQ(count, PACKETS_PER_CALL)
+            << "Call " << call_ids[i] << " received " << count
+            << " packets, expected " << PACKETS_PER_CALL;
+        min_recv = std::min(min_recv, count);
+        max_recv = std::max(max_recv, count);
+    }
+
+    std::printf("  [STRESS] %d calls, %d total packets sent, %d received\n",
+                NUM_CALLS, total_sent.load(), total_received.load());
+    std::printf("  [STRESS] Per-call: min=%d max=%d expected=%d\n",
+                min_recv, max_recv, PACKETS_PER_CALL);
+    std::printf("  [STRESS] Cross-talk: %s\n",
+                crosstalk_detected.load() ? "DETECTED (FAIL)" : "NONE (PASS)");
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(ConcurrencyStressTest, CallEndDuringActiveTraffic) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    ASSERT_TRUE(slave.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ASSERT_TRUE(master.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const int NUM_CALLS = 20;
+    std::vector<uint32_t> call_ids(NUM_CALLS);
+    for (int i = 0; i < NUM_CALLS; i++) {
+        call_ids[i] = master.reserve_call_id(i + 1);
+        ASSERT_GT(call_ids[i], 0u);
+    }
+
+    std::set<uint32_t> ended_calls;
+    std::mutex ended_mutex;
+    slave.register_call_end_handler([&](uint32_t call_id) {
+        std::lock_guard<std::mutex> lock(ended_mutex);
+        ended_calls.insert(call_id);
+    });
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> sent_count{0};
+
+    std::thread sender([&]() {
+        int idx = 0;
+        while (!stop) {
+            uint32_t cid = call_ids[idx % NUM_CALLS];
+            {
+                std::lock_guard<std::mutex> lock(ended_mutex);
+                if (ended_calls.count(cid)) {
+                    idx++;
+                    continue;
+                }
+            }
+            std::string data = "pkt_" + std::to_string(idx);
+            Packet pkt(cid, data.c_str(), data.size());
+            master.send_to_downstream(pkt);
+            sent_count++;
+            idx++;
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    });
+
+    std::thread receiver([&]() {
+        while (!stop) {
+            Packet pkt;
+            slave.recv_from_upstream(pkt, 200);
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    for (int i = 0; i < NUM_CALLS / 2; i++) {
+        master.broadcast_call_end(call_ids[i]);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    stop = true;
+    sender.join();
+    receiver.join();
+
+    {
+        std::lock_guard<std::mutex> lock(ended_mutex);
+        EXPECT_EQ(ended_calls.size(), static_cast<size_t>(NUM_CALLS / 2))
+            << "Expected " << NUM_CALLS / 2 << " CALL_END received, got "
+            << ended_calls.size();
+
+        for (int i = 0; i < NUM_CALLS / 2; i++) {
+            EXPECT_TRUE(ended_calls.count(call_ids[i]))
+                << "CALL_END for call " << call_ids[i] << " not received";
+        }
+    }
+
+    EXPECT_GT(sent_count.load(), 0) << "No packets were sent during stress test";
+
+    std::printf("  [CALL_END_STRESS] %d packets sent, %d/%d calls ended\n",
+                sent_count.load(), static_cast<int>(ended_calls.size()), NUM_CALLS / 2);
+
+    slave.shutdown();
+    master.shutdown();
+}
+
+TEST(ConcurrencyStressTest, BidirectionalMultiCallRouting) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(upstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    ASSERT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ASSERT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const int NUM_CALLS = 20;
+    const int PACKETS_PER_CALL = 100;
+
+    std::vector<uint32_t> call_ids(NUM_CALLS);
+    for (int i = 0; i < NUM_CALLS; i++) {
+        call_ids[i] = upstream.reserve_call_id(i + 1);
+        ASSERT_GT(call_ids[i], 0u);
+    }
+
+    std::atomic<int> down_recv{0};
+    std::atomic<int> up_recv{0};
+    std::atomic<bool> crosstalk{false};
+    std::atomic<bool> done_sending{false};
+
+    std::thread down_receiver([&]() {
+        while (!done_sending || down_recv < NUM_CALLS * PACKETS_PER_CALL) {
+            Packet pkt;
+            if (downstream.recv_from_upstream(pkt, 200)) {
+                uint32_t embedded;
+                memcpy(&embedded, pkt.payload.data(), 4);
+                if (embedded != pkt.call_id) crosstalk = true;
+                down_recv++;
+            }
+            if (done_sending && down_recv >= NUM_CALLS * PACKETS_PER_CALL) break;
+        }
+    });
+
+    std::thread up_receiver([&]() {
+        while (!done_sending || up_recv < NUM_CALLS * PACKETS_PER_CALL) {
+            Packet pkt;
+            if (upstream.recv_from_downstream(pkt, 200)) {
+                uint32_t embedded;
+                memcpy(&embedded, pkt.payload.data(), 4);
+                if (embedded != pkt.call_id) crosstalk = true;
+                up_recv++;
+            }
+            if (done_sending && up_recv >= NUM_CALLS * PACKETS_PER_CALL) break;
+        }
+    });
+
+    std::vector<std::thread> senders;
+    std::atomic<int> ready{0};
+    for (int c = 0; c < NUM_CALLS; c++) {
+        senders.emplace_back([&, c]() {
+            ready++;
+            while (ready < NUM_CALLS) std::this_thread::yield();
+            uint32_t cid = call_ids[c];
+            for (int p = 0; p < PACKETS_PER_CALL; p++) {
+                uint8_t payload[32];
+                memcpy(payload, &cid, 4);
+                uint32_t seq = static_cast<uint32_t>(p);
+                memcpy(payload + 4, &seq, 4);
+
+                Packet down_pkt(cid, payload, sizeof(payload));
+                upstream.send_to_downstream(down_pkt);
+
+                Packet up_pkt(cid, payload, sizeof(payload));
+                downstream.send_to_upstream(up_pkt);
+            }
+        });
+    }
+
+    for (auto& t : senders) t.join();
+    done_sending = true;
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while ((down_recv < NUM_CALLS * PACKETS_PER_CALL ||
+            up_recv < NUM_CALLS * PACKETS_PER_CALL) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    down_receiver.join();
+    up_receiver.join();
+
+    EXPECT_FALSE(crosstalk) << "Cross-talk in bidirectional multi-call";
+    EXPECT_EQ(down_recv.load(), NUM_CALLS * PACKETS_PER_CALL);
+    EXPECT_EQ(up_recv.load(), NUM_CALLS * PACKETS_PER_CALL);
+
+    std::printf("  [BIDIR_STRESS] %d calls, down_recv=%d up_recv=%d crosstalk=%s\n",
+                NUM_CALLS, down_recv.load(), up_recv.load(),
+                crosstalk.load() ? "YES" : "NO");
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
 class CrashRecoveryMatrixTest : public ::testing::TestWithParam<ServiceType> {};
 
 TEST_P(CrashRecoveryMatrixTest, ServiceCrashAndRecovery) {
