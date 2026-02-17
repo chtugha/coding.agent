@@ -934,6 +934,156 @@ TEST(MasterFailoverTest, ThirdPartySlaveSeesNewMaster) {
     remaining_slave.shutdown();
 }
 
+class CrashRecoveryMatrixTest : public ::testing::TestWithParam<ServiceType> {};
+
+TEST_P(CrashRecoveryMatrixTest, ServiceCrashAndRecovery) {
+    ServiceType crashed_type = GetParam();
+
+    if (crashed_type == ServiceType::SIP_CLIENT) {
+        InterconnectNode master(ServiceType::SIP_CLIENT);
+        ASSERT_TRUE(master.initialize());
+        ASSERT_TRUE(master.is_master());
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        InterconnectNode slave(ServiceType::INBOUND_AUDIO_PROCESSOR);
+        ASSERT_TRUE(slave.initialize());
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        EXPECT_TRUE(master.is_service_alive(ServiceType::INBOUND_AUDIO_PROCESSOR));
+
+        master.shutdown();
+
+        auto start = std::chrono::steady_clock::now();
+        bool slave_promoted = false;
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(12)) {
+            if (slave.is_master()) { slave_promoted = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        EXPECT_TRUE(slave_promoted) << "Slave should promote after SIP_CLIENT (master) crash";
+
+        InterconnectNode master_restart(ServiceType::SIP_CLIENT);
+        ASSERT_TRUE(master_restart.initialize());
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+
+        EXPECT_TRUE(master_restart.is_master()) << "Restarted SIP_CLIENT should reclaim master";
+
+        uint32_t id = master_restart.reserve_call_id(1);
+        EXPECT_GT(id, 0u) << "Restarted master should reserve call IDs";
+
+        std::printf("  [SIP_CLIENT] Master crash + promotion + reclaim: PASS\n");
+
+        slave.shutdown();
+        master_restart.shutdown();
+        return;
+    }
+
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+    ASSERT_TRUE(master.is_master());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    auto* crashed_node = new InterconnectNode(crashed_type);
+    ASSERT_TRUE(crashed_node->initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    EXPECT_TRUE(master.is_service_alive(crashed_type))
+        << service_type_to_string(crashed_type) << " should be alive before crash";
+
+    ServiceType upstream_type = upstream_of(crashed_type);
+    std::unique_ptr<InterconnectNode> upstream_neighbor;
+    if (upstream_type != ServiceType::SIP_CLIENT) {
+        upstream_neighbor = std::make_unique<InterconnectNode>(upstream_type);
+        ASSERT_TRUE(upstream_neighbor->initialize());
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        upstream_neighbor->connect_to_downstream();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+
+    crashed_node->shutdown();
+    delete crashed_node;
+    crashed_node = nullptr;
+
+    auto crash_time = std::chrono::steady_clock::now();
+
+    auto start = std::chrono::steady_clock::now();
+    bool detected = false;
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(8)) {
+        if (!master.is_service_alive(crashed_type)) {
+            detected = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    auto detect_time = std::chrono::steady_clock::now();
+    auto detect_ms = std::chrono::duration_cast<std::chrono::milliseconds>(detect_time - crash_time).count();
+
+    EXPECT_TRUE(detected)
+        << service_type_to_string(crashed_type) << " crash not detected within 8s";
+
+    std::printf("  [%s] Crash detected in %lldms\n",
+                service_type_to_string(crashed_type), detect_ms);
+
+    if (upstream_neighbor) {
+        ConnectionState us = upstream_neighbor->upstream_state();
+        bool traffic_detected = (us == ConnectionState::FAILED || us == ConnectionState::DISCONNECTED);
+        std::printf("  [%s] Upstream neighbor traffic state: %s\n",
+                    service_type_to_string(crashed_type),
+                    traffic_detected ? "DISCONNECTED/FAILED (correct)" : "still CONNECTED");
+    }
+
+    InterconnectNode restarted(crashed_type);
+    ASSERT_TRUE(restarted.initialize())
+        << service_type_to_string(crashed_type) << " failed to restart";
+
+    auto restart_time = std::chrono::steady_clock::now();
+    bool re_registered = false;
+    while (std::chrono::steady_clock::now() - restart_time < std::chrono::seconds(5)) {
+        if (master.is_service_alive(crashed_type)) {
+            re_registered = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    auto rereg_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - restart_time).count();
+
+    EXPECT_TRUE(re_registered)
+        << service_type_to_string(crashed_type) << " did not re-register within 5s";
+
+    std::printf("  [%s] Re-registered in %lldms\n",
+                service_type_to_string(crashed_type), rereg_ms);
+
+    if (upstream_neighbor) {
+        bool reconnected = upstream_neighbor->connect_to_downstream();
+        std::printf("  [%s] Upstream reconnect after restart: %s\n",
+                    service_type_to_string(crashed_type),
+                    reconnected ? "SUCCESS" : "FAILED (may need time)");
+    }
+
+    uint32_t id = master.reserve_call_id(1);
+    EXPECT_GT(id, 0u);
+
+    restarted.shutdown();
+    if (upstream_neighbor) upstream_neighbor->shutdown();
+    master.shutdown();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllServiceTypes,
+    CrashRecoveryMatrixTest,
+    ::testing::Values(
+        ServiceType::SIP_CLIENT,
+        ServiceType::INBOUND_AUDIO_PROCESSOR,
+        ServiceType::WHISPER_SERVICE,
+        ServiceType::LLAMA_SERVICE,
+        ServiceType::KOKORO_SERVICE,
+        ServiceType::OUTBOUND_AUDIO_PROCESSOR
+    ),
+    [](const ::testing::TestParamInfo<ServiceType>& info) {
+        return std::string(service_type_to_string(info.param));
+    }
+);
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
