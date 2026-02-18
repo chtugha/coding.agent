@@ -77,6 +77,9 @@ public:
 
         std::cout << "🔗 Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
 
+        uint16_t lp = interconnect_.frontend_log_port();
+        if (lp) log_fwd_.init(lp, whispertalk::ServiceType::LLAMA_SERVICE);
+
         if (!interconnect_.connect_to_downstream()) {
             std::cout << "⚠️  Downstream (Kokoro) not available yet - will auto-reconnect" << std::endl;
         }
@@ -271,6 +274,7 @@ private:
 
         call->messages.push_back({"assistant", response});
         std::cout << "🦙 [" << cid << "] DE (" << gen_ms << "ms): " << response << std::endl;
+        log_fwd_.forward("INFO", cid, "Response (%lldms): %s", gen_ms, response.c_str());
         return response;
     }
 
@@ -288,6 +292,7 @@ private:
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                 std::cout << "⚠️  [" << cid << "] Kokoro disconnected, discarding response to /dev/null" << std::endl;
+                log_fwd_.forward("WARN", cid, "Kokoro disconnected, discarding response");
             }
         }
     }
@@ -301,6 +306,7 @@ private:
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
         std::cout << "📞 Created conversation context for call_id " << cid << std::endl;
+        log_fwd_.forward("INFO", cid, "Created conversation context");
         return call;
     }
 
@@ -312,6 +318,7 @@ private:
             llama_memory_seq_rm(mem, calls_[call_id]->seq_id, -1, -1);
             calls_.erase(call_id);
             std::cout << "🛑 Call " << call_id << " ended, clearing conversation context" << std::endl;
+            log_fwd_.forward("INFO", call_id, "Call ended, clearing conversation context");
         }
     }
 
@@ -328,6 +335,7 @@ private:
     std::mutex work_mutex_;
     std::condition_variable work_cv_;
     whispertalk::InterconnectNode interconnect_;
+    whispertalk::LogForwarder log_fwd_;
 };
 
 int main(int argc, char** argv) {

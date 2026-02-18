@@ -729,6 +729,9 @@ public:
             return false;
         }
 
+        uint16_t lp = node_.frontend_log_port();
+        if (lp) log_fwd_.init(lp, ServiceType::KOKORO_SERVICE);
+
         std::printf("Kokoro TTS Service initialized (German, voice=%s, decoder=coreml-split)\n",
                    voice_name.c_str());
         std::printf("  Negotiation ports: IN=%u OUT=%u\n", node_.ports().neg_in, node_.ports().neg_out);
@@ -781,6 +784,7 @@ private:
             ctx->worker = std::thread(&KokoroService::call_worker, this, ctx);
             calls_[pkt.call_id] = ctx;
             std::printf("Started synthesis thread for call %u\n", pkt.call_id);
+            log_fwd_.forward("INFO", pkt.call_id, "Started synthesis thread");
             it = calls_.find(pkt.call_id);
         }
 
@@ -820,6 +824,7 @@ private:
 
             std::printf("Synthesized %zu samples in %lldms for call %u\n",
                         samples.size(), elapsed, ctx->call_id);
+            log_fwd_.forward("INFO", ctx->call_id, "Synthesized %zu samples in %lldms", samples.size(), elapsed);
 
             send_audio_to_downstream(ctx->call_id, samples);
         }
@@ -881,6 +886,7 @@ private:
     }
 
     InterconnectNode node_;
+    LogForwarder log_fwd_;
     KokoroPipeline pipeline_;
     std::atomic<bool> running_{true};
     std::map<uint32_t, std::shared_ptr<CallContext>> calls_;

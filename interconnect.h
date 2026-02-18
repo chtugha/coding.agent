@@ -1921,7 +1921,8 @@ public:
         }
     }
 
-    // Thread-safe: stack-local buffers + sendto is atomic for datagrams < MTU.
+    // Thread-safe for logging: stack-local buffers, sendto is atomic per POSIX.
+    // Max datagram ~2200 bytes (fits in localhost loopback MTU ~65K).
     void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
         if (sock_ < 0) return;
         char msg[2048];

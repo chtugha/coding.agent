@@ -69,6 +69,9 @@ public:
 
         std::cout << "🔗 Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
 
+        uint16_t lp = interconnect_.frontend_log_port();
+        if (lp) log_fwd_.init(lp, whispertalk::ServiceType::WHISPER_SERVICE);
+
         if (!interconnect_.connect_to_downstream()) {
             std::cout << "⚠️  Downstream (LLaMA) not available yet - will auto-reconnect" << std::endl;
         }
@@ -248,6 +251,7 @@ private:
             }
             if (!text.empty()) {
                 std::cout << "📝 [" << call_id << "] Transcription (" << whisper_ms << "ms): " << text << std::endl;
+                log_fwd_.forward("INFO", call_id, "Transcription (%lldms): %s", whisper_ms, text.c_str());
 
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
@@ -278,6 +282,7 @@ private:
             }
         } else {
             std::cerr << "⚠️  [" << call_id << "] Whisper transcription failed" << std::endl;
+            log_fwd_.forward("ERROR", call_id, "Whisper transcription failed");
         }
     }
 
@@ -289,6 +294,7 @@ private:
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
         std::cout << "📞 Created transcription session for call_id " << cid << std::endl;
+        log_fwd_.forward("INFO", cid, "Created transcription session");
         return call;
     }
 
@@ -296,6 +302,7 @@ private:
         std::lock_guard<std::mutex> lock(calls_mutex_);
         if (calls_.count(call_id)) {
             std::cout << "🛑 Call " << call_id << " ended, closing transcription session" << std::endl;
+            log_fwd_.forward("INFO", call_id, "Call ended, closing transcription session");
             calls_.erase(call_id);
         }
     }
@@ -307,6 +314,7 @@ private:
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<WhisperCall>> calls_;
     whispertalk::InterconnectNode interconnect_;
+    whispertalk::LogForwarder log_fwd_;
     
     std::mutex buffer_mutex_;
     std::deque<whispertalk::Packet> buffered_packets_;
