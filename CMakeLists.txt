@@ -285,8 +285,16 @@ else()
     endif()
 endif()
 
+# 7. Frontend (mongoose + SQLite)
+add_executable(frontend frontend.cpp mongoose.c sqlite3.c)
+target_link_libraries(frontend PRIVATE Threads::Threads)
+target_compile_definitions(frontend PRIVATE MG_ENABLE_PACKED_FS=0)
+if(APPLE)
+    target_link_libraries(frontend PRIVATE "-framework CoreFoundation")
+endif()
+
 # Install
-set(INSTALL_TARGETS sip-client inbound-audio-processor outbound-audio-processor whisper-service llama-service)
+set(INSTALL_TARGETS sip-client inbound-audio-processor outbound-audio-processor whisper-service llama-service frontend)
 if(TARGET kokoro-service)
     list(APPEND INSTALL_TARGETS kokoro-service)
 endif()

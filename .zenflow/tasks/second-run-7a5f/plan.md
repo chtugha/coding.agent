@@ -573,6 +573,28 @@ Whisper transcribes → sends text → SPEECH_IDLE(call_id) → LLaMA proceeds w
 
 **Verification**: All 77 tests pass (2 sanity + 25 SIP provider unit + 50 interconnect including 4 new speech signal tests). SingleCallFullPipeline integration test PASSED (65s).
 
+
+### [x] Step: frontend
+<!-- chat-id: ed5508fe-2f77-4dfd-93b3-8a98aca77d68 -->
+
+Now let’s talk frontend.cpp!
+I want you to build a c++ as static as possible binary that consists of a logging-server, mysql-database + web server that is able to display a php based frontend. That php based frontend uses the bootstrap framework so the design can be changed via bootstrap templates. The webserver uses mongoose ( https://github.com/cesanta/mongoose https://mongoose.ws/documentation/). 
+The frontend needs to run as an app for macOS (minimum Sonoma) on apple silicon.
+The frontend uses as much php+mysql as possible and as litte javascript as necessary.
+It has phpmysql implemented for database-administration.
+Otherwise the frontend just calls binaries and reads from the corresponding logs. 
+The only change in the code of the test/service binaries is a mechanism that will enable logging to the logging-server of the frontend if it is available. Therefore the interconnect.h library will be included into the frontend.cpp so that the master knows the frontend is available. The necessary information to connect the services to the logging-server of the frontend (port or whatever) will be propagated over the master/slave system that already exists. 
+Don’t change anything else in the code of the services/tests. If that would be really necessary ask first, but try to do everything by reading the log.
+The frontend consists of two main parts: testing and main. Those are separated sections of the frontend.
+The basic functionality of the testing frontend is: 
+1. Overview of the available tests and short important realtime-information (running/turned off/idle, active calls ..etc.)
+2. Undersections for every test with:
+a.) An overview of relevant information
+b.) A Button to start the test with the possibility to change startup parameters. For example selection of the model. And a Button to restart the test if parameters are wished to be changed.
+c.) A field that shows the live log of the test
+d.) A Summary of the last test results.
+
+The basic functionality of the main fr
 ## Test Results Log
 
 ### Phase 0 Tests

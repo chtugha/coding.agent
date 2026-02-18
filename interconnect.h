@@ -31,7 +31,8 @@ enum class ServiceType : uint8_t {
     WHISPER_SERVICE = 3,
     LLAMA_SERVICE = 4,
     KOKORO_SERVICE = 5,
-    OUTBOUND_AUDIO_PROCESSOR = 6
+    OUTBOUND_AUDIO_PROCESSOR = 6,
+    FRONTEND = 7
 };
 
 inline const char* service_type_to_string(ServiceType type) {
@@ -42,6 +43,7 @@ inline const char* service_type_to_string(ServiceType type) {
         case ServiceType::LLAMA_SERVICE: return "LLAMA_SERVICE";
         case ServiceType::KOKORO_SERVICE: return "KOKORO_SERVICE";
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return "OUTBOUND_AUDIO_PROCESSOR";
+        case ServiceType::FRONTEND: return "FRONTEND";
         default: return "UNKNOWN";
     }
 }
