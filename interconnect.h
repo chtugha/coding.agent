@@ -647,8 +647,15 @@ public:
                 std::string msg = "SET_LOG_PORT " + std::to_string(port);
                 send_all(sock, msg.c_str(), msg.size());
                 char buf[32];
-                recv_with_timeout(sock, buf, sizeof(buf) - 1, 1000);
+                ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, 1000);
                 close(sock);
+                if (n <= 0) {
+                    std::fprintf(stderr, "[%s] Warning: no response from master for SET_LOG_PORT\n",
+                                service_type_to_string(type_));
+                }
+            } else {
+                std::fprintf(stderr, "[%s] Warning: failed to send SET_LOG_PORT to master\n",
+                            service_type_to_string(type_));
             }
         }
     }
@@ -998,9 +1005,13 @@ private:
                 response = "HEARTBEAT_ACK";
             }
             else if (msg.substr(0, 13) == "SET_LOG_PORT ") {
-                uint16_t lp = static_cast<uint16_t>(std::stoul(msg.substr(13)));
-                frontend_log_port_.store(lp, std::memory_order_relaxed);
-                response = "SET_LOG_PORT_ACK";
+                try {
+                    uint16_t lp = static_cast<uint16_t>(std::stoul(msg.substr(13)));
+                    frontend_log_port_.store(lp, std::memory_order_relaxed);
+                    response = "SET_LOG_PORT_ACK";
+                } catch (const std::exception&) {
+                    response = "SET_LOG_PORT_ERROR";
+                }
             }
             else if (msg.substr(0, 15) == "GET_DOWNSTREAM ") {
                 ServiceType requester = static_cast<ServiceType>(std::stoi(msg.substr(15)));
@@ -1046,8 +1057,10 @@ private:
                     std::string entry = (next == std::string::npos) ? entries.substr(pos) : entries.substr(pos, next - pos);
                     if (!entry.empty()) {
                         if (entry.substr(0, 3) == "LP=") {
-                            uint16_t lp = static_cast<uint16_t>(std::stoul(entry.substr(3)));
-                            frontend_log_port_.store(lp, std::memory_order_relaxed);
+                            try {
+                                uint16_t lp = static_cast<uint16_t>(std::stoul(entry.substr(3)));
+                                frontend_log_port_.store(lp, std::memory_order_relaxed);
+                            } catch (const std::exception&) {}
                         } else {
                             size_t c1 = entry.find(':');
                             size_t c2 = entry.find(':', c1 + 1);
@@ -1908,6 +1921,7 @@ public:
         }
     }
 
+    // Thread-safe: stack-local buffers + sendto is atomic for datagrams < MTU.
     void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
         if (sock_ < 0) return;
         char msg[2048];
