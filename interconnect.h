@@ -22,6 +22,7 @@
 #include <signal.h>
 #include <cerrno>
 #include <cstdio>
+#include <cstdarg>
 
 namespace whispertalk {
 
@@ -243,6 +244,7 @@ public:
           was_original_master_(false),
           running_(false),
           master_heartbeat_failures_(0),
+          frontend_log_port_(0),
           max_known_call_id_(0),
           neg_in_sock_(-1),
           neg_out_sock_(-1),
@@ -633,6 +635,24 @@ public:
         return PortConfig();
     }
 
+    uint16_t frontend_log_port() const {
+        return frontend_log_port_.load(std::memory_order_relaxed);
+    }
+
+    void set_frontend_log_port(uint16_t port) {
+        frontend_log_port_.store(port, std::memory_order_relaxed);
+        if (!is_master_) {
+            int sock = connect_to_port("127.0.0.1", 22222);
+            if (sock >= 0) {
+                std::string msg = "SET_LOG_PORT " + std::to_string(port);
+                send_all(sock, msg.c_str(), msg.size());
+                char buf[32];
+                recv_with_timeout(sock, buf, sizeof(buf) - 1, 1000);
+                close(sock);
+            }
+        }
+    }
+
 private:
     ServiceType type_;
     bool is_master_;
@@ -649,6 +669,7 @@ private:
     static constexpr int DEMOTION_REGISTER_RETRIES = 3;
     static constexpr int DEMOTION_REGISTER_BACKOFF_MS = 200;
     PortConfig ports_;
+    std::atomic<uint16_t> frontend_log_port_;
 
     mutable std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;
@@ -976,6 +997,11 @@ private:
                 last_heartbeat_[svc_type] = std::chrono::steady_clock::now();
                 response = "HEARTBEAT_ACK";
             }
+            else if (msg.substr(0, 13) == "SET_LOG_PORT ") {
+                uint16_t lp = static_cast<uint16_t>(std::stoul(msg.substr(13)));
+                frontend_log_port_.store(lp, std::memory_order_relaxed);
+                response = "SET_LOG_PORT_ACK";
+            }
             else if (msg.substr(0, 15) == "GET_DOWNSTREAM ") {
                 ServiceType requester = static_cast<ServiceType>(std::stoi(msg.substr(15)));
                 ServiceType downstream = downstream_of(requester);
@@ -1019,13 +1045,18 @@ private:
                     size_t next = entries.find(' ', pos);
                     std::string entry = (next == std::string::npos) ? entries.substr(pos) : entries.substr(pos, next - pos);
                     if (!entry.empty()) {
-                        size_t c1 = entry.find(':');
-                        size_t c2 = entry.find(':', c1 + 1);
-                        if (c1 != std::string::npos && c2 != std::string::npos) {
-                            ServiceType svc = static_cast<ServiceType>(std::stoi(entry.substr(0, c1)));
-                            uint16_t ni = static_cast<uint16_t>(std::stoul(entry.substr(c1 + 1, c2 - c1 - 1)));
-                            uint16_t no = static_cast<uint16_t>(std::stoul(entry.substr(c2 + 1)));
-                            registry[svc] = PortConfig(ni, no);
+                        if (entry.substr(0, 3) == "LP=") {
+                            uint16_t lp = static_cast<uint16_t>(std::stoul(entry.substr(3)));
+                            frontend_log_port_.store(lp, std::memory_order_relaxed);
+                        } else {
+                            size_t c1 = entry.find(':');
+                            size_t c2 = entry.find(':', c1 + 1);
+                            if (c1 != std::string::npos && c2 != std::string::npos) {
+                                ServiceType svc = static_cast<ServiceType>(std::stoi(entry.substr(0, c1)));
+                                uint16_t ni = static_cast<uint16_t>(std::stoul(entry.substr(c1 + 1, c2 - c1 - 1)));
+                                uint16_t no = static_cast<uint16_t>(std::stoul(entry.substr(c2 + 1)));
+                                registry[svc] = PortConfig(ni, no);
+                            }
                         }
                     }
                     if (next == std::string::npos) break;
@@ -1270,6 +1301,8 @@ private:
             std::lock_guard<std::mutex> lock(registry_mutex_);
             std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
             payload = "SYNC_REGISTRY " + std::to_string(max_known_call_id_);
+            uint16_t lp = frontend_log_port_.load(std::memory_order_relaxed);
+            payload += " LP=" + std::to_string(lp);
             for (const auto& [svc, cfg] : service_registry_) {
                 payload += " " + std::to_string(static_cast<int>(svc)) +
                            ":" + std::to_string(cfg.neg_in) +
@@ -1852,6 +1885,54 @@ private:
             sock = -1;
         }
     }
+};
+
+class LogForwarder {
+public:
+    LogForwarder() : sock_(-1), port_(0) {}
+
+    ~LogForwarder() {
+        if (sock_ >= 0) ::close(sock_);
+    }
+
+    void init(uint16_t port, ServiceType svc) {
+        if (port == 0) return;
+        port_ = port;
+        svc_name_ = service_type_to_string(svc);
+        sock_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock_ >= 0) {
+            memset(&addr_, 0, sizeof(addr_));
+            addr_.sin_family = AF_INET;
+            addr_.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            addr_.sin_port = htons(port_);
+        }
+    }
+
+    void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
+        if (sock_ < 0) return;
+        char msg[2048];
+        va_list args;
+        va_start(args, fmt);
+        int mlen = vsnprintf(msg, sizeof(msg), fmt, args);
+        va_end(args);
+        if (mlen <= 0) return;
+
+        char buf[2200];
+        int blen = snprintf(buf, sizeof(buf), "%s %s %u %.*s",
+                            svc_name_, level, call_id, mlen, msg);
+        if (blen > 0) {
+            sendto(sock_, buf, static_cast<size_t>(blen), 0,
+                   (struct sockaddr*)&addr_, sizeof(addr_));
+        }
+    }
+
+    bool active() const { return sock_ >= 0 && port_ > 0; }
+
+private:
+    int sock_;
+    uint16_t port_;
+    const char* svc_name_ = "UNKNOWN";
+    struct sockaddr_in addr_;
 };
 
 }
