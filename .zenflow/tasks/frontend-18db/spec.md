@@ -71,9 +71,23 @@ At startup after `interconnect_.initialize()`, each service checks `interconnect
 
 This is the **only change** to service files.
 
-### 2. Logging Server
+### 2. Logging Server (Dual-Source)
 
 **Already exists** in `frontend.cpp:251-321` — UDP receiver on `log_port_`, circular buffer, SQLite writes.
+
+**Two log sources**:
+
+1. **UDP log forwarding** (real-time, from running services):
+   - Services send structured messages via UDP to frontend's log port
+   - Frontend receives, parses, stores in circular buffer + SQLite
+   - This is the primary real-time source for service logs
+
+2. **Log file tailing** (for tests and fallback):
+   - Tests redirect stdout/stderr to `logs/<test_name>_<timestamp>.log`
+   - Frontend tails active test log files using `kqueue` (macOS native file event API)
+   - On each file change event, read new bytes, parse into log entries
+   - Also used as fallback for services that started before frontend (read their existing log files)
+   - Log file locations: `logs/` directory, discovered by convention (`logs/<service_name>.log`)
 
 **Enhancements needed**:
 - Parse structured log messages: `SERVICE_NAME LEVEL CALL_ID MESSAGE`
@@ -81,6 +95,8 @@ This is the **only change** to service files.
 - Batched SQLite writes (queue + flush every 500ms) to avoid per-message I/O
 - Log rotation: delete entries older than 30 days on startup and periodically
 - Index on `(service, timestamp)` for efficient filtered queries
+- kqueue-based file watcher for test log files
+- Maximum disk usage: cap log directory at 500MB, oldest files deleted first
 
 ### 3. SSE Live Log Streaming
 
@@ -142,32 +158,64 @@ The UI is served as inline HTML strings from the C++ binary (current approach in
 - Results displayed as Bootstrap table
 - Schema viewer (list tables, columns, indexes)
 - Pre-built query shortcuts (recent logs, test history, service stats)
-- **Safety**: Only SELECT queries allowed by default; a toggle to enable write queries (with confirmation dialog)
+- **Safety**: Only SELECT queries allowed by default; an in-memory toggle (resets on page refresh) to enable write queries. Write mode shows a confirmation dialog ("Are you sure? This will modify the database.") before execution. No authentication required (localhost-only threat model)
 
 #### D. Theme Switcher
 5 pre-bundled themes. Implementation:
-- Each theme is a CSS string embedded in the binary (or a `<link>` to a CDN variant)
-- Theme selection stored in SQLite `settings` table
-- Dropdown in navbar to switch themes; applies immediately via JS class swap
-- Themes:
+
+**Storage**: Theme name stored in SQLite `settings` table (`key='theme'`, `value='dark'`). Loaded on page serve; default is `default`.
+
+**Switching mechanism**:
+- Themes 1-2 use Bootstrap's built-in `data-bs-theme` attribute on `<html>`:
+  - Default: `<html data-bs-theme="light">`
+  - Dark: `<html data-bs-theme="dark">`
+- Themes 3-5 use Bootswatch CSS served from an endpoint `/css/theme/<name>`:
+  - The CSS is stored as `static const char*` string literals in `frontend.cpp`
+  - On page load, the `<link>` tag's `href` is set based on the stored theme
+- Theme dropdown in navbar sends `POST /api/settings` with `{"key":"theme","value":"<name>"}`
+- After POST succeeds, JS reloads the page to apply the new theme server-side
+
+**Themes**:
   1. **Default** — Bootstrap 5.3 default (light)
   2. **Dark** — Bootstrap dark mode (`data-bs-theme="dark"`)
   3. **Slate** — dark blue/gray professional look
   4. **Flatly** — clean flat design
   5. **Cyborg** — dark with neon accents
 
-For themes 3-5, embed the Bootswatch CSS directly as strings in the binary (~15KB each).
+For themes 3-5, embed the Bootswatch CSS directly as `static const char*` string literals (~15KB each, ~45KB total).
 
 ### 5. Service Lifecycle Management
 
-**Services section** allows starting/stopping the 6 pipeline services. Implementation:
+**Services section** allows starting, stopping, and restarting the 6 pipeline services.
 
-- Frontend stores service binary paths and default args in SQLite `service_config` table
-- Start: `fork()`+`execv()` with configured args, redirect stdout/stderr to log file
-- Stop: `kill(pid, SIGTERM)`, wait, then `SIGKILL` if needed
-- Restart: stop + start with new parameters
-- Service PID tracking and `waitpid` polling (same pattern as existing test management)
-- The frontend also monitors service status via interconnect heartbeat (already present: `is_service_alive()`, `query_service_ports()`)
+**Dual status tracking**:
+- **Interconnect status**: `is_service_alive()` detects services started externally (before frontend)
+- **PID tracking**: For services started BY the frontend via fork/exec
+
+**Start** (only if service is not already running):
+- Validate binary exists at configured path and is executable
+- `fork()`+`execv()` with configured args
+- Redirect stdout/stderr to `logs/<service_name>.log`
+- Store PID in `service_status` table
+
+**Stop**:
+- `kill(pid, SIGTERM)`, wait up to 5 seconds
+- If still running: `kill(pid, SIGKILL)`
+- Clear PID from `service_status`
+
+**Restart** (for parameter changes):
+- Stop current instance
+- Start with new parameters from the form
+
+**Externally started services**:
+- If a service is detected via interconnect heartbeat but was NOT started by frontend, the UI shows it as "running (external)"
+- Stop/restart buttons are disabled for external services (frontend doesn't own the PID)
+- Only live logs and status monitoring are available
+
+**Service config persistence**:
+- Binary path + arguments stored in SQLite `service_config` table
+- Edited parameters are saved to DB before start
+- Persist across frontend restarts
 
 ### 6. Test Lifecycle Management
 
@@ -262,6 +310,8 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 ```
 
+**Schema versioning**: Store `schema_version` in `settings` table. On startup, check version and run migration SQL if needed. All tables use `CREATE TABLE IF NOT EXISTS` for forward compatibility.
+
 **Pre-populated `service_config`**:
 | service | binary_path | arguments |
 |---------|------------|-----------|
@@ -312,10 +362,15 @@ WhisperTalk.app/
 </plist>
 ```
 
-**Auto-open browser**: At the end of `main()`, after starting the HTTP server, call:
+**Auto-open browser**: After HTTP server starts successfully, open browser in a child process:
 ```cpp
-system("open http://localhost:8080");
+if (fork() == 0) {
+    execl("/usr/bin/open", "open",
+          ("http://localhost:" + std::to_string(port)).c_str(), NULL);
+    _exit(0);
+}
 ```
+Uses `execl` instead of `system()` to avoid shell expansion. Frontend continues running if browser is closed (it's a server, not a GUI app).
 
 **Build script**: `scripts/package-frontend-app.sh` creates the `.app` bundle, copies binary, signs if cert available.
 
@@ -326,7 +381,7 @@ system("open http://localhost:8080");
 ### Files to Modify
 
 #### 1. `frontend.cpp` (Major Enhancement)
-Current: 613 lines. Target: ~2000-2500 lines.
+Current: 613 lines. Target: ~3000-4000 lines (bulk is inline HTML/CSS string literals for UI and embedded Bootswatch themes).
 
 Changes:
 - Add SSE handler for live log streaming
@@ -375,6 +430,41 @@ Shell script to create macOS `.app` bundle structure, copy binary, generate Info
 - **Command injection**: Service/test args are passed as explicit `execv` argv, never through `system()` or shell. No shell expansion occurs.
 - **Path traversal**: Log file paths are validated to stay within the `logs/` directory.
 - **CORS**: Not needed — frontend is served from same origin.
+- **Parameter validation**: Model paths validated to exist on disk before start. Port numbers validated as 1-65535. SIP credentials are not logged. Arguments passed via `execv` argv array (no shell expansion, no injection).
+
+---
+
+## Error Handling
+
+### Service/Test Crashes
+- `waitpid(WNOHANG)` polling in main loop detects crashed child processes
+- Exit code and signal stored in DB; UI shows "crashed" badge with exit code
+- Orphaned child processes: on frontend shutdown, `SIGTERM` all tracked PIDs, then `SIGKILL` after 5s timeout
+
+### Frontend Crash Recovery
+- On startup, scan `service_status` table for stale PIDs (from previous frontend instance)
+- For each stale PID, check if process is still running via `kill(pid, 0)`
+- If running: adopt it (resume PID tracking). If dead: clear from DB
+- Running tests continue independently of frontend (they're separate processes)
+
+### SQLite Corruption
+- Use `PRAGMA journal_mode=WAL` for crash safety
+- On open failure, attempt `PRAGMA integrity_check`; if corrupt, rename DB and create fresh
+
+### Interconnect Unavailable
+- If frontend can't bind interconnect ports (another master exists), log warning
+- Frontend still functions for manual service management; just no live interconnect status
+- Retry interconnect initialization every 30 seconds in background
+
+### Concurrent Test Execution
+- Multiple different tests CAN run simultaneously
+- Same test CANNOT run twice concurrently (check `is_running` before start; return error if already running)
+- Each test tracks its own PID independently
+
+### UDP Log Packet Loss
+- UDP is fire-and-forget; lost packets are simply missing from logs
+- No retry mechanism (by design — logging must not impact service performance)
+- If log volume is extremely high, batch size limits prevent SQLite overload
 
 ---
 
@@ -395,11 +485,17 @@ Shell script to create macOS `.app` bundle structure, copy binary, generate Info
 | Risk | Mitigation |
 |------|-----------|
 | SSE connection leak | Track SSE connections; clean up on disconnect; limit max concurrent SSE clients to 20 |
-| Log volume overwhelms SQLite | Batched writes (500ms flush); circular buffer caps memory; 30-day rotation |
-| Service start failure | Validate binary exists and is executable before fork; report clear error |
-| Interconnect protocol change breaks services | New message types are additive; unknown messages are ignored by existing handlers |
+| Log volume overwhelms SQLite | Batched writes (500ms flush); circular buffer caps memory; 30-day rotation; 500MB disk cap |
+| Service start failure | Validate binary exists and is executable before fork; report clear error in API response |
+| Interconnect protocol change breaks services | New message types are additive; unknown messages already ignored by existing handlers |
 | Theme CSS size | ~15KB per Bootswatch theme; 5 themes = ~75KB — negligible in binary |
 | Port conflicts | HTTP port configurable via `--port`; log port derived from interconnect; conflict logged clearly |
+| Frontend crashes during test execution | Tests are independent processes; they continue running; frontend recovers PIDs on restart |
+| Multiple frontends running simultaneously | Only one can bind the HTTP port; second instance fails with clear error |
+| UDP log packet loss | Accepted by design; no retry; logging must not impact service latency |
+| Apple Gatekeeper blocks unsigned app | Build script includes ad-hoc signing; document right-click → Open fallback |
+| Incompatible interconnect protocol | SET_LOG_PORT is new; old services without it simply ignore unknown messages (already handled) |
+| Services started without frontend | Detected via interconnect heartbeat; shown as "external" in UI; log file tailing as fallback |
 
 ---
 
