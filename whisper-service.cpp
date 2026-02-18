@@ -206,7 +206,12 @@ private:
 
         auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);
-        if (whisper_full(ctx_, wparams, audio.data(), audio.size()) == 0) {
+        int result = whisper_full(ctx_, wparams, audio.data(), audio.size());
+
+        interconnect_.broadcast_speech_signal(call_id, false);
+        std::cout << "🤐 [" << call_id << "] SPEECH_IDLE broadcast" << std::endl;
+
+        if (result == 0) {
             auto t1 = std::chrono::steady_clock::now();
             auto whisper_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
             int n_segments = whisper_full_n_segments(ctx_);
@@ -216,8 +221,6 @@ private:
             }
             if (!text.empty()) {
                 std::cout << "📝 [" << call_id << "] Transcription (" << whisper_ms << "ms): " << text << std::endl;
-
-                interconnect_.broadcast_speech_signal(call_id, false);
 
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
@@ -246,6 +249,8 @@ private:
                     }
                 }
             }
+        } else {
+            std::cerr << "⚠️  [" << call_id << "] Whisper transcription failed" << std::endl;
         }
     }
 

@@ -16,6 +16,8 @@ struct CallState {
     std::vector<float> buffer;
     std::mutex mutex;
     bool speech_signaled = false;
+    int energy_frames_above = 0;
+    std::chrono::steady_clock::time_point speech_signal_time;
 };
 
 class InboundAudioProcessor {
@@ -111,9 +113,32 @@ private:
             }
             energy /= static_cast<float>(pcm.size());
 
-            if (energy > 0.00003f && !state->speech_signaled) {
+            static constexpr float SPEECH_ENERGY_THRESHOLD = 0.00003f;
+            static constexpr int SPEECH_DEBOUNCE_FRAMES = 3;
+            static constexpr int SPEECH_SIGNAL_TIMEOUT_S = 10;
+
+            if (energy > SPEECH_ENERGY_THRESHOLD) {
+                state->energy_frames_above++;
+            } else {
+                state->energy_frames_above = 0;
+            }
+
+            if (state->energy_frames_above >= SPEECH_DEBOUNCE_FRAMES && !state->speech_signaled) {
                 state->speech_signaled = true;
+                state->speech_signal_time = std::chrono::steady_clock::now();
                 interconnect_.broadcast_speech_signal(pkt.call_id, true);
+                std::cout << "🗣️  [" << pkt.call_id << "] SPEECH_ACTIVE broadcast" << std::endl;
+            }
+
+            if (state->speech_signaled) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - state->speech_signal_time).count();
+                if (elapsed > SPEECH_SIGNAL_TIMEOUT_S) {
+                    state->speech_signaled = false;
+                    state->energy_frames_above = 0;
+                    interconnect_.broadcast_speech_signal(pkt.call_id, false);
+                    std::cerr << "⚠️  [" << pkt.call_id << "] SPEECH_ACTIVE timeout (" << SPEECH_SIGNAL_TIMEOUT_S << "s) — forcing SPEECH_IDLE" << std::endl;
+                }
             }
 
             {
