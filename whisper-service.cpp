@@ -17,12 +17,14 @@ struct WhisperCall {
     std::vector<float> audio_buffer;
     std::mutex mutex;
     bool in_speech = false;
+    bool speech_signaled = false;
     int silence_count = 0;
     float noise_floor = 0.0001f;
     int frame_count = 0;
     size_t vad_pos = 0;
     size_t speech_start = 0;
     std::chrono::steady_clock::time_point last_activity;
+    std::chrono::steady_clock::time_point speech_signal_time;
 };
 
 class WhisperService {
@@ -39,6 +41,8 @@ class WhisperService {
     static constexpr size_t VAD_MAX_SPEECH_SAMPLES = 16000 * 10;
     // Include 2 frames (200ms) of pre-speech context for Whisper accuracy
     static constexpr int VAD_CONTEXT_FRAMES = 2;
+    // Safety timeout: force SPEECH_IDLE if no utterance completes within 10s
+    static constexpr int SPEECH_SIGNAL_TIMEOUT_S = 10;
 
 public:
     WhisperService(const std::string& model_path) 
@@ -146,6 +150,12 @@ private:
                                 call->in_speech = true;
                                 size_t context = VAD_FRAME_SIZE * VAD_CONTEXT_FRAMES;
                                 call->speech_start = (pos > context) ? pos - context : 0;
+                                if (!call->speech_signaled) {
+                                    call->speech_signaled = true;
+                                    call->speech_signal_time = std::chrono::steady_clock::now();
+                                    interconnect_.broadcast_speech_signal(call->id, true);
+                                    std::cout << "🗣️  [" << call->id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
+                                }
                             }
                             call->silence_count = 0;
                         } else if (call->in_speech) {
@@ -189,6 +199,16 @@ private:
                             call->audio_buffer.begin() + (call->vad_pos - keep));
                         call->vad_pos = keep;
                     }
+
+                    if (call->speech_signaled) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now() - call->speech_signal_time).count();
+                        if (elapsed > SPEECH_SIGNAL_TIMEOUT_S) {
+                            call->speech_signaled = false;
+                            interconnect_.broadcast_speech_signal(call->id, false);
+                            std::cerr << "⚠️  [" << call->id << "] SPEECH_ACTIVE timeout (" << SPEECH_SIGNAL_TIMEOUT_S << "s) — forcing SPEECH_IDLE" << std::endl;
+                        }
+                    }
                 }
 
                 if (!to_process.empty()) {
@@ -208,6 +228,13 @@ private:
         std::lock_guard<std::mutex> lock(whisper_mutex_);
         int result = whisper_full(ctx_, wparams, audio.data(), audio.size());
 
+        {
+            std::lock_guard<std::mutex> clk(calls_mutex_);
+            auto it = calls_.find(call_id);
+            if (it != calls_.end()) {
+                it->second->speech_signaled = false;
+            }
+        }
         interconnect_.broadcast_speech_signal(call_id, false);
         std::cout << "🤐 [" << call_id << "] SPEECH_IDLE broadcast" << std::endl;
 

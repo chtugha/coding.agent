@@ -533,10 +533,44 @@ Save to `{@artifacts_path}/plan.md`.
 ---
 
 
-### [ ] Step: llama shutup while talking
+### [x] Step: llama shutup while talking
 <!-- agent: opus -->
 
 llama tends to start babbling if the person is talking too long. it doesn't let a person finish talking, but starts impatiently. implement a "shutup and wait while i'm talking" signal that is sent via the interconnection communication line. the signal should be a boolean switch that is switched on by the IAP while the IAP processes speech and turned off by whisper service when the speaker on the phone finished its sentences/question/whatever and the audio has been processed by whisper .As long as it is switched on, llama service will not start talking, but waits patiently for input. also llama will interrupt text generation immediately and wait for input again if the switch is turned on again.
+
+#### Implementation: Speech Signal Protocol (Alternative C — Single VAD Source)
+
+**Design decision**: All speech detection handled by Whisper's existing adaptive VAD. IAP is a pure audio pass-through. This eliminates duplicate VAD logic and false positives from fixed thresholds.
+
+**Protocol**: `SPEECH_ACTIVE <call_id>` / `SPEECH_IDLE <call_id>` messages sent via negotiation channel. Master relays to all registered slaves. Per-call_id isolation via `speech_active_calls_` set.
+
+**Signal flow**:
+```
+Audio → IAP (pass-through) → Whisper VAD detects speech start → SPEECH_ACTIVE(call_id)
+                                                                        ↓
+                                                             LLaMA suppresses/interrupts
+                                                                        ↓
+Whisper transcribes → sends text → SPEECH_IDLE(call_id) → LLaMA proceeds with response
+```
+
+**Files modified**:
+- `interconnect.h`: Added `broadcast_speech_signal()`, `register_speech_signal_handler()`, `is_speech_active()`. Master tracks `speech_active_calls_` set. Negotiation handler processes SPEECH_ACTIVE/SPEECH_IDLE with relay.
+- `whisper-service.cpp`: VAD sends SPEECH_ACTIVE when `in_speech` transitions true (speech start). Sends SPEECH_IDLE after transcription (success or failure). 10s timeout safety: forces SPEECH_IDLE if no utterance completes. Per-call `speech_signaled` flag prevents duplicate signals.
+- `llama-service.cpp`: Registers speech signal handler — interrupts active generation (`generating = false`) on SPEECH_ACTIVE. Worker loop polls `is_speech_active(call_id)` before starting generation (50ms interval).
+- `inbound-audio-processor.cpp`: No speech detection — pure audio pass-through.
+
+**Safety mechanisms**:
+- SPEECH_IDLE sent regardless of Whisper success/failure (prevents deadlock)
+- 10s timeout in Whisper forces SPEECH_IDLE if no utterance completes
+- All state per-call_id — no cross-call interference
+
+**Tests added** (4 new tests in `test_interconnect.cpp`):
+- `SpeechSignalTest.BroadcastAndQuery`: Master broadcasts, both master and slave query correctly
+- `SpeechSignalTest.PerCallIsolation`: SPEECH_ACTIVE for call_id=1 doesn't affect call_id=2
+- `SpeechSignalTest.SlaveToMasterRelay`: Whisper (slave) → Master → LLaMA (slave) relay works
+- `SpeechSignalTest.HandlerCallback`: Handler receives correct call_id and active/idle state
+
+**Verification**: All 77 tests pass (2 sanity + 25 SIP provider unit + 50 interconnect including 4 new speech signal tests). SingleCallFullPipeline integration test PASSED (65s).
 
 ## Test Results Log
 

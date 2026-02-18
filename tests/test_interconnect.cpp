@@ -2086,6 +2086,160 @@ TEST(InterconnectLatencyTest, PacketTraceAccuracy) {
                 trace.hop_count, trace.total_ms(), trace.hop_ms(1), trace.hop_ms(2));
 }
 
+TEST(SpeechSignalTest, BroadcastAndQuery) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::LLAMA_SERVICE);
+    ASSERT_TRUE(slave.initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    uint32_t cid = master.reserve_call_id(1);
+
+    EXPECT_FALSE(master.is_speech_active(cid));
+    EXPECT_FALSE(slave.is_speech_active(cid));
+
+    master.broadcast_speech_signal(cid, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(master.is_speech_active(cid));
+    EXPECT_TRUE(slave.is_speech_active(cid));
+
+    master.broadcast_speech_signal(cid, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_FALSE(master.is_speech_active(cid));
+    EXPECT_FALSE(slave.is_speech_active(cid));
+
+    std::printf("  [SPEECH_SIGNAL] Broadcast and query: PASSED\n");
+    slave.shutdown();
+    master.shutdown();
+}
+
+TEST(SpeechSignalTest, PerCallIsolation) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::LLAMA_SERVICE);
+    ASSERT_TRUE(slave.initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    uint32_t cid1 = master.reserve_call_id(1);
+    uint32_t cid2 = master.reserve_call_id(2);
+
+    master.broadcast_speech_signal(cid1, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(master.is_speech_active(cid1));
+    EXPECT_FALSE(master.is_speech_active(cid2));
+    EXPECT_TRUE(slave.is_speech_active(cid1));
+    EXPECT_FALSE(slave.is_speech_active(cid2));
+
+    master.broadcast_speech_signal(cid2, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(master.is_speech_active(cid1));
+    EXPECT_TRUE(master.is_speech_active(cid2));
+
+    master.broadcast_speech_signal(cid1, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_FALSE(master.is_speech_active(cid1));
+    EXPECT_TRUE(master.is_speech_active(cid2));
+    EXPECT_FALSE(slave.is_speech_active(cid1));
+    EXPECT_TRUE(slave.is_speech_active(cid2));
+
+    std::printf("  [SPEECH_SIGNAL] Per-call isolation: PASSED\n");
+    slave.shutdown();
+    master.shutdown();
+}
+
+TEST(SpeechSignalTest, SlaveToMasterRelay) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode whisper(ServiceType::WHISPER_SERVICE);
+    InterconnectNode llama(ServiceType::LLAMA_SERVICE);
+    ASSERT_TRUE(whisper.initialize());
+    ASSERT_TRUE(llama.initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    uint32_t cid = master.reserve_call_id(1);
+
+    std::atomic<int> llama_active_count{0};
+    std::atomic<int> llama_idle_count{0};
+    llama.register_speech_signal_handler([&](uint32_t id, bool active) {
+        if (id == cid) {
+            if (active) llama_active_count++;
+            else llama_idle_count++;
+        }
+    });
+
+    whisper.broadcast_speech_signal(cid, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    EXPECT_TRUE(master.is_speech_active(cid));
+    EXPECT_TRUE(llama.is_speech_active(cid));
+    EXPECT_GE(llama_active_count.load(), 1);
+
+    whisper.broadcast_speech_signal(cid, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    EXPECT_FALSE(master.is_speech_active(cid));
+    EXPECT_FALSE(llama.is_speech_active(cid));
+    EXPECT_GE(llama_idle_count.load(), 1);
+
+    std::printf("  [SPEECH_SIGNAL] Slave→Master→Slave relay: active=%d idle=%d\n",
+                llama_active_count.load(), llama_idle_count.load());
+
+    llama.shutdown();
+    whisper.shutdown();
+    master.shutdown();
+}
+
+TEST(SpeechSignalTest, HandlerCallback) {
+    InterconnectNode master(ServiceType::SIP_CLIENT);
+    ASSERT_TRUE(master.initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    InterconnectNode slave(ServiceType::LLAMA_SERVICE);
+    ASSERT_TRUE(slave.initialize());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    uint32_t cid = master.reserve_call_id(1);
+
+    std::atomic<bool> handler_called{false};
+    std::atomic<bool> handler_active{false};
+    std::atomic<uint32_t> handler_call_id{0};
+    slave.register_speech_signal_handler([&](uint32_t id, bool active) {
+        handler_called = true;
+        handler_active = active;
+        handler_call_id = id;
+    });
+
+    master.broadcast_speech_signal(cid, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    EXPECT_TRUE(handler_called.load());
+    EXPECT_TRUE(handler_active.load());
+    EXPECT_EQ(handler_call_id.load(), cid);
+
+    handler_called = false;
+    master.broadcast_speech_signal(cid, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    EXPECT_TRUE(handler_called.load());
+    EXPECT_FALSE(handler_active.load());
+    EXPECT_EQ(handler_call_id.load(), cid);
+
+    std::printf("  [SPEECH_SIGNAL] Handler callback: PASSED\n");
+    slave.shutdown();
+    master.shutdown();
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
