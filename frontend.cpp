@@ -179,6 +179,7 @@ private:
     uint16_t log_port_;
     InterconnectNode interconnect_;
     sqlite3* db_;
+    bool db_write_mode_ = false;
     struct mg_mgr mgr_;
     std::thread log_thread_;
     
@@ -387,6 +388,18 @@ private:
         return result;
     }
 
+    static bool is_allowed_binary(const std::string& path) {
+        if (path.empty()) return false;
+        if (path.find("..") != std::string::npos) return false;
+        if (path[0] == '/') return false;
+        if (path.substr(0, 4) != "bin/") return false;
+        struct stat st;
+        if (stat(path.c_str(), &st) != 0) return false;
+        if (!S_ISREG(st.st_mode)) return false;
+        if (!(st.st_mode & S_IXUSR)) return false;
+        return true;
+    }
+
     bool start_service(const std::string& name, const std::string& args_override) {
         std::lock_guard<std::mutex> lock(services_mutex_);
         for (auto& svc : services_) {
@@ -396,8 +409,7 @@ private:
             ServiceType st = parse_service_type(name);
             if (interconnect_.is_service_alive(st)) return false;
 
-            struct stat st_buf;
-            if (stat(svc.binary_path.c_str(), &st_buf) != 0) return false;
+            if (!is_allowed_binary(svc.binary_path)) return false;
 
             std::string use_args = args_override.empty() ? svc.default_args : args_override;
             auto argv_strings = split_args(use_args);
@@ -406,6 +418,10 @@ private:
             svc.log_file = "logs/" + name + ".log";
 
             pid_t pid = fork();
+            if (pid < 0) {
+                std::cerr << "fork() failed for service " << name << ": " << strerror(errno) << "\n";
+                return false;
+            }
             if (pid == 0) {
                 int fd = open(svc.log_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 if (fd >= 0) {
@@ -422,18 +438,16 @@ private:
                 argv.push_back(nullptr);
                 execv(svc.binary_path.c_str(), argv.data());
                 _exit(1);
-            } else if (pid > 0) {
-                svc.managed = true;
-                svc.pid = pid;
-                svc.start_time = time(nullptr);
-
-                if (!args_override.empty()) {
-                    svc.default_args = args_override;
-                    save_service_config(name, args_override);
-                }
-                return true;
             }
-            return false;
+            svc.managed = true;
+            svc.pid = pid;
+            svc.start_time = time(nullptr);
+
+            if (!args_override.empty()) {
+                svc.default_args = args_override;
+                save_service_config(name, args_override);
+            }
+            return true;
         }
         return false;
     }
@@ -781,6 +795,8 @@ private:
                 serve_logs_recent(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/db/query")) == 0) {
                 handle_db_query(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/db/write_mode")) == 0) {
+                handle_db_write_mode(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/db/schema")) == 0) {
                 handle_db_schema(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/settings")) == 0) {
@@ -1014,11 +1030,29 @@ private:
         std::string needle = "\"" + key + "\"";
         size_t pos = json.find(needle);
         if (pos == std::string::npos) return "";
-        pos = json.find('"', pos + needle.size() + 1);
-        if (pos == std::string::npos) return "";
-        size_t end = json.find('"', pos + 1);
-        if (end == std::string::npos) return "";
-        return json.substr(pos + 1, end - pos - 1);
+        pos += needle.size();
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':')) pos++;
+        if (pos >= json.size() || json[pos] != '"') return "";
+        pos++;
+        std::string result;
+        while (pos < json.size()) {
+            if (json[pos] == '\\' && pos + 1 < json.size()) {
+                char next = json[pos + 1];
+                if (next == '"') { result += '"'; pos += 2; }
+                else if (next == '\\') { result += '\\'; pos += 2; }
+                else if (next == 'n') { result += '\n'; pos += 2; }
+                else if (next == 't') { result += '\t'; pos += 2; }
+                else if (next == 'r') { result += '\r'; pos += 2; }
+                else if (next == '/') { result += '/'; pos += 2; }
+                else { result += json[pos]; pos++; }
+            } else if (json[pos] == '"') {
+                break;
+            } else {
+                result += json[pos];
+                pos++;
+            }
+        }
+        return result;
     }
 
     void handle_test_start(struct mg_connection *c, struct mg_http_message *hm) {
@@ -1040,6 +1074,10 @@ private:
                 std::string log_path = "logs/" + test.name + "_" + std::to_string(time(nullptr)) + ".log";
 
                 pid_t pid = fork();
+                if (pid < 0) {
+                    std::cerr << "fork() failed for test " << test.name << ": " << strerror(errno) << "\n";
+                    break;
+                }
                 if (pid == 0) {
                     int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                     if (fd >= 0) {
@@ -1057,13 +1095,12 @@ private:
                     
                     execv(test.binary_path.c_str(), argv.data());
                     _exit(1);
-                } else if (pid > 0) {
-                    test.is_running = true;
-                    test.pid = pid;
-                    test.start_time = time(nullptr);
-                    test.log_file = log_path;
-                    test.default_args = use_args;
                 }
+                test.is_running = true;
+                test.pid = pid;
+                test.start_time = time(nullptr);
+                test.log_file = log_path;
+                test.default_args = use_args;
                 break;
             }
         }
@@ -1211,7 +1248,12 @@ private:
         }
 
         stop_service(name);
-        usleep(500000);
+
+        for (int i = 0; i < 20; i++) {
+            ServiceType st = parse_service_type(name);
+            if (!interconnect_.is_service_alive(st)) break;
+            usleep(100000);
+        }
 
         if (start_service(name, args)) {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"restarted\"}");
@@ -1379,12 +1421,51 @@ private:
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    static bool is_read_only_query(const std::string& query) {
+        std::string trimmed = query;
+        size_t start = trimmed.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) return false;
+        trimmed = trimmed.substr(start);
+        if (trimmed.size() < 6) return false;
+        std::string prefix;
+        for (size_t i = 0; i < std::min(trimmed.size(), (size_t)10); i++) {
+            prefix += static_cast<char>(toupper(static_cast<unsigned char>(trimmed[i])));
+        }
+        return prefix.substr(0, 6) == "SELECT" ||
+               prefix.substr(0, 7) == "EXPLAIN" ||
+               prefix.substr(0, 6) == "PRAGMA";
+    }
+
+    void handle_db_write_mode(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                         "{\"write_mode\":%s}", db_write_mode_ ? "true" : "false");
+        } else {
+            std::string body(hm->body.buf, hm->body.len);
+            std::string enabled = extract_json_string(body, "enabled");
+            db_write_mode_ = (enabled == "true" || enabled == "1");
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                         "{\"write_mode\":%s}", db_write_mode_ ? "true" : "false");
+        }
+    }
+
     void handle_db_query(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string query = extract_json_string(body, "query");
         
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
+            return;
+        }
+
+        if (query.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Empty query\"}");
+            return;
+        }
+
+        if (!db_write_mode_ && !is_read_only_query(query)) {
+            mg_http_reply(c, 403, "Content-Type: application/json\r\n",
+                         "{\"error\":\"Write mode is disabled. Only SELECT, EXPLAIN, and PRAGMA queries are allowed. Enable write mode via POST /api/db/write_mode.\"}");
             return;
         }
 
@@ -1402,13 +1483,15 @@ private:
         
         int row_count = 0;
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            if (row_count >= 10000) break;
             if (row_count > 0) json << ",";
             json << "{";
             
             int col_count = sqlite3_column_count(stmt);
             for (int i = 0; i < col_count; i++) {
                 if (i > 0) json << ",";
-                json << "\"" << sqlite3_column_name(stmt, i) << "\":";
+                const char* col_name = sqlite3_column_name(stmt, i);
+                json << "\"" << escape_json(col_name ? col_name : "") << "\":";
                 
                 const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
                 if (text) {
@@ -1422,7 +1505,8 @@ private:
             row_count++;
         }
         
-        json << "],\"affected\":" << sqlite3_changes(db_) << "}";
+        json << "],\"affected\":" << sqlite3_changes(db_)
+             << ",\"truncated\":" << (row_count >= 10000 ? "true" : "false") << "}";
         sqlite3_finalize(stmt);
         
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
