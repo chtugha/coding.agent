@@ -72,10 +72,12 @@ cd build && cmake .. -DBUILD_TESTS=ON && make test_interconnect && ./bin/test_in
 - `llama-service.cpp` (~10 lines)
 - `kokoro-service.cpp` (~10 lines)
 
-**Verification**:
-```bash
-cd build && cmake .. && make
-```
+**Verification** (COMPLETED with real binaries and models):
+- All 7 service binaries + 5 test binaries compile with zero warnings
+- whisper-cpp (CoreML+Metal) and llama-cpp (Metal) built as static libs
+- Models downloaded: Whisper large-v3 q5_0, LLaMA 3.2-1B Q8_0, Whisper CoreML encoder, Kokoro German CoreML
+- 82 tests passed: test_sanity(2), test_interconnect(47), test_sip_provider_unit(25), test_kokoro_cpp(7), test_integration SingleCallFullPipeline(1)
+- Full 6-service end-to-end pipeline ran 30s call with real models on Apple M4
 
 ---
 
