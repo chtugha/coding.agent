@@ -69,8 +69,7 @@ public:
 
         std::cout << "🔗 Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
 
-        uint16_t lp = interconnect_.frontend_log_port();
-        if (lp) log_fwd_.init(lp, whispertalk::ServiceType::WHISPER_SERVICE);
+        log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::WHISPER_SERVICE);
 
         if (!interconnect_.connect_to_downstream()) {
             std::cout << "⚠️  Downstream (LLaMA) not available yet - will auto-reconnect" << std::endl;

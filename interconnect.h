@@ -26,6 +26,8 @@
 
 namespace whispertalk {
 
+static constexpr uint16_t FRONTEND_LOG_PORT = 22022;
+
 enum class ServiceType : uint8_t {
     SIP_CLIENT = 1,
     INBOUND_AUDIO_PROCESSOR = 2,
@@ -244,7 +246,6 @@ public:
           was_original_master_(false),
           running_(false),
           master_heartbeat_failures_(0),
-          frontend_log_port_(0),
           max_known_call_id_(0),
           neg_in_sock_(-1),
           neg_out_sock_(-1),
@@ -636,28 +637,7 @@ public:
     }
 
     uint16_t frontend_log_port() const {
-        return frontend_log_port_.load(std::memory_order_relaxed);
-    }
-
-    void set_frontend_log_port(uint16_t port) {
-        frontend_log_port_.store(port, std::memory_order_relaxed);
-        if (!is_master_) {
-            int sock = connect_to_port("127.0.0.1", 22222);
-            if (sock >= 0) {
-                std::string msg = "SET_LOG_PORT " + std::to_string(port);
-                send_all(sock, msg.c_str(), msg.size());
-                char buf[32];
-                ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, 1000);
-                close(sock);
-                if (n <= 0) {
-                    std::fprintf(stderr, "[%s] Warning: no response from master for SET_LOG_PORT\n",
-                                service_type_to_string(type_));
-                }
-            } else {
-                std::fprintf(stderr, "[%s] Warning: failed to send SET_LOG_PORT to master\n",
-                            service_type_to_string(type_));
-            }
-        }
+        return FRONTEND_LOG_PORT;
     }
 
 private:
@@ -676,7 +656,6 @@ private:
     static constexpr int DEMOTION_REGISTER_RETRIES = 3;
     static constexpr int DEMOTION_REGISTER_BACKOFF_MS = 200;
     PortConfig ports_;
-    std::atomic<uint16_t> frontend_log_port_;
 
     mutable std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;
@@ -1004,15 +983,6 @@ private:
                 last_heartbeat_[svc_type] = std::chrono::steady_clock::now();
                 response = "HEARTBEAT_ACK";
             }
-            else if (msg.substr(0, 13) == "SET_LOG_PORT ") {
-                try {
-                    uint16_t lp = static_cast<uint16_t>(std::stoul(msg.substr(13)));
-                    frontend_log_port_.store(lp, std::memory_order_relaxed);
-                    response = "SET_LOG_PORT_ACK";
-                } catch (const std::exception&) {
-                    response = "SET_LOG_PORT_ERROR";
-                }
-            }
             else if (msg.substr(0, 15) == "GET_DOWNSTREAM ") {
                 ServiceType requester = static_cast<ServiceType>(std::stoi(msg.substr(15)));
                 ServiceType downstream = downstream_of(requester);
@@ -1056,12 +1026,7 @@ private:
                     size_t next = entries.find(' ', pos);
                     std::string entry = (next == std::string::npos) ? entries.substr(pos) : entries.substr(pos, next - pos);
                     if (!entry.empty()) {
-                        if (entry.substr(0, 3) == "LP=") {
-                            try {
-                                uint16_t lp = static_cast<uint16_t>(std::stoul(entry.substr(3)));
-                                frontend_log_port_.store(lp, std::memory_order_relaxed);
-                            } catch (const std::exception&) {}
-                        } else {
+                        {
                             size_t c1 = entry.find(':');
                             size_t c2 = entry.find(':', c1 + 1);
                             if (c1 != std::string::npos && c2 != std::string::npos) {
@@ -1314,8 +1279,6 @@ private:
             std::lock_guard<std::mutex> lock(registry_mutex_);
             std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
             payload = "SYNC_REGISTRY " + std::to_string(max_known_call_id_);
-            uint16_t lp = frontend_log_port_.load(std::memory_order_relaxed);
-            payload += " LP=" + std::to_string(lp);
             for (const auto& [svc, cfg] : service_registry_) {
                 payload += " " + std::to_string(static_cast<int>(svc)) +
                            ":" + std::to_string(cfg.neg_in) +
@@ -1921,8 +1884,6 @@ public:
         }
     }
 
-    // Thread-safe for logging: stack-local buffers, sendto is atomic per POSIX.
-    // Max datagram ~2200 bytes (fits in localhost loopback MTU ~65K).
     void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
         if (sock_ < 0) return;
         char msg[2048];

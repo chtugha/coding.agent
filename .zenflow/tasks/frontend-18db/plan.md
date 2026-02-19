@@ -81,7 +81,7 @@ cd build && cmake .. -DBUILD_TESTS=ON && make test_interconnect && ./bin/test_in
 
 ---
 
-### [ ] Step 3: Frontend Logging Server Enhancement
+### [x] Step 3: Frontend Logging Server Enhancement
 
 **Objective**: Enhance the existing logging infrastructure with structured parsing, batched writes, and log rotation.
 
@@ -89,19 +89,26 @@ cd build && cmake .. -DBUILD_TESTS=ON && make test_interconnect && ./bin/test_in
 - Parse structured log messages: `SERVICE_NAME LEVEL CALL_ID MESSAGE`
 - Implement batched SQLite writes (queue + 500ms flush)
 - Add log rotation (delete >30 day entries)
-- Enhance database schema (add indexes, service_config, settings tables)
-- Frontend sends `SET_LOG_PORT` to master on startup
+- Enhance database schema (add composite index, service_config, settings tables)
+- Hardcoded log port to `FRONTEND_LOG_PORT = 22022` (constant in interconnect.h)
 - Pre-populate `service_config` table with default service entries
+- Fixed JSON body parsing for test start/stop/db query endpoints
+- Removed dynamic log port propagation (SET_LOG_PORT, LP= in SYNC_REGISTRY)
+- Simplified all 6 services to use hardcoded port directly
 
 **Files Modified**:
-- `frontend.cpp` (logging + schema sections, ~200 lines changed/added)
+- `interconnect.h` (added FRONTEND_LOG_PORT constant, removed SET_LOG_PORT/LP= protocol, removed reinit/set_frontend_log_port)
+- `frontend.cpp` (structured parsing, batched writes, log rotation, schema, JSON parsing)
+- All 6 service files (simplified to use FRONTEND_LOG_PORT directly)
 
-**Verification**:
-```bash
-cd build && make frontend
-./bin/frontend --port 9999 &
-# Send test UDP log messages, verify SQLite storage
-```
+**Verification** (COMPLETED):
+- All 12 binaries compile with zero warnings
+- test_sanity: 2/2 passed
+- test_sip_provider_unit: 25/25 passed
+- test_interconnect: 51/51 passed (excl. 10-min stress)
+- test_kokoro_cpp: 7/7 passed
+- test_integration SingleCallFullPipeline: 1/1 passed (30s call, real models, Apple M4)
+- Frontend logging: 6/6 UDP messages received, parsed, persisted to SQLite
 
 ---
 

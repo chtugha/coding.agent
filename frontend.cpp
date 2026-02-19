@@ -10,6 +10,7 @@
 #include <atomic>
 #include <queue>
 #include <ctime>
+#include <chrono>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -93,7 +94,7 @@ public:
             return false;
         }
 
-        log_port_ = interconnect_.ports().neg_in + 10;
+        log_port_ = whispertalk::FRONTEND_LOG_PORT;
         std::cout << "Frontend logging port: " << log_port_ << "\n";
         std::cout << "Frontend HTTP port: " << http_port_ << "\n";
 
@@ -108,10 +109,23 @@ public:
         std::cout << "Frontend web server started on " << listen_addr << "\n";
         std::cout << "Open http://localhost:" << http_port_ << " in your browser\n";
 
+        auto last_flush = std::chrono::steady_clock::now();
+        auto last_rotation = last_flush;
         while (!s_sigint_received) {
-            mg_mgr_poll(&mgr_, 1000);
+            mg_mgr_poll(&mgr_, 500);
             check_test_status();
+
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_flush >= std::chrono::milliseconds(500)) {
+                flush_log_queue();
+                last_flush = now;
+            }
+            if (now - last_rotation >= std::chrono::hours(1)) {
+                rotate_logs();
+                last_rotation = now;
+            }
         }
+        flush_log_queue();
 
         mg_mgr_free(&mgr_);
         interconnect_.shutdown();
@@ -157,6 +171,7 @@ private:
             );
             CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
             CREATE INDEX IF NOT EXISTS idx_logs_service ON logs(service);
+            CREATE INDEX IF NOT EXISTS idx_logs_service_ts ON logs(service, timestamp);
             
             CREATE TABLE IF NOT EXISTS test_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,6 +190,19 @@ private:
                 call_count INTEGER,
                 ports TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS service_config (
+                service TEXT PRIMARY KEY,
+                binary_path TEXT NOT NULL,
+                default_args TEXT DEFAULT '',
+                description TEXT DEFAULT '',
+                auto_start INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
         )";
 
         char* errmsg = nullptr;
@@ -183,6 +211,20 @@ private:
             std::cerr << "SQL error: " << errmsg << "\n";
             sqlite3_free(errmsg);
         }
+
+        const char* seed = R"(
+            INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
+                ('SIP_CLIENT', 'bin/sip-client', '--lines 2 test 127.0.0.1 5060', 'SIP client / RTP gateway'),
+                ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz→16kHz resample'),
+                ('WHISPER_SERVICE', 'bin/whisper-service', '', 'Whisper ASR (CoreML/Metal)'),
+                ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
+                ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
+                ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio → G.711 encode + RTP');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'default');
+        )";
+        sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
+
+        rotate_logs();
     }
 
     void discover_tests() {
@@ -284,18 +326,44 @@ private:
         close(sock);
     }
 
+    static ServiceType parse_service_type(const std::string& name) {
+        if (name == "SIP_CLIENT") return ServiceType::SIP_CLIENT;
+        if (name == "INBOUND_AUDIO_PROCESSOR") return ServiceType::INBOUND_AUDIO_PROCESSOR;
+        if (name == "WHISPER_SERVICE") return ServiceType::WHISPER_SERVICE;
+        if (name == "LLAMA_SERVICE") return ServiceType::LLAMA_SERVICE;
+        if (name == "KOKORO_SERVICE") return ServiceType::KOKORO_SERVICE;
+        if (name == "OUTBOUND_AUDIO_PROCESSOR") return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
+        if (name == "FRONTEND") return ServiceType::FRONTEND;
+        return ServiceType::SIP_CLIENT;
+    }
+
     void process_log_message(const std::string& msg) {
         LogEntry entry;
-        
+
         time_t now = time(nullptr);
         char timebuf[64];
         strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
         entry.timestamp = timebuf;
-        
-        entry.service = ServiceType::SIP_CLIENT;
-        entry.call_id = 0;
-        entry.level = "INFO";
-        entry.message = msg;
+
+        size_t p1 = msg.find(' ');
+        size_t p2 = (p1 != std::string::npos) ? msg.find(' ', p1 + 1) : std::string::npos;
+        size_t p3 = (p2 != std::string::npos) ? msg.find(' ', p2 + 1) : std::string::npos;
+
+        if (p1 != std::string::npos && p2 != std::string::npos && p3 != std::string::npos) {
+            entry.service = parse_service_type(msg.substr(0, p1));
+            entry.level = msg.substr(p1 + 1, p2 - p1 - 1);
+            try {
+                entry.call_id = static_cast<uint32_t>(std::stoul(msg.substr(p2 + 1, p3 - p2 - 1)));
+            } catch (const std::exception&) {
+                entry.call_id = 0;
+            }
+            entry.message = msg.substr(p3 + 1);
+        } else {
+            entry.service = ServiceType::FRONTEND;
+            entry.call_id = 0;
+            entry.level = "INFO";
+            entry.message = msg;
+        }
 
         {
             std::lock_guard<std::mutex> lock(logs_mutex_);
@@ -305,19 +373,49 @@ private:
             }
         }
 
-        if (db_) {
-            const char* sql = "INSERT INTO logs (timestamp, service, call_id, level, message) VALUES (?, ?, ?, ?, ?)";
-            sqlite3_stmt* stmt;
-            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        enqueue_log(entry);
+    }
+
+    std::mutex log_queue_mutex_;
+    std::vector<LogEntry> log_queue_;
+
+    void enqueue_log(const LogEntry& entry) {
+        std::lock_guard<std::mutex> lock(log_queue_mutex_);
+        log_queue_.push_back(entry);
+    }
+
+    void flush_log_queue() {
+        std::vector<LogEntry> batch;
+        {
+            std::lock_guard<std::mutex> lock(log_queue_mutex_);
+            if (log_queue_.empty()) return;
+            batch.swap(log_queue_);
+        }
+
+        if (!db_) return;
+
+        sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr);
+        const char* sql = "INSERT INTO logs (timestamp, service, call_id, level, message) VALUES (?, ?, ?, ?, ?)";
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            for (const auto& entry : batch) {
                 sqlite3_bind_text(stmt, 1, entry.timestamp.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(stmt, 2, service_type_to_string(entry.service), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int(stmt, 3, entry.call_id);
+                sqlite3_bind_int(stmt, 3, static_cast<int>(entry.call_id));
                 sqlite3_bind_text(stmt, 4, entry.level.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(stmt, 5, entry.message.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
+                sqlite3_reset(stmt);
             }
+            sqlite3_finalize(stmt);
         }
+        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+    }
+
+    void rotate_logs() {
+        if (!db_) return;
+        const char* sql = "DELETE FROM logs WHERE timestamp < datetime('now', '-30 days')";
+        sqlite3_exec(db_, sql, nullptr, nullptr, nullptr);
     }
 
     static void http_handler_static(struct mg_connection *c, int ev, void *ev_data) {
@@ -479,9 +577,20 @@ private:
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    static std::string extract_json_string(const std::string& json, const std::string& key) {
+        std::string needle = "\"" + key + "\"";
+        size_t pos = json.find(needle);
+        if (pos == std::string::npos) return "";
+        pos = json.find('"', pos + needle.size() + 1);
+        if (pos == std::string::npos) return "";
+        size_t end = json.find('"', pos + 1);
+        if (end == std::string::npos) return "";
+        return json.substr(pos + 1, end - pos - 1);
+    }
+
     void handle_test_start(struct mg_connection *c, struct mg_http_message *hm) {
-        char test_name[256];
-        mg_http_get_var(&hm->body, "test", test_name, sizeof(test_name));
+        std::string body(hm->body.buf, hm->body.len);
+        std::string test_name = extract_json_string(body, "test");
         
         std::lock_guard<std::mutex> lock(tests_mutex_);
         for (auto& test : tests_) {
@@ -520,8 +629,8 @@ private:
     }
 
     void handle_test_stop(struct mg_connection *c, struct mg_http_message *hm) {
-        char test_name[256];
-        mg_http_get_var(&hm->body, "test", test_name, sizeof(test_name));
+        std::string body(hm->body.buf, hm->body.len);
+        std::string test_name = extract_json_string(body, "test");
         
         std::lock_guard<std::mutex> lock(tests_mutex_);
         for (auto& test : tests_) {
@@ -539,8 +648,8 @@ private:
     }
 
     void handle_db_query(struct mg_connection *c, struct mg_http_message *hm) {
-        char query[4096];
-        mg_http_get_var(&hm->body, "query", query, sizeof(query));
+        std::string body(hm->body.buf, hm->body.len);
+        std::string query = extract_json_string(body, "query");
         
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
@@ -548,7 +657,7 @@ private:
         }
 
         sqlite3_stmt* stmt;
-        int rc = sqlite3_prepare_v2(db_, query, -1, &stmt, nullptr);
+        int rc = sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
             std::string error = sqlite3_errmsg(db_);
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", 

@@ -729,8 +729,7 @@ public:
             return false;
         }
 
-        uint16_t lp = node_.frontend_log_port();
-        if (lp) log_fwd_.init(lp, ServiceType::KOKORO_SERVICE);
+        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::KOKORO_SERVICE);
 
         std::printf("Kokoro TTS Service initialized (German, voice=%s, decoder=coreml-split)\n",
                    voice_name.c_str());
