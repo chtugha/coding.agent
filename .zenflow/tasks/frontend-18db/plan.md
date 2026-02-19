@@ -112,30 +112,34 @@ cd build && cmake .. -DBUILD_TESTS=ON && make test_interconnect && ./bin/test_in
 
 ---
 
-### [ ] Step 4: SSE Live Log Streaming
+### [x] Step 4: SSE Live Log Streaming
 
 **Objective**: Implement Server-Sent Events for real-time log delivery to browser.
 
 **Tasks**:
 - Add SSE connection tracking in Mongoose event handler
 - Implement `/api/logs/stream` endpoint with filter params (service, level)
-- Push new log entries to SSE clients on each `mg_mgr_poll` cycle
-- Handle client disconnect cleanup
+- Push new log entries to SSE clients on each `mg_mgr_poll` cycle (thread-safe via queue)
+- Handle client disconnect cleanup via MG_EV_CLOSE
 - Limit max concurrent SSE connections to 20
 
 **Files Modified**:
-- `frontend.cpp` (~150 lines added)
+- `frontend.cpp` (~90 lines added: SSE queue, flush, handle_sse_stream, remove_sse_connection)
 
-**Verification**:
-```bash
-./bin/frontend --port 9999 &
-curl -N "http://localhost:9999/api/logs/stream"
-# In another terminal, send UDP log messages, verify SSE output
-```
+**Verification** (COMPLETED):
+- All 12 binaries compile with zero warnings
+- SSE unfiltered: 3/3 UDP messages received as SSE events with correct JSON
+- SSE filtered: service filter correctly delivers only matching messages
+- Max connections: 21st connection correctly rejected with HTTP 503
+- Disconnect cleanup: new connections work after killing previous SSE clients
+- test_sanity: 2/2 passed
+- test_sip_provider_unit: 25/25 passed
+- test_interconnect: 51/51 passed (excl. 10-min stress)
+- test_kokoro_cpp: 7/7 passed
 
 ---
 
-### [ ] Step 5: Service Lifecycle Management + REST API
+### [x] Step 5: Service Lifecycle Management + REST API
 
 **Objective**: Implement service start/stop/restart functionality and all REST API endpoints.
 
@@ -145,17 +149,20 @@ curl -N "http://localhost:9999/api/logs/stream"
 - Add service status polling via `waitpid` and interconnect heartbeat
 - Implement all REST API endpoints from spec (tests, services, logs, db, settings)
 - Enhance test management with parameter persistence and run history
+- Fixed SQL injection in `serve_logs_api()` — now uses parameterized queries
 
 **Files Modified**:
 - `frontend.cpp` (~500 lines added/changed)
 
-**Verification**:
-```bash
-./bin/frontend --port 9999 &
-curl http://localhost:9999/api/services
-curl http://localhost:9999/api/tests
-curl -X POST http://localhost:9999/api/db/query -d '{"query":"SELECT * FROM service_config"}'
-```
+**Verification** (COMPLETED):
+- All 12 binaries compile with zero warnings
+- test_sanity: 2/2 passed
+- test_sip_provider_unit: 25/25 passed
+- test_interconnect: 51/51 passed (excl. 10-min stress)
+- test_kokoro_cpp: 7/7 passed
+- REST API verified: services list, tests list, test start/stop/history/log, service start/stop/restart/config, logs with filters, DB query/schema, settings, status
+- SQL injection vulnerability fixed (parameterized queries)
+- Test run history persisted to SQLite with exit codes
 
 ---
 
