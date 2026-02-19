@@ -54,7 +54,7 @@ cd build && cmake .. -DBUILD_TESTS=ON && make test_interconnect && ./bin/test_in
 
 ---
 
-### [ ] Step 2: Service Log Forwarding Integration
+### [x] Step 2: Service Log Forwarding Integration
 
 **Objective**: Add optional UDP log forwarding to each service (~10 lines each). No functional changes.
 

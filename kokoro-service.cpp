@@ -855,11 +855,13 @@ private:
                        samples.size(), KOKORO_SAMPLE_RATE, call_id);
         } else {
             std::fprintf(stderr, "Failed to send audio for call %u\n", call_id);
+            log_fwd_.forward("ERROR", call_id, "Failed to send audio to OAP");
         }
     }
 
     void handle_call_end(uint32_t call_id) {
         std::printf("Call %u ended - cleaning up synthesis thread\n", call_id);
+        log_fwd_.forward("INFO", call_id, "Call ended, cleaning up synthesis thread");
         std::shared_ptr<CallContext> ctx;
         {
             std::lock_guard<std::mutex> lock(calls_mutex_);
