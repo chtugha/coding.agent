@@ -56,7 +56,13 @@ The frontend **Tests tab** must provide:
 
 ### 3.3 Communication: Frontend -> SIP Provider
 
-The SIP provider uses a **Unix Domain Socket** (`/tmp/test-sip-provider.ctrl`) to receive injection commands at runtime. Text-based protocol with commands like `INJECT <filename> <leg>`. This is consistent with OAP's existing `/tmp/outbound-audio-processor.ctrl` control socket pattern already established in the codebase. The frontend sends commands to this socket when the user triggers injection from the Tests tab.
+The SIP provider receives injection commands via the **Interconnect Negotiation Protocol Extension**. The frontend (already an `InterconnectNode`) sends commands to the SIP provider through the existing negotiation channel:
+
+- `INJECT <filename> <leg>` — inject the specified audio file into the given call leg
+- `LIST_FILES` — return available audio files from `Testfiles/`
+- `STATUS` — return current call and injection state
+
+**Rationale**: Same approach as SIP client line management (Section 4.2). Keeps all control within the existing interconnect infrastructure — no additional socket types needed.
 
 ## 4. SIP Client: Dynamic Line Management
 
@@ -180,7 +186,7 @@ Initial estimates based on Apple Silicon (M-series) capabilities with CoreML/Met
 - **Directory name**: Created `Testfiles/` directory (task description said "Testifies" which appears to be a typo)
 - **Transcription vs translation**: `.txt` files contain transcriptions (German audio -> German text), not cross-language translations. The pipeline performs speech-to-speech within the same language (German).
 - **Audio format**: All initial test files are 44.1kHz WAV for consistency; the SIP provider is designed to handle various sample rates for future extensibility
-- **Control channel**: Unix domain socket for SIP provider injection commands — consistent with OAP pattern
+- **Control channel**: Interconnect negotiation protocol extension for SIP provider injection commands (same approach as line management)
 - **Line management**: Interconnect negotiation protocol extension (user confirmed)
 - **Initial test config**: 2 lines (1 active, 1 listening); manual scaling via frontend
 - **Language**: All test audio is German; Whisper and LLaMA are configured for German
