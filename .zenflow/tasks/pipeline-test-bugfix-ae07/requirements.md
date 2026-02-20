@@ -56,13 +56,15 @@ The frontend **Tests tab** must provide:
 
 ### 3.3 Communication: Frontend -> SIP Provider
 
-The SIP provider receives injection commands via the **Interconnect Negotiation Protocol Extension**. The frontend (already an `InterconnectNode`) sends commands to the SIP provider through the existing negotiation channel:
+The SIP provider embeds a **mongoose HTTP server** on port **22011** for control commands. Mongoose is already compiled into the project (`mongoose.c`/`mongoose.h`). Endpoints:
 
-- `INJECT <filename> <leg>` — inject the specified audio file into the given call leg
-- `LIST_FILES` — return available audio files from `Testfiles/`
-- `STATUS` — return current call and injection state
+- `POST /inject` — inject a specified audio file into a call leg (body: `{"file": "sample_01.wav", "leg": "a"}`)
+- `GET /files` — list available audio files from `Testfiles/`
+- `GET /status` — return current call state, relay stats, and injection status
 
-**Rationale**: Same approach as SIP client line management (Section 4.2). Keeps all control within the existing interconnect infrastructure — no additional socket types needed.
+The frontend browser JS calls these endpoints directly. Also testable via `curl`.
+
+**Rationale**: The SIP provider is a standalone test tool, not an `InterconnectNode`. Mongoose is already in the project and provides a clean, self-contained HTTP API with minimal code.
 
 ## 4. SIP Client: Dynamic Line Management
 
@@ -186,7 +188,7 @@ Initial estimates based on Apple Silicon (M-series) capabilities with CoreML/Met
 - **Directory name**: Created `Testfiles/` directory (task description said "Testifies" which appears to be a typo)
 - **Transcription vs translation**: `.txt` files contain transcriptions (German audio -> German text), not cross-language translations. The pipeline performs speech-to-speech within the same language (German).
 - **Audio format**: All initial test files are 44.1kHz WAV for consistency; the SIP provider is designed to handle various sample rates for future extensibility
-- **Control channel**: Interconnect negotiation protocol extension for SIP provider injection commands (same approach as line management)
+- **Control channel**: Embedded mongoose HTTP server on port 22011 for SIP provider injection commands
 - **Line management**: Interconnect negotiation protocol extension (user confirmed)
 - **Initial test config**: 2 lines (1 active, 1 listening); manual scaling via frontend
 - **Language**: All test audio is German; Whisper and LLaMA are configured for German
