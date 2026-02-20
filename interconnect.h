@@ -591,6 +591,10 @@ public:
         speech_signal_handler_ = handler;
     }
 
+    void register_custom_negotiation_handler(std::function<std::string(const std::string&)> handler) {
+        custom_negotiation_handler_ = handler;
+    }
+
     bool is_speech_active(uint32_t call_id) const {
         std::lock_guard<std::mutex> lock(speech_mutex_);
         return speech_active_calls_.count(call_id) > 0;
@@ -685,6 +689,7 @@ private:
 
     std::function<void(uint32_t)> call_end_handler_;
     std::function<void(uint32_t, bool)> speech_signal_handler_;
+    std::function<std::string(const std::string&)> custom_negotiation_handler_;
     mutable std::mutex speech_mutex_;
     std::set<uint32_t> speech_active_calls_;
 
@@ -1122,6 +1127,10 @@ private:
             }
 
             response = "CALL_END_ACK " + std::to_string(call_id);
+        }
+
+        if (response.empty() && custom_negotiation_handler_) {
+            response = custom_negotiation_handler_(msg);
         }
 
         if (!response.empty()) {

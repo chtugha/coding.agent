@@ -42,9 +42,12 @@ struct SipLine {
     int sip_sock;
     int local_port;
     std::string user;
+    std::string server_ip;
+    std::string password;
     std::thread sip_thread;
     std::thread reg_thread;
     std::atomic<bool> registered{false};
+    std::atomic<bool> line_running{true};
 };
 
 class SipClient {
@@ -59,28 +62,9 @@ public:
         local_ip_ = "127.0.0.1";
 
         for (int i = 0; i < num_lines; ++i) {
-            auto line = std::make_shared<SipLine>();
-            line->index = i;
-            // Single line: use base user as-is; multi-line: append 1-based index (e.g. "alice1", "alice2")
-            line->user = (num_lines == 1) ? user : user + std::to_string(i + 1);
-
-            line->sip_sock = socket(AF_INET, SOCK_DGRAM, 0);
-            if (line->sip_sock < 0) {
-                std::cerr << "Failed to create SIP socket for line " << i << std::endl;
-                return false;
-            }
-            struct sockaddr_in addr{};
-            addr.sin_family = AF_INET;
-            addr.sin_addr.s_addr = INADDR_ANY;
-            addr.sin_port = 0;
-            bind(line->sip_sock, (struct sockaddr*)&addr, sizeof(addr));
-
-            socklen_t alen = sizeof(addr);
-            getsockname(line->sip_sock, (struct sockaddr*)&addr, &alen);
-            line->local_port = ntohs(addr.sin_port);
-
-            lines_.push_back(line);
-            std::cout << "SIP line " << i << " (" << line->user << ") on port " << line->local_port << std::endl;
+            std::string line_user = (num_lines == 1) ? user : user + std::to_string(i + 1);
+            int idx = create_line(line_user, server, "");
+            if (idx < 0) return false;
         }
 
         if (!interconnect_.initialize()) {
@@ -98,7 +82,65 @@ public:
             this->handle_call_end(call_id);
         });
 
+        interconnect_.register_custom_negotiation_handler([this](const std::string& msg) -> std::string {
+            return handle_line_command(msg);
+        });
+
         return true;
+    }
+
+    int add_line(const std::string& user, const std::string& server_ip, const std::string& password) {
+        std::lock_guard<std::mutex> lock(lines_mutex_);
+        int idx = create_line(user, server_ip, password);
+        if (idx < 0) return -1;
+        auto& line = lines_.back();
+        line->sip_thread = std::thread(&SipClient::sip_loop, this, line);
+        line->reg_thread = std::thread(&SipClient::registration_loop, this, line);
+        std::cout << "Added line " << idx << " (" << user << "@" << server_ip << ")" << std::endl;
+        return idx;
+    }
+
+    bool remove_line(int index) {
+        std::lock_guard<std::mutex> lock(lines_mutex_);
+        auto it = std::find_if(lines_.begin(), lines_.end(),
+            [index](const std::shared_ptr<SipLine>& l) { return l->index == index; });
+        if (it == lines_.end()) return false;
+
+        auto line = *it;
+        line->line_running = false;
+        line->registered = false;
+
+        if (line->sip_thread.joinable()) line->sip_thread.join();
+        if (line->reg_thread.joinable()) line->reg_thread.join();
+
+        if (line->sip_sock >= 0) close(line->sip_sock);
+
+        {
+            std::lock_guard<std::mutex> clock(calls_mutex_);
+            for (auto cit = calls_.begin(); cit != calls_.end(); ) {
+                if (cit->second->line_index == index) {
+                    cit->second->active = false;
+                    cit = calls_.erase(cit);
+                } else {
+                    ++cit;
+                }
+            }
+        }
+
+        lines_.erase(it);
+        std::cout << "Removed line " << index << " (" << line->user << ")" << std::endl;
+        return true;
+    }
+
+    std::string list_lines() {
+        std::lock_guard<std::mutex> lock(lines_mutex_);
+        std::ostringstream out;
+        out << "LINES";
+        for (const auto& line : lines_) {
+            out << " " << line->index << ":" << line->user
+                << ":" << (line->registered ? "registered" : "unregistered");
+        }
+        return out.str();
     }
 
     void run() {
@@ -124,7 +166,7 @@ public:
 private:
     void sip_loop(std::shared_ptr<SipLine> line) {
         char buf[4096];
-        while (running_) {
+        while (running_ && line->line_running) {
             struct sockaddr_in sender{};
             socklen_t slen = sizeof(sender);
             struct timeval tv{1, 0};
@@ -142,9 +184,11 @@ private:
     }
 
     void registration_loop(std::shared_ptr<SipLine> line) {
-        while (running_) {
+        while (running_ && line->line_running) {
             register_sip(line);
-            std::this_thread::sleep_for(std::chrono::seconds(30));
+            for (int i = 0; i < 30 && running_ && line->line_running; ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
         }
     }
 
@@ -333,12 +377,67 @@ private:
         sendto(line->sip_sock, s.c_str(), s.length(), 0, (struct sockaddr*)&srv, sizeof(srv));
     }
 
+    int create_line(const std::string& user, const std::string& server_ip, const std::string& password) {
+        auto line = std::make_shared<SipLine>();
+        line->index = next_line_index_++;
+        line->user = user;
+        line->server_ip = server_ip;
+        line->password = password;
+
+        line->sip_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (line->sip_sock < 0) {
+            std::cerr << "Failed to create SIP socket for line " << line->index << std::endl;
+            return -1;
+        }
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = 0;
+        bind(line->sip_sock, (struct sockaddr*)&addr, sizeof(addr));
+
+        socklen_t alen = sizeof(addr);
+        getsockname(line->sip_sock, (struct sockaddr*)&addr, &alen);
+        line->local_port = ntohs(addr.sin_port);
+
+        lines_.push_back(line);
+        std::cout << "SIP line " << line->index << " (" << line->user << ") on port " << line->local_port << std::endl;
+        return line->index;
+    }
+
+    std::string handle_line_command(const std::string& msg) {
+        if (msg.substr(0, 9) == "ADD_LINE ") {
+            std::istringstream iss(msg.substr(9));
+            std::string user, server_ip, password;
+            iss >> user >> server_ip >> password;
+            if (user.empty() || server_ip.empty()) {
+                return "ERROR Missing user or server_ip";
+            }
+            int idx = add_line(user, server_ip, password);
+            if (idx < 0) return "ERROR Failed to create line";
+            return "LINE_ADDED " + std::to_string(idx);
+        }
+        else if (msg.substr(0, 12) == "REMOVE_LINE ") {
+            int index = -1;
+            try { index = std::stoi(msg.substr(12)); } catch (...) { return "ERROR Invalid index"; }
+            if (remove_line(index)) {
+                return "LINE_REMOVED " + std::to_string(index);
+            }
+            return "ERROR Line " + std::to_string(index) + " not found";
+        }
+        else if (msg == "LIST_LINES") {
+            return list_lines();
+        }
+        return "";
+    }
+
     std::atomic<bool> running_;
     uint32_t next_id_;
+    int next_line_index_ = 0;
     std::mutex call_id_mutex_;
     int server_port_;
     std::string server_, local_ip_;
     std::mutex calls_mutex_;
+    std::mutex lines_mutex_;
     std::map<std::string, std::shared_ptr<CallSession>> calls_;
     std::map<uint32_t, std::shared_ptr<CallSession>> id_to_call_;
     std::vector<std::shared_ptr<SipLine>> lines_;
