@@ -156,13 +156,26 @@ cd build && cmake .. -DBUILD_TESTS=ON && make test_interconnect && ./bin/test_in
 
 **Verification** (COMPLETED):
 - All 12 binaries compile with zero warnings
-- test_sanity: 2/2 passed
-- test_sip_provider_unit: 25/25 passed
-- test_interconnect: 51/51 passed (excl. 10-min stress)
-- test_kokoro_cpp: 7/7 passed
-- REST API verified: services list, tests list, test start/stop/history/log, service start/stop/restart/config, logs with filters, DB query/schema, settings, status
-- SQL injection vulnerability fixed (parameterized queries)
-- Test run history persisted to SQLite with exit codes
+- test_sanity: 2/2, test_sip_provider_unit: 25/25, test_kokoro_cpp: 7/7 passed
+- All 17 REST API endpoints verified with curl:
+  - GET /api/status, /api/tests, /api/services, /api/services/config
+  - POST /api/tests/start (with custom args), /api/tests/stop
+  - GET /api/tests/{name}/history, /api/tests/{name}/log
+  - POST /api/services/start, /api/services/stop, /api/services/restart
+  - POST /api/services/config
+  - GET /api/logs (with service/level/limit/offset filters)
+  - GET /api/logs/recent, /api/logs/stream (SSE verified)
+  - POST /api/db/query, GET/POST /api/db/write_mode, GET /api/db/schema
+  - GET/POST /api/settings
+
+**Security Hardening**:
+- `/api/db/query` restricted to SELECT/EXPLAIN/PRAGMA by default
+- Write mode toggle via `/api/db/write_mode` (in-memory, resets on restart)
+- SQL injection fixed in `serve_logs_api()` with parameterized queries
+- Binary path whitelist: only `bin/` relative paths, must be regular executable file
+- Improved JSON parser handles escaped quotes
+- fork() error handling with errno logging
+- Restart race fix: polls interconnect instead of blind usleep
 
 ---
 
