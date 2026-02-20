@@ -1122,12 +1122,14 @@ function fetchTests(){
         :(t.exit_code===0&&t.end_time?'<span class="wt-badge wt-badge-secondary">Passed</span>'
         :(t.exit_code>0?'<span class="wt-badge wt-badge-danger">Failed ('+t.exit_code+')</span>'
         :'<span class="wt-badge wt-badge-secondary">Idle</span>'));
-      return '<div class="wt-card" style="cursor:pointer" onclick="showTestDetail(\''+t.name+'\')">'
+      var eName=escapeHtml(t.name),eDesc=escapeHtml(t.description),ePath=escapeHtml(t.binary_path);
+      var safeAttr=t.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      return '<div class="wt-card" style="cursor:pointer" onclick="showTestDetail(\''+safeAttr+'\')">'
         +'<div class="wt-card-header"><span class="wt-card-title">'
         +'<span class="wt-status-dot '+(t.is_running?'running':(t.exit_code===0&&t.end_time?'online':'offline'))+'"></span>'
-        +t.name+'</span>'+status+'</div>'
-        +'<div style="font-size:12px;color:var(--wt-text-secondary)">'+t.description+'</div>'
-        +'<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">'+t.binary_path+'</div>'
+        +eName+'</span>'+status+'</div>'
+        +'<div style="font-size:12px;color:var(--wt-text-secondary)">'+eDesc+'</div>'
+        +'<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">'+ePath+'</div>'
         +'</div>';
     }).join('');
     if(currentTest){
@@ -1225,12 +1227,14 @@ function fetchServices(){
       var desc={'SIP_CLIENT':'SIP/RTP Gateway','INBOUND_AUDIO_PROCESSOR':'G.711 Decode & Resample',
         'WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM','KOKORO_SERVICE':'Kokoro TTS',
         'OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP'};
-      return '<div class="wt-card" style="cursor:pointer" onclick="showSvcDetail(\''+s.name+'\')">'
+      var eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
+      var safeAttr=s.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      return '<div class="wt-card" style="cursor:pointer" onclick="showSvcDetail(\''+safeAttr+'\')">'
         +'<div class="wt-card-header"><span class="wt-card-title">'
         +'<span class="wt-status-dot '+(s.online?'online':'offline')+'"></span>'
-        +s.name+'</span>'+status+'</div>'
-        +'<div style="font-size:12px;color:var(--wt-text-secondary)">'+(desc[s.name]||s.description)+'</div>'
-        +'<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">'+s.binary_path+'</div>'
+        +eName+'</span>'+status+'</div>'
+        +'<div style="font-size:12px;color:var(--wt-text-secondary)">'+eDesc+'</div>'
+        +'<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">'+ePath+'</div>'
         +(s.managed?'<div style="font-size:11px;margin-top:4px"><span class="wt-badge wt-badge-warning">Managed by Frontend</span></div>':'')
         +'</div>';
     }).join('');
@@ -1300,10 +1304,15 @@ function connectSvcSSE(name){
     try{
       var d=JSON.parse(e.data);
       var el=document.getElementById('svcDetailLog');
-      el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+d.timestamp+'</span> '
-        +'<span class="log-lvl-'+d.level+'">'+d.level+'</span> '+escapeHtml(d.message)+'</div>';
+      var lvlClass=/^[A-Z]+$/.test(d.level)?d.level:'INFO';
+      el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(d.timestamp)+'</span> '
+        +'<span class="log-lvl-'+lvlClass+'">'+escapeHtml(d.level)+'</span> '+escapeHtml(d.message)+'</div>';
       el.scrollTop=el.scrollHeight;
     }catch(x){}
+  };
+  svcLogSSE.onerror=function(){
+    svcLogSSE.close();
+    setTimeout(function(){if(currentSvc===name)connectSvcSSE(name);},3000);
   };
 }
 
@@ -1319,12 +1328,17 @@ function reconnectLogSSE(){
       var lvl=document.getElementById('logLevelFilter').value;
       if(lvl&&d.level!==lvl)return;
       var el=document.getElementById('liveLogView');
-      el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+d.timestamp+'</span> '
-        +'<span class="log-svc">'+d.service+'</span> '
-        +'<span class="log-lvl-'+d.level+'">'+d.level+'</span> '+escapeHtml(d.message)+'</div>';
+      var lvlClass=/^[A-Z]+$/.test(d.level)?d.level:'INFO';
+      el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(d.timestamp)+'</span> '
+        +'<span class="log-svc">'+escapeHtml(d.service)+'</span> '
+        +'<span class="log-lvl-'+lvlClass+'">'+escapeHtml(d.level)+'</span> '+escapeHtml(d.message)+'</div>';
       if(el.children.length>2000){el.removeChild(el.firstChild);}
       if(document.getElementById('autoScrollToggle').classList.contains('on')){el.scrollTop=el.scrollHeight;}
     }catch(x){}
+  };
+  logSSE.onerror=function(){
+    logSSE.close();
+    setTimeout(reconnectLogSSE,3000);
   };
 }
 
