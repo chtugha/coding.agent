@@ -331,8 +331,9 @@ if(BUILD_TESTS)
         endif()
     endif()
 
-    add_executable(test_sip_provider tests/test_sip_provider.cpp)
+    add_executable(test_sip_provider tests/test_sip_provider.cpp mongoose.c)
     target_link_libraries(test_sip_provider PRIVATE Threads::Threads)
+    target_compile_definitions(test_sip_provider PRIVATE MG_ENABLE_PACKED_FS=0)
     set_property(TARGET test_sip_provider PROPERTY CXX_STANDARD 17)
 
     add_executable(test_sip_provider_unit tests/test_sip_provider_unit.cpp)

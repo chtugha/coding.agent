@@ -1,4 +1,3 @@
-#include <iostream>
 #include <vector>
 #include <string>
 #include <thread>
@@ -10,12 +9,17 @@
 #include <cmath>
 #include <cerrno>
 #include <sstream>
+#include <fstream>
+#include <random>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <getopt.h>
 #include <signal.h>
+#include <dirent.h>
+#include "mongoose.h"
 
 static std::atomic<bool> g_running{true};
 
@@ -48,6 +52,8 @@ struct ActiveCall {
     std::thread inject_thread;
     std::atomic<bool> active{true};
     std::atomic<bool> relay_started{false};
+    std::atomic<bool> injecting{false};
+    std::string injecting_file;
     std::atomic<uint64_t> pkts_a_to_b{0};
     std::atomic<uint64_t> pkts_b_to_a{0};
     std::atomic<uint64_t> bytes_a_to_b{0};
@@ -70,11 +76,180 @@ static uint8_t linear_to_ulaw(int16_t sample) {
     return ~(sign | (exponent << 4) | mantissa);
 }
 
+struct WavData {
+    std::vector<int16_t> samples;
+    uint32_t sample_rate = 0;
+    uint16_t channels = 0;
+    std::string error;
+};
+
+static WavData load_wav_file(const std::string& path) {
+    WavData result;
+
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) {
+        result.error = "File not found: " + path;
+        return result;
+    }
+    if (st.st_size > 50 * 1024 * 1024) {
+        result.error = "File too large (>50MB): " + path;
+        return result;
+    }
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        result.error = "Cannot open file: " + path;
+        return result;
+    }
+
+    char riff_header[12];
+    f.read(riff_header, 12);
+    if (!f || std::memcmp(riff_header, "RIFF", 4) != 0 || std::memcmp(riff_header + 8, "WAVE", 4) != 0) {
+        result.error = "Invalid RIFF/WAVE header";
+        return result;
+    }
+
+    uint16_t audio_format = 0, num_channels = 0, bits_per_sample = 0;
+    uint32_t sample_rate = 0;
+    std::vector<uint8_t> raw_data;
+    bool got_fmt = false, got_data = false;
+
+    while (f && !got_data) {
+        char chunk_id[4];
+        uint32_t chunk_size;
+        f.read(chunk_id, 4);
+        f.read(reinterpret_cast<char*>(&chunk_size), 4);
+        if (!f) break;
+
+        if (std::memcmp(chunk_id, "fmt ", 4) == 0) {
+            if (chunk_size < 16) { result.error = "fmt chunk too small"; return result; }
+            f.read(reinterpret_cast<char*>(&audio_format), 2);
+            f.read(reinterpret_cast<char*>(&num_channels), 2);
+            f.read(reinterpret_cast<char*>(&sample_rate), 4);
+            f.seekg(6, std::ios::cur);
+            f.read(reinterpret_cast<char*>(&bits_per_sample), 2);
+            if (chunk_size > 16) f.seekg(chunk_size - 16, std::ios::cur);
+            got_fmt = true;
+        } else if (std::memcmp(chunk_id, "data", 4) == 0) {
+            if (!got_fmt) { result.error = "data chunk before fmt chunk"; return result; }
+            raw_data.resize(chunk_size);
+            f.read(reinterpret_cast<char*>(raw_data.data()), chunk_size);
+            got_data = true;
+        } else {
+            f.seekg(chunk_size, std::ios::cur);
+        }
+    }
+
+    if (!got_fmt || !got_data) {
+        result.error = "Missing fmt or data chunk";
+        return result;
+    }
+
+    if (audio_format != 1 && audio_format != 3) {
+        result.error = "Unsupported audio format: " + std::to_string(audio_format) + " (only PCM=1 and IEEE float=3 supported)";
+        return result;
+    }
+
+    result.sample_rate = sample_rate;
+    result.channels = num_channels;
+
+    size_t frame_size = num_channels * (bits_per_sample / 8);
+    if (frame_size == 0) { result.error = "Invalid bits_per_sample"; return result; }
+    size_t num_frames = raw_data.size() / frame_size;
+    result.samples.reserve(num_frames);
+
+    for (size_t i = 0; i < num_frames; i++) {
+        const uint8_t* frame = raw_data.data() + i * frame_size;
+        int32_t mono_sum = 0;
+
+        for (uint16_t ch = 0; ch < num_channels; ch++) {
+            const uint8_t* s = frame + ch * (bits_per_sample / 8);
+            int32_t val = 0;
+
+            if (audio_format == 1 && bits_per_sample == 16) {
+                val = static_cast<int16_t>(s[0] | (s[1] << 8));
+            } else if (audio_format == 1 && bits_per_sample == 24) {
+                val = static_cast<int32_t>((s[0] << 8) | (s[1] << 16) | (s[2] << 24)) >> 16;
+            } else if (audio_format == 3 && bits_per_sample == 32) {
+                float fval;
+                std::memcpy(&fval, s, 4);
+                val = static_cast<int32_t>(fval * 32767.0f);
+                if (val > 32767) val = 32767;
+                if (val < -32768) val = -32768;
+            } else {
+                result.error = "Unsupported format/bits: " + std::to_string(audio_format) + "/" + std::to_string(bits_per_sample);
+                result.samples.clear();
+                return result;
+            }
+            mono_sum += val;
+        }
+
+        result.samples.push_back(static_cast<int16_t>(mono_sum / num_channels));
+    }
+
+    return result;
+}
+
+static std::vector<int16_t> resample_to_8khz(const std::vector<int16_t>& samples, uint32_t source_rate) {
+    if (source_rate == 8000) return samples;
+
+    if (source_rate == 16000) {
+        std::vector<int16_t> out;
+        out.reserve(samples.size() / 2);
+        for (size_t i = 0; i + 1 < samples.size(); i += 2) {
+            out.push_back(static_cast<int16_t>((static_cast<int32_t>(samples[i]) + samples[i + 1]) / 2));
+        }
+        return out;
+    }
+
+    static constexpr int FILTER_TAPS = 15;
+    static constexpr int HALF_TAPS = FILTER_TAPS / 2;
+    double cutoff = 3400.0 / (source_rate / 2.0);
+
+    double coeffs[FILTER_TAPS];
+    double sum = 0;
+    for (int n = 0; n < FILTER_TAPS; n++) {
+        int k = n - HALF_TAPS;
+        double hamming = 0.54 - 0.46 * std::cos(2.0 * M_PI * n / (FILTER_TAPS - 1));
+        double sinc_val = (k == 0) ? 1.0 : std::sin(M_PI * cutoff * k) / (M_PI * k);
+        coeffs[n] = sinc_val * hamming * cutoff;
+        sum += coeffs[n];
+    }
+    for (int n = 0; n < FILTER_TAPS; n++) coeffs[n] /= sum;
+
+    double ratio = static_cast<double>(source_rate) / 8000.0;
+    size_t out_len = static_cast<size_t>(samples.size() / ratio);
+    std::vector<int16_t> out(out_len);
+
+    for (size_t i = 0; i < out_len; i++) {
+        double src_pos = i * ratio;
+        double filtered = 0;
+
+        for (int t = 0; t < FILTER_TAPS; t++) {
+            int idx = static_cast<int>(src_pos) - HALF_TAPS + t;
+            if (idx >= 0 && idx < static_cast<int>(samples.size())) {
+                filtered += samples[idx] * coeffs[t];
+            }
+        }
+
+        int32_t clamped = static_cast<int32_t>(filtered);
+        if (clamped > 32767) clamped = 32767;
+        if (clamped < -32768) clamped = -32768;
+        out[i] = static_cast<int16_t>(clamped);
+    }
+
+    return out;
+}
+
+static const char* CORS_HEADERS = "Content-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
+
 class TestSipProvider {
 public:
-    bool init(int sip_port, const std::string& local_ip) {
+    bool init(int sip_port, const std::string& local_ip, const std::string& testfiles_dir, int http_port) {
         local_ip_ = local_ip;
         sip_port_ = sip_port;
+        testfiles_dir_ = testfiles_dir;
+        http_port_ = http_port;
 
         sip_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (sip_sock_ < 0) {
@@ -83,9 +258,7 @@ public:
         }
 
         int reuse = 1;
-        if (setsockopt(sip_sock_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-            std::fprintf(stderr, "setsockopt(SO_REUSEADDR) failed: %s\n", strerror(errno));
-        }
+        setsockopt(sip_sock_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -99,21 +272,31 @@ public:
             return false;
         }
 
-        std::printf("Test SIP Provider listening on %s:%d\n", local_ip.c_str(), sip_port);
+        mg_mgr_init(&mgr_);
+        std::string listen_addr = "http://0.0.0.0:" + std::to_string(http_port);
+        struct mg_connection* c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
+        if (!c) {
+            std::fprintf(stderr, "Failed to start HTTP server on port %d\n", http_port);
+            close(sip_sock_);
+            sip_sock_ = -1;
+            return false;
+        }
+
+        std::printf("Test SIP Provider listening on %s:%d (HTTP: %d, Testfiles: %s)\n",
+                    local_ip.c_str(), sip_port, http_port, testfiles_dir.c_str());
         return true;
     }
 
-    void run(int duration_sec, bool inject_tone) {
-        duration_ = duration_sec;
-        inject_tone_ = inject_tone;
-
-        std::printf("Waiting for 2 SIP clients to register...\n");
+    void run() {
+        std::printf("Waiting for SIP clients to register...\n");
 
         while (g_running) {
+            mg_mgr_poll(&mgr_, 1);
+
             char buf[4096];
             struct sockaddr_in sender{};
             socklen_t slen = sizeof(sender);
-            struct timeval tv{1, 0};
+            struct timeval tv{0, 1000};
             setsockopt(sip_sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
             ssize_t n = recvfrom(sip_sock_, buf, sizeof(buf) - 1, 0,
@@ -130,16 +313,206 @@ public:
                     initiate_call();
                 }
             }
-
-            if (call_ && !call_->active) break;
         }
 
         print_results();
         shutdown_call();
+        mg_mgr_free(&mgr_);
         if (sip_sock_ >= 0) close(sip_sock_);
     }
 
 private:
+    static void http_handler_static(struct mg_connection* c, int ev, void* ev_data) {
+        if (ev == MG_EV_HTTP_MSG) {
+            TestSipProvider* self = static_cast<TestSipProvider*>(c->fn_data);
+            self->http_handler(c, static_cast<struct mg_http_message*>(ev_data));
+        }
+    }
+
+    void http_handler(struct mg_connection* c, struct mg_http_message* hm) {
+        if (mg_strcmp(hm->method, mg_str("OPTIONS")) == 0) {
+            mg_http_reply(c, 204, CORS_HEADERS, "");
+            return;
+        }
+
+        if (mg_strcmp(hm->uri, mg_str("/files")) == 0) {
+            handle_files(c);
+        } else if (mg_strcmp(hm->uri, mg_str("/inject")) == 0) {
+            handle_inject(c, hm);
+        } else if (mg_strcmp(hm->uri, mg_str("/status")) == 0) {
+            handle_status(c);
+        } else {
+            mg_http_reply(c, 404, CORS_HEADERS, "{\"error\":\"Not found\"}");
+        }
+    }
+
+    void handle_files(struct mg_connection* c) {
+        DIR* dir = opendir(testfiles_dir_.c_str());
+        if (!dir) {
+            mg_http_reply(c, 500, CORS_HEADERS, "{\"error\":\"Cannot open Testfiles directory\"}");
+            return;
+        }
+
+        std::ostringstream json;
+        json << "{\"files\":[";
+        bool first = true;
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string name = entry->d_name;
+            if (name.size() > 4 && name.substr(name.size() - 4) == ".wav") {
+                struct stat st;
+                std::string full = testfiles_dir_ + "/" + name;
+                if (stat(full.c_str(), &st) == 0) {
+                    if (!first) json << ",";
+                    json << "{\"name\":\"" << name << "\",\"size_bytes\":" << st.st_size << "}";
+                    first = false;
+                }
+            }
+        }
+        closedir(dir);
+        json << "]}";
+        mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
+    }
+
+    void handle_inject(struct mg_connection* c, struct mg_http_message* hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"POST required\"}");
+            return;
+        }
+
+        char* file_str = mg_json_get_str(hm->body, "$.file");
+        char* leg_str = mg_json_get_str(hm->body, "$.leg");
+
+        if (!file_str || !leg_str) {
+            free(file_str);
+            free(leg_str);
+            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"Missing 'file' or 'leg' in JSON body\"}");
+            return;
+        }
+
+        std::string file(file_str);
+        std::string leg(leg_str);
+        free(file_str);
+        free(leg_str);
+
+        if (leg != "a" && leg != "b") {
+            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"Invalid leg '%s', must be 'a' or 'b'\"}", leg.c_str());
+            return;
+        }
+
+        if (!call_ || !call_->active || !call_->relay_started) {
+            mg_http_reply(c, 409, CORS_HEADERS, "{\"error\":\"No active call to inject into\"}");
+            return;
+        }
+
+        std::string full_path = testfiles_dir_ + "/" + file;
+        struct stat st;
+        if (stat(full_path.c_str(), &st) != 0) {
+            mg_http_reply(c, 404, CORS_HEADERS, "{\"error\":\"File not found: %s\"}", file.c_str());
+            return;
+        }
+
+        std::string err = inject_file(full_path, leg);
+        if (!err.empty()) {
+            mg_http_reply(c, 500, CORS_HEADERS, "{\"error\":\"%s\"}", err.c_str());
+            return;
+        }
+
+        call_->injecting_file = file;
+        mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"injecting\":\"%s\",\"leg\":\"%s\"}", file.c_str(), leg.c_str());
+    }
+
+    void handle_status(struct mg_connection* c) {
+        std::ostringstream json;
+        json << "{\"call_active\":" << (call_ && call_->active ? "true" : "false");
+        if (call_) {
+            json << ",\"relay_stats\":{";
+            json << "\"pkts_a_to_b\":" << call_->pkts_a_to_b.load();
+            json << ",\"pkts_b_to_a\":" << call_->pkts_b_to_a.load();
+            json << ",\"bytes_a_to_b\":" << call_->bytes_a_to_b.load();
+            json << ",\"bytes_b_to_a\":" << call_->bytes_b_to_a.load();
+            json << "}";
+            if (call_->injecting) {
+                json << ",\"injecting\":\"" << call_->injecting_file << "\"";
+            } else {
+                json << ",\"injecting\":null";
+            }
+        }
+        json << "}";
+        mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
+    }
+
+    std::string inject_file(const std::string& path, const std::string& leg) {
+        WavData wav = load_wav_file(path);
+        if (!wav.error.empty()) return wav.error;
+        if (wav.samples.empty()) return "WAV file contains no samples";
+
+        std::vector<int16_t> resampled = resample_to_8khz(wav.samples, wav.sample_rate);
+        std::vector<uint8_t> ulaw(resampled.size());
+        for (size_t i = 0; i < resampled.size(); i++) {
+            ulaw[i] = linear_to_ulaw(resampled[i]);
+        }
+
+        cancel_injection();
+
+        call_->injecting = true;
+        call_->inject_thread = std::thread(&TestSipProvider::inject_rtp_stream, this, call_, leg, std::move(ulaw));
+        return "";
+    }
+
+    void cancel_injection() {
+        if (!call_) return;
+        if (call_->injecting) {
+            call_->injecting = false;
+            if (call_->inject_thread.joinable()) {
+                call_->inject_thread.join();
+            }
+        }
+    }
+
+    void inject_rtp_stream(std::shared_ptr<ActiveCall> call, std::string leg, std::vector<uint8_t> ulaw_samples) {
+        static constexpr int PKT_SAMPLES = 160;
+
+        CallLeg* target = (leg == "a") ? &call->leg_a : &call->leg_b;
+
+        struct sockaddr_in dest{};
+        dest.sin_family = AF_INET;
+        dest.sin_port = htons(target->client_rtp_port);
+        dest.sin_addr.s_addr = inet_addr(target->ip.c_str());
+
+        std::random_device rd;
+        uint32_t ssrc = rd();
+        uint16_t seq = 0;
+        uint32_t ts = 0;
+
+        size_t total_pkts = ulaw_samples.size() / PKT_SAMPLES;
+        std::printf("Injecting %zu RTP packets (%.1fs) into leg %s (%s)\n",
+                    total_pkts, ulaw_samples.size() / 8000.0, leg.c_str(), target->user.c_str());
+
+        for (size_t offset = 0; offset + PKT_SAMPLES <= ulaw_samples.size() && call->active && call->injecting && g_running; offset += PKT_SAMPLES) {
+            uint8_t rtp[12 + PKT_SAMPLES];
+            rtp[0] = 0x80;
+            rtp[1] = 0x00;
+            uint16_t seq_n = htons(seq++);
+            std::memcpy(rtp + 2, &seq_n, 2);
+            uint32_t ts_n = htonl(ts);
+            ts += PKT_SAMPLES;
+            std::memcpy(rtp + 4, &ts_n, 4);
+            uint32_t ssrc_n = htonl(ssrc);
+            std::memcpy(rtp + 8, &ssrc_n, 4);
+            std::memcpy(rtp + 12, ulaw_samples.data() + offset, PKT_SAMPLES);
+
+            sendto(target->relay_sock, rtp, sizeof(rtp), 0,
+                   (struct sockaddr*)&dest, sizeof(dest));
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        call->injecting = false;
+        call->injecting_file.clear();
+        std::printf("Audio injection complete\n");
+    }
+
     std::string get_header(const std::string& msg, const std::string& name) {
         std::string search = name + ":";
         size_t p = msg.find(search);
@@ -401,19 +774,7 @@ private:
         call_->relay_b_to_a = std::thread(&TestSipProvider::relay_thread, this,
             call_, &call_->leg_b, &call_->leg_a, &call_->pkts_b_to_a, &call_->bytes_b_to_a);
 
-        if (inject_tone_) {
-            call_->inject_thread = std::thread(&TestSipProvider::inject_audio, this, call_);
-        }
-
         stats_thread_ = std::thread(&TestSipProvider::stats_loop, this, call_);
-
-        end_thread_ = std::thread([this]() {
-            std::this_thread::sleep_for(std::chrono::seconds(duration_));
-            if (g_running && call_ && call_->active) {
-                std::printf("\nCall duration (%ds) expired — ending call\n", duration_);
-                call_->active = false;
-            }
-        });
     }
 
     void relay_thread(std::shared_ptr<ActiveCall> call,
@@ -444,63 +805,8 @@ private:
                        (struct sockaddr*)&dest, sizeof(dest));
                 (*pkt_count)++;
                 (*byte_count) += n;
-            } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                if (call->active && g_running) {
-                    std::fprintf(stderr, "Relay recvfrom error: %s\n", strerror(errno));
-                }
-                break;
             }
         }
-    }
-
-    void inject_audio(std::shared_ptr<ActiveCall> call) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-        const int SAMPLE_RATE = 8000;
-        const int PKT_SAMPLES = 160;
-        const double FREQ = 400.0;
-        const double AMP = 8000.0;
-        const int INJECT_SECONDS = 3;
-
-        uint16_t seq = 0;
-        uint32_t ts = 0;
-        uint32_t ssrc = 0xDEAD0001;
-        int sample_idx = 0;
-
-        int total_pkts = (INJECT_SECONDS * SAMPLE_RATE) / PKT_SAMPLES;
-
-        struct sockaddr_in dest{};
-        dest.sin_family = AF_INET;
-        dest.sin_port = htons(call->leg_a.client_rtp_port);
-        dest.sin_addr.s_addr = inet_addr(call->leg_a.ip.c_str());
-
-        std::printf("Injecting %ds test tone (%.0fHz) into leg A (%s)\n",
-                    INJECT_SECONDS, FREQ, call->leg_a.user.c_str());
-
-        for (int p = 0; p < total_pkts && call->active && g_running; p++) {
-            uint8_t rtp[12 + PKT_SAMPLES];
-            rtp[0] = 0x80;
-            rtp[1] = 0x00;
-            uint16_t seq_n = htons(seq++);
-            memcpy(rtp + 2, &seq_n, 2);
-            uint32_t ts_n = htonl(ts); ts += PKT_SAMPLES;
-            memcpy(rtp + 4, &ts_n, 4);
-            uint32_t ssrc_n = htonl(ssrc);
-            memcpy(rtp + 8, &ssrc_n, 4);
-
-            for (int i = 0; i < PKT_SAMPLES; i++) {
-                double t = (double)(sample_idx++) / SAMPLE_RATE;
-                int16_t s = (int16_t)(AMP * std::sin(2.0 * M_PI * FREQ * t));
-                rtp[12 + i] = linear_to_ulaw(s);
-            }
-
-            sendto(call->leg_a.relay_sock, rtp, sizeof(rtp), 0,
-                   (struct sockaddr*)&dest, sizeof(dest));
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-
-        std::printf("Audio injection complete\n");
     }
 
     void stats_loop(std::shared_ptr<ActiveCall> call) {
@@ -589,6 +895,8 @@ private:
     void shutdown_call() {
         if (!call_) return;
 
+        cancel_injection();
+
         if (call_->active) {
             send_bye_to_leg(call_->leg_a);
             send_bye_to_leg(call_->leg_b);
@@ -597,9 +905,7 @@ private:
 
         if (call_->relay_a_to_b.joinable()) call_->relay_a_to_b.join();
         if (call_->relay_b_to_a.joinable()) call_->relay_b_to_a.join();
-        if (call_->inject_thread.joinable()) call_->inject_thread.join();
         if (stats_thread_.joinable()) stats_thread_.join();
-        if (end_thread_.joinable()) end_thread_.join();
 
         if (call_->leg_a.relay_sock >= 0) close(call_->leg_a.relay_sock);
         if (call_->leg_b.relay_sock >= 0) close(call_->leg_b.relay_sock);
@@ -607,10 +913,12 @@ private:
 
     int sip_sock_ = -1;
     int sip_port_ = 5060;
+    int http_port_ = 22011;
     std::string local_ip_;
-    int duration_ = 30;
-    bool inject_tone_ = false;
+    std::string testfiles_dir_;
     bool call_initiated_ = false;
+
+    struct mg_mgr mgr_;
 
     std::mutex users_mutex_;
     std::map<std::string, RegisteredUser> users_;
@@ -618,7 +926,6 @@ private:
     std::mutex call_mutex_;
     std::shared_ptr<ActiveCall> call_;
     std::thread stats_thread_;
-    std::thread end_thread_;
 };
 
 int main(int argc, char* argv[]) {
@@ -626,54 +933,51 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, sig_handler);
 
     int port = 5060;
-    int duration = 30;
-    bool inject = false;
+    int http_port = 22011;
     std::string ip = "127.0.0.1";
+    std::string testfiles_dir = "Testfiles";
 
     static struct option long_opts[] = {
-        {"port",     required_argument, 0, 'p'},
-        {"duration", required_argument, 0, 'd'},
-        {"inject",   no_argument,       0, 'i'},
-        {"ip",       required_argument, 0, 'b'},
-        {"help",     no_argument,       0, 'h'},
+        {"port",          required_argument, 0, 'p'},
+        {"ip",            required_argument, 0, 'b'},
+        {"http-port",     required_argument, 0, 'H'},
+        {"testfiles-dir", required_argument, 0, 't'},
+        {"help",          no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:d:ib:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:b:H:t:h", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'p': port = atoi(optarg); break;
-            case 'd': duration = atoi(optarg); break;
-            case 'i': inject = true; break;
             case 'b': ip = optarg; break;
+            case 'H': http_port = atoi(optarg); break;
+            case 't': testfiles_dir = optarg; break;
             case 'h':
                 std::printf("Usage: test_sip_provider [OPTIONS]\n\n");
-                std::printf("  -p, --port PORT       SIP listen port (default: 5060)\n");
-                std::printf("  -d, --duration SECS   Call duration in seconds (default: 30)\n");
-                std::printf("  -i, --inject          Inject 3s test tone into leg A\n");
-                std::printf("  -b, --ip ADDR         Local IP address (default: 127.0.0.1)\n");
-                std::printf("  -h, --help            Show this help\n\n");
-                std::printf("Example:\n");
-                std::printf("  # Terminal 1: Start provider\n");
-                std::printf("  test_sip_provider --port 5060 --duration 60 --inject\n\n");
-                std::printf("  # Terminal 2: Start pipeline A\n");
-                std::printf("  sip-client alice 127.0.0.1 5060\n\n");
-                std::printf("  # Terminal 3: Start pipeline B\n");
-                std::printf("  sip-client bob 127.0.0.1 5060\n\n");
+                std::printf("  -p, --port PORT           SIP listen port (default: 5060)\n");
+                std::printf("  -b, --ip ADDR             Local IP address (default: 127.0.0.1)\n");
+                std::printf("  -H, --http-port PORT      HTTP control port (default: 22011)\n");
+                std::printf("  -t, --testfiles-dir DIR   Testfiles directory (default: Testfiles)\n");
+                std::printf("  -h, --help                Show this help\n\n");
+                std::printf("HTTP Endpoints:\n");
+                std::printf("  GET  /files    List WAV files in testfiles directory\n");
+                std::printf("  POST /inject   Inject audio: {\"file\":\"sample_01.wav\",\"leg\":\"a\"}\n");
+                std::printf("  GET  /status   Call status and relay stats\n\n");
                 return 0;
             default: break;
         }
     }
 
     std::printf("Test SIP Provider (B2BUA)\n");
-    std::printf("  Port:     %d\n", port);
-    std::printf("  Duration: %ds\n", duration);
-    std::printf("  Inject:   %s\n", inject ? "yes (3s 400Hz tone)" : "no");
+    std::printf("  SIP Port:     %d\n", port);
+    std::printf("  HTTP Port:    %d\n", http_port);
+    std::printf("  Testfiles:    %s\n", testfiles_dir.c_str());
     std::printf("\n");
 
     TestSipProvider provider;
-    if (!provider.init(port, ip)) return 1;
-    provider.run(duration, inject);
+    if (!provider.init(port, ip, testfiles_dir, http_port)) return 1;
+    provider.run();
 
     return 0;
 }
