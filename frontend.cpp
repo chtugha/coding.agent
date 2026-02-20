@@ -489,6 +489,21 @@ private:
         }
     }
 
+    std::string get_setting(const std::string& key, const std::string& default_val = "") {
+        if (!db_) return default_val;
+        sqlite3_stmt* stmt;
+        const char* sql = "SELECT value FROM settings WHERE key = ?";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return default_val;
+        sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+        std::string result = default_val;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* v = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            if (v) result = v;
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    }
+
     void save_test_run(const TestInfo& test) {
         if (!db_) return;
         sqlite3_stmt* stmt;
@@ -803,6 +818,8 @@ private:
                 handle_settings(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/status")) == 0) {
                 handle_status(c);
+            } else if (mg_match(hm->uri, mg_str("/css/theme/*"), NULL)) {
+                serve_theme_css(c, hm);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
@@ -810,69 +827,667 @@ private:
     }
 
     void serve_index(struct mg_connection *c) {
-        const char* html_part1 = 
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-            "<title>WhisperTalk Frontend</title>"
-            "<link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css\" rel=\"stylesheet\">"
-            "<style>.test-card{margin-bottom:1rem}.test-running{border-left:4px solid #28a745}"
-            ".test-idle{border-left:4px solid #6c757d}.service-online{color:#28a745}"
-            ".service-offline{color:#dc3545}.log-entry{font-family:monospace;font-size:0.85rem;padding:0.25rem;border-bottom:1px solid #eee}"
-            ".log-container{max-height:400px;overflow-y:auto;background:#f8f9fa;padding:1rem}"
-            "#liveLogs{max-height:600px;overflow-y:auto}</style></head><body>"
-            "<nav class=\"navbar navbar-dark bg-dark\"><div class=\"container-fluid\">"
-            "<span class=\"navbar-brand mb-0 h1\">WhisperTalk Frontend</span>"
-            "<span class=\"text-light\" id=\"status\">Loading...</span></div></nav>"
-            "<div class=\"container-fluid mt-4\"><ul class=\"nav nav-tabs\" id=\"mainTabs\" role=\"tablist\">"
-            "<li class=\"nav-item\" role=\"presentation\"><button class=\"nav-link active\" id=\"tests-tab\" data-bs-toggle=\"tab\" data-bs-target=\"#tests\" type=\"button\">Tests</button></li>"
-            "<li class=\"nav-item\" role=\"presentation\"><button class=\"nav-link\" id=\"services-tab\" data-bs-toggle=\"tab\" data-bs-target=\"#services\" type=\"button\">Services</button></li>"
-            "<li class=\"nav-item\" role=\"presentation\"><button class=\"nav-link\" id=\"logs-tab\" data-bs-toggle=\"tab\" data-bs-target=\"#logs\" type=\"button\">Logs</button></li>"
-            "<li class=\"nav-item\" role=\"presentation\"><button class=\"nav-link\" id=\"database-tab\" data-bs-toggle=\"tab\" data-bs-target=\"#database\" type=\"button\">Database</button></li></ul>"
-            "<div class=\"tab-content\" id=\"mainTabContent\">"
-            "<div class=\"tab-pane fade show active\" id=\"tests\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Available Tests</h4><div id=\"testsContainer\"></div></div></div></div>"
-            "<div class=\"tab-pane fade\" id=\"services\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Service Status</h4><table class=\"table table-striped\"><thead><tr><th>Service</th><th>Status</th><th>Calls</th><th>Ports</th><th>Last Seen</th></tr></thead><tbody id=\"servicesTable\"></tbody></table></div></div></div>"
-            "<div class=\"tab-pane fade\" id=\"logs\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Live Logs</h4><div class=\"log-container\" id=\"liveLogs\"></div></div></div></div>"
-            "<div class=\"tab-pane fade\" id=\"database\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Database Query</h4><form id=\"queryForm\">"
-            "<div class=\"mb-3\"><label for=\"sqlQuery\" class=\"form-label\">SQL Query</label><textarea class=\"form-control\" id=\"sqlQuery\" rows=\"3\">SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50</textarea></div>"
-            "<button type=\"submit\" class=\"btn btn-primary\">Execute Query</button></form><div class=\"mt-3\" id=\"queryResults\"></div></div></div></div></div></div>"
-            "<script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js\"></script><script>";
-        
-        const char* html_part2 = 
-            "function fetchTests(){fetch('/api/tests').then(r=>r.json()).then(data=>{"
-            "document.getElementById('testsContainer').innerHTML=data.tests.map(test=>"
-            "'<div class=\"card test-card '+(test.is_running?'test-running':'test-idle')+'\">"
-            "<div class=\"card-body\"><h5 class=\"card-title\">'+test.name+(test.is_running?' <span class=\"badge bg-success\">Running</span>':'')+' </h5>"
-            "<p class=\"card-text\">'+test.description+'</p><p class=\"text-muted small\">'+test.binary_path+'</p>"
-            "'+(test.is_running?'<button class=\"btn btn-sm btn-danger\" onclick=\"stopTest(\\''+test.name+'\\')\" >Stop</button>':'<button class=\"btn btn-sm btn-primary\" onclick=\"startTest(\\''+test.name+'\\')\" >Start</button>')"
-            "+(test.log_file?'<a href=\"/logs/'+test.log_file+'\" class=\"btn btn-sm btn-secondary\">View Log</a>':'')"
-            "'</div></div>').join('')})}"
-            "function fetchServices(){fetch('/api/services').then(r=>r.json()).then(data=>{"
-            "document.getElementById('servicesTable').innerHTML=data.services.map(svc=>'<tr><td>'+svc.name+'</td>"
-            "<td><span class=\"'+(svc.online?'service-online':'service-offline')+'\"> '+(svc.online?'● Online':'○ Offline')+'</span></td>"
-            "<td>'+(svc.calls||0)+'</td><td>'+(svc.ports||'N/A')+'</td><td>'+(svc.last_seen||'Never')+'</td></tr>').join('')})}"
-            "function fetchLogs(){fetch('/api/logs').then(r=>r.json()).then(data=>{"
-            "var container=document.getElementById('liveLogs');container.innerHTML=data.logs.map(log=>"
-            "'<div class=\"log-entry\"><span class=\"text-muted\">'+log.timestamp+'</span> "
-            "<span class=\"badge bg-secondary\">'+log.service+'</span> <span>'+log.message+'</span></div>').join('');"
-            "container.scrollTop=container.scrollHeight})}"
-            "function startTest(name){fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "body:JSON.stringify({test:name})}).then(()=>setTimeout(fetchTests,500))}"
-            "function stopTest(name){fetch('/api/tests/stop',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "body:JSON.stringify({test:name})}).then(()=>setTimeout(fetchTests,500))}"
-            "document.getElementById('queryForm').addEventListener('submit',(e)=>{e.preventDefault();"
-            "var query=document.getElementById('sqlQuery').value;fetch('/api/db/query',{method:'POST',headers:{'Content-Type':'application/json'},"
-            "body:JSON.stringify({query:query})}).then(r=>r.json()).then(data=>{"
-            "var container=document.getElementById('queryResults');if(data.error){container.innerHTML='<div class=\"alert alert-danger\">'+data.error+'</div>'}"
-            "else if(data.rows&&data.rows.length>0){var cols=Object.keys(data.rows[0]);container.innerHTML='<table class=\"table table-sm table-bordered\"><thead><tr>'"
-            "+cols.map(c=>'<th>'+c+'</th>').join('')+'</tr></thead><tbody>'+data.rows.map(row=>'<tr>'+cols.map(c=>'<td>'+row[c]+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}"
-            "else{container.innerHTML='<div class=\"alert alert-info\">Query executed successfully. '+(data.affected||0)+' rows affected.</div>'}})});"
-            "setInterval(fetchTests,2000);setInterval(fetchServices,3000);setInterval(fetchLogs,1000);"
-            "fetchTests();fetchServices();fetchLogs();document.getElementById('status').textContent='Frontend running on port ";
-        
+        std::string theme = get_setting("theme", "default");
+        std::string html = build_ui_html(theme);
+        mg_http_reply(c, 200, "Content-Type: text/html\r\n", "%s", html.c_str());
+    }
+
+    std::string build_ui_html(const std::string& theme) {
+        std::string dark_attr;
+        std::string theme_css_link;
+        if (theme == "dark") {
+            dark_attr = " data-bs-theme=\"dark\"";
+        } else if (theme == "slate" || theme == "flatly" || theme == "cyborg") {
+            theme_css_link = "<link rel=\"stylesheet\" href=\"/css/theme/" + theme + "\">";
+        }
+
+        std::string h;
+        h += R"WT(<!DOCTYPE html><html lang="en")WT" + dark_attr + R"WT(><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhisperTalk</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+)WT" + theme_css_link + R"WT(
+<style>
+:root{--wt-sidebar-width:240px;--wt-bg:#f5f5f7;--wt-sidebar-bg:rgba(255,255,255,0.72);--wt-card-bg:#fff;--wt-border:#d2d2d7;--wt-text:#1d1d1f;--wt-text-secondary:#86868b;--wt-accent:#0071e3;--wt-success:#34c759;--wt-danger:#ff3b30;--wt-warning:#ff9f0a;--wt-radius:12px;--wt-font:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;--wt-mono:"SF Mono",SFMono-Regular,ui-monospace,Menlo,monospace}
+[data-bs-theme="dark"]{--wt-bg:#1c1c1e;--wt-sidebar-bg:rgba(44,44,46,0.72);--wt-card-bg:#2c2c2e;--wt-border:#38383a;--wt-text:#f5f5f7;--wt-text-secondary:#98989d}
+*{box-sizing:border-box}
+body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-text);overflow:hidden;height:100vh}
+.wt-app{display:flex;height:100vh}
+.wt-sidebar{width:var(--wt-sidebar-width);min-width:var(--wt-sidebar-width);background:var(--wt-sidebar-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-right:0.5px solid var(--wt-border);display:flex;flex-direction:column;padding:0;overflow-y:auto;user-select:none}
+.wt-sidebar-header{padding:20px 16px 8px;display:flex;align-items:center;gap:10px}
+.wt-sidebar-header h1{font-size:13px;font-weight:700;letter-spacing:-0.01em;color:var(--wt-text-secondary);text-transform:uppercase;margin:0}
+.wt-sidebar-section{padding:4px 8px;margin-bottom:4px}
+.wt-sidebar-section-title{font-size:11px;font-weight:600;color:var(--wt-text-secondary);text-transform:uppercase;letter-spacing:0.5px;padding:6px 8px 2px;margin:0}
+.wt-nav-item{display:flex;align-items:center;gap:8px;padding:7px 12px;margin:1px 0;border-radius:8px;cursor:pointer;font-size:13px;font-weight:400;color:var(--wt-text);text-decoration:none;transition:background 0.15s}
+.wt-nav-item:hover{background:rgba(0,0,0,0.04)}
+[data-bs-theme="dark"] .wt-nav-item:hover{background:rgba(255,255,255,0.06)}
+.wt-nav-item.active{background:var(--wt-accent);color:#fff;font-weight:500}
+.wt-nav-item .nav-icon{width:20px;text-align:center;font-size:15px}
+.wt-nav-item .nav-badge{margin-left:auto;font-size:11px;font-weight:600;background:var(--wt-accent);color:#fff;border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
+.wt-nav-item.active .nav-badge{background:rgba(255,255,255,0.25)}
+.wt-main{flex:1;overflow-y:auto;padding:0}
+.wt-content{max-width:960px;margin:0 auto;padding:24px 32px}
+.wt-page-title{font-size:28px;font-weight:700;letter-spacing:-0.02em;margin:0 0 20px}
+.wt-card{background:var(--wt-card-bg);border-radius:var(--wt-radius);border:0.5px solid var(--wt-border);padding:16px;margin-bottom:12px;transition:box-shadow 0.2s}
+.wt-card:hover{box-shadow:0 2px 12px rgba(0,0,0,0.06)}
+.wt-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.wt-card-title{font-size:15px;font-weight:600;margin:0}
+.wt-status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.wt-status-dot.online{background:var(--wt-success);box-shadow:0 0 6px var(--wt-success)}
+.wt-status-dot.offline{background:var(--wt-text-secondary)}
+.wt-status-dot.running{background:var(--wt-success);animation:pulse 2s infinite}
+.wt-status-dot.failed{background:var(--wt-danger)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.wt-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 14px;border-radius:7px;border:none;font-size:13px;font-weight:500;cursor:pointer;transition:all 0.15s;font-family:var(--wt-font)}
+.wt-btn-primary{background:var(--wt-accent);color:#fff}
+.wt-btn-primary:hover{background:#005bb5}
+.wt-btn-danger{background:var(--wt-danger);color:#fff}
+.wt-btn-danger:hover{background:#d32f2f}
+.wt-btn-secondary{background:var(--wt-border);color:var(--wt-text)}
+.wt-btn-secondary:hover{background:#c0c0c5}
+.wt-btn-sm{padding:3px 10px;font-size:12px}
+.wt-input,.wt-textarea{width:100%;padding:8px 12px;border-radius:8px;border:0.5px solid var(--wt-border);background:var(--wt-bg);color:var(--wt-text);font-size:13px;font-family:var(--wt-font);outline:none;transition:border 0.15s}
+.wt-input:focus,.wt-textarea:focus{border-color:var(--wt-accent);box-shadow:0 0 0 3px rgba(0,113,227,0.15)}
+.wt-textarea{font-family:var(--wt-mono);resize:vertical;min-height:80px}
+.wt-log-view{background:#1a1a1a;color:#e0e0e0;font-family:var(--wt-mono);font-size:12px;line-height:1.6;border-radius:var(--wt-radius);padding:12px 16px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+.wt-log-entry{padding:2px 0}
+.wt-log-entry .log-ts{color:#98989d}
+.wt-log-entry .log-svc{color:#64d2ff;font-weight:500}
+.wt-log-entry .log-lvl-INFO{color:#30d158}
+.wt-log-entry .log-lvl-WARN{color:#ffd60a}
+.wt-log-entry .log-lvl-ERROR{color:#ff453a;font-weight:600}
+.wt-log-entry .log-lvl-DEBUG{color:#98989d}
+.wt-table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+.wt-table th{font-weight:600;color:var(--wt-text-secondary);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;padding:8px 12px;border-bottom:1px solid var(--wt-border);text-align:left}
+.wt-table td{padding:10px 12px;border-bottom:0.5px solid var(--wt-border);vertical-align:middle}
+.wt-table tr:last-child td{border-bottom:none}
+.wt-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:600}
+.wt-badge-success{background:rgba(52,199,89,0.12);color:var(--wt-success)}
+.wt-badge-danger{background:rgba(255,59,48,0.12);color:var(--wt-danger)}
+.wt-badge-secondary{background:rgba(142,142,147,0.12);color:var(--wt-text-secondary)}
+.wt-badge-warning{background:rgba(255,159,10,0.12);color:var(--wt-warning)}
+.wt-detail-back{font-size:13px;color:var(--wt-accent);cursor:pointer;margin-bottom:12px;display:inline-flex;align-items:center;gap:4px}
+.wt-detail-back:hover{text-decoration:underline}
+.wt-field{margin-bottom:12px}
+.wt-field label{display:block;font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:4px}
+.wt-theme-dropdown{position:relative;display:inline-block}
+.wt-theme-menu{display:none;position:absolute;right:0;top:100%;background:var(--wt-card-bg);border:0.5px solid var(--wt-border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.12);min-width:140px;z-index:100;overflow:hidden}
+.wt-theme-menu.open{display:block}
+.wt-theme-opt{padding:8px 14px;font-size:13px;cursor:pointer;transition:background 0.1s}
+.wt-theme-opt:hover{background:rgba(0,0,0,0.04)}
+.wt-theme-opt.active{color:var(--wt-accent);font-weight:600}
+.wt-status-bar{padding:8px 16px;border-top:0.5px solid var(--wt-border);font-size:11px;color:var(--wt-text-secondary);display:flex;gap:16px;margin-top:auto}
+.wt-filter-bar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+.wt-select{padding:5px 10px;border-radius:7px;border:0.5px solid var(--wt-border);background:var(--wt-bg);color:var(--wt-text);font-size:12px;font-family:var(--wt-font)}
+.wt-toggle{position:relative;width:42px;height:24px;background:var(--wt-border);border-radius:12px;cursor:pointer;transition:background 0.2s}
+.wt-toggle.on{background:var(--wt-success)}
+.wt-toggle::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;background:#fff;border-radius:50%;transition:transform 0.2s;box-shadow:0 1px 3px rgba(0,0,0,0.2)}
+.wt-toggle.on::after{transform:translateX(18px)}
+.hidden{display:none !important}
+.wt-page{display:none}
+.wt-page.active{display:block}
+</style></head><body>
+<div class="wt-app">
+<aside class="wt-sidebar">
+<div class="wt-sidebar-header"><h1>WhisperTalk</h1></div>
+<div class="wt-sidebar-section">
+<p class="wt-sidebar-section-title">Testing</p>
+<a class="wt-nav-item active" data-page="tests" onclick="showPage('tests')">
+<span class="nav-icon">&#x1F9EA;</span>Tests<span class="nav-badge" id="testsBadge">0</span></a>
+</div>
+<div class="wt-sidebar-section">
+<p class="wt-sidebar-section-title">Services</p>
+<a class="wt-nav-item" data-page="services" onclick="showPage('services')">
+<span class="nav-icon">&#x2699;</span>Pipeline<span class="nav-badge" id="svcBadge">0/6</span></a>
+</div>
+<div class="wt-sidebar-section">
+<p class="wt-sidebar-section-title">System</p>
+<a class="wt-nav-item" data-page="logs" onclick="showPage('logs')">
+<span class="nav-icon">&#x1F4CB;</span>Live Logs</a>
+<a class="wt-nav-item" data-page="database" onclick="showPage('database')">
+<span class="nav-icon">&#x1F5C4;</span>Database</a>
+</div>
+<div class="wt-status-bar" id="statusBar">
+<span id="statusText">Connecting...</span>
+</div>
+<div style="padding:8px 12px;border-top:0.5px solid var(--wt-border)">
+<div class="wt-theme-dropdown" style="width:100%">
+<div class="wt-nav-item" onclick="toggleThemeMenu()" style="margin:0">
+<span class="nav-icon">&#x1F3A8;</span>Theme<span style="margin-left:auto;font-size:11px;color:var(--wt-text-secondary)" id="currentThemeName">)WT" + theme + R"WT(</span>
+</div>
+<div class="wt-theme-menu" id="themeMenu">
+<div class="wt-theme-opt)WT" + std::string(theme == "default" ? " active" : "") + R"WT(" onclick="setTheme('default')">Default</div>
+<div class="wt-theme-opt)WT" + std::string(theme == "dark" ? " active" : "") + R"WT(" onclick="setTheme('dark')">Dark</div>
+<div class="wt-theme-opt)WT" + std::string(theme == "slate" ? " active" : "") + R"WT(" onclick="setTheme('slate')">Slate</div>
+<div class="wt-theme-opt)WT" + std::string(theme == "flatly" ? " active" : "") + R"WT(" onclick="setTheme('flatly')">Flatly</div>
+<div class="wt-theme-opt)WT" + std::string(theme == "cyborg" ? " active" : "") + R"WT(" onclick="setTheme('cyborg')">Cyborg</div>
+</div></div></div>
+</aside>
+<main class="wt-main">
+)WT";
+        h += build_ui_pages();
+        h += R"WT(</main></div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+)WT" + build_ui_js() + R"WT(
+</script></body></html>)WT";
+        return h;
+    }
+
+    std::string build_ui_pages() {
+        return R"PG(
+<div class="wt-page active" id="page-tests">
+<div class="wt-content">
+<div id="tests-overview">
+<h2 class="wt-page-title">Tests</h2>
+<div id="testsContainer"></div>
+</div>
+<div id="tests-detail" class="hidden">
+<div class="wt-detail-back" onclick="showTestsOverview()">&#x2190; All Tests</div>
+<h2 class="wt-page-title" id="testDetailName"></h2>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Configuration</span>
+<span id="testDetailStatus"></span></div>
+<div class="wt-field"><label>Arguments</label>
+<input class="wt-input" id="testDetailArgs" placeholder="e.g. --gtest_filter=*MyTest*"></div>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-primary" onclick="startTestDetail()">&#x25B6; Run</button>
+<button class="wt-btn wt-btn-danger" id="testStopBtn" onclick="stopTestDetail()" style="display:none">&#x25A0; Stop</button>
+</div></div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Live Output</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="clearTestLog()">Clear</button></div>
+<div class="wt-log-view" id="testDetailLog">Waiting for output...</div>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Run History</span></div>
+<table class="wt-table"><thead><tr><th>Started</th><th>Duration</th><th>Exit Code</th><th>Arguments</th></tr></thead>
+<tbody id="testHistoryBody"></tbody></table>
+</div></div></div></div>
+
+<div class="wt-page" id="page-services">
+<div class="wt-content">
+<div id="services-overview">
+<h2 class="wt-page-title">Pipeline Services</h2>
+<div id="servicesContainer"></div>
+</div>
+<div id="services-detail" class="hidden">
+<div class="wt-detail-back" onclick="showServicesOverview()">&#x2190; All Services</div>
+<h2 class="wt-page-title" id="svcDetailName"></h2>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Configuration</span>
+<span id="svcDetailStatus"></span></div>
+<div class="wt-field"><label>Binary Path</label>
+<div style="font-size:13px;color:var(--wt-text-secondary);font-family:var(--wt-mono)" id="svcDetailPath"></div></div>
+<div class="wt-field"><label>Arguments</label>
+<input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-primary" id="svcStartBtn" onclick="startSvcDetail()">&#x25B6; Start</button>
+<button class="wt-btn wt-btn-danger" id="svcStopBtn" onclick="stopSvcDetail()">&#x25A0; Stop</button>
+<button class="wt-btn wt-btn-secondary" id="svcRestartBtn" onclick="restartSvcDetail()">&#x21BB; Restart</button>
+</div></div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Live Logs</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="clearSvcLog()">Clear</button></div>
+<div class="wt-log-view" id="svcDetailLog">Waiting for logs...</div>
+</div></div></div></div>
+
+<div class="wt-page" id="page-logs">
+<div class="wt-content">
+<h2 class="wt-page-title">Live Logs</h2>
+<div class="wt-filter-bar">
+<select class="wt-select" id="logServiceFilter" onchange="reconnectLogSSE()">
+<option value="">All Services</option>
+<option value="SIP_CLIENT">SIP Client</option>
+<option value="INBOUND_AUDIO_PROCESSOR">Inbound Audio</option>
+<option value="WHISPER_SERVICE">Whisper ASR</option>
+<option value="LLAMA_SERVICE">LLaMA LLM</option>
+<option value="KOKORO_SERVICE">Kokoro TTS</option>
+<option value="OUTBOUND_AUDIO_PROCESSOR">Outbound Audio</option>
+<option value="FRONTEND">Frontend</option>
+</select>
+<select class="wt-select" id="logLevelFilter" onchange="reconnectLogSSE()">
+<option value="">All Levels</option>
+<option value="DEBUG">Debug</option>
+<option value="INFO">Info</option>
+<option value="WARN">Warn</option>
+<option value="ERROR">Error</option>
+</select>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="clearLiveLogs()">Clear</button>
+<label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-left:auto">
+<span>Auto-scroll</span>
+<div class="wt-toggle on" id="autoScrollToggle" onclick="this.classList.toggle('on')"></div></label>
+</div>
+<div class="wt-log-view" id="liveLogView" style="max-height:calc(100vh - 200px)"></div>
+</div></div>
+
+<div class="wt-page" id="page-database">
+<div class="wt-content">
+<h2 class="wt-page-title">Database Admin</h2>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">SQL Query</span>
+<div style="display:flex;align-items:center;gap:8px">
+<label style="font-size:12px;display:flex;align-items:center;gap:6px">
+<span>Write Mode</span>
+<div class="wt-toggle" id="dbWriteToggle" onclick="toggleDbWrite()"></div></label>
+</div></div>
+<textarea class="wt-textarea" id="sqlQuery" rows="3">SELECT * FROM logs ORDER BY id DESC LIMIT 50</textarea>
+<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+<button class="wt-btn wt-btn-primary" onclick="runQuery()">&#x25B6; Execute</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="document.getElementById('sqlQuery').value='SELECT * FROM logs ORDER BY id DESC LIMIT 50'">Recent Logs</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="document.getElementById('sqlQuery').value='SELECT * FROM test_runs ORDER BY start_time DESC LIMIT 20'">Test History</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="document.getElementById('sqlQuery').value='SELECT service, COUNT(*) as count FROM logs GROUP BY service'">Log Stats</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadSchema()">Show Schema</button>
+</div></div>
+<div id="queryResults"></div>
+<div id="schemaView" class="hidden"></div>
+</div></div>
+)PG";
+    }
+
+    std::string build_ui_js() {
         std::string port_str = std::to_string(http_port_);
-        const char* html_part3 = "';</script></body></html>";
-        
-        mg_http_reply(c, 200, "Content-Type: text/html\r\n", "%s%s%s%s", html_part1, html_part2, port_str.c_str(), html_part3);
+        return R"JS(
+var currentPage='tests',currentTest=null,currentSvc=null;
+var logSSE=null,svcLogSSE=null,testLogPoll=null;
+
+function showPage(p){
+  document.querySelectorAll('.wt-page').forEach(e=>e.classList.remove('active'));
+  document.getElementById('page-'+p).classList.add('active');
+  document.querySelectorAll('.wt-nav-item').forEach(e=>{
+    e.classList.toggle('active',e.dataset.page===p);
+  });
+  currentPage=p;
+  if(p==='tests'){showTestsOverview();fetchTests();}
+  if(p==='services'){showServicesOverview();fetchServices();}
+  if(p==='logs'){reconnectLogSSE();}
+  if(p==='database'){}
+}
+
+function fetchStatus(){
+  fetch('/api/status').then(r=>r.json()).then(d=>{
+    document.getElementById('statusText').textContent=
+      d.services_online+' services \u2022 '+d.running_tests+' tests \u2022 '+d.sse_connections+' SSE';
+    document.getElementById('svcBadge').textContent=d.services_online+'/6';
+  }).catch(()=>{document.getElementById('statusText').textContent='Disconnected';});
+}
+
+function fetchTests(){
+  fetch('/api/tests').then(r=>r.json()).then(d=>{
+    var running=d.tests.filter(t=>t.is_running).length;
+    document.getElementById('testsBadge').textContent=d.tests.length;
+    var c=document.getElementById('testsContainer');
+    c.innerHTML=d.tests.map(t=>{
+      var status=t.is_running?'<span class="wt-badge wt-badge-success"><span class="wt-status-dot running"></span>Running</span>'
+        :(t.exit_code===0&&t.end_time?'<span class="wt-badge wt-badge-secondary">Passed</span>'
+        :(t.exit_code>0?'<span class="wt-badge wt-badge-danger">Failed ('+t.exit_code+')</span>'
+        :'<span class="wt-badge wt-badge-secondary">Idle</span>'));
+      return '<div class="wt-card" style="cursor:pointer" onclick="showTestDetail(\''+t.name+'\')">'
+        +'<div class="wt-card-header"><span class="wt-card-title">'
+        +'<span class="wt-status-dot '+(t.is_running?'running':(t.exit_code===0&&t.end_time?'online':'offline'))+'"></span>'
+        +t.name+'</span>'+status+'</div>'
+        +'<div style="font-size:12px;color:var(--wt-text-secondary)">'+t.description+'</div>'
+        +'<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">'+t.binary_path+'</div>'
+        +'</div>';
+    }).join('');
+    if(currentTest){
+      var t=d.tests.find(x=>x.name===currentTest);
+      if(t)updateTestDetail(t);
+    }
+  });
+}
+
+function showTestDetail(name){
+  currentTest=name;
+  document.getElementById('tests-overview').classList.add('hidden');
+  document.getElementById('tests-detail').classList.remove('hidden');
+  document.getElementById('testDetailName').textContent=name;
+  fetch('/api/tests').then(r=>r.json()).then(d=>{
+    var t=d.tests.find(x=>x.name===name);
+    if(t)updateTestDetail(t);
+  });
+  loadTestHistory(name);
+  pollTestLog();
+}
+
+function updateTestDetail(t){
+  var s=t.is_running?'<span class="wt-badge wt-badge-success">Running</span>'
+    :(t.exit_code===0&&t.end_time?'<span class="wt-badge wt-badge-secondary">Passed</span>'
+    :(t.exit_code>0?'<span class="wt-badge wt-badge-danger">Failed</span>':'<span class="wt-badge wt-badge-secondary">Idle</span>'));
+  document.getElementById('testDetailStatus').innerHTML=s;
+  document.getElementById('testStopBtn').style.display=t.is_running?'':'none';
+  if(!document.getElementById('testDetailArgs').value&&t.default_args){
+    document.getElementById('testDetailArgs').value=Array.isArray(t.default_args)?t.default_args.join(' '):t.default_args;
+  }
+}
+
+function showTestsOverview(){
+  currentTest=null;
+  if(testLogPoll){clearInterval(testLogPoll);testLogPoll=null;}
+  document.getElementById('tests-overview').classList.remove('hidden');
+  document.getElementById('tests-detail').classList.add('hidden');
+}
+
+function startTestDetail(){
+  if(!currentTest)return;
+  var args=document.getElementById('testDetailArgs').value;
+  fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({test:currentTest,args:args})}).then(()=>{
+    document.getElementById('testDetailLog').textContent='Starting...';
+    setTimeout(fetchTests,500);pollTestLog();
+  });
+}
+
+function stopTestDetail(){
+  if(!currentTest)return;
+  fetch('/api/tests/stop',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({test:currentTest})}).then(()=>setTimeout(fetchTests,500));
+}
+
+function clearTestLog(){document.getElementById('testDetailLog').textContent='';}
+
+function pollTestLog(){
+  if(testLogPoll)clearInterval(testLogPoll);
+  testLogPoll=setInterval(()=>{
+    if(!currentTest)return;
+    fetch('/api/tests/'+encodeURIComponent(currentTest)+'/log').then(r=>r.json()).then(d=>{
+      if(d.log){
+        var el=document.getElementById('testDetailLog');
+        el.textContent=d.log;
+        el.scrollTop=el.scrollHeight;
+      }
+    }).catch(()=>{});
+  },1500);
+}
+
+function loadTestHistory(name){
+  fetch('/api/tests/'+encodeURIComponent(name)+'/history').then(r=>r.json()).then(d=>{
+    var tb=document.getElementById('testHistoryBody');
+    tb.innerHTML=d.runs.map(r=>{
+      var started=r.start_time?new Date(r.start_time*1000).toLocaleString():'--';
+      var dur=r.end_time&&r.start_time?(r.end_time-r.start_time)+'s':'--';
+      var code=r.exit_code===0?'<span class="wt-badge wt-badge-success">0</span>'
+        :'<span class="wt-badge wt-badge-danger">'+r.exit_code+'</span>';
+      return '<tr><td>'+started+'</td><td>'+dur+'</td><td>'+code+'</td><td style="font-family:var(--wt-mono);font-size:12px">'+
+        (r.arguments||'--')+'</td></tr>';
+    }).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--wt-text-secondary)">No history</td></tr>';
+  });
+}
+
+function fetchServices(){
+  fetch('/api/services').then(r=>r.json()).then(d=>{
+    var online=d.services.filter(s=>s.online).length;
+    document.getElementById('svcBadge').textContent=online+'/'+d.services.length;
+    var c=document.getElementById('servicesContainer');
+    c.innerHTML=d.services.map(s=>{
+      var status=s.online?'<span class="wt-badge wt-badge-success"><span class="wt-status-dot online"></span>Online</span>'
+        :'<span class="wt-badge wt-badge-secondary"><span class="wt-status-dot offline"></span>Offline</span>';
+      var desc={'SIP_CLIENT':'SIP/RTP Gateway','INBOUND_AUDIO_PROCESSOR':'G.711 Decode & Resample',
+        'WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM','KOKORO_SERVICE':'Kokoro TTS',
+        'OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP'};
+      return '<div class="wt-card" style="cursor:pointer" onclick="showSvcDetail(\''+s.name+'\')">'
+        +'<div class="wt-card-header"><span class="wt-card-title">'
+        +'<span class="wt-status-dot '+(s.online?'online':'offline')+'"></span>'
+        +s.name+'</span>'+status+'</div>'
+        +'<div style="font-size:12px;color:var(--wt-text-secondary)">'+(desc[s.name]||s.description)+'</div>'
+        +'<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">'+s.binary_path+'</div>'
+        +(s.managed?'<div style="font-size:11px;margin-top:4px"><span class="wt-badge wt-badge-warning">Managed by Frontend</span></div>':'')
+        +'</div>';
+    }).join('');
+    if(currentSvc){
+      var s=d.services.find(x=>x.name===currentSvc);
+      if(s)updateSvcDetail(s);
+    }
+  });
+}
+
+function showSvcDetail(name){
+  currentSvc=name;
+  document.getElementById('services-overview').classList.add('hidden');
+  document.getElementById('services-detail').classList.remove('hidden');
+  document.getElementById('svcDetailName').textContent=name;
+  fetch('/api/services').then(r=>r.json()).then(d=>{
+    var s=d.services.find(x=>x.name===name);
+    if(s)updateSvcDetail(s);
+  });
+  connectSvcSSE(name);
+}
+
+function updateSvcDetail(s){
+  document.getElementById('svcDetailPath').textContent=s.binary_path;
+  document.getElementById('svcDetailArgs').value=s.default_args||'';
+  var online=s.online;
+  document.getElementById('svcDetailStatus').innerHTML=online
+    ?'<span class="wt-badge wt-badge-success">Online</span>'
+    :'<span class="wt-badge wt-badge-secondary">Offline</span>';
+  document.getElementById('svcStartBtn').style.display=online?'none':'';
+  document.getElementById('svcStopBtn').style.display=(s.managed&&online)?'':'none';
+  document.getElementById('svcRestartBtn').style.display=(s.managed&&online)?'':'none';
+}
+
+function showServicesOverview(){
+  currentSvc=null;
+  if(svcLogSSE){svcLogSSE.close();svcLogSSE=null;}
+  document.getElementById('services-overview').classList.remove('hidden');
+  document.getElementById('services-detail').classList.add('hidden');
+}
+
+function startSvcDetail(){
+  if(!currentSvc)return;
+  var args=document.getElementById('svcDetailArgs').value;
+  fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:currentSvc,args:args})}).then(()=>{
+    setTimeout(fetchServices,1000);connectSvcSSE(currentSvc);
+  });
+}
+function stopSvcDetail(){
+  if(!currentSvc)return;
+  fetch('/api/services/stop',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:currentSvc})}).then(()=>setTimeout(fetchServices,1000));
+}
+function restartSvcDetail(){
+  if(!currentSvc)return;
+  var args=document.getElementById('svcDetailArgs').value;
+  fetch('/api/services/restart',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:currentSvc,args:args})}).then(()=>setTimeout(fetchServices,2000));
+}
+function clearSvcLog(){document.getElementById('svcDetailLog').textContent='';}
+
+function connectSvcSSE(name){
+  if(svcLogSSE){svcLogSSE.close();}
+  svcLogSSE=new EventSource('/api/logs/stream?service='+encodeURIComponent(name));
+  svcLogSSE.onmessage=function(e){
+    try{
+      var d=JSON.parse(e.data);
+      var el=document.getElementById('svcDetailLog');
+      el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+d.timestamp+'</span> '
+        +'<span class="log-lvl-'+d.level+'">'+d.level+'</span> '+escapeHtml(d.message)+'</div>';
+      el.scrollTop=el.scrollHeight;
+    }catch(x){}
+  };
+}
+
+function reconnectLogSSE(){
+  if(logSSE){logSSE.close();}
+  var svc=document.getElementById('logServiceFilter').value;
+  var url='/api/logs/stream';
+  if(svc)url+='?service='+encodeURIComponent(svc);
+  logSSE=new EventSource(url);
+  logSSE.onmessage=function(e){
+    try{
+      var d=JSON.parse(e.data);
+      var lvl=document.getElementById('logLevelFilter').value;
+      if(lvl&&d.level!==lvl)return;
+      var el=document.getElementById('liveLogView');
+      el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+d.timestamp+'</span> '
+        +'<span class="log-svc">'+d.service+'</span> '
+        +'<span class="log-lvl-'+d.level+'">'+d.level+'</span> '+escapeHtml(d.message)+'</div>';
+      if(el.children.length>2000){el.removeChild(el.firstChild);}
+      if(document.getElementById('autoScrollToggle').classList.contains('on')){el.scrollTop=el.scrollHeight;}
+    }catch(x){}
+  };
+}
+
+function clearLiveLogs(){document.getElementById('liveLogView').innerHTML='';}
+
+function runQuery(){
+  var q=document.getElementById('sqlQuery').value;
+  if(!q)return;
+  fetch('/api/db/query',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({query:q})}).then(r=>r.json()).then(d=>{
+    var c=document.getElementById('queryResults');
+    if(d.error){
+      c.innerHTML='<div class="wt-card" style="border-color:var(--wt-danger)"><div style="color:var(--wt-danger);font-weight:500">Error</div><div style="font-size:13px;margin-top:4px">'+escapeHtml(d.error)+'</div></div>';
+    }else if(d.rows&&d.rows.length>0){
+      var cols=Object.keys(d.rows[0]);
+      c.innerHTML='<div class="wt-card" style="padding:0;overflow:auto"><table class="wt-table"><thead><tr>'
+        +cols.map(k=>'<th>'+escapeHtml(k)+'</th>').join('')+'</tr></thead><tbody>'
+        +d.rows.map(r=>'<tr>'+cols.map(k=>'<td style="font-size:12px;font-family:var(--wt-mono)">'+escapeHtml(String(r[k]??'NULL'))+'</td>').join('')+'</tr>').join('')
+        +'</tbody></table></div>'
+        +(d.truncated?'<div style="font-size:12px;color:var(--wt-warning);margin-top:4px">Results truncated to 10,000 rows</div>':'')
+        +'<div style="font-size:12px;color:var(--wt-text-secondary);margin-top:4px">'+d.rows.length+' rows returned</div>';
+    }else{
+      c.innerHTML='<div class="wt-card"><div style="color:var(--wt-success)">Query executed successfully</div>'
+        +'<div style="font-size:13px;margin-top:4px">'+(d.affected||0)+' rows affected</div></div>';
+    }
+  });
+}
+
+function toggleDbWrite(){
+  var el=document.getElementById('dbWriteToggle');
+  var newMode=!el.classList.contains('on');
+  if(newMode&&!confirm('Enable write mode? This allows INSERT, UPDATE, DELETE queries.')){return;}
+  fetch('/api/db/write_mode',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:newMode?'true':'false'})}).then(r=>r.json()).then(d=>{
+    if(d.write_mode)el.classList.add('on');else el.classList.remove('on');
+  });
+}
+
+function loadSchema(){
+  fetch('/api/db/schema').then(r=>r.json()).then(d=>{
+    var v=document.getElementById('schemaView');
+    v.classList.remove('hidden');
+    v.innerHTML=d.tables.map(t=>
+      '<div class="wt-card"><div class="wt-card-title" style="margin-bottom:8px">'+escapeHtml(t.name)+'</div>'
+      +'<pre style="font-size:12px;font-family:var(--wt-mono);margin:0;white-space:pre-wrap;color:var(--wt-text-secondary)">'+escapeHtml(t.sql)+'</pre></div>'
+    ).join('');
+  });
+}
+
+function setTheme(t){
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:'theme',value:t})}).then(()=>location.reload());
+}
+
+function toggleThemeMenu(){
+  document.getElementById('themeMenu').classList.toggle('open');
+}
+
+function escapeHtml(s){
+  if(!s)return'';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+setInterval(fetchStatus,3000);
+setInterval(fetchTests,3000);
+setInterval(fetchServices,5000);
+fetchStatus();fetchTests();fetchServices();
+document.getElementById('statusText').textContent='Port )JS" + port_str + R"JS(';
+
+document.addEventListener('click',function(e){
+  if(!e.target.closest('.wt-theme-dropdown')){
+    document.getElementById('themeMenu').classList.remove('open');
+  }
+});
+
+document.getElementById('sqlQuery').addEventListener('keydown',function(e){
+  if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();runQuery();}
+});
+)JS";
+    }
+
+    void serve_theme_css(struct mg_connection *c, struct mg_http_message *hm) {
+        std::string uri(hm->uri.buf, hm->uri.len);
+        std::string name = uri.substr(strlen("/css/theme/"));
+
+        static const char* slate_css = R"CSS(
+:root{--wt-bg:#272b30;--wt-sidebar-bg:rgba(39,43,48,0.85);--wt-card-bg:#32363b;--wt-border:#43474c;--wt-text:#c8c8c8;--wt-text-secondary:#999;--wt-accent:#5bc0de;--wt-success:#62c462;--wt-danger:#ee5f5b;--wt-warning:#f89406}
+body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
+.wt-sidebar{background:var(--wt-sidebar-bg) !important;border-color:var(--wt-border) !important}
+.wt-card{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important}
+.wt-card:hover{box-shadow:0 2px 12px rgba(0,0,0,0.2) !important}
+.wt-input,.wt-textarea,.wt-select{background:#3a3f44 !important;color:var(--wt-text) !important;border-color:var(--wt-border) !important}
+.wt-btn-secondary{background:#43474c !important;color:#c8c8c8 !important}
+.wt-nav-item{color:var(--wt-text) !important}
+.wt-nav-item:hover{background:rgba(255,255,255,0.05) !important}
+.wt-nav-item.active{background:var(--wt-accent) !important;color:#fff !important}
+.wt-table th{color:var(--wt-text-secondary) !important;border-color:var(--wt-border) !important}
+.wt-table td{border-color:var(--wt-border) !important}
+.wt-page-title{color:#fff !important}
+.wt-status-bar{border-color:var(--wt-border) !important}
+.wt-sidebar-header h1{color:#999 !important}
+.wt-sidebar-section-title{color:#777 !important}
+.wt-theme-menu{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important}
+.wt-theme-opt:hover{background:rgba(255,255,255,0.05) !important}
+)CSS";
+
+        static const char* flatly_css = R"CSS(
+:root{--wt-bg:#ecf0f1;--wt-sidebar-bg:rgba(255,255,255,0.88);--wt-card-bg:#fff;--wt-border:#dce4ec;--wt-text:#2c3e50;--wt-text-secondary:#7b8a8b;--wt-accent:#18bc9c;--wt-success:#18bc9c;--wt-danger:#e74c3c;--wt-warning:#f39c12;--wt-radius:4px}
+body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
+.wt-card{border-radius:var(--wt-radius) !important;border-color:var(--wt-border) !important}
+.wt-btn{border-radius:4px !important}
+.wt-input,.wt-textarea,.wt-select{border-radius:4px !important}
+.wt-nav-item{border-radius:4px !important}
+.wt-nav-item.active{background:var(--wt-accent) !important}
+.wt-badge{border-radius:3px !important}
+.wt-page-title{color:#2c3e50 !important;font-weight:800 !important}
+.wt-sidebar-header h1{color:#2c3e50 !important}
+.wt-btn-primary{background:var(--wt-accent) !important}
+.wt-btn-primary:hover{background:#15a589 !important}
+.wt-nav-item .nav-badge{background:var(--wt-accent) !important}
+.wt-log-view{border-radius:var(--wt-radius) !important}
+)CSS";
+
+        static const char* cyborg_css = R"CSS(
+:root{--wt-bg:#060606;--wt-sidebar-bg:rgba(17,17,17,0.9);--wt-card-bg:#111;--wt-border:#282828;--wt-text:#ddd;--wt-text-secondary:#888;--wt-accent:#2a9fd6;--wt-success:#77b300;--wt-danger:#cc0000;--wt-warning:#ff8800;--wt-radius:0px}
+body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
+.wt-sidebar{background:var(--wt-sidebar-bg) !important;border-color:var(--wt-border) !important}
+.wt-card{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important;border-radius:0 !important}
+.wt-card:hover{box-shadow:0 0 10px rgba(42,159,214,0.15) !important}
+.wt-input,.wt-textarea,.wt-select{background:#1a1a1a !important;color:var(--wt-text) !important;border-color:var(--wt-border) !important;border-radius:0 !important}
+.wt-btn{border-radius:0 !important;text-transform:uppercase;font-size:11px !important;letter-spacing:1px}
+.wt-btn-primary{background:var(--wt-accent) !important}
+.wt-btn-primary:hover{background:#2186b4 !important}
+.wt-btn-secondary{background:#282828 !important;color:#aaa !important}
+.wt-nav-item{color:var(--wt-text) !important;border-radius:0 !important}
+.wt-nav-item:hover{background:rgba(42,159,214,0.1) !important}
+.wt-nav-item.active{background:var(--wt-accent) !important;color:#fff !important;border-radius:0 !important}
+.wt-nav-item .nav-badge{background:var(--wt-accent) !important;border-radius:0 !important}
+.wt-table th{color:var(--wt-accent) !important;border-color:var(--wt-border) !important;text-transform:uppercase}
+.wt-table td{border-color:var(--wt-border) !important}
+.wt-page-title{color:var(--wt-accent) !important;text-transform:uppercase;letter-spacing:2px}
+.wt-status-bar{border-color:var(--wt-border) !important}
+.wt-sidebar-header h1{color:var(--wt-accent) !important;letter-spacing:2px}
+.wt-sidebar-section-title{color:var(--wt-accent) !important;letter-spacing:1px}
+.wt-badge{border-radius:0 !important}
+.wt-log-view{border-radius:0 !important}
+.wt-theme-menu{background:#111 !important;border-color:var(--wt-border) !important;border-radius:0 !important}
+.wt-theme-opt:hover{background:rgba(42,159,214,0.1) !important}
+.wt-toggle{border-radius:2px !important}
+.wt-toggle::after{border-radius:2px !important}
+.wt-status-dot.online{box-shadow:0 0 6px var(--wt-success) !important}
+)CSS";
+
+        const char* css = nullptr;
+        if (name == "slate") css = slate_css;
+        else if (name == "flatly") css = flatly_css;
+        else if (name == "cyborg") css = cyborg_css;
+
+        if (css) {
+            mg_http_reply(c, 200, "Content-Type: text/css\r\nCache-Control: no-cache\r\n", "%s", css);
+        } else {
+            mg_http_reply(c, 404, "", "Theme not found\n");
+        }
     }
 
     void serve_tests_api(struct mg_connection *c) {
