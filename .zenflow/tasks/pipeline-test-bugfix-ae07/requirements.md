@@ -49,10 +49,12 @@ The existing `test_sip_provider` currently only injects a synthetic 400Hz tone. 
 
 ### 3.2 Frontend Integration
 
-The frontend **Tests tab** must provide:
-- A list of available sound files from `Testfiles/` (scanned from the directory)
-- A button/control to inject a selected file into an active call leg
-- The ability to start/stop the SIP provider (already partially exists in the Tests tab's test runner)
+The frontend **Tests tab** must provide a new "Audio File Injection" section below the existing test runner:
+- A dropdown listing available files from `Testfiles/` (fetched via `GET /files` on page load and refreshed periodically)
+- A "Leg" selector (A or B)
+- An "Inject" button that calls `POST /inject` with the selected file and leg
+- A status line showing last injection result (success/error, filename, timestamp)
+- The existing start/stop controls for the SIP provider remain as-is
 
 ### 3.3 Communication: Frontend -> SIP Provider
 
@@ -64,7 +66,9 @@ The SIP provider embeds a **mongoose HTTP server** on port **22011** for control
 
 The frontend browser JS calls these endpoints directly. Also testable via `curl`.
 
-**Rationale**: The SIP provider is a standalone test tool, not an `InterconnectNode`. Mongoose is already in the project and provides a clean, self-contained HTTP API with minimal code.
+CORS: Allow requests from the frontend origin (`http://localhost:8080`). Error responses use HTTP 400 with JSON body: `{"error": "<message>"}` (e.g., file not found, no active call, invalid leg).
+
+**Rationale**: The SIP provider is a standalone test tool that simulates external SIP infrastructure — it is not part of the WhisperTalk pipeline interconnect chain and does not use `InterconnectNode`. Mongoose is already in the project and provides a clean, self-contained HTTP API with minimal code.
 
 ## 4. SIP Client: Dynamic Line Management
 
@@ -188,7 +192,7 @@ Initial estimates based on Apple Silicon (M-series) capabilities with CoreML/Met
 - **Directory name**: Created `Testfiles/` directory (task description said "Testifies" which appears to be a typo)
 - **Transcription vs translation**: `.txt` files contain transcriptions (German audio -> German text), not cross-language translations. The pipeline performs speech-to-speech within the same language (German).
 - **Audio format**: All initial test files are 44.1kHz WAV for consistency; the SIP provider is designed to handle various sample rates for future extensibility
-- **Control channel**: Embedded mongoose HTTP server on port 22011 for SIP provider injection commands
+- **Control channel**: Embedded mongoose HTTP server on port 22011 for SIP provider injection commands (port chosen to avoid conflicts with SIP 5060, interconnect 22222/33333, pipeline service ports 8083/8090/9001/9002/13000, and frontend 8080)
 - **Line management**: Interconnect negotiation protocol extension (user confirmed)
 - **Initial test config**: 2 lines (1 active, 1 listening); manual scaling via frontend
 - **Language**: All test audio is German; Whisper and LLaMA are configured for German
