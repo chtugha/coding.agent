@@ -114,7 +114,7 @@ public:
         if (probe >= 0) {
             struct sockaddr_in pa{};
             pa.sin_family = AF_INET;
-            pa.sin_addr.s_addr = htonl(INADDR_ANY);
+            pa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             pa.sin_port = htons(log_port_);
             if (bind(probe, (struct sockaddr*)&pa, sizeof(pa)) < 0) {
                 std::cerr << "FATAL: Log port " << log_port_ << " is already in use (another frontend running?)\n";
@@ -551,7 +551,7 @@ private:
         struct sockaddr_in addr;
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = htons(log_port_);
 
         if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {

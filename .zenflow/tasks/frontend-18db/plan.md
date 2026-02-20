@@ -169,10 +169,12 @@ cd build && cmake .. -DBUILD_TESTS=ON && make test_interconnect && ./bin/test_in
   - GET/POST /api/settings
 
 **Security Hardening**:
-- `/api/db/query` restricted to SELECT/EXPLAIN/PRAGMA by default
+- `/api/db/query` restricted to SELECT, EXPLAIN, and 14 whitelisted read-only PRAGMAs
+- PRAGMA queries with `=` blocked (prevents writable_schema, journal_mode, etc.)
 - Write mode toggle via `/api/db/write_mode` (in-memory, resets on restart)
 - SQL injection fixed in `serve_logs_api()` with parameterized queries
-- Binary path whitelist: only `bin/` relative paths, must be regular executable file
+- Binary path whitelist for services AND tests: only `bin/` relative paths, must be regular executable file
+- HTTP server and UDP log receiver bound to localhost only (127.0.0.1)
 - Improved JSON parser handles escaped quotes
 - fork() error handling with errno logging
 - Restart race fix: polls interconnect instead of blind usleep
