@@ -1120,7 +1120,7 @@ function fetchTests(){
     c.innerHTML=d.tests.map(t=>{
       var status=t.is_running?'<span class="wt-badge wt-badge-success"><span class="wt-status-dot running"></span>Running</span>'
         :(t.exit_code===0&&t.end_time?'<span class="wt-badge wt-badge-secondary">Passed</span>'
-        :(t.exit_code>0?'<span class="wt-badge wt-badge-danger">Failed ('+t.exit_code+')</span>'
+        :(t.exit_code>0?'<span class="wt-badge wt-badge-danger">Failed ('+escapeHtml(String(t.exit_code))+')</span>'
         :'<span class="wt-badge wt-badge-secondary">Idle</span>'));
       var eName=escapeHtml(t.name),eDesc=escapeHtml(t.description),ePath=escapeHtml(t.binary_path);
       var safeAttr=t.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
@@ -1209,9 +1209,9 @@ function loadTestHistory(name){
       var started=r.start_time?new Date(r.start_time*1000).toLocaleString():'--';
       var dur=r.end_time&&r.start_time?(r.end_time-r.start_time)+'s':'--';
       var code=r.exit_code===0?'<span class="wt-badge wt-badge-success">0</span>'
-        :'<span class="wt-badge wt-badge-danger">'+r.exit_code+'</span>';
-      return '<tr><td>'+started+'</td><td>'+dur+'</td><td>'+code+'</td><td style="font-family:var(--wt-mono);font-size:12px">'+
-        (r.arguments||'--')+'</td></tr>';
+        :'<span class="wt-badge wt-badge-danger">'+escapeHtml(String(r.exit_code))+'</span>';
+      return '<tr><td>'+escapeHtml(started)+'</td><td>'+escapeHtml(dur)+'</td><td>'+code+'</td><td style="font-family:var(--wt-mono);font-size:12px">'+
+        escapeHtml(r.arguments||'--')+'</td></tr>';
     }).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--wt-text-secondary)">No history</td></tr>';
   });
 }
@@ -1359,10 +1359,10 @@ function runQuery(){
         +d.rows.map(r=>'<tr>'+cols.map(k=>'<td style="font-size:12px;font-family:var(--wt-mono)">'+escapeHtml(String(r[k]??'NULL'))+'</td>').join('')+'</tr>').join('')
         +'</tbody></table></div>'
         +(d.truncated?'<div style="font-size:12px;color:var(--wt-warning);margin-top:4px">Results truncated to 10,000 rows</div>':'')
-        +'<div style="font-size:12px;color:var(--wt-text-secondary);margin-top:4px">'+d.rows.length+' rows returned</div>';
+        +'<div style="font-size:12px;color:var(--wt-text-secondary);margin-top:4px">'+escapeHtml(String(d.rows.length))+' rows returned</div>';
     }else{
       c.innerHTML='<div class="wt-card"><div style="color:var(--wt-success)">Query executed successfully</div>'
-        +'<div style="font-size:13px;margin-top:4px">'+(d.affected||0)+' rows affected</div></div>';
+        +'<div style="font-size:13px;margin-top:4px">'+escapeHtml(String(d.affected||0))+' rows affected</div></div>';
     }
   });
 }
