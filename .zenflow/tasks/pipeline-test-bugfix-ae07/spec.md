@@ -8,6 +8,7 @@
 - **Key Libraries**: mongoose (HTTP server, already compiled into frontend and available as `mongoose.c`/`mongoose.h`), SQLite3 (frontend DB), whisper.cpp, llama.cpp, libtorch + espeak-ng (Kokoro)
 - **Interconnect**: Custom TCP protocol via `interconnect.h` — linear pipeline topology, master/slave negotiation on ports 22222/33333+, heartbeat, speech signals, call lifecycle management
 - **Test Framework**: Google Test (fetched via CMake FetchContent when `BUILD_TESTS=ON`)
+- **Working Directory**: All services and test tools assume they are launched from the project root directory. The frontend, when launching `test_sip_provider` via `fork()/execv()`, must set CWD to project root. Alternatively, the SIP provider accepts `--testfiles-dir <path>` (default: `Testfiles/` relative to CWD). The `Testfiles/` directory is located at the project root alongside `CMakeLists.txt`. Since `CMAKE_RUNTIME_OUTPUT_DIRECTORY` is `${CMAKE_SOURCE_DIR}/bin`, the frontend should `chdir()` to the parent of `bin/` before `execv()`, or pass `--testfiles-dir ../Testfiles` when launching from `bin/`.
 
 ## 2. Source Code Structure Changes
 
@@ -36,7 +37,23 @@ None. All changes are modifications to existing files.
 
 #### 3.1.1 Mongoose HTTP Server Embedding
 
-The `TestSipProvider` class gains a `mg_mgr` member. During `init()`, call `mg_mgr_init` and `mg_http_listen` on `http://0.0.0.0:22011`. In the main `run()` loop, call `mg_mgr_poll(&mgr_, 0)` alongside the existing SIP message handling (non-blocking, 0ms timeout).
+The `TestSipProvider` class gains a `mg_mgr` member. During `init()`, call `mg_mgr_init` and `mg_http_listen` on `http://0.0.0.0:22011`. In the main `run()` loop, integrate mongoose polling:
+
+```cpp
+while (g_running) {
+    mg_mgr_poll(&mgr_, 1);  // 1ms timeout for mongoose HTTP
+    
+    // Non-blocking SIP recv (reduce existing 1s timeout to 1ms)
+    struct timeval tv = {0, 1000};
+    setsockopt(sip_sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ssize_t n = recvfrom(sip_sock_, buf, sizeof(buf) - 1, 0, ...);
+    if (n > 0) handle_sip_message(msg, sender);
+    
+    // Existing call state checks...
+}
+```
+
+The key change: reduce the SIP `recvfrom` timeout from 1 second to 1ms so both SIP and HTTP can be serviced responsively in the same loop.
 
 HTTP handler routes:
 - `GET /files` — scan `Testfiles/` directory, return JSON array of `{name, size_bytes}`
@@ -45,39 +62,75 @@ HTTP handler routes:
 
 CORS: Add `Access-Control-Allow-Origin: *\r\n` to all response headers. Handle `OPTIONS` preflight with 204.
 
+HTTP response format:
+- Success: `POST /inject` → 200 `{"success":true,"injecting":"sample_01.wav","leg":"a"}`; `GET /files` → 200 `{"files":[{"name":"sample_01.wav","size_bytes":373130},...]}`; `GET /status` → 200 `{"call_active":true,"relay_stats":{...},"injecting":"sample_01.wav"|null}`
+- Errors: 400 (bad request), 404 (file not found), 409 (no active call), 500 (runtime failure) — all with `{"error":"<message>"}`
+
 #### 3.1.2 WAV Loading and Resampling
 
-Add a `load_wav_file(path) -> {samples, sample_rate, channels}` function:
-- Read RIFF/WAV header to extract `fmt` chunk: sample rate, bit depth, channels
-- Read `data` chunk into `std::vector<int16_t>` (or convert from float32 if needed)
-- If stereo, downmix to mono
+**WAV Parser** — add a `load_wav_file(path) -> WavData` function returning `{std::vector<int16_t> samples, uint32_t sample_rate, uint16_t channels}`:
 
-Add a `resample_to_8khz(samples, source_rate) -> std::vector<int16_t>` function:
-- Linear interpolation resampler (matches IAP's approach)
-- Handles 44.1kHz, 22.05kHz, 16kHz → 8kHz
+1. Read RIFF header (12 bytes): validate `"RIFF"` magic, read file size, validate `"WAVE"` format
+2. Scan chunks linearly: read chunk ID (4 bytes) + chunk size (4 bytes)
+3. Parse `"fmt "` chunk: extract `audio_format` (1=PCM, 3=IEEE float), `num_channels`, `sample_rate`, `bits_per_sample`
+4. Parse `"data"` chunk: read raw sample data
+5. Convert to int16 mono:
+   - PCM_16: direct read (or byte-swap if needed)
+   - PCM_24: shift right 8 bits to truncate to int16
+   - FLOAT32 (format=3): multiply by 32767, clamp, cast to int16
+   - Stereo: average L+R channels to mono
+6. Error handling: return empty result with error string if RIFF header invalid, format unsupported (e.g. ADPCM, compressed), or file exceeds 50MB safety limit
+7. Supported: PCM_16, PCM_24, FLOAT32 mono/stereo at any sample rate
+8. Rejected: Compressed formats (ADPCM, MP3-in-WAV, etc.)
+
+**Resampler** — add a `resample_to_8khz(samples, source_rate) -> std::vector<int16_t>` function:
+
+For downsampling (e.g. 44.1kHz → 8kHz, ratio 0.1814), a simple low-pass filter is required before decimation to prevent aliasing:
+
+1. **Anti-aliasing filter**: Apply a simple FIR low-pass filter before decimation. Use a windowed-sinc filter with cutoff at 3.4kHz (Nyquist for 8kHz target is 4kHz, with margin). A 15-tap FIR filter provides adequate attenuation for telephony-quality audio:
+   - Generate filter coefficients: sinc function windowed with Hamming window, normalized
+   - Apply via convolution on the source samples
+2. **Decimation**: After filtering, resample using linear interpolation at the target rate:
+   - For each output sample at position `i`, compute source position `src_pos = i * (source_rate / 8000.0)`
+   - Interpolate between the two nearest filtered source samples
+3. Special cases:
+   - Source rate == 8000: no resampling needed, return as-is
+   - Source rate == 16000: simple 2:1 decimation (average pairs), no filter needed (already below Nyquist)
+   - Source rate == 44100, 22050: full filter + decimate path
 
 #### 3.1.3 RTP Injection from File
 
 Refactor existing `inject_audio` method. The current method generates a 400Hz tone — replace with a general `inject_rtp_stream(call, leg, ulaw_samples)` method:
 - Takes pre-encoded u-law samples
 - Sends 160-sample RTP frames at 20ms intervals using `std::this_thread::sleep_for`
-- Manages RTP headers (seq, timestamp += 160, SSRC)
-- Runs in a detached thread per injection; tracks active injection with `std::atomic<bool>`
+- Manages RTP headers: seq (incrementing), timestamp (+= 160 per frame), SSRC (random per call via `std::random_device`)
+
+**Thread management for injection**:
+- Use `std::thread` (joinable, NOT detached), stored in `ActiveCall::inject_thread`
+- Track injection state with `std::atomic<bool> injecting_` per call
+- In the injection loop, check `injecting_` flag before each 20ms sleep. If `false`, exit loop immediately
+- Only one injection per call at a time. To cancel an in-progress injection: set `injecting_ = false`, then `join()` the thread (max wait ~20ms per frame)
+- New injection requests while one is active: cancel the current one first, wait for join, then start new thread
 
 New `inject_file(filename, leg)` method:
 1. Load WAV via `load_wav_file`
 2. Resample to 8kHz via `resample_to_8khz`
 3. Encode each sample via existing `linear_to_ulaw`
-4. Call `inject_rtp_stream`
+4. Cancel any in-progress injection (set `injecting_ = false`, join thread)
+5. Set `injecting_ = true`, start new `inject_rtp_stream` thread
 
 #### 3.1.4 CMake Changes
 
-Add mongoose to the test_sip_provider target:
+Modify the existing `test_sip_provider` target in `CMakeLists.txt` (currently lines 334-336) to add mongoose:
 
 ```cmake
 add_executable(test_sip_provider tests/test_sip_provider.cpp mongoose.c)
+target_link_libraries(test_sip_provider PRIVATE Threads::Threads)
 target_compile_definitions(test_sip_provider PRIVATE MG_ENABLE_PACKED_FS=0)
+set_property(TARGET test_sip_provider PROPERTY CXX_STANDARD 17)
 ```
+
+This replaces the existing 3-line block. `Threads::Threads` is required for `std::thread`, `CXX_STANDARD 17` for structured bindings and other C++17 features, and `MG_ENABLE_PACKED_FS=0` disables mongoose's embedded filesystem (not needed).
 
 ### 3.2 SIP Client Dynamic Line Management (sip-client-main.cpp)
 
@@ -148,20 +201,42 @@ Add to `http_handler`:
 - `POST /api/sip/remove-line` — extract index, send `REMOVE_LINE`
 - `GET /api/sip/lines` — send `LIST_LINES`, return result as JSON
 
-The frontend (as master or via master) can query the SIP client's negotiation port from the service registry, connect, send the command, read the response, and relay it as HTTP JSON.
+**Frontend Interconnect Role and Proxy Mechanism**:
+
+The frontend initializes as `InterconnectNode(ServiceType::FRONTEND)`. It can be either master (if first to start on port 22222) or slave. Either way, it can discover the SIP client's negotiation port:
+
+1. **If frontend is master**: Look up `ServiceType::SIP_CLIENT` directly from the local `service_registry_` via `query_service_ports(ServiceType::SIP_CLIENT)`
+2. **If frontend is slave**: Send `GET_DOWNSTREAM SIP_CLIENT` (or equivalent) to the master to get the SIP client's ports. Alternatively, use the synced registry from SYNC_REGISTRY broadcasts.
+
+Once the SIP client's `neg_in` port is known, the frontend's proxy handler:
+1. Opens a TCP connection to `127.0.0.1:<sip_client_neg_in_port>` using `connect_to_port()`
+2. Sends the text command (e.g. `ADD_LINE alice 127.0.0.1`)
+3. Reads the response with a 2-second timeout
+4. Closes the TCP socket
+5. Parses the response and returns it as JSON to the browser
+
+Add a helper method to `FrontendServer`:
+```cpp
+std::string send_negotiation_command(ServiceType target, const std::string& cmd);
+```
+This encapsulates the connect → send → recv → close pattern. Returns empty string on failure.
+
+**No authentication** for these endpoints — consistent with existing `/api/tests/*` endpoints. Acceptable for localhost-only test environment.
 
 ### 3.4 Interconnect Extension (interconnect.h)
 
 Add a custom handler registration mechanism:
 
 ```cpp
+std::function<std::string(const std::string&)> custom_negotiation_handler_;
+
 void register_custom_negotiation_handler(
     std::function<std::string(const std::string&)> handler) {
     custom_negotiation_handler_ = handler;
 }
 ```
 
-In `handle_negotiation_message`, after all existing `if/else if` chains, add:
+In `handle_negotiation_message`, at the **end** of the function (just before the `if (!response.empty())` send block), add:
 
 ```cpp
 if (response.empty() && custom_negotiation_handler_) {
@@ -169,7 +244,21 @@ if (response.empty() && custom_negotiation_handler_) {
 }
 ```
 
-This allows any service to extend the negotiation protocol without modifying `interconnect.h` for each new command.
+**Master/Slave Topology Clarification**:
+
+The custom handler runs on **whichever node receives the message on its negotiation port**. The line management flow works as follows:
+
+1. The SIP client registers a custom handler during `init()` that handles `ADD_LINE`/`REMOVE_LINE`/`LIST_LINES`
+2. The frontend needs to send these commands **directly to the SIP client's negotiation port**, NOT to the master
+3. The frontend looks up the SIP client's negotiation port from the master's service registry via `query_service_ports(ServiceType::SIP_CLIENT)` (if frontend is master, this is a local lookup; if not, it queries the master)
+4. The frontend opens a TCP connection to the SIP client's `neg_in` port and sends the command directly
+5. The SIP client's `handle_negotiation_message` receives the message, finds no built-in match, delegates to the custom handler, and sends back the response
+
+This approach works regardless of which node is master because:
+- The custom handler is invoked on the SIP client's own negotiation listener
+- The sender (frontend) just needs to know the SIP client's negotiation port
+- The master's service registry provides port discovery
+- No changes to master-specific routing logic are needed
 
 ## 4. Data Flow: Audio File Injection
 
@@ -190,6 +279,14 @@ Frontend (browser)
 ```
 
 ## 5. Incremental Delivery Phases
+
+Phases 1-3 are implementation setup. Phases 4-9 map to the 6 testing stages in requirements.md:
+- Phase 4 → Requirements Stage 1 (Frontend + SIP Provider + SIP Client)
+- Phase 5 → Requirements Stage 2 (+ IAP)
+- Phase 6 → Requirements Stage 3 (+ Whisper)
+- Phase 7 → Requirements Stage 4 (+ LLaMA)
+- Phase 8 → Requirements Stage 5 (+ Kokoro)
+- Phase 9 → Requirements Stage 6 (+ OAP, Full Loop)
 
 ### Phase 1: SIP Provider Enhancement + CMake
 - Mongoose HTTP server in test_sip_provider
@@ -253,8 +350,9 @@ Frontend (browser)
 
 ### Build Verification
 ```bash
-cd coding.agent && mkdir -p build && cd build && cmake .. -DBUILD_TESTS=ON && make -j$(sysctl -n hw.ncpu)
+cmake -B build -DBUILD_TESTS=ON && cmake --build build -j$(sysctl -n hw.ncpu)
 ```
+Run from the project root directory (where `CMakeLists.txt` is located). Binaries output to `bin/`.
 
 ### Functional Verification per Phase
 - **Phase 1**: `curl http://localhost:22011/files` returns JSON array; `curl -X POST -d '{"file":"sample_01.wav","leg":"a"}' http://localhost:22011/inject` triggers injection
@@ -263,7 +361,22 @@ cd coding.agent && mkdir -p build && cd build && cmake .. -DBUILD_TESTS=ON && ma
 - **Phase 4-9**: Run pipeline incrementally, inject test files, verify output at each stage; compare Whisper transcriptions against ground truth `.txt` files
 
 ### Transcription Accuracy Metric
-For Stage 3, compare Whisper output against `Testfiles/*.txt` using normalized string comparison (lowercased, trimmed). Target: exact match or near-exact match (allowing minor punctuation/spacing differences).
+
+For Stage 3, compare Whisper output against `Testfiles/*.txt` ground truth:
+
+1. **Capture**: After injecting a test file, wait for Whisper to emit a complete utterance (indicated by `SPEECH_IDLE` signal or observing the transcription log line `📝 [call_id] Transcription ...`). Extract the transcribed text from Whisper's stdout log output.
+2. **Normalize both strings** (expected from `.txt` and actual from Whisper):
+   - Convert to lowercase
+   - Strip leading/trailing whitespace
+   - Remove all punctuation (`.,;:!?-`)
+   - Collapse multiple spaces to single space
+3. **Comparison**:
+   - **PASS**: 100% normalized string match
+   - **WARN**: ≥90% character-level similarity (Levenshtein distance / max length)
+   - **FAIL**: <90% similarity
+4. **Logging**: Results logged to frontend via UDP log with format:
+   `TRANSCRIPTION_TEST sample_01.wav PASS expected='bei fettiger haut...' got='bei fettiger haut...'`
+5. **Iterative tuning**: If FAIL/WARN, adjust VAD parameters (`VAD_THRESHOLD_MULT`, `VAD_SILENCE_FRAMES`, `VAD_CONTEXT_FRAMES`) and re-run until PASS for all 10 samples.
 
 ## 7. Key Technical Decisions
 
@@ -271,10 +384,16 @@ For Stage 3, compare Whisper output against `Testfiles/*.txt` using normalized s
 
 2. **WAV Parsing**: Implement minimal WAV parser in `test_sip_provider.cpp` (read RIFF header, fmt chunk, data chunk). No external library needed — WAV is a simple format and we only need PCM16/float32 mono/stereo.
 
-3. **Resampling**: Linear interpolation (same approach as IAP's 8kHz→16kHz upsampling). For 44.1kHz→8kHz, ratio = 0.1814. This is adequate for telephony-quality audio.
+3. **Resampling**: FIR low-pass filter + linear interpolation for downsampling (44.1kHz→8kHz). Anti-aliasing filter with 3.4kHz cutoff prevents aliasing artifacts. Simple 2:1 decimation for 16kHz→8kHz. See Section 3.1.2 for details.
 
 4. **Custom Negotiation Handler**: Rather than hardcoding new commands in `interconnect.h`, add a callback mechanism so the SIP client can register its own command parser. This keeps `interconnect.h` generic and the SIP client responsible for its own commands.
 
 5. **Frontend Proxy vs Direct**: The frontend JS calls the SIP provider's HTTP API directly (port 22011) for file injection — this avoids adding proxy logic to the frontend for test-only features. For line management, the frontend uses its interconnect connection to the SIP client since those commands go through the negotiation protocol.
 
-6. **Thread Safety**: Audio injection runs in a separate thread. Track with `std::atomic<bool> injecting_` per call. New injections cancel in-progress ones (set `injecting_ = false`, wait for thread to finish, then start new one).
+6. **Thread Safety**: Audio injection runs in a joinable `std::thread` per call. Track with `std::atomic<bool> injecting_`. New injections cancel in-progress ones (set flag false, join thread, start new). See Section 3.1.3 for details.
+
+7. **File Size Limits**: WAV files capped at 50MB (~5 minutes at 44.1kHz stereo 16-bit) to prevent memory exhaustion during loading.
+
+8. **Concurrent Injection**: Only one injection per call at a time. New injection request cancels any in-progress injection (no queuing).
+
+9. **RTP SSRC**: Use `std::random_device` to generate random SSRC per injection, consistent with existing `inject_audio` pattern (`0xDEAD0001` in current code; replace with random).

@@ -66,7 +66,18 @@ The SIP provider embeds a **mongoose HTTP server** on port **22011** for control
 
 The frontend browser JS calls these endpoints directly. Also testable via `curl`.
 
-CORS: Allow requests from the frontend origin (`http://localhost:8080`). Error responses use HTTP 400 with JSON body: `{"error": "<message>"}` (e.g., file not found, no active call, invalid leg).
+CORS: `Access-Control-Allow-Origin: *` on all responses (localhost test tool, any origin acceptable for test flexibility). Handle `OPTIONS` preflight with 204.
+
+Error responses:
+- 400 Bad Request: `{"error": "Invalid leg 'x', must be 'a' or 'b'"}` — malformed request
+- 404 Not Found: `{"error": "File not found: sample_99.wav"}` — missing file
+- 409 Conflict: `{"error": "No active call to inject into"}` — no call established
+- 500 Internal Server Error: `{"error": "Failed to load WAV file: <reason>"}` — runtime failure
+
+Success responses:
+- `POST /inject` → 200: `{"success": true, "injecting": "sample_01.wav", "leg": "a"}`
+- `GET /files` → 200: `{"files": [{"name": "sample_01.wav", "size_bytes": 373130}, ...]}`
+- `GET /status` → 200: `{"call_active": true, "relay_stats": {...}, "injecting": "sample_01.wav" | null}`
 
 **Rationale**: The SIP provider is a standalone test tool that simulates external SIP infrastructure — it is not part of the WhisperTalk pipeline interconnect chain and does not use `InterconnectNode`. Mongoose is already in the project and provides a clean, self-contained HTTP API with minimal code.
 
