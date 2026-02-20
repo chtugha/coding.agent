@@ -8,7 +8,9 @@ Build a comprehensive, incremental test suite for the WhisperTalk pipeline. Each
 
 ### 2.1 Testfiles Directory
 
-Location: `Testfiles/` in the project root. Contains 10 German speech samples from the Thorsten-Voice dataset (CC0, TV-2022.10-Neutral subset, Rode Podcaster microphone):
+Location: `Testfiles/` in the project root. Contains 10 German speech samples committed to the repository.
+
+**Source**: Thorsten-Voice dataset (CC0 license), subset `TV-2022.10-Neutral`, recorded with a Rode Podcaster microphone. Downloaded via the HuggingFace datasets API (`Thorsten-Voice/TV-44kHz-Full`). The first 10 samples matching 3-5s duration and >= 30 character text length were selected to provide a variety of sentence structures (statements, compound words, proper nouns) suitable for testing VAD segmentation and transcription accuracy. To regenerate, use the same HuggingFace streaming query with the same selection criteria.
 
 | File | Duration | Transcription |
 |------|----------|---------------|
@@ -23,15 +25,17 @@ Location: `Testfiles/` in the project root. Contains 10 German speech samples fr
 | sample_09.wav | 4.5s | münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga. |
 | sample_10.wav | 4.5s | wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt. |
 
-- Format: 44.1kHz, mono, PCM_16, WAV
+- Format: 44.1kHz, mono, PCM_16, WAV (all files uniform for consistency)
 - Each `.wav` has a matching `.txt` with the exact expected transcription
 
 ### 2.2 File Format Handling
 
-The SIP provider must convert any WAV file (potentially different sample rates: 44.1kHz, 22.05kHz, 16kHz) to 8kHz G.711 u-law for RTP injection. This requires:
+All current test files are 44.1kHz WAV. The SIP provider must handle resampling from the source sample rate to 8kHz G.711 u-law for RTP injection. The implementation should be robust enough to accept WAV files at other common sample rates (22.05kHz, 16kHz) for future extensibility, but the initial test set is uniformly 44.1kHz. This requires:
+- Reading WAV headers to detect source sample rate
 - Resampling to 8kHz
 - PCM-to-ulaw encoding
 - Packetization into 160-sample RTP frames at 20ms intervals
+- Proper RTP sequence number, timestamp (incrementing by 160 per frame), and SSRC management (following the pattern already established in `test_sip_provider.cpp`'s `inject_audio` method)
 
 ## 3. SIP Provider Enhancement
 
@@ -45,20 +49,14 @@ The existing `test_sip_provider` currently only injects a synthetic 400Hz tone. 
 
 ### 3.2 Frontend Integration
 
-The frontend must provide:
-- A list of available sound files from `Testfiles/`
-- A button/control to inject a selected file into an active call
-- The ability to start the SIP provider from the Tests tab (already partially exists)
+The frontend **Tests tab** must provide:
+- A list of available sound files from `Testfiles/` (scanned from the directory)
+- A button/control to inject a selected file into an active call leg
+- The ability to start/stop the SIP provider (already partially exists in the Tests tab's test runner)
 
 ### 3.3 Communication: Frontend -> SIP Provider
 
-The SIP provider needs a control channel to receive injection commands at runtime. **Three options were considered** (user decision pending):
-
-1. **Unix Domain Socket** (`/tmp/test-sip-provider.ctrl`): Text commands like `INJECT <filename> <leg>`. Consistent with OAP's existing `/tmp/outbound-audio-processor.ctrl` pattern.
-2. **Embedded HTTP API**: Mongoose-based REST endpoint in the SIP provider.
-3. **Interconnect Protocol Extension**: Extend the negotiation channel to carry control commands.
-
-**Recommendation**: Option 1 (Unix socket) for simplicity and consistency.
+The SIP provider uses a **Unix Domain Socket** (`/tmp/test-sip-provider.ctrl`) to receive injection commands at runtime. Text-based protocol with commands like `INJECT <filename> <leg>`. This is consistent with OAP's existing `/tmp/outbound-audio-processor.ctrl` control socket pattern already established in the codebase. The frontend sends commands to this socket when the user triggers injection from the Tests tab.
 
 ## 4. SIP Client: Dynamic Line Management
 
@@ -112,8 +110,13 @@ Testing proceeds strictly in order. Each stage must pass before the next service
 1. Verify TCP interconnect between IAP and Whisper
 2. Inject test audio through the running pipeline
 3. Compare Whisper transcription output against `Testfiles/*.txt` ground truth
-4. **Optimize VAD**: Tune parameters so no words/sentences are crippled:
-   - VAD_THRESHOLD_MULT, VAD_SILENCE_FRAMES, VAD_CONTEXT_FRAMES
+4. **Optimize VAD**: Tune parameters so no words/sentences are crippled. Current baselines from `whisper-service.cpp`:
+   - `VAD_FRAME_SIZE` = 1600 (100ms @ 16kHz)
+   - `VAD_THRESHOLD_MULT` = 10.0 (10x noise floor)
+   - `VAD_MIN_ENERGY` = 0.00003
+   - `VAD_SILENCE_FRAMES` = 6 (600ms before end-of-utterance)
+   - `VAD_MAX_SPEECH_SAMPLES` = 160000 (10s max)
+   - `VAD_CONTEXT_FRAMES` = 2 (200ms pre-speech context)
    - Ensure complete sentence capture without premature cutoffs
 5. **Optimize transcription**: Model parameters, threading, CoreML utilization
 6. Target: excellent German transcription accuracy at lightning speed
@@ -154,6 +157,8 @@ The frontend's Live Logs tab must display these in real-time.
 
 ## 7. Performance Targets
 
+Initial estimates based on Apple Silicon (M-series) capabilities with CoreML/Metal acceleration. These are aspirational starting points to be validated and adjusted during testing — actual achievable targets will be refined as each service is profiled.
+
 | Metric | Target |
 |--------|--------|
 | IAP conversion latency | < 1ms per RTP packet |
@@ -172,8 +177,11 @@ The frontend's Live Logs tab must display these in real-time.
 
 ## 9. Assumptions & Decisions
 
-- **Audio format**: Test files are 44.1kHz WAV; the SIP provider handles resampling to 8kHz
+- **Directory name**: Created `Testfiles/` directory (task description said "Testifies" which appears to be a typo)
+- **Transcription vs translation**: `.txt` files contain transcriptions (German audio -> German text), not cross-language translations. The pipeline performs speech-to-speech within the same language (German).
+- **Audio format**: All initial test files are 44.1kHz WAV for consistency; the SIP provider is designed to handle various sample rates for future extensibility
 - **Control channel**: Unix domain socket for SIP provider injection commands — consistent with OAP pattern
 - **Line management**: Interconnect negotiation protocol extension (user confirmed)
 - **Initial test config**: 2 lines (1 active, 1 listening); manual scaling via frontend
 - **Language**: All test audio is German; Whisper and LLaMA are configured for German
+- **Logging format**: Uses the existing UDP log protocol consumed by the frontend's `log_receiver_loop` (plain text messages on the configured log port)
