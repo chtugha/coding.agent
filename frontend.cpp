@@ -132,7 +132,7 @@ public:
 
         mg_mgr_init(&mgr_);
         
-        std::string listen_addr = "http://0.0.0.0:" + std::to_string(http_port_);
+        std::string listen_addr = "http://127.0.0.1:" + std::to_string(http_port_);
         struct mg_connection *c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
         if (c) c->fn_data = this;
         
@@ -1070,6 +1070,11 @@ private:
                     use_args = test.default_args;
                 }
 
+                if (!is_allowed_binary(test.binary_path)) {
+                    std::cerr << "Invalid test binary path: " << test.binary_path << "\n";
+                    break;
+                }
+
                 mkdir("logs", 0755);
                 std::string log_path = "logs/" + test.name + "_" + std::to_string(time(nullptr)) + ".log";
 
@@ -1427,13 +1432,26 @@ private:
         if (start == std::string::npos) return false;
         trimmed = trimmed.substr(start);
         if (trimmed.size() < 6) return false;
-        std::string prefix;
-        for (size_t i = 0; i < std::min(trimmed.size(), (size_t)10); i++) {
-            prefix += static_cast<char>(toupper(static_cast<unsigned char>(trimmed[i])));
+        std::string upper;
+        for (size_t i = 0; i < trimmed.size(); i++) {
+            upper += static_cast<char>(toupper(static_cast<unsigned char>(trimmed[i])));
         }
-        return prefix.substr(0, 6) == "SELECT" ||
-               prefix.substr(0, 7) == "EXPLAIN" ||
-               prefix.substr(0, 6) == "PRAGMA";
+        if (upper.substr(0, 6) == "SELECT" || upper.substr(0, 7) == "EXPLAIN") return true;
+        if (upper.substr(0, 6) == "PRAGMA") {
+            if (upper.find('=') != std::string::npos) return false;
+            static const char* safe[] = {
+                "PRAGMA TABLE_INFO", "PRAGMA TABLE_LIST", "PRAGMA TABLE_XINFO",
+                "PRAGMA DATABASE_LIST", "PRAGMA INDEX_LIST", "PRAGMA INDEX_INFO",
+                "PRAGMA SCHEMA_VERSION", "PRAGMA PAGE_COUNT", "PRAGMA PAGE_SIZE",
+                "PRAGMA FREELIST_COUNT", "PRAGMA INTEGRITY_CHECK", "PRAGMA QUICK_CHECK",
+                "PRAGMA COMPILE_OPTIONS", "PRAGMA FOREIGN_KEY_LIST", nullptr
+            };
+            for (int i = 0; safe[i]; i++) {
+                if (upper.find(safe[i]) == 0) return true;
+            }
+            return false;
+        }
+        return false;
     }
 
     void handle_db_write_mode(struct mg_connection *c, struct mg_http_message *hm) {
