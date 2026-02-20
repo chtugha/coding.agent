@@ -216,32 +216,6 @@ cd build && cmake .. -DBUILD_TESTS=ON && make test_interconnect && ./bin/test_in
 
 ---
 
-### [ ] Step 7: macOS App Bundling
-
-**Objective**: Package frontend as a macOS .app bundle with auto-open browser.
-
-**Tasks**:
-- Add `system("open http://localhost:<port>")` call after HTTP server starts
-- Create `scripts/package-frontend-app.sh` (bundle structure, Info.plist, codesign)
-- Add `package-frontend-app` CMake custom target
-- Test `.app` launch on macOS
-
-**Files Modified**:
-- `frontend.cpp` (1 line: browser auto-open)
-- `CMakeLists.txt` (custom target addition)
-
-**Files Created**:
-- `scripts/package-frontend-app.sh`
-
-**Verification**:
-```bash
-cd build && cmake .. && make frontend
-cd .. && bash scripts/package-frontend-app.sh
-open WhisperTalk.app
-```
-
----
-
 ### [ ] Step 8: Final Testing & Verification
 
 **Objective**: End-to-end verification that all components work together.
@@ -255,7 +229,6 @@ open WhisperTalk.app
 - Verify test start/stop with custom parameters
 - Verify theme persistence
 - Verify database admin
-- Verify macOS .app bundle
 - Write implementation report to `report.md`
 
 **Verification**:
