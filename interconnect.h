@@ -22,8 +22,11 @@
 #include <signal.h>
 #include <cerrno>
 #include <cstdio>
+#include <cstdarg>
 
 namespace whispertalk {
+
+static constexpr uint16_t FRONTEND_LOG_PORT = 22022;
 
 enum class ServiceType : uint8_t {
     SIP_CLIENT = 1,
@@ -637,6 +640,10 @@ public:
         return PortConfig();
     }
 
+    uint16_t frontend_log_port() const {
+        return FRONTEND_LOG_PORT;
+    }
+
 private:
     ServiceType type_;
     bool is_master_;
@@ -1024,13 +1031,15 @@ private:
                     size_t next = entries.find(' ', pos);
                     std::string entry = (next == std::string::npos) ? entries.substr(pos) : entries.substr(pos, next - pos);
                     if (!entry.empty()) {
-                        size_t c1 = entry.find(':');
-                        size_t c2 = entry.find(':', c1 + 1);
-                        if (c1 != std::string::npos && c2 != std::string::npos) {
-                            ServiceType svc = static_cast<ServiceType>(std::stoi(entry.substr(0, c1)));
-                            uint16_t ni = static_cast<uint16_t>(std::stoul(entry.substr(c1 + 1, c2 - c1 - 1)));
-                            uint16_t no = static_cast<uint16_t>(std::stoul(entry.substr(c2 + 1)));
-                            registry[svc] = PortConfig(ni, no);
+                        {
+                            size_t c1 = entry.find(':');
+                            size_t c2 = entry.find(':', c1 + 1);
+                            if (c1 != std::string::npos && c2 != std::string::npos) {
+                                ServiceType svc = static_cast<ServiceType>(std::stoi(entry.substr(0, c1)));
+                                uint16_t ni = static_cast<uint16_t>(std::stoul(entry.substr(c1 + 1, c2 - c1 - 1)));
+                                uint16_t no = static_cast<uint16_t>(std::stoul(entry.substr(c2 + 1)));
+                                registry[svc] = PortConfig(ni, no);
+                            }
                         }
                     }
                     if (next == std::string::npos) break;
@@ -1861,6 +1870,54 @@ private:
             sock = -1;
         }
     }
+};
+
+class LogForwarder {
+public:
+    LogForwarder() : sock_(-1), port_(0) {}
+
+    ~LogForwarder() {
+        if (sock_ >= 0) ::close(sock_);
+    }
+
+    void init(uint16_t port, ServiceType svc) {
+        if (port == 0) return;
+        port_ = port;
+        svc_name_ = service_type_to_string(svc);
+        sock_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock_ >= 0) {
+            memset(&addr_, 0, sizeof(addr_));
+            addr_.sin_family = AF_INET;
+            addr_.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            addr_.sin_port = htons(port_);
+        }
+    }
+
+    void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
+        if (sock_ < 0) return;
+        char msg[2048];
+        va_list args;
+        va_start(args, fmt);
+        int mlen = vsnprintf(msg, sizeof(msg), fmt, args);
+        va_end(args);
+        if (mlen <= 0) return;
+
+        char buf[2200];
+        int blen = snprintf(buf, sizeof(buf), "%s %s %u %.*s",
+                            svc_name_, level, call_id, mlen, msg);
+        if (blen > 0) {
+            sendto(sock_, buf, static_cast<size_t>(blen), 0,
+                   (struct sockaddr*)&addr_, sizeof(addr_));
+        }
+    }
+
+    bool active() const { return sock_ >= 0 && port_ > 0; }
+
+private:
+    int sock_;
+    uint16_t port_;
+    const char* svc_name_ = "UNKNOWN";
+    struct sockaddr_in addr_;
 };
 
 }

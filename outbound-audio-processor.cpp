@@ -39,6 +39,8 @@ public:
 
         std::cout << "🔗 Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
 
+        log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+
         if (!interconnect_.connect_to_downstream()) {
             std::cout << "⚠️  Downstream (SIP) not available yet - will auto-reconnect" << std::endl;
         }
@@ -136,6 +138,7 @@ private:
                 if (!interconnect_.send_to_downstream(pkt)) {
                     if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                         std::cout << "⚠️  [" << state->id << "] SIP disconnected, discarding audio" << std::endl;
+                        log_fwd_.forward("WARN", state->id, "SIP disconnected, discarding audio");
                     }
                 }
             }
@@ -153,6 +156,7 @@ private:
         state->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = state;
         std::cout << "📞 Created outbound audio state for call_id " << cid << std::endl;
+        log_fwd_.forward("INFO", cid, "Created outbound audio state");
         return state;
     }
 
@@ -160,6 +164,7 @@ private:
         std::lock_guard<std::mutex> lock(calls_mutex_);
         if (calls_.count(call_id)) {
             std::cout << "🛑 Call " << call_id << " ended, cleaning up outbound audio" << std::endl;
+            log_fwd_.forward("INFO", call_id, "Call ended, cleaning up outbound audio");
             calls_.erase(call_id);
         }
     }
@@ -168,6 +173,7 @@ private:
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<CallState>> calls_;
     whispertalk::InterconnectNode interconnect_;
+    whispertalk::LogForwarder log_fwd_;
 };
 
 int main() {

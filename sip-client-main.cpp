@@ -74,6 +74,8 @@ public:
 
         std::cout << "Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
 
+        log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::SIP_CLIENT);
+
         if (!interconnect_.connect_to_downstream()) {
             std::cout << "Downstream (IAP) not available yet - will auto-reconnect" << std::endl;
         }
@@ -228,6 +230,7 @@ private:
         uint32_t cid = interconnect_.reserve_call_id(proposed_id);
         if (cid == 0) {
             std::cerr << "Failed to reserve call_id, rejecting call on line " << line->index << std::endl;
+            log_fwd_.forward("ERROR", 0, "Failed to reserve call_id on line %d", line->index);
             std::string resp = "SIP/2.0 503 Service Unavailable\r\nCall-ID: " + scid + "\r\n\r\n";
             sendto(line->sip_sock, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
             return;
@@ -278,6 +281,7 @@ private:
         std::string s = resp.str();
         sendto(line->sip_sock, s.c_str(), s.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
         std::cout << "Accepted call " << cid << " on line " << line->index << " port " << session->local_rtp_port << std::endl;
+        log_fwd_.forward("INFO", cid, "Accepted call on line %d port %d", line->index, session->local_rtp_port);
     }
 
     void handle_bye(const std::string& msg, const struct sockaddr_in& sender, std::shared_ptr<SipLine> line) {
@@ -305,6 +309,7 @@ private:
         for (auto it = calls_.begin(); it != calls_.end(); ++it) {
             if (it->second->id == static_cast<int>(call_id)) {
                 std::cout << "Call " << call_id << " ended, cleaning up" << std::endl;
+                log_fwd_.forward("INFO", call_id, "Call ended, cleaning up");
                 it->second->active = false;
                 if (it->second->rtp_thread.joinable()) {
                     it->second->rtp_thread.detach();
@@ -452,6 +457,7 @@ private:
     std::map<uint32_t, std::shared_ptr<CallSession>> id_to_call_;
     std::vector<std::shared_ptr<SipLine>> lines_;
     whispertalk::InterconnectNode interconnect_;
+    whispertalk::LogForwarder log_fwd_;
 };
 
 int main(int argc, char** argv) {
