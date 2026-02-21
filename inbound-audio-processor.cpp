@@ -1,4 +1,3 @@
-// Inbound Audio Processor (Interconnect-based)
 #include <iostream>
 #include <vector>
 #include <string>
@@ -8,7 +7,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <signal.h>
 #include "interconnect.h"
+
+static std::atomic<bool> g_running{true};
+static void sig_handler(int) { g_running = false; }
 
 struct CallState {
     int id;
@@ -45,10 +48,11 @@ public:
     void run() {
         std::thread processor_thread(&InboundAudioProcessor::processing_loop, this);
         
-        while (running_) {
+        while (running_ && g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             cleanup_inactive_calls();
         }
+        running_ = false;
         
         processor_thread.join();
         interconnect_.shutdown();
@@ -68,7 +72,7 @@ private:
     }
 
     void processing_loop() {
-        while (running_) {
+        while (running_ && g_running) {
             whispertalk::Packet pkt;
             if (!interconnect_.recv_from_upstream(pkt, 100)) {
                 continue;
@@ -99,21 +103,20 @@ private:
                 state->buffer.insert(state->buffer.end(), pcm.begin(), pcm.end());
             }
 
-            if (state->buffer.size() >= 1600) {
-                std::vector<float> chunk;
-                {
-                    std::lock_guard<std::mutex> lock(state->mutex);
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (state->buffer.size() >= 1600) {
                     size_t chunk_size = std::min(state->buffer.size(), size_t(16000));
-                    chunk.assign(state->buffer.begin(), state->buffer.begin() + chunk_size);
+                    std::vector<float> chunk(state->buffer.begin(), state->buffer.begin() + chunk_size);
                     state->buffer.erase(state->buffer.begin(), state->buffer.begin() + chunk_size);
-                }
 
-                whispertalk::Packet out_pkt(pkt.call_id, chunk.data(), chunk.size() * sizeof(float));
-                out_pkt.trace = pkt.trace;
-                out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
-                if (!interconnect_.send_to_downstream(out_pkt)) {
-                    if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                        std::cout << "⚠️  [" << pkt.call_id << "] Whisper disconnected, dumping stream to /dev/null" << std::endl;
+                    whispertalk::Packet out_pkt(pkt.call_id, chunk.data(), chunk.size() * sizeof(float));
+                    out_pkt.trace = pkt.trace;
+                    out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
+                    if (!interconnect_.send_to_downstream(out_pkt)) {
+                        if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
+                            std::cout << "⚠️  [" << pkt.call_id << "] Whisper disconnected, dumping stream to /dev/null" << std::endl;
+                        }
                     }
                 }
             }
@@ -160,6 +163,10 @@ private:
 };
 
 int main() {
+    signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
+    signal(SIGPIPE, SIG_IGN);
+
     InboundAudioProcessor proc;
     if (!proc.init()) {
         return 1;

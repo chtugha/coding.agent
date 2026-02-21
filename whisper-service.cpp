@@ -9,8 +9,12 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <signal.h>
 #include "interconnect.h"
 #include "whisper-cpp/include/whisper.h"
+
+static std::atomic<bool> g_running{true};
+static void sig_handler(int) { g_running = false; }
 
 struct WhisperCall {
     uint32_t id;
@@ -25,24 +29,25 @@ struct WhisperCall {
     size_t speech_start = 0;
     std::chrono::steady_clock::time_point last_activity;
     std::chrono::steady_clock::time_point speech_signal_time;
+    size_t last_buffer_size = 0;
+    std::chrono::steady_clock::time_point last_buffer_growth;
 };
 
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
     // 100ms frames @ 16kHz = 1600 samples (standard VAD frame size)
     static constexpr size_t VAD_FRAME_SIZE = 1600;
-    // 10x noise floor — tuned for telephony SNR with G.711 μ-law codec artifacts
-    static constexpr float VAD_THRESHOLD_MULT = 10.0f;
-    // Minimum energy floor to prevent triggering on digital silence
-    static constexpr float VAD_MIN_ENERGY = 0.00003f;
-    // 6 silent frames (600ms) before end-of-utterance — accommodates German compound words
-    static constexpr int VAD_SILENCE_FRAMES = 6;
+    static constexpr float VAD_THRESHOLD_MULT = 2.0f;
+    static constexpr float VAD_MIN_ENERGY = 0.000002f;
+    static constexpr int VAD_SILENCE_FRAMES = 30;
     // Max 10s speech before forced flush to prevent unbounded buffering
     static constexpr size_t VAD_MAX_SPEECH_SAMPLES = 16000 * 10;
     // Include 2 frames (200ms) of pre-speech context for Whisper accuracy
-    static constexpr int VAD_CONTEXT_FRAMES = 2;
+    static constexpr int VAD_CONTEXT_FRAMES = 4;
     // Safety timeout: force SPEECH_IDLE if no utterance completes within 10s
     static constexpr int SPEECH_SIGNAL_TIMEOUT_S = 10;
+    // Inactivity flush: if in_speech and no new audio for this many ms, flush buffer
+    static constexpr int VAD_INACTIVITY_FLUSH_MS = 1500;
 
 public:
     WhisperService(const std::string& model_path) 
@@ -84,9 +89,10 @@ public:
         std::thread receiver_thread(&WhisperService::receiver_loop, this);
         std::thread processor_thread(&WhisperService::processing_loop, this);
         
-        while (running_) {
+        while (running_ && g_running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+        running_ = false;
         
         receiver_thread.join();
         processor_thread.join();
@@ -117,7 +123,7 @@ private:
     }
 
     void processing_loop() {
-        while (running_) {
+        while (running_ && g_running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
             std::vector<std::shared_ptr<WhisperCall>> active;
@@ -174,6 +180,7 @@ private:
                             call->in_speech = false;
                             call->silence_count = 0;
                             call->speech_start = 0;
+                            call->noise_floor = 0.0001f;
                             break;
                         }
 
@@ -188,10 +195,42 @@ private:
                             call->in_speech = false;
                             call->silence_count = 0;
                             call->speech_start = 0;
+                            call->noise_floor = 0.0001f;
                             break;
                         }
                     }
                     call->vad_pos = pos;
+
+                    auto now = std::chrono::steady_clock::now();
+                    if (call->audio_buffer.size() != call->last_buffer_size) {
+                        call->last_buffer_size = call->audio_buffer.size();
+                        call->last_buffer_growth = now;
+                    }
+
+                    if (call->in_speech && to_process.empty() && call->last_buffer_size > 0) {
+                        auto inactivity = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - call->last_buffer_growth).count();
+                        if (inactivity > VAD_INACTIVITY_FLUSH_MS) {
+                            size_t end = call->audio_buffer.size();
+                            if (end > call->speech_start) {
+                                to_process.assign(
+                                    call->audio_buffer.begin() + call->speech_start,
+                                    call->audio_buffer.end());
+                                call->audio_buffer.clear();
+                                call->vad_pos = 0;
+                                call->in_speech = false;
+                                call->silence_count = 0;
+                                call->speech_start = 0;
+                                call->last_buffer_size = 0;
+                                call->noise_floor = 0.0001f;
+                                if (call->speech_signaled) {
+                                    call->speech_signaled = false;
+                                    interconnect_.broadcast_speech_signal(call->id, false);
+                                }
+                                std::cout << "🔄 [" << call->id << "] Inactivity flush: " << to_process.size() << " samples → SPEECH_IDLE" << std::endl;
+                            }
+                        }
+                    }
 
                     if (!call->in_speech && call->vad_pos > VAD_FRAME_SIZE * 2) {
                         size_t keep = VAD_FRAME_SIZE * 2;
@@ -202,8 +241,20 @@ private:
 
                     if (call->speech_signaled) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                            std::chrono::steady_clock::now() - call->speech_signal_time).count();
+                            now - call->speech_signal_time).count();
                         if (elapsed > SPEECH_SIGNAL_TIMEOUT_S) {
+                            if (call->in_speech && call->audio_buffer.size() > call->speech_start) {
+                                to_process.assign(
+                                    call->audio_buffer.begin() + call->speech_start,
+                                    call->audio_buffer.end());
+                                call->audio_buffer.clear();
+                                call->vad_pos = 0;
+                                call->in_speech = false;
+                                call->silence_count = 0;
+                                call->speech_start = 0;
+                                call->last_buffer_size = 0;
+                                std::cout << "🔄 [" << call->id << "] Timeout flush: " << to_process.size() << " samples" << std::endl;
+                            }
                             call->speech_signaled = false;
                             interconnect_.broadcast_speech_signal(call->id, false);
                             std::cerr << "⚠️  [" << call->id << "] SPEECH_ACTIVE timeout (" << SPEECH_SIGNAL_TIMEOUT_S << "s) — forcing SPEECH_IDLE" << std::endl;
@@ -287,6 +338,7 @@ private:
         auto call = std::make_shared<WhisperCall>();
         call->id = cid;
         call->last_activity = std::chrono::steady_clock::now();
+        call->last_buffer_growth = call->last_activity;
         calls_[cid] = call;
         std::cout << "📞 Created transcription session for call_id " << cid << std::endl;
         return call;
@@ -313,6 +365,10 @@ private:
 };
 
 int main(int argc, char** argv) {
+    signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
+    signal(SIGPIPE, SIG_IGN);
+
     const char* env_models = std::getenv("WHISPERTALK_MODELS_DIR");
     std::string models_dir = env_models ? env_models :
 #ifdef WHISPERTALK_MODELS_DIR

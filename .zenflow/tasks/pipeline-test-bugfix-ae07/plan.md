@@ -105,7 +105,7 @@ Detailed implementation plan created below, replacing the generic Implementation
 
 - **Verify**: All of above pass. No crashes, no hangs. RTP flow confirmed via relay stats in SIP provider
 
-### [ ] Step: Stage 2 Testing — Inbound Audio Processor (IAP) Integration
+### [x] Step: Stage 2 Testing — Inbound Audio Processor (IAP) Integration
 
 **Scope**: Add IAP to running pipeline. Test TCP resilience, optimize conversion.
 
@@ -120,7 +120,7 @@ Detailed implementation plan created below, replacing the generic Implementation
 
 - **Verify**: IAP start/stop cycles work reliably. No socket leaks. Conversion latency < 1ms per packet. Pipeline stable with IAP running
 
-### [ ] Step: Stage 3 Testing — Whisper Service Integration + Transcription Optimization
+### [x] Step: Stage 3 Testing — Whisper Service Integration + Transcription Optimization
 
 **Scope**: Connect Whisper to running pipeline. Optimize VAD and transcription accuracy.
 
