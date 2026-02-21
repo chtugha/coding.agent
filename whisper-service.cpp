@@ -274,6 +274,8 @@ private:
         wparams.language = "de";
         wparams.n_threads = 4;
         wparams.no_timestamps = true;
+        wparams.single_segment = true;
+        wparams.no_context = true;
 
         auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);
