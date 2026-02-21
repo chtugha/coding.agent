@@ -130,10 +130,11 @@ Detailed implementation plan created below, replacing the generic Implementation
 4. Capture Whisper transcription output from logs
 5. Compare against `Testfiles/sample_01.txt` using normalized string comparison:
    - Lowercase both strings
-   - Strip whitespace, remove punctuation `.,;:!?-`
+   - Strip whitespace, remove punctuation `.,;:!?-—`
    - Collapse multiple spaces
+   - Normalize numbers: Whisper outputs digits (e.g. "67") for spoken numbers ("siebenundsechzig"). This is correct and expected — LLaMA understands both forms. Ground truth files MUST contain the spoken form (what the speaker actually says). The scoring script MUST normalize numbers before comparison so both forms are treated as equivalent. DO NOT change ground truths to digit form just because Whisper outputs digits.
    - PASS: 100% match, WARN: ≥90% similarity, FAIL: <90%
-6. Run all 10 test files through pipeline, record results
+6. Run all 20 test files through pipeline, record results
 7. **Tune VAD parameters** if sentences are crippled:
    - `VAD_THRESHOLD_MULT` (currently 10.0) — lower if speech not detected
    - `VAD_SILENCE_FRAMES` (currently 6/600ms) — increase if sentences cut short
