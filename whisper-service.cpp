@@ -294,7 +294,7 @@ private:
         wparams.beam_search.beam_size = 5;
         wparams.temperature = 0.0f;
         wparams.temperature_inc = 0.0f;
-        wparams.initial_prompt = "Erzieher, Lehrer, benennt, verordnet, schäbigen, Schwächephasen, Fußball-Bundesliga, Zeichen";
+        wparams.initial_prompt = "Fußball-Bundesliga, Erzieher, Schwächephasen, benennt, verordnet, schäbigen";
 
         auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);

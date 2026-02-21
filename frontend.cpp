@@ -305,7 +305,7 @@ private:
                     info.description = "Interconnect protocol tests (master/slave, heartbeat, crash recovery)";
                 } else if (name == "test_sip_provider") {
                     info.description = "SIP B2BUA test provider";
-                    info.default_args = {"--port", "5060", "--duration", "60"};
+                    info.default_args = {"--port", "5060", "--http-port", "22011", "--testfiles-dir", "Testfiles"};
                 } else if (name == "test_kokoro_cpp") {
                     info.description = "Kokoro TTS C++ tests (phonemization, CoreML inference)";
                 } else {
@@ -454,6 +454,8 @@ private:
                 return false;
             }
             if (pid == 0) {
+                for (int i = 3; i < 1024; ++i) close(i);
+
                 int fd = open(svc.log_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 if (fd >= 0) {
                     dup2(fd, STDOUT_FILENO);
@@ -1729,6 +1731,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         std::lock_guard<std::mutex> lock(tests_mutex_);
         for (auto& test : tests_) {
             if (test.name == test_name && !test.is_running) {
+                std::string bin_name = test.binary_path;
+                size_t slash = bin_name.rfind('/');
+                if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
+                kill_ghost_processes(bin_name);
+
                 std::vector<std::string> use_args;
                 if (!custom_args.empty()) {
                     use_args = split_args(custom_args);
@@ -1750,6 +1757,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     break;
                 }
                 if (pid == 0) {
+                    for (int i = 3; i < 1024; ++i) close(i);
+
                     int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                     if (fd >= 0) {
                         dup2(fd, STDOUT_FILENO);

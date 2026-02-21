@@ -506,9 +506,26 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
-        call->injecting = false;
+        std::printf("Audio done, sending silence until next injection or call end\n");
+        while (call->active && call->injecting && g_running) {
+            uint8_t rtp[12 + PKT_SAMPLES];
+            rtp[0] = 0x80;
+            rtp[1] = 0x00;
+            uint16_t seq_n = htons(seq++);
+            std::memcpy(rtp + 2, &seq_n, 2);
+            uint32_t ts_n = htonl(ts);
+            ts += PKT_SAMPLES;
+            std::memcpy(rtp + 4, &ts_n, 4);
+            uint32_t ssrc_n = htonl(ssrc);
+            std::memcpy(rtp + 8, &ssrc_n, 4);
+            std::memset(rtp + 12, 0xFF, PKT_SAMPLES);
+            sendto(target->relay_sock, rtp, sizeof(rtp), 0,
+                   (struct sockaddr*)&dest, sizeof(dest));
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
         call->injecting_file.clear();
-        std::printf("Audio injection complete\n");
+        std::printf("RTP stream stopped\n");
     }
 
     std::string get_header(const std::string& msg, const std::string& name) {
