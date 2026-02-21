@@ -57,7 +57,7 @@ Detailed implementation plan created below, replacing the generic Implementation
 
 - **Verify**: `cmake -B build -DBUILD_TESTS=ON && cmake --build build -j$(sysctl -n hw.ncpu)`. Start provider, `curl http://localhost:22011/files` returns JSON. `curl -X POST -d '{"file":"sample_01.wav","leg":"a"}' http://localhost:22011/inject` returns success (even without active call → 409)
 
-### [ ] Step: SIP Client Dynamic Line Management via Interconnect Extension
+### [x] Step: SIP Client Dynamic Line Management via Interconnect Extension
 
 **Files**: `interconnect.h`, `sip-client-main.cpp`
 
@@ -72,7 +72,7 @@ Detailed implementation plan created below, replacing the generic Implementation
 
 - **Verify**: Build. Start SIP client with `--lines 1`. Use `nc` or test script to connect to SIP client's negotiation port and send `ADD_LINE alice2 127.0.0.1`. Verify `LINE_ADDED` response. Send `LIST_LINES`, verify output. Send `REMOVE_LINE <idx>`, verify removal
 
-### [ ] Step: Frontend UI — Audio Injection + Line Management
+### [x] Step: Frontend UI — Audio Injection + Line Management
 
 **Files**: `frontend.cpp`
 

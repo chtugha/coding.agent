@@ -144,9 +144,12 @@ public:
     }
 
     void run() {
-        for (auto& line : lines_) {
-            line->sip_thread = std::thread(&SipClient::sip_loop, this, line);
-            line->reg_thread = std::thread(&SipClient::registration_loop, this, line);
+        {
+            std::lock_guard<std::mutex> lock(lines_mutex_);
+            for (auto& line : lines_) {
+                line->sip_thread = std::thread(&SipClient::sip_loop, this, line);
+                line->reg_thread = std::thread(&SipClient::registration_loop, this, line);
+            }
         }
 
         std::thread out_thread(&SipClient::outbound_audio_loop, this);
@@ -155,7 +158,13 @@ public:
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
 
-        for (auto& line : lines_) {
+        std::vector<std::shared_ptr<SipLine>> lines_copy;
+        {
+            std::lock_guard<std::mutex> lock(lines_mutex_);
+            lines_copy = lines_;
+            for (auto& line : lines_copy) line->line_running = false;
+        }
+        for (auto& line : lines_copy) {
             if (line->sip_thread.joinable()) line->sip_thread.join();
             if (line->reg_thread.joinable()) line->reg_thread.join();
         }
@@ -366,13 +375,14 @@ private:
     }
 
     void register_sip(std::shared_ptr<SipLine> line) {
+        std::string reg_server = line->server_ip.empty() ? server_ : line->server_ip;
         std::ostringstream req;
-        req << "REGISTER sip:" << server_ << " SIP/2.0\r\nVia: SIP/2.0/UDP " << local_ip_ << ":" << line->local_port << "\r\n";
-        req << "From: <sip:" << line->user << "@" << server_ << ">\r\nTo: <sip:" << line->user << "@" << server_ << ">\r\n";
+        req << "REGISTER sip:" << reg_server << " SIP/2.0\r\nVia: SIP/2.0/UDP " << local_ip_ << ":" << line->local_port << "\r\n";
+        req << "From: <sip:" << line->user << "@" << reg_server << ">\r\nTo: <sip:" << line->user << "@" << reg_server << ">\r\n";
         req << "Call-ID: reg-" << rand() << "@" << local_ip_ << "\r\nCSeq: 1 REGISTER\r\n";
         req << "Contact: <sip:" << line->user << "@" << local_ip_ << ":" << line->local_port << ">\r\nExpires: 3600\r\n\r\n";
         struct sockaddr_in srv{};
-        srv.sin_family = AF_INET; srv.sin_port = htons(server_port_); srv.sin_addr.s_addr = inet_addr(server_.c_str());
+        srv.sin_family = AF_INET; srv.sin_port = htons(server_port_); srv.sin_addr.s_addr = inet_addr(reg_server.c_str());
         std::string s = req.str();
         sendto(line->sip_sock, s.c_str(), s.length(), 0, (struct sockaddr*)&srv, sizeof(srv));
     }

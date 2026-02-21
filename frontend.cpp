@@ -215,7 +215,7 @@ private:
                     info.description = "Interconnect protocol tests (master/slave, heartbeat, crash recovery)";
                 } else if (name == "test_sip_provider") {
                     info.description = "SIP B2BUA test provider";
-                    info.default_args = {"--port", "5060", "--duration", "60"};
+                    info.default_args = {"--port", "5060", "--http-port", "22011", "--testfiles-dir", "Testfiles"};
                 } else if (name == "test_kokoro_cpp") {
                     info.description = "Kokoro TTS C++ tests (phonemization, CoreML inference)";
                 } else {
@@ -343,6 +343,12 @@ private:
                 serve_logs_api(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/db/query")) == 0) {
                 handle_db_query(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/sip/add-line")) == 0) {
+                handle_sip_add_line(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/sip/remove-line")) == 0) {
+                handle_sip_remove_line(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/sip/lines")) == 0) {
+                handle_sip_lines(c);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
@@ -369,7 +375,22 @@ private:
             "<li class=\"nav-item\" role=\"presentation\"><button class=\"nav-link\" id=\"logs-tab\" data-bs-toggle=\"tab\" data-bs-target=\"#logs\" type=\"button\">Logs</button></li>"
             "<li class=\"nav-item\" role=\"presentation\"><button class=\"nav-link\" id=\"database-tab\" data-bs-toggle=\"tab\" data-bs-target=\"#database\" type=\"button\">Database</button></li></ul>"
             "<div class=\"tab-content\" id=\"mainTabContent\">"
-            "<div class=\"tab-pane fade show active\" id=\"tests\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Available Tests</h4><div id=\"testsContainer\"></div></div></div></div>"
+            "<div class=\"tab-pane fade show active\" id=\"tests\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Available Tests</h4><div id=\"testsContainer\"></div>"
+            "<hr><h5>Audio File Injection (SIP Provider)</h5>"
+            "<div class=\"row g-2 align-items-end mb-3\">"
+            "<div class=\"col-md-4\"><label class=\"form-label\">Audio File</label><select id=\"injectFile\" class=\"form-select\"><option>Loading...</option></select></div>"
+            "<div class=\"col-md-2\"><label class=\"form-label\">Leg</label><select id=\"injectLeg\" class=\"form-select\"><option value=\"a\">Leg A</option><option value=\"b\">Leg B</option></select></div>"
+            "<div class=\"col-md-2\"><button class=\"btn btn-warning w-100\" onclick=\"injectAudio()\">Inject</button></div>"
+            "<div class=\"col-md-4\"><span id=\"injectStatus\" class=\"text-muted\">Ready</span></div></div>"
+            "<hr><h5>SIP Client Line Management</h5>"
+            "<div class=\"row g-2 align-items-end mb-3\">"
+            "<div class=\"col-md-3\"><label class=\"form-label\">User</label><input type=\"text\" id=\"lineUser\" class=\"form-control\" placeholder=\"alice\"></div>"
+            "<div class=\"col-md-3\"><label class=\"form-label\">Server IP</label><input type=\"text\" id=\"lineServer\" class=\"form-control\" placeholder=\"127.0.0.1\"></div>"
+            "<div class=\"col-md-2\"><label class=\"form-label\">Password</label><input type=\"text\" id=\"linePassword\" class=\"form-control\" placeholder=\"(optional)\"></div>"
+            "<div class=\"col-md-2\"><button class=\"btn btn-success w-100\" onclick=\"addLine()\">Add Line</button></div>"
+            "<div class=\"col-md-2\"><button class=\"btn btn-outline-secondary w-100\" onclick=\"refreshLines()\">Refresh</button></div></div>"
+            "<table class=\"table table-sm\" id=\"linesTable\"><thead><tr><th>Index</th><th>User</th><th>Status</th><th>Action</th></tr></thead><tbody id=\"linesBody\"></tbody></table>"
+            "</div></div></div>"
             "<div class=\"tab-pane fade\" id=\"services\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Service Status</h4><table class=\"table table-striped\"><thead><tr><th>Service</th><th>Status</th><th>Calls</th><th>Ports</th><th>Last Seen</th></tr></thead><tbody id=\"servicesTable\"></tbody></table></div></div></div>"
             "<div class=\"tab-pane fade\" id=\"logs\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Live Logs</h4><div class=\"log-container\" id=\"liveLogs\"></div></div></div></div>"
             "<div class=\"tab-pane fade\" id=\"database\" role=\"tabpanel\"><div class=\"row mt-3\"><div class=\"col-md-12\"><h4>Database Query</h4><form id=\"queryForm\">"
@@ -406,8 +427,33 @@ private:
             "else if(data.rows&&data.rows.length>0){var cols=Object.keys(data.rows[0]);container.innerHTML='<table class=\"table table-sm table-bordered\"><thead><tr>'"
             "+cols.map(c=>'<th>'+c+'</th>').join('')+'</tr></thead><tbody>'+data.rows.map(row=>'<tr>'+cols.map(c=>'<td>'+row[c]+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}"
             "else{container.innerHTML='<div class=\"alert alert-info\">Query executed successfully. '+(data.affected||0)+' rows affected.</div>'}})});"
-            "setInterval(fetchTests,2000);setInterval(fetchServices,3000);setInterval(fetchLogs,1000);"
-            "fetchTests();fetchServices();fetchLogs();document.getElementById('status').textContent='Frontend running on port ";
+            "function fetchInjectFiles(){fetch('http://localhost:22011/files').then(r=>r.json()).then(data=>{"
+            "var sel=document.getElementById('injectFile');sel.innerHTML=data.files.map(f=>'<option value=\"'+f.name+'\">'+f.name+' ('+Math.round(f.size_bytes/1024)+'KB)</option>').join('');"
+            "}).catch(()=>{document.getElementById('injectFile').innerHTML='<option>SIP Provider offline</option>'})}"
+            "function injectAudio(){var file=document.getElementById('injectFile').value;var leg=document.getElementById('injectLeg').value;"
+            "var st=document.getElementById('injectStatus');st.textContent='Injecting '+file+'...';st.className='text-warning';"
+            "fetch('http://localhost:22011/inject',{method:'POST',headers:{'Content-Type':'application/json'},"
+            "body:JSON.stringify({file:file,leg:leg})}).then(r=>r.json()).then(data=>{"
+            "if(data.success){st.textContent='Injecting: '+data.injecting+' (leg '+data.leg+')';st.className='text-success'}"
+            "else{st.textContent='Error: '+data.error;st.className='text-danger'}}).catch(e=>{st.textContent='Error: '+e.message;st.className='text-danger'})}"
+            "function refreshLines(){fetch('/api/sip/lines').then(r=>r.json()).then(data=>{"
+            "var tb=document.getElementById('linesBody');"
+            "if(data.error){tb.innerHTML='<tr><td colspan=\"4\" class=\"text-danger\">'+data.error+'</td></tr>';return}"
+            "if(!data.lines||data.lines.length===0){tb.innerHTML='<tr><td colspan=\"4\" class=\"text-muted\">No lines</td></tr>';return}"
+            "tb.innerHTML=data.lines.map(l=>'<tr><td>'+l.index+'</td><td>'+l.user+'</td><td>'+(l.registered?'<span class=\"text-success\">Registered</span>':'<span class=\"text-muted\">Unregistered</span>')+'</td>"
+            "<td><button class=\"btn btn-sm btn-outline-danger\" onclick=\"removeLine('+l.index+')\">Remove</button></td></tr>').join('')"
+            "}).catch(()=>{document.getElementById('linesBody').innerHTML='<tr><td colspan=\"4\" class=\"text-muted\">SIP Client not connected</td></tr>'})}"
+            "function addLine(){var user=document.getElementById('lineUser').value;var server=document.getElementById('lineServer').value||'127.0.0.1';"
+            "var password=document.getElementById('linePassword').value;"
+            "if(!user){alert('User is required');return}"
+            "fetch('/api/sip/add-line',{method:'POST',headers:{'Content-Type':'application/json'},"
+            "body:JSON.stringify({user:user,server:server,password:password})}).then(r=>r.json()).then(data=>{"
+            "if(data.error)alert('Error: '+data.error);else refreshLines()}).catch(e=>alert('Error: '+e.message))}"
+            "function removeLine(idx){fetch('/api/sip/remove-line',{method:'POST',headers:{'Content-Type':'application/json'},"
+            "body:JSON.stringify({index:idx})}).then(r=>r.json()).then(data=>{"
+            "if(data.error)alert('Error: '+data.error);else refreshLines()}).catch(e=>alert('Error: '+e.message))}"
+            "setInterval(fetchTests,2000);setInterval(fetchServices,3000);setInterval(fetchLogs,1000);setInterval(fetchInjectFiles,5000);setInterval(refreshLines,3000);"
+            "fetchTests();fetchServices();fetchLogs();fetchInjectFiles();refreshLines();document.getElementById('status').textContent='Frontend running on port ";
         
         std::string port_str = std::to_string(http_port_);
         const char* html_part3 = "';</script></body></html>";
@@ -480,8 +526,12 @@ private:
     }
 
     void handle_test_start(struct mg_connection *c, struct mg_http_message *hm) {
-        char test_name[256];
-        mg_http_get_var(&hm->body, "test", test_name, sizeof(test_name));
+        char test_name[256] = {0};
+        char* jval = mg_json_get_str(hm->body, "$.test");
+        if (jval) {
+            snprintf(test_name, sizeof(test_name), "%s", jval);
+            free(jval);
+        }
         
         std::lock_guard<std::mutex> lock(tests_mutex_);
         for (auto& test : tests_) {
@@ -520,8 +570,12 @@ private:
     }
 
     void handle_test_stop(struct mg_connection *c, struct mg_http_message *hm) {
-        char test_name[256];
-        mg_http_get_var(&hm->body, "test", test_name, sizeof(test_name));
+        char test_name[256] = {0};
+        char* jval = mg_json_get_str(hm->body, "$.test");
+        if (jval) {
+            snprintf(test_name, sizeof(test_name), "%s", jval);
+            free(jval);
+        }
         
         std::lock_guard<std::mutex> lock(tests_mutex_);
         for (auto& test : tests_) {
@@ -538,9 +592,126 @@ private:
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"ok\"}");
     }
 
+    std::string send_negotiation_command(whispertalk::ServiceType target, const std::string& cmd) {
+        whispertalk::PortConfig ports = interconnect_.query_service_ports(target);
+        if (ports.neg_in == 0) return "";
+
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return "";
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        addr.sin_port = htons(ports.neg_in);
+
+        struct timeval tv{2, 0};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(sock);
+            return "";
+        }
+
+        ssize_t sent = send(sock, cmd.c_str(), cmd.size(), 0);
+        if (sent <= 0) {
+            close(sock);
+            return "";
+        }
+
+        char buf[4096];
+        ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+        close(sock);
+        if (n <= 0) return "";
+        buf[n] = '\0';
+        return std::string(buf, n);
+    }
+
+    void handle_sip_add_line(struct mg_connection *c, struct mg_http_message *hm) {
+        char* user = mg_json_get_str(hm->body, "$.user");
+        char* server = mg_json_get_str(hm->body, "$.server");
+        char* password = mg_json_get_str(hm->body, "$.password");
+
+        if (!user) {
+            free(server); free(password);
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing 'user'\"}");
+            return;
+        }
+
+        std::string cmd = "ADD_LINE " + std::string(user) + " " + std::string(server ? server : "127.0.0.1");
+        if (password && strlen(password) > 0) cmd += " " + std::string(password);
+        free(user); free(server); free(password);
+
+        std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, cmd);
+        if (resp.empty()) {
+            mg_http_reply(c, 502, "Content-Type: application/json\r\n", "{\"error\":\"SIP Client not reachable\"}");
+            return;
+        }
+
+        if (resp.find("LINE_ADDED") == 0) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"success\":true,\"response\":\"%s\"}", resp.c_str());
+        } else {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"%s\"}", resp.c_str());
+        }
+    }
+
+    void handle_sip_remove_line(struct mg_connection *c, struct mg_http_message *hm) {
+        double idx;
+        if (mg_json_get_num(hm->body, "$.index", &idx) == false) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing 'index'\"}");
+            return;
+        }
+
+        std::string cmd = "REMOVE_LINE " + std::to_string(static_cast<int>(idx));
+        std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, cmd);
+        if (resp.empty()) {
+            mg_http_reply(c, 502, "Content-Type: application/json\r\n", "{\"error\":\"SIP Client not reachable\"}");
+            return;
+        }
+
+        if (resp.find("LINE_REMOVED") == 0) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"success\":true,\"response\":\"%s\"}", resp.c_str());
+        } else {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"%s\"}", resp.c_str());
+        }
+    }
+
+    void handle_sip_lines(struct mg_connection *c) {
+        std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "LIST_LINES");
+        if (resp.empty()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"lines\":[],\"error\":\"SIP Client not reachable\"}");
+            return;
+        }
+
+        std::stringstream json;
+        json << "{\"lines\":[";
+
+        std::istringstream iss(resp);
+        std::string token;
+        iss >> token;
+        bool first = true;
+        while (iss >> token) {
+            size_t p1 = token.find(':');
+            size_t p2 = token.find(':', p1 + 1);
+            if (p1 == std::string::npos || p2 == std::string::npos) continue;
+            if (!first) json << ",";
+            json << "{\"index\":" << token.substr(0, p1)
+                 << ",\"user\":\"" << token.substr(p1 + 1, p2 - p1 - 1) << "\""
+                 << ",\"registered\":" << (token.substr(p2 + 1) == "registered" ? "true" : "false") << "}";
+            first = false;
+        }
+
+        json << "]}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
     void handle_db_query(struct mg_connection *c, struct mg_http_message *hm) {
-        char query[4096];
-        mg_http_get_var(&hm->body, "query", query, sizeof(query));
+        char query[4096] = {0};
+        char* jval = mg_json_get_str(hm->body, "$.query");
+        if (jval) {
+            snprintf(query, sizeof(query), "%s", jval);
+            free(jval);
+        }
         
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
