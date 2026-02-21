@@ -462,11 +462,9 @@ private:
 
     void cancel_injection() {
         if (!call_) return;
-        if (call_->injecting) {
-            call_->injecting = false;
-            if (call_->inject_thread.joinable()) {
-                call_->inject_thread.join();
-            }
+        call_->injecting = false;
+        if (call_->inject_thread.joinable()) {
+            call_->inject_thread.join();
         }
     }
 

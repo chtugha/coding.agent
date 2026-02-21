@@ -87,7 +87,7 @@ Detailed implementation plan created below, replacing the generic Implementation
 
 - **Verify**: Build. Start frontend, open `http://localhost:8080`. Tests tab shows injection controls. Start SIP provider from frontend, verify file dropdown populates. Line management section visible
 
-### [ ] Step: Stage 1 Testing — Frontend + SIP Provider + SIP Client Integration
+### [x] Step: Stage 1 Testing — Frontend + SIP Provider + SIP Client Integration
 
 **Scope**: End-to-end test of the first 3 components. Fix all bugs discovered.
 
