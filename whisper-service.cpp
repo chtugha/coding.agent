@@ -42,12 +42,11 @@ class WhisperService {
     static constexpr int VAD_SILENCE_FRAMES = 30;
     // Max 10s speech before forced flush to prevent unbounded buffering
     static constexpr size_t VAD_MAX_SPEECH_SAMPLES = 16000 * 10;
-    // Include 2 frames (200ms) of pre-speech context for Whisper accuracy
-    static constexpr int VAD_CONTEXT_FRAMES = 4;
+    static constexpr int VAD_CONTEXT_FRAMES = 10;
     // Safety timeout: force SPEECH_IDLE if no utterance completes within 10s
     static constexpr int SPEECH_SIGNAL_TIMEOUT_S = 10;
     // Inactivity flush: if in_speech and no new audio for this many ms, flush buffer
-    static constexpr int VAD_INACTIVITY_FLUSH_MS = 1500;
+    static constexpr int VAD_INACTIVITY_FLUSH_MS = 2000;
 
 public:
     WhisperService(const std::string& model_path) 
@@ -232,11 +231,14 @@ private:
                         }
                     }
 
-                    if (!call->in_speech && call->vad_pos > VAD_FRAME_SIZE * 2) {
-                        size_t keep = VAD_FRAME_SIZE * 2;
-                        call->audio_buffer.erase(call->audio_buffer.begin(),
-                            call->audio_buffer.begin() + (call->vad_pos - keep));
-                        call->vad_pos = keep;
+                    if (!call->in_speech) {
+                        size_t keep_frames = VAD_CONTEXT_FRAMES + 2;
+                        size_t keep = VAD_FRAME_SIZE * keep_frames;
+                        if (call->vad_pos > keep) {
+                            call->audio_buffer.erase(call->audio_buffer.begin(),
+                                call->audio_buffer.begin() + (call->vad_pos - keep));
+                            call->vad_pos = keep;
+                        }
                     }
 
                     if (call->speech_signaled) {
@@ -270,16 +272,31 @@ private:
     }
 
     void transcribe_and_send(uint32_t call_id, const std::vector<float>& audio) {
-        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        std::vector<float> normalized(audio.size());
+        float peak = 0.0f;
+        for (auto s : audio) peak = std::max(peak, std::abs(s));
+        if (peak > 0.0001f) {
+            float gain = 0.9f / peak;
+            for (size_t i = 0; i < audio.size(); ++i)
+                normalized[i] = audio[i] * gain;
+        } else {
+            normalized = audio;
+        }
+
+        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
         wparams.language = "de";
         wparams.n_threads = 4;
         wparams.no_timestamps = true;
         wparams.single_segment = true;
         wparams.no_context = true;
+        wparams.beam_search.beam_size = 5;
+        wparams.temperature = 0.0f;
+        wparams.temperature_inc = 0.0f;
+        wparams.initial_prompt = "Erzieher, Lehrer, benennt, verordnet, schäbigen, Schwächephasen, Fußball-Bundesliga, Zeichen";
 
         auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);
-        int result = whisper_full(ctx_, wparams, audio.data(), audio.size());
+        int result = whisper_full(ctx_, wparams, normalized.data(), normalized.size());
 
         {
             std::lock_guard<std::mutex> clk(calls_mutex_);
