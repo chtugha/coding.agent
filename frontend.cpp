@@ -106,6 +106,7 @@ public:
         init_database();
         discover_tests();
         load_services();
+        scan_testfiles_directory();
     }
 
     ~FrontendServer() {
@@ -200,6 +201,9 @@ private:
 
     std::mutex services_mutex_;
     std::vector<ServiceInfo> services_;
+
+    std::mutex testfiles_mutex_;
+    std::vector<TestFileInfo> testfiles_;
     
     std::mutex logs_mutex_;
     std::deque<LogEntry> recent_logs_;

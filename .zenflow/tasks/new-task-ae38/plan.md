@@ -19,7 +19,8 @@ If you are blocked and need user clarification, mark the current step with `[!]`
 
 Create a Product Requirements Document (PRD) based on the feature description.
 
-### [ ] Step: Technical Specification
+### [x] Step: Technical Specification
+<!-- chat-id: 0f10e64f-9af7-4abc-afa8-418d598df865 -->
 
 Create a technical specification based on the PRD.
 
