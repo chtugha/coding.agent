@@ -980,6 +980,12 @@ private:
                 handle_log_level_settings(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/test_results")) == 0) {
                 handle_test_results(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_test")) == 0) {
+                handle_whisper_accuracy_test(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/vad_config")) == 0) {
+                handle_whisper_vad_config(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_results")) == 0) {
+                handle_whisper_accuracy_results(c, hm);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }

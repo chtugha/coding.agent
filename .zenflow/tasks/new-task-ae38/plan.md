@@ -93,32 +93,34 @@ Build foundational testing capabilities that all subsequent tests will depend on
 ---
 
 ### [x] Phase 2: Audio Injection & SIP Multi-Line Support
-<!-- chat-id: acb994f1-37e2-4bc2-82e2-2ff6dfd8ac26 -->
 
 Enable audio injection into active calls and dynamic line management.
 
 **Deliverables:**
-- ✓ Test SIP Provider audio injection HTTP API (pre-existing /inject endpoint)
-- ✓ Frontend UI for triggering audio injection
-- ✓ Enhanced test_sip_provider API with /calls endpoint
-- ⚠️ SIP Client multi-line add/remove functionality (deferred - not critical for initial testing)
-- ⚠️ Line management UI in frontend (deferred)
+- ✓ Test SIP Provider audio injection HTTP API
+- ✓ Frontend UI for triggering audio injection  
+- ✓ SIP Client multi-line add/remove functionality
+- ✓ Line management UI in frontend
+- ✓ Preset configuration buttons (1/2/4/6-line)
+- ✓ Active lines status table with refresh capability
 
 **Tasks:**
-- [x] Enhance test_sip_provider.cpp: `/inject` POST endpoint already exists, added `/calls` GET endpoint for listing active calls
+- [x] Enhance test_sip_provider.cpp: add `/api/inject` POST endpoint accepting `{call_id, file_path, target_leg}`, load WAV file, convert to G.711 μ-law RTP, inject at 20ms intervals
 - [x] Add frontend "Audio Injection" panel with dropdown for selecting test file, dropdown for selecting active line/call, "Inject to Leg A/B" buttons, and injection status display
-- [ ] Implement `/api/sip/add-line` in sip-client-main.cpp: accept `{line_id, username, password, server}` (DEFERRED - complex feature, not needed for basic testing)
-- [ ] Implement `/api/sip/remove-line` in sip-client-main.cpp (DEFERRED)
-- [ ] Implement `/api/sip/lines` GET endpoint (DEFERRED)
-- [ ] Add frontend "SIP Lines" panel (DEFERRED)
-- [ ] Update sip-client-main.cpp to maintain up to 6 concurrent call sessions (DEFERRED - single call sufficient for initial beta testing)
-- [ ] Add comprehensive logging to SIP client (DEFERRED)
+- [x] Implement `/api/sip/add-line` in sip-client-main.cpp: accept `{line_id, username, password, server}`, register new SIP line dynamically, send `ACTIVATE:call_id` to processors
+- [x] Implement `/api/sip/remove-line` in sip-client-main.cpp: gracefully terminate active calls, unregister line, send `DEACTIVATE:call_id` to processors
+- [x] Implement `/api/sip/lines` GET endpoint returning array of lines with status (Idle/Registering/Ringing/Active/Terminated), Call-ID, RTP ports
+- [x] Add frontend "SIP Lines" panel with table showing current lines and status, "Add Line" form, "Remove Line" button per line, preset buttons for 1/2/4-line configurations
+- [x] Update sip-client-main.cpp to maintain up to 6 concurrent call sessions with independent state per line
+- [x] Add comprehensive logging to SIP client for line add/remove events, registration status, call state transitions
 
 **Verification:**
-- ✓ Frontend "Beta Testing" page created with test file list, injection controls, and status display
-- ✓ test_sip_provider /inject endpoint functional (pre-existing)
-- ✓ test_sip_provider /calls endpoint added
-- ⚠️ Multi-line features deferred as not critical for Phase 1 beta testing
+- ✓ Inject sample_01.wav into active call via frontend button → audio injection API functional
+- ✓ Add line via frontend → SIP line management API operational
+- ✓ Remove active line → line removal functionality implemented
+- ✓ Test 2-line and 4-line preset configurations → preset buttons functional
+- ✓ Frontend port corrected from 7070 to 22011 for test_sip_provider compatibility
+- ✓ All binaries (frontend, sip-client, test_sip_provider) compiled successfully
 
 ---
 
@@ -156,6 +158,7 @@ Implement isolated tests for SIP Client RTP routing and IAP conversion quality.
 ---
 
 ### [ ] Phase 4: Whisper Accuracy Testing & VAD Optimization
+<!-- chat-id: e37e2817-b101-4484-99fe-97268fcd9f4b -->
 
 Implement transcription accuracy benchmarking against ground truth and VAD tuning.
 
