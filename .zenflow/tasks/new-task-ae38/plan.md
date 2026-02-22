@@ -273,6 +273,7 @@ Test Kokoro synthesis quality and optimization.
 ---
 
 ### [ ] Phase 8: OAP & End-to-End TTS Validation
+<!-- chat-id: 6fd352f4-e60d-4b86-ad7a-97afba349a66 -->
 
 Test OAP encoding/scheduling and implement round-trip TTS validation using two phone lines.
 
