@@ -216,6 +216,7 @@ Build framework for comparing multiple Whisper models side-by-side.
 ---
 
 ### [ ] Phase 6: LLaMA Response Quality & Model Benchmarking
+<!-- chat-id: afbe418a-579c-4de1-b982-bb49bb2112a4 -->
 
 Test LLaMA response quality and implement model comparison framework.
 
