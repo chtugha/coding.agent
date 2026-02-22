@@ -304,6 +304,7 @@ Test OAP encoding/scheduling and implement round-trip TTS validation using two p
 ---
 
 ### [ ] Phase 9: Service Interconnection Resilience Testing
+<!-- chat-id: 1ebcbd36-a04d-47a8-adb4-19d4a45d7fde -->
 
 Test TCP reconnection, buffering, and error handling across service boundaries.
 
