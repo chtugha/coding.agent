@@ -71,9 +71,9 @@ static std::string escape_json(const std::string& s) {
             case '\r': result += "\\r"; break;
             case '\t': result += "\\t"; break;
             default:
-                if (c < 32) {
+                if (static_cast<unsigned char>(c) < 32) {
                     char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
                     result += buf;
                 } else {
                     result += c;
@@ -262,9 +262,9 @@ private:
 
         const char* seed = R"(
             INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
-                ('SIP_CLIENT', 'bin/sip-client', '--lines 2 test 127.0.0.1 5060', 'SIP client / RTP gateway'),
+                ('SIP_CLIENT', 'bin/sip-client', '--lines 2 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
                 ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
-                ('WHISPER_SERVICE', 'bin/whisper-service', '', 'Whisper ASR (CoreML/Metal)'),
+                ('WHISPER_SERVICE', 'bin/whisper-service', '--language de models/ggml-large-v3.bin', 'Whisper ASR (CoreML/Metal)'),
                 ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
                 ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
                 ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP');
@@ -497,6 +497,7 @@ private:
                 if (waitpid(svc.pid, &status, WNOHANG) == svc.pid) {
                     svc.managed = false;
                     svc.pid = 0;
+                    interconnect_.unregister_service(parse_service_type(name));
                     return true;
                 }
                 usleep(100000);
@@ -505,6 +506,7 @@ private:
             waitpid(svc.pid, nullptr, 0);
             svc.managed = false;
             svc.pid = 0;
+            interconnect_.unregister_service(parse_service_type(name));
             return true;
         }
         return false;
@@ -752,7 +754,7 @@ private:
 
         mg_printf(c,
             "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream\r\n"
+            "Content-Type: text/event-stream; charset=utf-8\r\n"
             "Cache-Control: no-cache\r\n"
             "Connection: keep-alive\r\n"
             "Transfer-Encoding: chunked\r\n\r\n");
@@ -853,6 +855,8 @@ private:
                 handle_status(c);
             } else if (mg_match(hm->uri, mg_str("/css/theme/*"), NULL)) {
                 serve_theme_css(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/models")) == 0) {
+                handle_whisper_models(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/sip/add-line")) == 0) {
                 handle_sip_add_line(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/sip/remove-line")) == 0) {
@@ -868,7 +872,7 @@ private:
     void serve_index(struct mg_connection *c) {
         std::string theme = get_setting("theme", "default");
         std::string html = build_ui_html(theme);
-        mg_http_reply(c, 200, "Content-Type: text/html\r\n", "%s", html.c_str());
+        mg_http_reply(c, 200, "Content-Type: text/html; charset=utf-8\r\n", "%s", html.c_str());
     }
 
     std::string build_ui_html(const std::string& theme) {
@@ -1058,12 +1062,20 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <span id="svcDetailStatus"></span></div>
 <div class="wt-field"><label>Binary Path</label>
 <div style="font-size:13px;color:var(--wt-text-secondary);font-family:var(--wt-mono)" id="svcDetailPath"></div></div>
+<div id="whisperConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">Whisper Configuration</div>
+<div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">Language</label>
+<select class="wt-select" id="whisperLang" onchange="updateWhisperArgs()" style="font-size:12px"></select></div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Model</label>
+<select class="wt-select" id="whisperModel" onchange="updateWhisperArgs()" style="font-size:12px"></select></div>
+</div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
 <div style="display:flex;gap:8px">
 <button class="wt-btn wt-btn-primary" id="svcStartBtn" onclick="startSvcDetail()">&#x25B6; Start</button>
 <button class="wt-btn wt-btn-danger" id="svcStopBtn" onclick="stopSvcDetail()">&#x25A0; Stop</button>
 <button class="wt-btn wt-btn-secondary" id="svcRestartBtn" onclick="restartSvcDetail()">&#x21BB; Restart</button>
+<button class="wt-btn wt-btn-secondary" id="svcSaveBtn" onclick="saveSvcConfig()">&#x1F4BE; Save Config</button>
 </div></div>
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Live Logs</span>
@@ -1268,6 +1280,12 @@ function fetchServices(){
         'OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP'};
       var eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
       var safeAttr=s.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      var btns='<div style="margin-top:6px;display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">';
+      if(!s.online) btns+='<button class="wt-btn wt-btn-primary" style="font-size:11px;padding:2px 8px" onclick="quickSvcStart(\''+safeAttr+'\')">&#x25B6; Start</button>';
+      if(s.managed&&s.online) btns+='<button class="wt-btn wt-btn-danger" style="font-size:11px;padding:2px 8px" onclick="quickSvcStop(\''+safeAttr+'\')">&#x25A0; Stop</button>';
+      if(s.managed&&s.online) btns+='<button class="wt-btn wt-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="quickSvcRestart(\''+safeAttr+'\')">&#x21BB; Restart</button>';
+      btns+='<button class="wt-btn wt-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="showSvcDetail(\''+safeAttr+'\')">&#x2699; Config</button>';
+      btns+='</div>';
       return '<div class="wt-card" style="cursor:pointer" onclick="showSvcDetail(\''+safeAttr+'\')">'
         +'<div class="wt-card-header"><span class="wt-card-title">'
         +'<span class="wt-status-dot '+(s.online?'online':'offline')+'"></span>'
@@ -1275,7 +1293,7 @@ function fetchServices(){
         +'<div style="font-size:12px;color:var(--wt-text-secondary)">'+eDesc+'</div>'
         +'<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">'+ePath+'</div>'
         +(s.managed?'<div style="font-size:11px;margin-top:4px"><span class="wt-badge wt-badge-warning">Managed by Frontend</span></div>':'')
-        +'</div>';
+        +btns+'</div>';
     }).join('');
     if(currentSvc){
       var s=d.services.find(x=>x.name===currentSvc);
@@ -1306,6 +1324,35 @@ function updateSvcDetail(s){
   document.getElementById('svcStartBtn').style.display=online?'none':'';
   document.getElementById('svcStopBtn').style.display=(s.managed&&online)?'':'none';
   document.getElementById('svcRestartBtn').style.display=(s.managed&&online)?'':'none';
+  var wc=document.getElementById('whisperConfig');
+  if(s.name==='WHISPER_SERVICE'){
+    wc.classList.remove('hidden');
+    loadWhisperConfig(s.default_args||'');
+  } else {
+    wc.classList.add('hidden');
+  }
+}
+function loadWhisperConfig(args){
+  fetch('/api/whisper/models').then(r=>r.json()).then(d=>{
+    var langSel=document.getElementById('whisperLang');
+    var modelSel=document.getElementById('whisperModel');
+    langSel.innerHTML=d.languages.map(l=>'<option value="'+l+'">'+l+'</option>').join('');
+    modelSel.innerHTML=d.models.map(m=>'<option value="'+m+'">'+m+'</option>').join('');
+    var curLang='de',curModel='';
+    var parts=args.split(/\s+/);
+    for(var i=0;i<parts.length;i++){
+      if((parts[i]==='--language'||parts[i]==='-l')&&i+1<parts.length){curLang=parts[i+1];i++;}
+      else if((parts[i]==='--model'||parts[i]==='-m')&&i+1<parts.length){curModel=parts[i+1];i++;}
+      else if(parts[i].indexOf('.bin')!==-1){curModel=parts[i];}
+    }
+    langSel.value=curLang;
+    if(curModel)modelSel.value=curModel;
+  });
+}
+function updateWhisperArgs(){
+  var lang=document.getElementById('whisperLang').value;
+  var model=document.getElementById('whisperModel').value;
+  document.getElementById('svcDetailArgs').value='--language '+lang+' '+model;
 }
 
 function showServicesOverview(){
@@ -1333,6 +1380,28 @@ function restartSvcDetail(){
   var args=document.getElementById('svcDetailArgs').value;
   fetch('/api/services/restart',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({service:currentSvc,args:args})}).then(()=>setTimeout(fetchServices,2000));
+}
+function saveSvcConfig(){
+  if(!currentSvc)return;
+  var args=document.getElementById('svcDetailArgs').value;
+  fetch('/api/services/config',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:currentSvc,args:args})}).then(()=>{
+    fetchServices();
+    var btn=document.getElementById('svcSaveBtn');
+    btn.textContent='Saved!';setTimeout(()=>{btn.textContent='Save Config';},1500);
+  });
+}
+function quickSvcStart(name){
+  fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,1000));
+}
+function quickSvcStop(name){
+  fetch('/api/services/stop',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,1000));
+}
+function quickSvcRestart(name){
+  fetch('/api/services/restart',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,2000));
 }
 function clearSvcLog(){document.getElementById('svcDetailLog').textContent='';}
 
@@ -2091,6 +2160,36 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
 
         json << "]}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    void handle_whisper_models(struct mg_connection *c) {
+        std::stringstream json;
+        json << "{\"models\":[";
+        DIR* dir = opendir("models");
+        bool first = true;
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr) {
+                std::string name = entry->d_name;
+                if (name.size() > 4 && name.substr(name.size() - 4) == ".bin") {
+                    if (!first) json << ",";
+                    json << "\"models/" << escape_json(name) << "\"";
+                    first = false;
+                }
+            }
+            closedir(dir);
+        }
+        std::string current_args;
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            for (auto& svc : services_) {
+                if (svc.name == "WHISPER_SERVICE") { current_args = svc.default_args; break; }
+            }
+        }
+        json << "],\"current_args\":\"" << escape_json(current_args) << "\"";
+        json << ",\"languages\":[\"de\",\"en\",\"fr\",\"es\",\"it\",\"pt\",\"nl\",\"pl\",\"ru\",\"ja\",\"zh\",\"auto\"]";
+        json << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 

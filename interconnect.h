@@ -624,6 +624,13 @@ public:
         return ended_call_ids_.size();
     }
 
+    void unregister_service(ServiceType svc_type) {
+        if (!is_master_) return;
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        service_registry_.erase(svc_type);
+        last_heartbeat_.erase(svc_type);
+    }
+
     size_t registered_service_count() const {
         if (!is_master_) return 0;
         std::lock_guard<std::mutex> lock(registry_mutex_);
@@ -1200,6 +1207,26 @@ private:
             }
 
             if (!need_down_in && !need_down_out) {
+                {
+                    std::lock_guard<std::mutex> lock(traffic_mutex_);
+                    auto probe_sock = [](int fd) -> bool {
+                        if (fd < 0) return true;
+                        int flags = fcntl(fd, F_GETFL);
+                        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+                        char c;
+                        ssize_t r = recv(fd, &c, 1, MSG_PEEK);
+                        fcntl(fd, F_SETFL, flags);
+                        return r != 0;
+                    };
+                    if (!probe_sock(down_in_accepted_)) {
+                        close(down_in_accepted_);
+                        down_in_accepted_ = -1;
+                    }
+                    if (!probe_sock(down_out_accepted_)) {
+                        close(down_out_accepted_);
+                        down_out_accepted_ = -1;
+                    }
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }

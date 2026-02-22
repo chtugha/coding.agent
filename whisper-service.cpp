@@ -10,6 +10,7 @@
 #include <cstring>
 #include <deque>
 #include <signal.h>
+#include <getopt.h>
 #include "interconnect.h"
 #include "whisper-cpp/include/whisper.h"
 
@@ -49,9 +50,10 @@ class WhisperService {
     static constexpr int VAD_INACTIVITY_FLUSH_MS = 2000;
 
 public:
-    WhisperService(const std::string& model_path) 
+    WhisperService(const std::string& model_path, const std::string& language = "de") 
         : running_(true), 
           model_path_(model_path),
+          language_(language),
           interconnect_(whispertalk::ServiceType::WHISPER_SERVICE) {
         whisper_context_params cparams = whisper_context_default_params();
         cparams.use_gpu = true;
@@ -286,7 +288,7 @@ private:
         }
 
         whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
-        wparams.language = "de";
+        wparams.language = language_.c_str();
         wparams.n_threads = 4;
         wparams.no_timestamps = true;
         wparams.single_segment = true;
@@ -379,6 +381,7 @@ private:
 
     std::atomic<bool> running_;
     std::string model_path_;
+    std::string language_;
     struct whisper_context* ctx_ = nullptr;
     std::mutex whisper_mutex_;
     std::mutex calls_mutex_;
@@ -395,18 +398,44 @@ int main(int argc, char** argv) {
     signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);
 
-    const char* env_models = std::getenv("WHISPERTALK_MODELS_DIR");
-    std::string models_dir = env_models ? env_models :
+    std::string model_path;
+    std::string language = "de";
+
+    static struct option long_opts[] = {
+        {"language", required_argument, 0, 'l'},
+        {"model", required_argument, 0, 'm'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "l:m:", long_opts, nullptr)) != -1) {
+        switch (opt) {
+            case 'l': language = optarg; break;
+            case 'm': model_path = optarg; break;
+            default: break;
+        }
+    }
+
+    if (model_path.empty()) {
+        if (optind < argc) {
+            model_path = argv[optind];
+        } else {
+            const char* env_models = std::getenv("WHISPERTALK_MODELS_DIR");
+            std::string models_dir = env_models ? env_models :
 #ifdef WHISPERTALK_MODELS_DIR
-        WHISPERTALK_MODELS_DIR;
+                WHISPERTALK_MODELS_DIR;
 #else
-        "models";
+                "models";
 #endif
-    std::string model_path = models_dir + "/ggml-large-v3-q5_0.bin";
-    if (argc >= 2) model_path = argv[1];
+            model_path = models_dir + "/ggml-large-v3-q5_0.bin";
+        }
+    }
+
+    std::cout << "Whisper model: " << model_path << std::endl;
+    std::cout << "Language: " << language << std::endl;
 
     try {
-        WhisperService service(model_path);
+        WhisperService service(model_path, language);
         if (!service.init()) {
             return 1;
         }

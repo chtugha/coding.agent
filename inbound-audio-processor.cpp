@@ -100,18 +100,19 @@ private:
                 pcm[i*2 + 1] = 0.5f * (s + next);
             }
 
-            std::vector<float> chunk;
             {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 state->buffer.insert(state->buffer.end(), pcm.begin(), pcm.end());
-                if (state->buffer.size() >= 1600) {
-                    size_t chunk_size = std::min(state->buffer.size(), size_t(16000));
-                    chunk.assign(state->buffer.begin(), state->buffer.begin() + chunk_size);
-                    state->buffer.erase(state->buffer.begin(), state->buffer.begin() + chunk_size);
-                }
             }
 
-            if (!chunk.empty()) {
+            while (true) {
+                std::vector<float> chunk;
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    if (state->buffer.size() < 1600) break;
+                    chunk.assign(state->buffer.begin(), state->buffer.begin() + 1600);
+                    state->buffer.erase(state->buffer.begin(), state->buffer.begin() + 1600);
+                }
                 whispertalk::Packet out_pkt(pkt.call_id, chunk.data(), chunk.size() * sizeof(float));
                 out_pkt.trace = pkt.trace;
                 out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
