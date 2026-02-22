@@ -246,6 +246,7 @@ Test LLaMA response quality and implement model comparison framework.
 ---
 
 ### [ ] Phase 7: Kokoro TTS Quality Testing
+<!-- chat-id: bb84ad7c-a9d8-4e9e-9047-7b226a3f7f01 -->
 
 Test Kokoro synthesis quality and optimization.
 
