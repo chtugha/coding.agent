@@ -87,7 +87,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1615,
-        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "ground_truth": "der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
         "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Peptide."
       },
       {
@@ -101,9 +101,9 @@
       {
         "sample": "sample_13",
         "status": "WARN",
-        "similarity": 97.0,
+        "similarity": 96.0,
         "inference_ms": 1471,
-        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "ground_truth": "der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft.",
         "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen im Untersuchungshafen."
       },
       {
@@ -127,7 +127,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1028,
-        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "ground_truth": "bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung.",
         "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
       },
       {
@@ -135,7 +135,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1361,
-        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen.",
         "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
       },
       {
@@ -143,7 +143,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1095,
-        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "ground_truth": "bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert.",
         "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
       },
       {
@@ -151,7 +151,7 @@
         "status": "WARN",
         "similarity": 96.3855421686747,
         "inference_ms": 1489,
-        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter.",
         "transcription": "Im Landratrand im oberbayerischen Kreis Mühldorf ist der 49-Jährige kein Unbekannter."
       },
       {
@@ -159,7 +159,7 @@
         "status": "WARN",
         "similarity": 92.40506329113924,
         "inference_ms": 1382,
-        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "ground_truth": "beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn?",
         "transcription": "Beauty-Trend. Der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
       }
     ],
@@ -258,7 +258,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1887,
-        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "ground_truth": "der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
         "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Peptide."
       },
       {
@@ -272,9 +272,9 @@
       {
         "sample": "sample_13",
         "status": "WARN",
-        "similarity": 97.0,
+        "similarity": 96.0,
         "inference_ms": 1809,
-        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "ground_truth": "der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft.",
         "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen im Untersuchungshafen."
       },
       {
@@ -298,7 +298,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1339,
-        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "ground_truth": "bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung.",
         "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
       },
       {
@@ -306,7 +306,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1667,
-        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen.",
         "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
       },
       {
@@ -314,7 +314,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1344,
-        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "ground_truth": "bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert.",
         "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
       },
       {
@@ -322,7 +322,7 @@
         "status": "WARN",
         "similarity": 96.3855421686747,
         "inference_ms": 1801,
-        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter.",
         "transcription": "Im Landratrand im oberbayerischen Kreis Mühldorf ist der 49-Jährige kein Unbekannter."
       },
       {
@@ -330,7 +330,7 @@
         "status": "WARN",
         "similarity": 92.40506329113924,
         "inference_ms": 1727,
-        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "ground_truth": "beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn?",
         "transcription": "Beauty-Trend. Der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
       }
     ],
@@ -429,7 +429,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1653,
-        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "ground_truth": "der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
         "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Peptide."
       },
       {
@@ -443,9 +443,9 @@
       {
         "sample": "sample_13",
         "status": "WARN",
-        "similarity": 97.0,
+        "similarity": 96.0,
         "inference_ms": 1529,
-        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "ground_truth": "der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft.",
         "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen im Untersuchungshafen."
       },
       {
@@ -469,7 +469,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1081,
-        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "ground_truth": "bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung.",
         "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
       },
       {
@@ -477,7 +477,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1394,
-        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen.",
         "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
       },
       {
@@ -485,7 +485,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1127,
-        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "ground_truth": "bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert.",
         "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
       },
       {
@@ -493,7 +493,7 @@
         "status": "WARN",
         "similarity": 96.3855421686747,
         "inference_ms": 1558,
-        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter.",
         "transcription": "Im Landratrand im oberbayerischen Kreis Mühldorf ist der 49-Jährige kein Unbekannter."
       },
       {
@@ -501,7 +501,7 @@
         "status": "WARN",
         "similarity": 92.40506329113924,
         "inference_ms": 1435,
-        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "ground_truth": "beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn?",
         "transcription": "Beauty-Trend. Der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
       }
     ],
@@ -600,7 +600,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 2447,
-        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "ground_truth": "der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
         "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Peptide."
       },
       {
@@ -614,9 +614,9 @@
       {
         "sample": "sample_13",
         "status": "WARN",
-        "similarity": 97.0,
+        "similarity": 96.0,
         "inference_ms": 1965,
-        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "ground_truth": "der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft.",
         "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen im Untersuchungshafen."
       },
       {
@@ -640,7 +640,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1504,
-        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "ground_truth": "bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung.",
         "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
       },
       {
@@ -648,7 +648,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1815,
-        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen.",
         "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
       },
       {
@@ -656,7 +656,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1471,
-        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "ground_truth": "bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert.",
         "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
       },
       {
@@ -664,7 +664,7 @@
         "status": "WARN",
         "similarity": 96.3855421686747,
         "inference_ms": 1975,
-        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter.",
         "transcription": "Im Landratrand im oberbayerischen Kreis Mühldorf ist der 49-Jährige kein Unbekannter."
       },
       {
@@ -672,7 +672,7 @@
         "status": "WARN",
         "similarity": 92.40506329113924,
         "inference_ms": 1844,
-        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "ground_truth": "beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn?",
         "transcription": "Beauty-Trend. Der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
       }
     ],
@@ -771,7 +771,7 @@
         "status": "WARN",
         "similarity": 98.93617021276596,
         "inference_ms": 759,
-        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "ground_truth": "der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
         "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Pektide."
       },
       {
@@ -784,10 +784,10 @@
       },
       {
         "sample": "sample_13",
-        "status": "PASS",
-        "similarity": 100.0,
+        "status": "WARN",
+        "similarity": 98.98989898989899,
         "inference_ms": 737,
-        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "ground_truth": "der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft.",
         "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen in Untersuchungshaft."
       },
       {
@@ -811,7 +811,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 605,
-        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "ground_truth": "bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung.",
         "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
       },
       {
@@ -819,7 +819,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 684,
-        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen.",
         "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
       },
       {
@@ -827,7 +827,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 633,
-        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "ground_truth": "bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert.",
         "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
       },
       {
@@ -835,7 +835,7 @@
         "status": "WARN",
         "similarity": 92.85714285714286,
         "inference_ms": 742,
-        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter.",
         "transcription": "Im Landrat Kant im oberbayerischen Kreis Nulldorf ist der 49-Jährige kein Unbekannter."
       },
       {
@@ -843,13 +843,13 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 692,
-        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "ground_truth": "beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn?",
         "transcription": "Beauty-Trend, der aufregendste Beauty-Trend für die Festival- und Badesaison 2015."
       }
     ],
     "summary": {
-      "pass": 9,
-      "warn": 10,
+      "pass": 8,
+      "warn": 11,
       "fail": 1,
       "avg_ms": 687.578947368421
     }
@@ -942,7 +942,7 @@
         "status": "WARN",
         "similarity": 98.93617021276596,
         "inference_ms": 1087,
-        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "ground_truth": "der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
         "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Pektide."
       },
       {
@@ -955,10 +955,10 @@
       },
       {
         "sample": "sample_13",
-        "status": "PASS",
-        "similarity": 100.0,
+        "status": "WARN",
+        "similarity": 98.98989898989899,
         "inference_ms": 1061,
-        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "ground_truth": "der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft.",
         "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen in Untersuchungshaft."
       },
       {
@@ -982,7 +982,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1011,
-        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "ground_truth": "bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung.",
         "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
       },
       {
@@ -990,7 +990,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 999,
-        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen.",
         "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
       },
       {
@@ -998,7 +998,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 919,
-        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "ground_truth": "bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert.",
         "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
       },
       {
@@ -1006,7 +1006,7 @@
         "status": "WARN",
         "similarity": 92.85714285714286,
         "inference_ms": 1023,
-        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter.",
         "transcription": "Im Landrat Kant im oberbayerischen Kreis Nulldorf ist der 49-Jährige kein Unbekannter."
       },
       {
@@ -1014,13 +1014,13 @@
         "status": "WARN",
         "similarity": 92.40506329113924,
         "inference_ms": 1010,
-        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "ground_truth": "beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn?",
         "transcription": "Beauty-Trend, der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
       }
     ],
     "summary": {
-      "pass": 8,
-      "warn": 12,
+      "pass": 7,
+      "warn": 13,
       "fail": 0,
       "avg_ms": 1012.8
     }
@@ -1113,7 +1113,7 @@
         "status": "WARN",
         "similarity": 98.93617021276596,
         "inference_ms": 800,
-        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "ground_truth": "der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
         "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Pektide."
       },
       {
@@ -1126,10 +1126,10 @@
       },
       {
         "sample": "sample_13",
-        "status": "PASS",
-        "similarity": 100.0,
+        "status": "WARN",
+        "similarity": 98.98989898989899,
         "inference_ms": 716,
-        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "ground_truth": "der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft.",
         "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen in Untersuchungshaft."
       },
       {
@@ -1153,7 +1153,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 612,
-        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "ground_truth": "bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung.",
         "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
       },
       {
@@ -1161,7 +1161,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 693,
-        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen.",
         "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
       },
       {
@@ -1169,7 +1169,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 607,
-        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "ground_truth": "bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert.",
         "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
       },
       {
@@ -1177,7 +1177,7 @@
         "status": "WARN",
         "similarity": 92.85714285714286,
         "inference_ms": 725,
-        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter.",
         "transcription": "Im Landrat Kant im oberbayerischen Kreis Nulldorf ist der 49-Jährige kein Unbekannter."
       },
       {
@@ -1185,13 +1185,13 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 684,
-        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "ground_truth": "beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn?",
         "transcription": "Beauty-Trend, der aufregendste Beauty-Trend für die Festival- und Badesaison 2015."
       }
     ],
     "summary": {
-      "pass": 8,
-      "warn": 11,
+      "pass": 7,
+      "warn": 12,
       "fail": 1,
       "avg_ms": 686.05
     }
@@ -1284,7 +1284,7 @@
         "status": "WARN",
         "similarity": 98.93617021276596,
         "inference_ms": 1222,
-        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "ground_truth": "der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
         "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Pektide."
       },
       {
@@ -1297,10 +1297,10 @@
       },
       {
         "sample": "sample_13",
-        "status": "PASS",
-        "similarity": 100.0,
+        "status": "WARN",
+        "similarity": 98.98989898989899,
         "inference_ms": 1185,
-        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "ground_truth": "der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft.",
         "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen in Untersuchungshaft."
       },
       {
@@ -1324,7 +1324,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1084,
-        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "ground_truth": "bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung.",
         "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
       },
       {
@@ -1332,7 +1332,7 @@
         "status": "WARN",
         "similarity": 97.61904761904762,
         "inference_ms": 1108,
-        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen.",
         "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerinnen."
       },
       {
@@ -1340,7 +1340,7 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1049,
-        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "ground_truth": "bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert.",
         "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
       },
       {
@@ -1348,7 +1348,7 @@
         "status": "WARN",
         "similarity": 91.56626506024097,
         "inference_ms": 1144,
-        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter.",
         "transcription": "Im Landrat Kant im oberbayerischen Kreis Nundorf ist der 49-Jährige kein Unbekannter."
       },
       {
@@ -1356,13 +1356,13 @@
         "status": "PASS",
         "similarity": 100.0,
         "inference_ms": 1115,
-        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "ground_truth": "beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn?",
         "transcription": "Beauty-Trend, der aufregendste Beauty-Trend für die Festival- und Badesaison 2015."
       }
     ],
     "summary": {
-      "pass": 9,
-      "warn": 11,
+      "pass": 8,
+      "warn": 12,
       "fail": 0,
       "avg_ms": 1102.95
     }
