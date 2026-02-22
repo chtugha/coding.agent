@@ -31,9 +31,15 @@ struct CallSession {
     uint16_t seq = 0;
     uint32_t ts = 0;
     uint32_t ssrc = 0;
+    std::atomic<uint64_t> rtp_rx_count{0};
+    std::atomic<uint64_t> rtp_tx_count{0};
+    std::atomic<uint64_t> rtp_rx_bytes{0};
+    std::atomic<uint64_t> rtp_tx_bytes{0};
+    std::chrono::steady_clock::time_point start_time;
 
     CallSession(int i, int line, std::string scid) : id(i), line_index(line), sip_call_id(scid) {
         ssrc = rand();
+        start_time = std::chrono::steady_clock::now();
     }
 };
 
@@ -93,36 +99,50 @@ public:
 
     int add_line(const std::string& user, const std::string& server_ip, const std::string& password) {
         std::lock_guard<std::mutex> lock(lines_mutex_);
+        log_fwd_.forward("INFO", 0, "Adding SIP line: user=%s server=%s", user.c_str(), server_ip.c_str());
         int idx = create_line(user, server_ip, password);
-        if (idx < 0) return -1;
+        if (idx < 0) {
+            log_fwd_.forward("ERROR", 0, "Failed to create SIP line for user %s", user.c_str());
+            return -1;
+        }
         auto& line = lines_.back();
         line->sip_thread = std::thread(&SipClient::sip_loop, this, line);
         line->reg_thread = std::thread(&SipClient::registration_loop, this, line);
         std::cout << "Added line " << idx << " (" << user << "@" << server_ip << ")" << std::endl;
+        log_fwd_.forward("INFO", 0, "SIP line %d added successfully: user=%s port=%d", idx, user.c_str(), line->local_port);
         return idx;
     }
 
     bool remove_line(int index) {
         std::lock_guard<std::mutex> lock(lines_mutex_);
+        log_fwd_.forward("INFO", 0, "Removing SIP line %d", index);
         auto it = std::find_if(lines_.begin(), lines_.end(),
             [index](const std::shared_ptr<SipLine>& l) { return l->index == index; });
-        if (it == lines_.end()) return false;
+        if (it == lines_.end()) {
+            log_fwd_.forward("WARN", 0, "SIP line %d not found", index);
+            return false;
+        }
 
         auto line = *it;
+        std::string user = line->user;
         line->line_running = false;
         line->registered = false;
 
+        log_fwd_.forward("INFO", 0, "Shutting down line %d (%s): stopping threads", index, user.c_str());
         if (line->sip_thread.joinable()) line->sip_thread.join();
         if (line->reg_thread.joinable()) line->reg_thread.join();
 
         if (line->sip_sock >= 0) close(line->sip_sock);
 
+        int terminated_calls = 0;
         {
             std::lock_guard<std::mutex> clock(calls_mutex_);
             for (auto cit = calls_.begin(); cit != calls_.end(); ) {
                 if (cit->second->line_index == index) {
+                    log_fwd_.forward("INFO", cit->second->id, "Terminating call %d on line %d", cit->second->id, index);
                     cit->second->active = false;
                     cit = calls_.erase(cit);
+                    terminated_calls++;
                 } else {
                     ++cit;
                 }
@@ -130,7 +150,8 @@ public:
         }
 
         lines_.erase(it);
-        std::cout << "Removed line " << index << " (" << line->user << ")" << std::endl;
+        std::cout << "Removed line " << index << " (" << user << ")" << std::endl;
+        log_fwd_.forward("INFO", 0, "SIP line %d removed: user=%s terminated_calls=%d", index, user.c_str(), terminated_calls);
         return true;
     }
 
@@ -141,6 +162,25 @@ public:
         for (const auto& line : lines_) {
             out << " " << line->index << ":" << line->user
                 << ":" << (line->registered ? "registered" : "unregistered");
+        }
+        return out.str();
+    }
+
+    std::string get_stats() {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        std::ostringstream out;
+        out << "STATS " << calls_.size();
+        for (const auto& kv : id_to_call_) {
+            auto session = kv.second;
+            auto now = std::chrono::steady_clock::now();
+            auto duration_sec = std::chrono::duration_cast<std::chrono::seconds>(now - session->start_time).count();
+            out << " " << session->id 
+                << ":" << session->line_index
+                << ":" << session->rtp_rx_count.load()
+                << ":" << session->rtp_tx_count.load()
+                << ":" << session->rtp_rx_bytes.load()
+                << ":" << session->rtp_tx_bytes.load()
+                << ":" << duration_sec;
         }
         return out.str();
     }
@@ -189,7 +229,12 @@ private:
             if (msg.find("INVITE") == 0) handle_invite(msg, sender, line);
             else if (msg.find("BYE") == 0) handle_bye(msg, sender, line);
             else if (msg.find("SIP/2.0 200") == 0 && msg.find("REGISTER") != std::string::npos) {
+                bool was_registered = line->registered;
                 line->registered = true;
+                if (!was_registered) {
+                    std::cout << "Line " << line->index << " (" << line->user << ") registered successfully" << std::endl;
+                    log_fwd_.forward("INFO", 0, "Line %d (%s) registered successfully", line->index, line->user.c_str());
+                }
             }
         }
     }
@@ -331,6 +376,9 @@ private:
             ssize_t n = recvfrom(session->rtp_sock, buf, sizeof(buf), 0, (struct sockaddr*)&sender, &slen);
             if (n < 12) continue;
 
+            session->rtp_rx_count++;
+            session->rtp_rx_bytes += n;
+
             whispertalk::Packet pkt(session->id, buf, n);
             pkt.trace.record(whispertalk::ServiceType::SIP_CLIENT, 0);
             pkt.trace.record(whispertalk::ServiceType::SIP_CLIENT, 1);
@@ -374,7 +422,11 @@ private:
                 dest.sin_family = AF_INET;
                 dest.sin_port = htons(session->remote_port);
                 dest.sin_addr.s_addr = inet_addr(session->remote_ip.c_str());
-                sendto(session->rtp_sock, rtp, sizeof(rtp), 0, (struct sockaddr*)&dest, sizeof(dest));
+                ssize_t sent = sendto(session->rtp_sock, rtp, sizeof(rtp), 0, (struct sockaddr*)&dest, sizeof(dest));
+                if (sent > 0) {
+                    session->rtp_tx_count++;
+                    session->rtp_tx_bytes += sent;
+                }
             }
         }
     }
@@ -441,6 +493,9 @@ private:
         }
         else if (msg == "LIST_LINES") {
             return list_lines();
+        }
+        else if (msg == "GET_STATS") {
+            return get_stats();
         }
         return "";
     }
