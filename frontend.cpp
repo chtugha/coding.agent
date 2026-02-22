@@ -6,6 +6,7 @@
 #include <fstream>
 #include <map>
 #include <vector>
+#include <deque>
 #include <mutex>
 #include <atomic>
 #include <queue>
@@ -15,6 +16,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <signal.h>
+#include <dirent.h>
 #include <algorithm>
 #include <fcntl.h>
 
@@ -57,6 +59,16 @@ struct ServiceInfo {
     pid_t pid;
     std::string log_file;
     time_t start_time;
+};
+
+struct TestFileInfo {
+    std::string name;
+    size_t size_bytes;
+    double duration_sec;
+    uint32_t sample_rate;
+    uint16_t channels;
+    std::string ground_truth;
+    time_t last_modified;
 };
 
 static std::string escape_json(const std::string& s) {
@@ -250,6 +262,85 @@ private:
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS testfiles (
+                name TEXT PRIMARY KEY,
+                size_bytes INTEGER,
+                duration_sec REAL,
+                sample_rate INTEGER,
+                channels INTEGER,
+                ground_truth TEXT,
+                last_modified INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS whisper_accuracy_tests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER,
+                file_name TEXT,
+                model_name TEXT,
+                ground_truth TEXT,
+                transcription TEXT,
+                similarity_percent REAL,
+                latency_ms INTEGER,
+                status TEXT,
+                timestamp INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT,
+                name TEXT,
+                path TEXT,
+                backend TEXT,
+                size_mb INTEGER,
+                config_json TEXT,
+                added_timestamp INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS model_benchmark_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_id INTEGER,
+                test_files TEXT,
+                iterations INTEGER,
+                avg_accuracy REAL,
+                avg_latency_ms INTEGER,
+                p50_latency_ms INTEGER,
+                p95_latency_ms INTEGER,
+                p99_latency_ms INTEGER,
+                memory_mb INTEGER,
+                timestamp INTEGER,
+                FOREIGN KEY(model_id) REFERENCES models(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS tts_validation_tests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                line1_call_id INTEGER,
+                line2_call_id INTEGER,
+                original_text TEXT,
+                tts_transcription TEXT,
+                similarity_percent REAL,
+                phoneme_errors TEXT,
+                timestamp INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS sip_lines (
+                line_id INTEGER PRIMARY KEY,
+                username TEXT,
+                password TEXT,
+                server TEXT,
+                port INTEGER,
+                status TEXT,
+                last_registered INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS service_test_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT,
+                test_type TEXT,
+                status TEXT,
+                metrics_json TEXT,
+                timestamp INTEGER
             );
         )";
 
@@ -863,6 +954,10 @@ private:
                 handle_sip_remove_line(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/sip/lines")) == 0) {
                 handle_sip_lines(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/testfiles")) == 0) {
+                serve_testfiles_api(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/testfiles/scan")) == 0) {
+                handle_testfiles_scan(c);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
