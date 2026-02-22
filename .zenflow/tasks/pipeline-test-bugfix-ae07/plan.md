@@ -25,12 +25,14 @@ cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 
 ### Whisper Model Selection
 - **USE**: `models/ggml-large-v3.bin` (unquantized, 1.5GB) with **Metal-only GPU** (no CoreML encoder)
-- **DO NOT USE**: CoreML encoder models — tested extensively, all produce degraded transcriptions:
-  - CoreML ANE (`--optimize-ane True`): ~700ms but garbled output (missing letters, wrong language)
-  - CoreML standard (`--optimize-ane False`): ~840ms but still garbled
-  - Pre-converted HuggingFace models: behind auth wall (401), not accessible
-  - Root cause: CoreML encoder conversion (both ANE and standard paths) introduces precision loss that degrades the encoder embeddings
-- **Metal-only performance**: ~1400ms inference for 3-5s utterances, **100% transcription accuracy** on all 20 test samples
+- **DO NOT USE**: CoreML encoder models — tested extensively, ALL produce degraded transcriptions:
+  - CoreML ANE (our conversion, `--optimize-ane True`, torch 2.10): ~700ms but garbled output (missing letters, wrong language)
+  - CoreML ANE (our conversion, `--optimize-ane True`, torch 2.7): ~673ms, still garbled
+  - CoreML standard (our conversion, `--optimize-ane False`): ~840ms but still garbled
+  - Pre-converted official model (`ggerganov/whisper.cpp` on HuggingFace): ~781ms, **ALSO degraded** — same pattern of missing letters, CJK hallucinations, English word mixing
+  - Root cause: CoreML encoder integration in whisper.cpp introduces precision loss that degrades encoder embeddings — this is a fundamental whisper.cpp issue, not our conversion problem
+- **Metal-only performance**: ~1424ms avg inference for 3-5s utterances, 12/20 PASS, 8/20 WARN (>91%), 0 FAIL
+- **Number handling**: Whisper converts spoken German numbers to digits (e.g., "siebenundsechzig" → "67", "zweitausenddreiundzwanzig" → "2023"). This is ACCEPTABLE — LLaMA can handle digits. Ground truth files MUST use digit forms. Do NOT "fix" this by changing ground truths back to spelled-out forms.
 - **Default args**: `--language de models/ggml-large-v3.bin`
 
 ### CoreML Model Conversion (if retrying in future)
