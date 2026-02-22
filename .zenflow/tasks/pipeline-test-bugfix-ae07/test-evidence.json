@@ -1,0 +1,1370 @@
+{
+  "large-v3-coreml": {
+    "model": "large-v3-coreml",
+    "results": [
+      {
+        "sample": "sample_01",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1207,
+        "ground_truth": "bei fettiger haut sind diese verstopft, abfallstoffe bleiben stecken.",
+        "transcription": "Bei fettiger Haut sind diese verstopft. Abfallstoffe bleiben stecken."
+      },
+      {
+        "sample": "sample_02",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 989,
+        "ground_truth": "ende juli, anfang august könnten entscheidungen fallen.",
+        "transcription": "Ende Juli, Anfang August könnten Entscheidungen fallen."
+      },
+      {
+        "sample": "sample_03",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1135,
+        "ground_truth": "erzieher werden schon jetzt, lehrer nach den ferien getestet.",
+        "transcription": "Erzieher werden schon jetzt, Lehrer nach den Ferien getestet."
+      },
+      {
+        "sample": "sample_04",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1063,
+        "ground_truth": "bei dieser retro-brille ist der rahmen die besonderheit.",
+        "transcription": "Bei dieser Retro-Brille ist der Rahmen die Besonderheit."
+      },
+      {
+        "sample": "sample_05",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1350,
+        "ground_truth": "als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln.",
+        "transcription": "Als Hauptlieferant gilt die konventionelle Landwirtschaft mit phosphorhaltigen Düngemitteln."
+      },
+      {
+        "sample": "sample_06",
+        "status": "WARN",
+        "similarity": 96.2962962962963,
+        "inference_ms": 1257,
+        "ground_truth": "auch das kommissionspapier benennt diese technologie als besonders risikoträchtig.",
+        "transcription": "Auch das Kommissionspapier benimmt diese Technologie als besonders risikoträchtig."
+      },
+      {
+        "sample": "sample_07",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1101,
+        "ground_truth": "der mann machte ihm ein zeichen, zu ihm hinüber zu kommen.",
+        "transcription": "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen."
+      },
+      {
+        "sample": "sample_08",
+        "status": "WARN",
+        "similarity": 96.22641509433963,
+        "inference_ms": 1072,
+        "ground_truth": "der experte operiert nicht, verordnet aber medikamente.",
+        "transcription": "Der Experte operiert nicht, er ordnet aber Medikamente."
+      },
+      {
+        "sample": "sample_09",
+        "status": "WARN",
+        "similarity": 98.78048780487805,
+        "inference_ms": 1375,
+        "ground_truth": "münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga.",
+        "transcription": "München bleibt trotz erneuter schwäche Phasen Tabellenführer der Fußball-Bundesliga."
+      },
+      {
+        "sample": "sample_10",
+        "status": "WARN",
+        "similarity": 98.71794871794873,
+        "inference_ms": 1469,
+        "ground_truth": "wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt.",
+        "transcription": "Wie er im schädigen Stripclub des Städtchens seine blutigen Klamotten wechselt."
+      },
+      {
+        "sample": "sample_11",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1615,
+        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Peptide."
+      },
+      {
+        "sample": "sample_12",
+        "status": "WARN",
+        "similarity": 99.13793103448276,
+        "inference_ms": 1542,
+        "ground_truth": "im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt.",
+        "transcription": "Im November vor zwei Jahren habe ich einen Beitrag im Mozilla-Forum veröffentlicht und meine Stimmspende angekündigt."
+      },
+      {
+        "sample": "sample_13",
+        "status": "WARN",
+        "similarity": 97.0,
+        "inference_ms": 1471,
+        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen im Untersuchungshafen."
+      },
+      {
+        "sample": "sample_14",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1501,
+        "ground_truth": "teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen.",
+        "transcription": "Teilnehmende Werkstätten können auch Analyseinstrumente, Spezialwerkzeug und Reparaturanleitungen beziehen."
+      },
+      {
+        "sample": "sample_15",
+        "status": "FAIL",
+        "similarity": 86.36363636363636,
+        "inference_ms": 1517,
+        "ground_truth": "die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland.",
+        "transcription": "Die Immunpaldina gilt als älteste in der grünwissenschaftlich-medizinische Gelehrtengesellschaft in Deutschland."
+      },
+      {
+        "sample": "sample_16",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1028,
+        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
+      },
+      {
+        "sample": "sample_17",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1361,
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
+      },
+      {
+        "sample": "sample_18",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1095,
+        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
+      },
+      {
+        "sample": "sample_19",
+        "status": "WARN",
+        "similarity": 96.3855421686747,
+        "inference_ms": 1489,
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "transcription": "Im Landratrand im oberbayerischen Kreis Mühldorf ist der 49-Jährige kein Unbekannter."
+      },
+      {
+        "sample": "sample_20",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 1382,
+        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "transcription": "Beauty-Trend. Der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
+      }
+    ],
+    "summary": {
+      "pass": 11,
+      "warn": 8,
+      "fail": 1,
+      "avg_ms": 1300.95
+    }
+  },
+  "large-v3-metal": {
+    "model": "large-v3-metal",
+    "results": [
+      {
+        "sample": "sample_01",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1595,
+        "ground_truth": "bei fettiger haut sind diese verstopft, abfallstoffe bleiben stecken.",
+        "transcription": "Bei fettiger Haut sind diese verstopft. Abfallstoffe bleiben stecken."
+      },
+      {
+        "sample": "sample_02",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1324,
+        "ground_truth": "ende juli, anfang august könnten entscheidungen fallen.",
+        "transcription": "Ende Juli, Anfang August könnten Entscheidungen fallen."
+      },
+      {
+        "sample": "sample_03",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1438,
+        "ground_truth": "erzieher werden schon jetzt, lehrer nach den ferien getestet.",
+        "transcription": "Erzieher werden schon jetzt Lehrer nach den Ferien getestet."
+      },
+      {
+        "sample": "sample_04",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1395,
+        "ground_truth": "bei dieser retro-brille ist der rahmen die besonderheit.",
+        "transcription": "Bei dieser Retro-Brille ist der Rahmen die Besonderheit."
+      },
+      {
+        "sample": "sample_05",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1671,
+        "ground_truth": "als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln.",
+        "transcription": "Als Hauptlieferant gilt die konventionelle Landwirtschaft mit phosphorhaltigen Düngemitteln."
+      },
+      {
+        "sample": "sample_06",
+        "status": "WARN",
+        "similarity": 96.2962962962963,
+        "inference_ms": 1579,
+        "ground_truth": "auch das kommissionspapier benennt diese technologie als besonders risikoträchtig.",
+        "transcription": "Auch das Kommissionspapier benimmt diese Technologie als besonders risikoträchtig."
+      },
+      {
+        "sample": "sample_07",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1435,
+        "ground_truth": "der mann machte ihm ein zeichen, zu ihm hinüber zu kommen.",
+        "transcription": "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen."
+      },
+      {
+        "sample": "sample_08",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1415,
+        "ground_truth": "der experte operiert nicht, verordnet aber medikamente.",
+        "transcription": "Der Experte operiert nicht, verordnet aber Medikamente."
+      },
+      {
+        "sample": "sample_09",
+        "status": "WARN",
+        "similarity": 98.78048780487805,
+        "inference_ms": 1685,
+        "ground_truth": "münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga.",
+        "transcription": "München bleibt trotz erneuter schwäche Phasen Tabellenführer der Fußball-Bundesliga."
+      },
+      {
+        "sample": "sample_10",
+        "status": "WARN",
+        "similarity": 98.71794871794873,
+        "inference_ms": 1794,
+        "ground_truth": "wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt.",
+        "transcription": "Wie er im schädigen Stripclub des Städtchens seine blutigen Klamotten wechselt."
+      },
+      {
+        "sample": "sample_11",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1887,
+        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Peptide."
+      },
+      {
+        "sample": "sample_12",
+        "status": "WARN",
+        "similarity": 99.13793103448276,
+        "inference_ms": 1917,
+        "ground_truth": "im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt.",
+        "transcription": "Im November vor zwei Jahren habe ich einen Beitrag im Mozilla-Forum veröffentlicht und meine Stimmspende angekündigt."
+      },
+      {
+        "sample": "sample_13",
+        "status": "WARN",
+        "similarity": 97.0,
+        "inference_ms": 1809,
+        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen im Untersuchungshafen."
+      },
+      {
+        "sample": "sample_14",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1874,
+        "ground_truth": "teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen.",
+        "transcription": "Teilnehmende Werkstätten können auch Analyseinstrumente, Spezialwerkzeug und Reparaturanleitungen beziehen."
+      },
+      {
+        "sample": "sample_15",
+        "status": "WARN",
+        "similarity": 92.3076923076923,
+        "inference_ms": 1839,
+        "ground_truth": "die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland.",
+        "transcription": "Die Immunopaldina gilt als älteste akurwissenschaftlich-medizinische Gelehrtengesellschaft in Deutschland."
+      },
+      {
+        "sample": "sample_16",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1339,
+        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
+      },
+      {
+        "sample": "sample_17",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1667,
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
+      },
+      {
+        "sample": "sample_18",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1344,
+        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
+      },
+      {
+        "sample": "sample_19",
+        "status": "WARN",
+        "similarity": 96.3855421686747,
+        "inference_ms": 1801,
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "transcription": "Im Landratrand im oberbayerischen Kreis Mühldorf ist der 49-Jährige kein Unbekannter."
+      },
+      {
+        "sample": "sample_20",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 1727,
+        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "transcription": "Beauty-Trend. Der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
+      }
+    ],
+    "summary": {
+      "pass": 12,
+      "warn": 8,
+      "fail": 0,
+      "avg_ms": 1626.75
+    }
+  },
+  "large-v3-q5_0-coreml": {
+    "model": "large-v3-q5_0-coreml",
+    "results": [
+      {
+        "sample": "sample_01",
+        "status": "TIMEOUT",
+        "similarity": 0,
+        "inference_ms": 0,
+        "ground_truth": "bei fettiger haut sind diese verstopft, abfallstoffe bleiben stecken.",
+        "transcription": ""
+      },
+      {
+        "sample": "sample_02",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1048,
+        "ground_truth": "ende juli, anfang august könnten entscheidungen fallen.",
+        "transcription": "Ende Juli, Anfang August könnten Entscheidungen fallen."
+      },
+      {
+        "sample": "sample_03",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1160,
+        "ground_truth": "erzieher werden schon jetzt, lehrer nach den ferien getestet.",
+        "transcription": "Erzieher werden schon jetzt Lehrer nach den Ferien getestet."
+      },
+      {
+        "sample": "sample_04",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1094,
+        "ground_truth": "bei dieser retro-brille ist der rahmen die besonderheit.",
+        "transcription": "Bei dieser Retro-Brille ist der Rahmen die Besonderheit."
+      },
+      {
+        "sample": "sample_05",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1405,
+        "ground_truth": "als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln.",
+        "transcription": "Als Hauptlieferant gilt die konventionelle Landwirtschaft mit phosphorhaltigen Düngemitteln."
+      },
+      {
+        "sample": "sample_06",
+        "status": "WARN",
+        "similarity": 96.2962962962963,
+        "inference_ms": 1300,
+        "ground_truth": "auch das kommissionspapier benennt diese technologie als besonders risikoträchtig.",
+        "transcription": "Auch das Kommissionspapier benimmt diese Technologie als besonders risikoträchtig."
+      },
+      {
+        "sample": "sample_07",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1143,
+        "ground_truth": "der mann machte ihm ein zeichen, zu ihm hinüber zu kommen.",
+        "transcription": "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen."
+      },
+      {
+        "sample": "sample_08",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1138,
+        "ground_truth": "der experte operiert nicht, verordnet aber medikamente.",
+        "transcription": "Der Experte operiert nicht, verordnet aber Medikamente."
+      },
+      {
+        "sample": "sample_09",
+        "status": "WARN",
+        "similarity": 98.78048780487805,
+        "inference_ms": 1430,
+        "ground_truth": "münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga.",
+        "transcription": "München bleibt trotz erneuter schwäche Phasen Tabellenführer der Fußball-Bundesliga."
+      },
+      {
+        "sample": "sample_10",
+        "status": "WARN",
+        "similarity": 98.71794871794873,
+        "inference_ms": 1481,
+        "ground_truth": "wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt.",
+        "transcription": "Wie er im schädigen Stripclub des Städtchens seine blutigen Klamotten wechselt."
+      },
+      {
+        "sample": "sample_11",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1653,
+        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Peptide."
+      },
+      {
+        "sample": "sample_12",
+        "status": "WARN",
+        "similarity": 99.13793103448276,
+        "inference_ms": 1644,
+        "ground_truth": "im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt.",
+        "transcription": "Im November vor zwei Jahren habe ich einen Beitrag im Mozilla-Forum veröffentlicht und meine Stimmspende angekündigt."
+      },
+      {
+        "sample": "sample_13",
+        "status": "WARN",
+        "similarity": 97.0,
+        "inference_ms": 1529,
+        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen im Untersuchungshafen."
+      },
+      {
+        "sample": "sample_14",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1637,
+        "ground_truth": "teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen.",
+        "transcription": "Teilnehmende Werkstätten können auch Analyseinstrumente, Spezialwerkzeug und Reparaturanleitungen beziehen."
+      },
+      {
+        "sample": "sample_15",
+        "status": "WARN",
+        "similarity": 92.23300970873787,
+        "inference_ms": 1558,
+        "ground_truth": "die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland.",
+        "transcription": "Die Immunpaldina gilt als älteste akurwissenschaftlich-medizinische Gelehrtengesellschaft in Deutschland."
+      },
+      {
+        "sample": "sample_16",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1081,
+        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
+      },
+      {
+        "sample": "sample_17",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1394,
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
+      },
+      {
+        "sample": "sample_18",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1127,
+        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
+      },
+      {
+        "sample": "sample_19",
+        "status": "WARN",
+        "similarity": 96.3855421686747,
+        "inference_ms": 1558,
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "transcription": "Im Landratrand im oberbayerischen Kreis Mühldorf ist der 49-Jährige kein Unbekannter."
+      },
+      {
+        "sample": "sample_20",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 1435,
+        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "transcription": "Beauty-Trend. Der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
+      }
+    ],
+    "summary": {
+      "pass": 11,
+      "warn": 8,
+      "fail": 1,
+      "avg_ms": 1358.6842105263158
+    }
+  },
+  "large-v3-q5_0-metal": {
+    "model": "large-v3-q5_0-metal",
+    "results": [
+      {
+        "sample": "sample_01",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1724,
+        "ground_truth": "bei fettiger haut sind diese verstopft, abfallstoffe bleiben stecken.",
+        "transcription": "Bei fettiger Haut sind diese verstopft. Abfallstoffe bleiben stecken."
+      },
+      {
+        "sample": "sample_02",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1451,
+        "ground_truth": "ende juli, anfang august könnten entscheidungen fallen.",
+        "transcription": "Ende Juli, Anfang August könnten Entscheidungen fallen."
+      },
+      {
+        "sample": "sample_03",
+        "status": "WARN",
+        "similarity": 95.0,
+        "inference_ms": 1618,
+        "ground_truth": "erzieher werden schon jetzt, lehrer nach den ferien getestet.",
+        "transcription": "Erzieher werden schon jetzt näherer nach den Ferien getestet."
+      },
+      {
+        "sample": "sample_04",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1527,
+        "ground_truth": "bei dieser retro-brille ist der rahmen die besonderheit.",
+        "transcription": "Bei dieser Retro-Brille ist der Rahmen die Besonderheit."
+      },
+      {
+        "sample": "sample_05",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1853,
+        "ground_truth": "als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln.",
+        "transcription": "Als Hauptlieferant gilt die konventionelle Landwirtschaft mit phosphorhaltigen Düngemitteln."
+      },
+      {
+        "sample": "sample_06",
+        "status": "WARN",
+        "similarity": 96.2962962962963,
+        "inference_ms": 1732,
+        "ground_truth": "auch das kommissionspapier benennt diese technologie als besonders risikoträchtig.",
+        "transcription": "Auch das Kommissionspapier benimmt diese Technologie als besonders risikoträchtig."
+      },
+      {
+        "sample": "sample_07",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1540,
+        "ground_truth": "der mann machte ihm ein zeichen, zu ihm hinüber zu kommen.",
+        "transcription": "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen."
+      },
+      {
+        "sample": "sample_08",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1532,
+        "ground_truth": "der experte operiert nicht, verordnet aber medikamente.",
+        "transcription": "Der Experte operiert nicht, verordnet aber Medikamente."
+      },
+      {
+        "sample": "sample_09",
+        "status": "WARN",
+        "similarity": 98.78048780487805,
+        "inference_ms": 1855,
+        "ground_truth": "münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga.",
+        "transcription": "München bleibt trotz erneuter schwäche Phasen Tabellenführer der Fußball-Bundesliga."
+      },
+      {
+        "sample": "sample_10",
+        "status": "WARN",
+        "similarity": 98.71794871794873,
+        "inference_ms": 1921,
+        "ground_truth": "wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt.",
+        "transcription": "Wie er im schädigen Stripclub des Städtchens seine blutigen Klamotten wechselt."
+      },
+      {
+        "sample": "sample_11",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 2447,
+        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Peptide."
+      },
+      {
+        "sample": "sample_12",
+        "status": "WARN",
+        "similarity": 99.13793103448276,
+        "inference_ms": 2035,
+        "ground_truth": "im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt.",
+        "transcription": "Im November vor zwei Jahren habe ich einen Beitrag im Mozilla-Forum veröffentlicht und meine Stimmspende angekündigt."
+      },
+      {
+        "sample": "sample_13",
+        "status": "WARN",
+        "similarity": 97.0,
+        "inference_ms": 1965,
+        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen im Untersuchungshafen."
+      },
+      {
+        "sample": "sample_14",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 2025,
+        "ground_truth": "teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen.",
+        "transcription": "Teilnehmende Werkstätten können auch Analyseinstrumente, Spezialwerkzeug und Reparaturanleitungen beziehen."
+      },
+      {
+        "sample": "sample_15",
+        "status": "WARN",
+        "similarity": 91.2621359223301,
+        "inference_ms": 1944,
+        "ground_truth": "die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland.",
+        "transcription": "Die Immunpaldina gilt als älteste akutwissenschaftlich-medizinische Gelehrtengesellschaft in Deutschland."
+      },
+      {
+        "sample": "sample_16",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1504,
+        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
+      },
+      {
+        "sample": "sample_17",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1815,
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
+      },
+      {
+        "sample": "sample_18",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1471,
+        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
+      },
+      {
+        "sample": "sample_19",
+        "status": "WARN",
+        "similarity": 96.3855421686747,
+        "inference_ms": 1975,
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "transcription": "Im Landratrand im oberbayerischen Kreis Mühldorf ist der 49-Jährige kein Unbekannter."
+      },
+      {
+        "sample": "sample_20",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 1844,
+        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "transcription": "Beauty-Trend. Der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
+      }
+    ],
+    "summary": {
+      "pass": 11,
+      "warn": 9,
+      "fail": 0,
+      "avg_ms": 1788.9
+    }
+  },
+  "large-v3-turbo-coreml": {
+    "model": "large-v3-turbo-coreml",
+    "results": [
+      {
+        "sample": "sample_01",
+        "status": "TIMEOUT",
+        "similarity": 0,
+        "inference_ms": 0,
+        "ground_truth": "bei fettiger haut sind diese verstopft, abfallstoffe bleiben stecken.",
+        "transcription": ""
+      },
+      {
+        "sample": "sample_02",
+        "status": "WARN",
+        "similarity": 98.11320754716981,
+        "inference_ms": 621,
+        "ground_truth": "ende juli, anfang august könnten entscheidungen fallen.",
+        "transcription": "Ende Juni, Anfang August könnten Entscheidungen fallen."
+      },
+      {
+        "sample": "sample_03",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 639,
+        "ground_truth": "erzieher werden schon jetzt, lehrer nach den ferien getestet.",
+        "transcription": "Erzieher werden schon jetzt Lehrer nach den Ferien getestet."
+      },
+      {
+        "sample": "sample_04",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 635,
+        "ground_truth": "bei dieser retro-brille ist der rahmen die besonderheit.",
+        "transcription": "Bei dieser Retro-Brille ist der Rahmen die Besonderheit."
+      },
+      {
+        "sample": "sample_05",
+        "status": "WARN",
+        "similarity": 97.82608695652173,
+        "inference_ms": 702,
+        "ground_truth": "als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln.",
+        "transcription": "Als Hauptlieferant gilt die konventionelle Landwirtschaft mit phosphorhaltigen Dünnermitteln."
+      },
+      {
+        "sample": "sample_06",
+        "status": "WARN",
+        "similarity": 96.2962962962963,
+        "inference_ms": 693,
+        "ground_truth": "auch das kommissionspapier benennt diese technologie als besonders risikoträchtig.",
+        "transcription": "Auch das Kommissionspapier benimmt diese Technologie als besonders risikoträchtig."
+      },
+      {
+        "sample": "sample_07",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 630,
+        "ground_truth": "der mann machte ihm ein zeichen, zu ihm hinüber zu kommen.",
+        "transcription": "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen."
+      },
+      {
+        "sample": "sample_08",
+        "status": "WARN",
+        "similarity": 98.11320754716981,
+        "inference_ms": 625,
+        "ground_truth": "der experte operiert nicht, verordnet aber medikamente.",
+        "transcription": "Der Experte operiert nicht, erordnet aber Medikamente."
+      },
+      {
+        "sample": "sample_09",
+        "status": "WARN",
+        "similarity": 97.53086419753086,
+        "inference_ms": 715,
+        "ground_truth": "münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga.",
+        "transcription": "München bleibt trotz erneuter schwächephasen Papellenführer der Fußball-Bundesliga."
+      },
+      {
+        "sample": "sample_10",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 722,
+        "ground_truth": "wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt.",
+        "transcription": "Wie er im schädigen Stripclub des Städtchens seine Blüte und Klamotten wechselt."
+      },
+      {
+        "sample": "sample_11",
+        "status": "WARN",
+        "similarity": 98.93617021276596,
+        "inference_ms": 759,
+        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Pektide."
+      },
+      {
+        "sample": "sample_12",
+        "status": "WARN",
+        "similarity": 96.55172413793103,
+        "inference_ms": 739,
+        "ground_truth": "im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt.",
+        "transcription": "Im November vor zwei Jahren habe ich einen Beitrag im Ozyla-Forum veröffentlicht und meine Stimmspende angekündigt."
+      },
+      {
+        "sample": "sample_13",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 737,
+        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen in Untersuchungshaft."
+      },
+      {
+        "sample": "sample_14",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 749,
+        "ground_truth": "teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen.",
+        "transcription": "Teilnehmende Werkstätten können auch Analyseinstrumente, Spezialwerkzeug und Reparaturanleitungen beziehen."
+      },
+      {
+        "sample": "sample_15",
+        "status": "WARN",
+        "similarity": 99.01960784313727,
+        "inference_ms": 742,
+        "ground_truth": "die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland.",
+        "transcription": "Die Neopoldina gilt als älteste naturwissenschaftlich-medizinische Gelehrtengesellschaft in Deutschland."
+      },
+      {
+        "sample": "sample_16",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 605,
+        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
+      },
+      {
+        "sample": "sample_17",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 684,
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
+      },
+      {
+        "sample": "sample_18",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 633,
+        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
+      },
+      {
+        "sample": "sample_19",
+        "status": "WARN",
+        "similarity": 92.85714285714286,
+        "inference_ms": 742,
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "transcription": "Im Landrat Kant im oberbayerischen Kreis Nulldorf ist der 49-Jährige kein Unbekannter."
+      },
+      {
+        "sample": "sample_20",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 692,
+        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "transcription": "Beauty-Trend, der aufregendste Beauty-Trend für die Festival- und Badesaison 2015."
+      }
+    ],
+    "summary": {
+      "pass": 9,
+      "warn": 10,
+      "fail": 1,
+      "avg_ms": 687.578947368421
+    }
+  },
+  "large-v3-turbo-metal": {
+    "model": "large-v3-turbo-metal",
+    "results": [
+      {
+        "sample": "sample_01",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 999,
+        "ground_truth": "bei fettiger haut sind diese verstopft, abfallstoffe bleiben stecken.",
+        "transcription": "Bei fettiger Haut sind diese verstopft. Abfallstoffe bleiben stecken."
+      },
+      {
+        "sample": "sample_02",
+        "status": "WARN",
+        "similarity": 98.11320754716981,
+        "inference_ms": 928,
+        "ground_truth": "ende juli, anfang august könnten entscheidungen fallen.",
+        "transcription": "Ende Juni, Anfang August könnten Entscheidungen fallen."
+      },
+      {
+        "sample": "sample_03",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 953,
+        "ground_truth": "erzieher werden schon jetzt, lehrer nach den ferien getestet.",
+        "transcription": "Erzieher werden schon jetzt Lehrer nach den Ferien getestet."
+      },
+      {
+        "sample": "sample_04",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 950,
+        "ground_truth": "bei dieser retro-brille ist der rahmen die besonderheit.",
+        "transcription": "Bei dieser Retro-Brille ist der Rahmen die Besonderheit."
+      },
+      {
+        "sample": "sample_05",
+        "status": "WARN",
+        "similarity": 97.82608695652173,
+        "inference_ms": 1007,
+        "ground_truth": "als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln.",
+        "transcription": "Als Hauptlieferant gilt die konventionelle Landwirtschaft mit phosphorhaltigen Dünnermitteln."
+      },
+      {
+        "sample": "sample_06",
+        "status": "WARN",
+        "similarity": 96.2962962962963,
+        "inference_ms": 1033,
+        "ground_truth": "auch das kommissionspapier benennt diese technologie als besonders risikoträchtig.",
+        "transcription": "Auch das Kommissionspapier benimmt diese Technologie als besonders risikoträchtig."
+      },
+      {
+        "sample": "sample_07",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 978,
+        "ground_truth": "der mann machte ihm ein zeichen, zu ihm hinüber zu kommen.",
+        "transcription": "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen."
+      },
+      {
+        "sample": "sample_08",
+        "status": "WARN",
+        "similarity": 98.11320754716981,
+        "inference_ms": 989,
+        "ground_truth": "der experte operiert nicht, verordnet aber medikamente.",
+        "transcription": "Der Experte operiert nicht, erordnet aber Medikamente."
+      },
+      {
+        "sample": "sample_09",
+        "status": "WARN",
+        "similarity": 97.53086419753086,
+        "inference_ms": 1056,
+        "ground_truth": "münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga.",
+        "transcription": "München bleibt trotz erneuter schwächephasen Papellenführer der Fußball-Bundesliga."
+      },
+      {
+        "sample": "sample_10",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 1070,
+        "ground_truth": "wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt.",
+        "transcription": "Wie er im schädigen Stripclub des Städtchens seine Blüte und Klamotten wechselt."
+      },
+      {
+        "sample": "sample_11",
+        "status": "WARN",
+        "similarity": 98.93617021276596,
+        "inference_ms": 1087,
+        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Pektide."
+      },
+      {
+        "sample": "sample_12",
+        "status": "WARN",
+        "similarity": 97.41379310344827,
+        "inference_ms": 1059,
+        "ground_truth": "im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt.",
+        "transcription": "Im November vor zwei Jahren habe ich einen Beitrag im Ozyla Forum veröffentlicht und meine Stimmspende angekündigt."
+      },
+      {
+        "sample": "sample_13",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1061,
+        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen in Untersuchungshaft."
+      },
+      {
+        "sample": "sample_14",
+        "status": "WARN",
+        "similarity": 99.05660377358491,
+        "inference_ms": 1074,
+        "ground_truth": "teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen.",
+        "transcription": "Teilnehmende Werkstätten können auch analyse Instrumente, Spezialwerkzeug und Reparaturanleitungen beziehen."
+      },
+      {
+        "sample": "sample_15",
+        "status": "WARN",
+        "similarity": 99.01960784313727,
+        "inference_ms": 1050,
+        "ground_truth": "die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland.",
+        "transcription": "Die Neopoldina gilt als älteste naturwissenschaftlich-medizinische Gelehrtengesellschaft in Deutschland."
+      },
+      {
+        "sample": "sample_16",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1011,
+        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
+      },
+      {
+        "sample": "sample_17",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 999,
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
+      },
+      {
+        "sample": "sample_18",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 919,
+        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
+      },
+      {
+        "sample": "sample_19",
+        "status": "WARN",
+        "similarity": 92.85714285714286,
+        "inference_ms": 1023,
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "transcription": "Im Landrat Kant im oberbayerischen Kreis Nulldorf ist der 49-Jährige kein Unbekannter."
+      },
+      {
+        "sample": "sample_20",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 1010,
+        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "transcription": "Beauty-Trend, der aufregendste Beauty-Trend für die Festgewinn- und Badesaison 2015."
+      }
+    ],
+    "summary": {
+      "pass": 8,
+      "warn": 12,
+      "fail": 0,
+      "avg_ms": 1012.8
+    }
+  },
+  "large-v3-turbo-q5_0-coreml": {
+    "model": "large-v3-turbo-q5_0-coreml",
+    "results": [
+      {
+        "sample": "sample_01",
+        "status": "FAIL",
+        "similarity": 41.7910447761194,
+        "inference_ms": 567,
+        "ground_truth": "bei fettiger haut sind diese verstopft, abfallstoffe bleiben stecken.",
+        "transcription": "Abfallstoffe bleiben stecken."
+      },
+      {
+        "sample": "sample_02",
+        "status": "WARN",
+        "similarity": 98.11320754716981,
+        "inference_ms": 607,
+        "ground_truth": "ende juli, anfang august könnten entscheidungen fallen.",
+        "transcription": "Ende Juni, Anfang August könnten Entscheidungen fallen."
+      },
+      {
+        "sample": "sample_03",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 625,
+        "ground_truth": "erzieher werden schon jetzt, lehrer nach den ferien getestet.",
+        "transcription": "Erzieher werden schon jetzt Lehrer nach den Ferien getestet."
+      },
+      {
+        "sample": "sample_04",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 627,
+        "ground_truth": "bei dieser retro-brille ist der rahmen die besonderheit.",
+        "transcription": "Bei dieser Retro-Brille ist der Rahmen die Besonderheit."
+      },
+      {
+        "sample": "sample_05",
+        "status": "WARN",
+        "similarity": 97.82608695652173,
+        "inference_ms": 709,
+        "ground_truth": "als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln.",
+        "transcription": "Als Hauptlieferant gilt die konventionelle Landwirtschaft mit phosphorhaltigen Dünnermitteln."
+      },
+      {
+        "sample": "sample_06",
+        "status": "WARN",
+        "similarity": 96.2962962962963,
+        "inference_ms": 698,
+        "ground_truth": "auch das kommissionspapier benennt diese technologie als besonders risikoträchtig.",
+        "transcription": "Auch das Kommissionspapier benimmt diese Technologie als besonders risikoträchtig."
+      },
+      {
+        "sample": "sample_07",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 640,
+        "ground_truth": "der mann machte ihm ein zeichen, zu ihm hinüber zu kommen.",
+        "transcription": "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen."
+      },
+      {
+        "sample": "sample_08",
+        "status": "WARN",
+        "similarity": 98.11320754716981,
+        "inference_ms": 682,
+        "ground_truth": "der experte operiert nicht, verordnet aber medikamente.",
+        "transcription": "Der Experte operiert nicht, erordnet aber Medikamente."
+      },
+      {
+        "sample": "sample_09",
+        "status": "WARN",
+        "similarity": 97.53086419753086,
+        "inference_ms": 744,
+        "ground_truth": "münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga.",
+        "transcription": "München bleibt trotz erneuter schwächephasen Papellenführer der Fußball-Bundesliga."
+      },
+      {
+        "sample": "sample_10",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 752,
+        "ground_truth": "wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt.",
+        "transcription": "Wie er im schädigen Stripclub des Städtchens seine Blüte und Klamotten wechselt."
+      },
+      {
+        "sample": "sample_11",
+        "status": "WARN",
+        "similarity": 98.93617021276596,
+        "inference_ms": 800,
+        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Pektide."
+      },
+      {
+        "sample": "sample_12",
+        "status": "WARN",
+        "similarity": 97.41379310344827,
+        "inference_ms": 742,
+        "ground_truth": "im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt.",
+        "transcription": "Im November vor zwei Jahren habe ich einen Beitrag im Ozyla Forum veröffentlicht und meine Stimmspende angekündigt."
+      },
+      {
+        "sample": "sample_13",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 716,
+        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen in Untersuchungshaft."
+      },
+      {
+        "sample": "sample_14",
+        "status": "WARN",
+        "similarity": 99.05660377358491,
+        "inference_ms": 735,
+        "ground_truth": "teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen.",
+        "transcription": "Teilnehmende Werkstätten können auch analyse Instrumente, Spezialwerkzeug und Reparaturanleitungen beziehen."
+      },
+      {
+        "sample": "sample_15",
+        "status": "WARN",
+        "similarity": 97.11538461538461,
+        "inference_ms": 756,
+        "ground_truth": "die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland.",
+        "transcription": "Die Neopoldina gilt als älteste naturwissenschaftliche medizinische Gelehrtengesellschaft in Deutschland."
+      },
+      {
+        "sample": "sample_16",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 612,
+        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
+      },
+      {
+        "sample": "sample_17",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 693,
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerungen."
+      },
+      {
+        "sample": "sample_18",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 607,
+        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
+      },
+      {
+        "sample": "sample_19",
+        "status": "WARN",
+        "similarity": 92.85714285714286,
+        "inference_ms": 725,
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "transcription": "Im Landrat Kant im oberbayerischen Kreis Nulldorf ist der 49-Jährige kein Unbekannter."
+      },
+      {
+        "sample": "sample_20",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 684,
+        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "transcription": "Beauty-Trend, der aufregendste Beauty-Trend für die Festival- und Badesaison 2015."
+      }
+    ],
+    "summary": {
+      "pass": 8,
+      "warn": 11,
+      "fail": 1,
+      "avg_ms": 686.05
+    }
+  },
+  "large-v3-turbo-q5_0-metal": {
+    "model": "large-v3-turbo-q5_0-metal",
+    "results": [
+      {
+        "sample": "sample_01",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1083,
+        "ground_truth": "bei fettiger haut sind diese verstopft, abfallstoffe bleiben stecken.",
+        "transcription": "Bei fettiger Haut sind diese verstopft. Abfallstoffe bleiben stecken."
+      },
+      {
+        "sample": "sample_02",
+        "status": "WARN",
+        "similarity": 98.11320754716981,
+        "inference_ms": 1009,
+        "ground_truth": "ende juli, anfang august könnten entscheidungen fallen.",
+        "transcription": "Ende Juni, Anfang August könnten Entscheidungen fallen."
+      },
+      {
+        "sample": "sample_03",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1040,
+        "ground_truth": "erzieher werden schon jetzt, lehrer nach den ferien getestet.",
+        "transcription": "Erzieher werden schon jetzt Lehrer nach den Ferien getestet."
+      },
+      {
+        "sample": "sample_04",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1038,
+        "ground_truth": "bei dieser retro-brille ist der rahmen die besonderheit.",
+        "transcription": "Bei dieser Retro-Brille ist der Rahmen die Besonderheit."
+      },
+      {
+        "sample": "sample_05",
+        "status": "WARN",
+        "similarity": 97.82608695652173,
+        "inference_ms": 1089,
+        "ground_truth": "als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln.",
+        "transcription": "Als Hauptlieferant gilt die konventionelle Landwirtschaft mit phosphorhaltigen Dünnermitteln."
+      },
+      {
+        "sample": "sample_06",
+        "status": "WARN",
+        "similarity": 96.2962962962963,
+        "inference_ms": 1070,
+        "ground_truth": "auch das kommissionspapier benennt diese technologie als besonders risikoträchtig.",
+        "transcription": "Auch das Kommissionspapier benimmt diese Technologie als besonders risikoträchtig."
+      },
+      {
+        "sample": "sample_07",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1047,
+        "ground_truth": "der mann machte ihm ein zeichen, zu ihm hinüber zu kommen.",
+        "transcription": "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen."
+      },
+      {
+        "sample": "sample_08",
+        "status": "WARN",
+        "similarity": 98.11320754716981,
+        "inference_ms": 1065,
+        "ground_truth": "der experte operiert nicht, verordnet aber medikamente.",
+        "transcription": "Der Experte operiert nicht, erordnet aber Medikamente."
+      },
+      {
+        "sample": "sample_09",
+        "status": "WARN",
+        "similarity": 97.53086419753086,
+        "inference_ms": 1097,
+        "ground_truth": "münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga.",
+        "transcription": "München bleibt trotz erneuter schwächephasen Papellenführer der Fußball-Bundesliga."
+      },
+      {
+        "sample": "sample_10",
+        "status": "WARN",
+        "similarity": 92.40506329113924,
+        "inference_ms": 1130,
+        "ground_truth": "wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt.",
+        "transcription": "Wie er im schädigen Stripclub des Städtchens seine Blüte und Klamotten wechselt."
+      },
+      {
+        "sample": "sample_11",
+        "status": "WARN",
+        "similarity": 98.93617021276596,
+        "inference_ms": 1222,
+        "ground_truth": "der 67-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide.",
+        "transcription": "Der 67-Jährige erforscht spezifische Eiweißstrukturen auf der Zelloberfläche, sogenannte Pektide."
+      },
+      {
+        "sample": "sample_12",
+        "status": "WARN",
+        "similarity": 96.55172413793103,
+        "inference_ms": 1205,
+        "ground_truth": "im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt.",
+        "transcription": "Im November vor zwei Jahren habe ich einen Beitrag im Ozyla-Forum veröffentlicht und meine Stimmspende angekündigt."
+      },
+      {
+        "sample": "sample_13",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1185,
+        "ground_truth": "der 29-jährige tatverdächtige ist nach polizeiangaben von donnerstag inzwischen in untersuchungshaft.",
+        "transcription": "Der 29-jährige Tatverdächtige ist nach Polizeiangaben von Donnerstag inzwischen in Untersuchungshaft."
+      },
+      {
+        "sample": "sample_14",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1161,
+        "ground_truth": "teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen.",
+        "transcription": "Teilnehmende Werkstätten können auch Analyseinstrumente, Spezialwerkzeug und Reparaturanleitungen beziehen."
+      },
+      {
+        "sample": "sample_15",
+        "status": "WARN",
+        "similarity": 99.01960784313727,
+        "inference_ms": 1118,
+        "ground_truth": "die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland.",
+        "transcription": "Die Neopoldina gilt als älteste naturwissenschaftlich-medizinische Gelehrtengesellschaft in Deutschland."
+      },
+      {
+        "sample": "sample_16",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1084,
+        "ground_truth": "bis 2023 hat sie dazu zunächst 350 millionen euro zur verfügung.",
+        "transcription": "Bis 2023 hat sie dazu zunächst 350 Millionen Euro zur Verfügung."
+      },
+      {
+        "sample": "sample_17",
+        "status": "WARN",
+        "similarity": 97.61904761904762,
+        "inference_ms": 1108,
+        "ground_truth": "erstmals stellte zudem das vereinigte königreich mit 2087 die meisten einbürgerungen.",
+        "transcription": "Erstmals stellte zudem das Vereinigte Königreich mit 2087 die meisten Einbürgerinnen."
+      },
+      {
+        "sample": "sample_18",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1049,
+        "ground_truth": "bis ende 2019 wurden hier bereits 495 millionen euro investiert.",
+        "transcription": "Bis Ende 2019 wurden hier bereits 495 Millionen Euro investiert."
+      },
+      {
+        "sample": "sample_19",
+        "status": "WARN",
+        "similarity": 91.56626506024097,
+        "inference_ms": 1144,
+        "ground_truth": "im landratsamt im oberbayerischen kreis mühldorf ist der 49-jährige kein unbekannter.",
+        "transcription": "Im Landrat Kant im oberbayerischen Kreis Nundorf ist der 49-Jährige kein Unbekannter."
+      },
+      {
+        "sample": "sample_20",
+        "status": "PASS",
+        "similarity": 100.0,
+        "inference_ms": 1115,
+        "ground_truth": "beauty-trend, der aufregendste beauty-trend für die festival- und badesaison 2015.",
+        "transcription": "Beauty-Trend, der aufregendste Beauty-Trend für die Festival- und Badesaison 2015."
+      }
+    ],
+    "summary": {
+      "pass": 9,
+      "warn": 11,
+      "fail": 0,
+      "avg_ms": 1102.95
+    }
+  }
+}

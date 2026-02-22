@@ -2,6 +2,7 @@
 build/
 dist/
 whisper-cpp/build/
+whisper-cpp-build-bak/
 
 # whisper-cpp non-essential directories (only library headers + src needed)
 whisper-cpp/examples/
@@ -106,3 +107,4 @@ tests/data/
 
 # Backup files
 *.old.json
+whisper-cpp/test_wavs/

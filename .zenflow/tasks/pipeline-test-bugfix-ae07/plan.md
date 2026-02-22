@@ -29,7 +29,7 @@ cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 - **whisper-cpp version**: MUST be 1.8.3+ (updated from 1.7.6 which had CoreML precision issues)
 - **CoreML performance**: ~1200ms avg inference (after warmup), 12/20 PASS, 7/20 WARN (>90%), 1 FAIL
 - **Previous CoreML failures were caused by**: (1) wrong model file (large-v3-turbo symlinked as large-v3), (2) old whisper-cpp 1.7.6 with different Metal memory layout
-- **Number handling**: Whisper converts spoken German numbers to digits (e.g., "siebenundsechzig" → "67", "zweitausenddreiundzwanzig" → "2023"). This is ACCEPTABLE — LLaMA can handle digits. Ground truth files MUST use digit forms. Do NOT "fix" this by changing ground truths back to spelled-out forms.
+- **Number handling**: Whisper converts spoken German numbers to digits (e.g., "siebenundsechzig" → "67", "zweitausenddreiundzwanzig" → "2023"). This is ACCEPTABLE — LLaMA can handle digits. Ground truth files MUST use the **spoken form** (what the speaker actually says). The test scoring script (`run_pipeline_test.py`) normalizes German numbers to digits before comparison. Do NOT change ground truths to digit form — preserve spoken form for data integrity.
 - **Default args**: `--language de models/ggml-large-v3.bin`
 
 ### CoreML Model Conversion
@@ -186,6 +186,20 @@ Detailed implementation plan created below, replacing the generic Implementation
 8. Fix all bugs. Clean unnecessary code
 
 - **Verify**: IAP start/stop cycles work reliably. No socket leaks. Conversion latency < 1ms per packet. Pipeline stable with IAP running
+
+**Stage 2 Test Results (2026-02-22):**
+
+| # | Test | Status | Details |
+|---|------|--------|---------|
+| 1 | IAP running and connected | PASS | PID 95401, online=true |
+| 2 | Audio flows through IAP to Whisper | PASS | sample_04 → "Bei dieser Retro-Brille ist der Rahmen die Besonderheit." (1049ms) |
+| 3 | Stop IAP via frontend API | PASS | Status → offline |
+| 4 | Start IAP via frontend API | PASS | New PID 1417, status → running |
+| 5 | Stop/Restart 5 cycles | PASS | PIDs: 1484→1496→1517→1529→1550 (all unique, no ghosts) |
+| 6 | Audio flows after 5 restart cycles | PASS | sample_07 → "Der Mann machte ihm ein Zeichen, zu ihm hinüber zu kommen." (1062ms) |
+| 7 | Exactly one IAP instance running | PASS | pgrep count = 1 |
+
+**7/7 PASS. Stage 2 complete.**
 
 ### [x] Step: Stage 3 Testing — Whisper Service Integration + Transcription Optimization
 
