@@ -5,6 +5,55 @@
 
 ---
 
+## Build Rules
+
+### whisper-cpp (submodule at `whisper-cpp/`)
+```
+cd whisper-cpp
+cmake -G Ninja -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DWHISPER_COREML=1 \
+  -DWHISPER_COREML_ALLOW_FALLBACK=ON \
+  -DWHISPER_CCACHE=OFF \
+  -DBUILD_SHARED_LIBS=OFF
+cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+```
+- **MUST** use Ninja (`-G Ninja`)
+- **MUST** disable ccache (`-DWHISPER_CCACHE=OFF`)
+- **MUST** build static libs (`-DBUILD_SHARED_LIBS=OFF`) — project CMakeLists.txt links `.a` files
+- **MUST** enable CoreML with fallback (`-DWHISPER_COREML=1 -DWHISPER_COREML_ALLOW_FALLBACK=ON`) — allows Metal-only operation when CoreML encoder is absent
+
+### Whisper Model Selection
+- **USE**: `models/ggml-large-v3.bin` (unquantized, 1.5GB) with **Metal-only GPU** (no CoreML encoder)
+- **DO NOT USE**: CoreML encoder models — tested extensively, all produce degraded transcriptions:
+  - CoreML ANE (`--optimize-ane True`): ~700ms but garbled output (missing letters, wrong language)
+  - CoreML standard (`--optimize-ane False`): ~840ms but still garbled
+  - Pre-converted HuggingFace models: behind auth wall (401), not accessible
+  - Root cause: CoreML encoder conversion (both ANE and standard paths) introduces precision loss that degrades the encoder embeddings
+- **Metal-only performance**: ~1400ms inference for 3-5s utterances, **100% transcription accuracy** on all 20 test samples
+- **Default args**: `--language de models/ggml-large-v3.bin`
+
+### CoreML Model Conversion (if retrying in future)
+- **MUST** use conda env `py312-whisper` with **torch==2.7.0** (coremltools 9.0 only tested up to torch 2.7)
+- **DO NOT** use system Python (has torch 2.10+ which is incompatible with coremltools)
+- Conda Python path: `/opt/homebrew/Caskroom/miniconda/base/envs/py312-whisper/bin/python3`
+- The `--optimize-ane True` flag in `generate-coreml-model.sh` is marked "currently broken" upstream (whisper.cpp issue #3632)
+
+### Project binaries
+```
+cd /path/to/project
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target <target> -j$(sysctl -n hw.ncpu)
+```
+
+### Process Management Rules
+1. ALWAYS check that only ONE frontend instance is running before tests
+2. ALL services MUST be started/stopped via the frontend API (`curl http://127.0.0.1:8080/api/services/start|stop`)
+3. Before starting any service, kill ghost processes of the same binary first
+4. Verify with `lsof -nP -iTCP -sTCP:LISTEN` that each service has exactly one instance
+
+---
+
 ## Workflow Steps
 
 ### [x] Step: Requirements
