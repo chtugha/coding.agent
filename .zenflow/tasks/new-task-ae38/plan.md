@@ -334,6 +334,7 @@ Test TCP reconnection, buffering, and error handling across service boundaries.
 ---
 
 ### [ ] Phase 10: Multi-Line Stress Testing & Final Optimization
+<!-- chat-id: 2a28a0d0-d164-4f89-aa52-4378551f3cb1 -->
 
 Test system with 1, 2, 4, and 6 concurrent phone lines to verify scalability.
 
