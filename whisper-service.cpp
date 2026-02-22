@@ -427,7 +427,7 @@ int main(int argc, char** argv) {
 #else
                 "models";
 #endif
-            model_path = models_dir + "/ggml-large-v3-q5_0.bin";
+            model_path = models_dir + "/ggml-large-v3-turbo-q5_0.bin";
         }
     }
 

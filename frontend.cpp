@@ -264,7 +264,7 @@ private:
             INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
                 ('SIP_CLIENT', 'bin/sip-client', '--lines 2 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
                 ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
-                ('WHISPER_SERVICE', 'bin/whisper-service', '--language de models/ggml-large-v3.bin', 'Whisper ASR (CoreML/Metal)'),
+                ('WHISPER_SERVICE', 'bin/whisper-service', '--language de models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (CoreML/Metal)'),
                 ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
                 ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
                 ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP');
