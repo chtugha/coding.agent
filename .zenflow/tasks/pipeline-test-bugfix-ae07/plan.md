@@ -218,10 +218,10 @@ Detailed implementation plan created below, replacing the generic Implementation
    - PASS: 100% match, WARN: ≥90% similarity, FAIL: <90%
 6. Run all 20 test files through pipeline, record results
 7. **Tune VAD parameters** if sentences are crippled:
-   - `VAD_THRESHOLD_MULT` (currently 10.0) — lower if speech not detected
-   - `VAD_SILENCE_FRAMES` (currently 6/600ms) — increase if sentences cut short
-   - `VAD_CONTEXT_FRAMES` (currently 2/200ms) — increase if word beginnings lost
-   - `VAD_MIN_ENERGY` (currently 0.00003) — adjust for RTP audio levels
+   - `VAD_THRESHOLD_MULT` (currently 2.0, was 10.0) — lower if speech not detected
+   - `VAD_SILENCE_FRAMES` (currently 15/1.5s, was 6/600ms) — increase if sentences cut short
+   - `VAD_CONTEXT_FRAMES` (currently 10/1s, was 2/200ms) — increase if word beginnings lost
+   - `VAD_MIN_ENERGY` (currently 0.000002, was 0.00003) — adjust for RTP audio levels
 8. **Optimize transcription speed**: Check `wparams.n_threads` (currently 4), ensure CoreML/GPU is active, measure inference time vs audio duration
 9. Fix all bugs. Target: all 10 samples PASS transcription accuracy
 
@@ -257,7 +257,8 @@ Detailed implementation plan created below, replacing the generic Implementation
 | 2 | Whisper→LLaMA flow (sample_04) | PASS | Whisper: "Bei dieser Retro-Brille ist der Rahmen die Besonderheit." → LLaMA: "Die Brille ist also nicht richtig." (191ms) + "Die Besonderheit ist, dass sie auch bei Sonnenlicht gut funktioniert." (302ms) |
 | 3 | German response quality | PASS | All 20 samples produced coherent German responses |
 | 4 | Response brevity | PASS | All responses ≤15 words as instructed |
-| 5 | Shut-up mechanism | N/A | LLaMA finishes in 170-461ms, too fast for interruption during normal 12s injection intervals. Mechanism code verified present but not triggered |
+| 5 | Shut-up mechanism (pre-gen wait) | PASS | Injected sample_12 then sample_05 with 9s gap. LLaMA logged "Waiting — speech active, deferring response" while sample_05 audio arrived at VAD, then "Speech ended, resuming response generation" after sample_05 completed. Pre-generation wait path confirmed working. |
+| 5b | Shut-up mechanism (mid-gen interrupt) | N/A | LLaMA finishes in 170-461ms — too fast for mid-generation interrupt with 1B model. Code path verified present. Would activate with larger models or longer responses. |
 | 6 | Downstream dump (Kokoro offline) | PASS | "Kokoro disconnected, discarding response" logged correctly |
 | 7 | 20-sample stability | PASS | All 20 samples processed, no crashes, exactly 1 instance of each service throughout |
 | 8 | Generation speed | PASS | Avg 326ms (range 170-461ms), target <500ms MET |
@@ -287,10 +288,10 @@ Detailed implementation plan created below, replacing the generic Implementation
 | 19 | Im Landrat Kant im oberbayerischen Kreis Nulldorf ist der 49-Jährige kein Unbekannter. | Der Mann ist ein bekannter Politiker. | 350ms |
 | 20 | Beauty-Trend, der aufregendste Beauty-Trend für die Festival- und Badesaison 2015. | Der Trend war das "Fleischfressen". | 413ms |
 
-**8/8 PASS (1 N/A). Stage 4 complete.**
+**9/9 PASS (1 N/A). Stage 4 complete.**
 **Average LLaMA generation time: 326ms (target <500ms).**
 
-### [ ] Step: Stage 5 Testing — Kokoro TTS Service Integration
+### [x] Step: Stage 5 Testing — Kokoro TTS Service Integration
 
 **Scope**: Connect Kokoro TTS to running pipeline. Validate speech synthesis.
 
@@ -304,6 +305,43 @@ Detailed implementation plan created below, replacing the generic Implementation
 8. Fix all bugs
 
 - **Verify**: Kokoro produces audible speech output. Synthesis time < 2s. TCP handling stable
+
+**Stage 5 Test Results (2026-02-22):**
+
+**Bugs fixed:**
+- **HAR decoder crash (CRITICAL)**: f0 tensor had wrong dimensions — passed `{1,1,f0_frames}` (3D) to HAR model that internally does `unsqueeze(1)`, creating 4D tensor incompatible with `Upsample(scale_factor=300)`. Fix: pass `{1,f0_frames}` (2D) directly. Also added try-catch around HAR forward() to prevent process crash.
+- **Interconnect reconnect**: Replaced unreliable `recv(MSG_PEEK)` dead socket detection with `poll(POLLHUP|POLLERR|POLLNVAL)` check. LLaMA now auto-reconnects to new Kokoro after restart.
+- **Kokoro stdout buffering**: Added `setlinebuf(stdout/stderr)` in main() so logs appear immediately when redirected to file.
+
+**Model**: CoreML split decoder (3s/5s/10s buckets), HAR TorchScript models, duration CoreML model (ANE)
+**Voice**: df_eva (German female)
+**Model load time**: ~285s (CoreML compilation on first use, cached after)
+
+| # | Test | Status | Details |
+|---|------|--------|---------|
+| 1 | Kokoro running + model load | PASS | PID verified, all 3 decoder buckets (3s/5s/10s) + 3 HAR models loaded, CoreML ANE enabled |
+| 2 | LLaMA→Kokoro interconnect | PASS | TCP connections established (ports 22235-22236) |
+| 3 | Full pipeline synthesis (sample_04) | PASS | Whisper→LLaMA→Kokoro: "Die Retro-Brille, das ist ein interessantes Accessoire." → 144,000 samples (6s @ 24kHz) in 821ms (warmup) |
+| 4 | Multi-sample synthesis (5 samples) | PASS | All 5 samples (01,04,07,12,15) synthesized successfully. Avg 234ms after warmup |
+| 5 | Kokoro→OAP downstream | PASS | OAP received audio, created outbound state |
+| 6 | Stop Kokoro gracefully | PASS | Stopped via API, LLaMA discards response: "Kokoro disconnected" |
+| 7 | 5 stop/start cycles | PASS | 5 unique PIDs (24901,24922,24933,24953,24974), no ghost processes, exactly 1 instance |
+| 8 | Audio after restart cycles | PASS | Synthesis works after 5 stop/start cycles: 144,000 samples in 296ms |
+| 9 | Auto-reconnect (interconnect fix) | PASS | LLaMA reconnects to new Kokoro via poll-based dead socket detection |
+
+**Synthesis Performance:**
+| Response | Samples | Duration | Synth Time |
+|----------|---------|----------|------------|
+| "Die Retro-Brille..." (warmup) | 144,000 | 6.0s | 821ms |
+| "Es ist ratsam..." | 144,000 | 6.0s | 234ms |
+| "Der Rahmen ist..." | 144,000 | 6.0s | 231ms |
+| "Der Mann will..." | 72,000 | 3.0s | 240ms |
+| "Du hast an der..." | 144,000 | 6.0s | 235ms |
+| "Die Gesellschaft..." | 144,000 | 6.0s | 228ms |
+
+**Avg synthesis: 232ms (after warmup). Target <2s MET.**
+
+**9/9 PASS. Stage 5 complete.**
 
 ### [ ] Step: Stage 6 Testing — OAP Integration + Full Round-Trip Quality Test
 

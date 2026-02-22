@@ -93,6 +93,7 @@ public:
                 auto it = calls_.find(call_id);
                 if (it != calls_.end() && it->second->generating) {
                     std::cout << "🤫 [" << call_id << "] Speech detected — interrupting generation" << std::endl;
+                    log_fwd_.forward("WARN", call_id, "Speech detected — interrupting generation (shut-up)");
                     it->second->generating = false;
                 }
             }
@@ -157,8 +158,14 @@ private:
                 work_queue_.pop();
             }
 
-            while (interconnect_.is_speech_active(item.call_id) && running_) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (interconnect_.is_speech_active(item.call_id)) {
+                std::cout << "⏸️  [" << item.call_id << "] Waiting — speech active, deferring response" << std::endl;
+                log_fwd_.forward("INFO", item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
+                while (interconnect_.is_speech_active(item.call_id) && running_) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                std::cout << "▶️  [" << item.call_id << "] Speech ended, resuming response generation" << std::endl;
+                log_fwd_.forward("INFO", item.call_id, "Speech ended, resuming response generation");
             }
             if (!running_) break;
 

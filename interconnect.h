@@ -38,6 +38,20 @@ enum class ServiceType : uint8_t {
     FRONTEND = 7
 };
 
+inline bool is_pipeline_service(ServiceType type) {
+    switch (type) {
+        case ServiceType::SIP_CLIENT:
+        case ServiceType::INBOUND_AUDIO_PROCESSOR:
+        case ServiceType::WHISPER_SERVICE:
+        case ServiceType::LLAMA_SERVICE:
+        case ServiceType::KOKORO_SERVICE:
+        case ServiceType::OUTBOUND_AUDIO_PROCESSOR:
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline const char* service_type_to_string(ServiceType type) {
     switch (type) {
         case ServiceType::SIP_CLIENT: return "SIP_CLIENT";
@@ -267,7 +281,9 @@ public:
             return false;
         }
 
-        if (!bind_traffic_listen_ports()) {
+        bool pipeline = is_pipeline_service(type_);
+
+        if (pipeline && !bind_traffic_listen_ports()) {
             close_socket(neg_in_sock_);
             close_socket(neg_out_sock_);
             return false;
@@ -277,8 +293,10 @@ public:
 
         neg_thread_ = std::thread(&InterconnectNode::negotiation_loop, this);
         heartbeat_thread_ = std::thread(&InterconnectNode::heartbeat_loop, this);
-        accept_thread_ = std::thread(&InterconnectNode::accept_loop, this);
-        reconnect_thread_ = std::thread(&InterconnectNode::reconnect_loop, this);
+        if (pipeline) {
+            accept_thread_ = std::thread(&InterconnectNode::accept_loop, this);
+            reconnect_thread_ = std::thread(&InterconnectNode::reconnect_loop, this);
+        }
 
         return true;
     }
@@ -317,6 +335,8 @@ public:
     }
 
     bool connect_to_downstream() {
+        if (!is_pipeline_service(type_)) return false;
+
         PortConfig downstream_ports = query_downstream_ports();
         if (!downstream_ports.is_valid()) {
             return false;
@@ -1209,20 +1229,11 @@ private:
             if (!need_down_in && !need_down_out) {
                 {
                     std::lock_guard<std::mutex> lock(traffic_mutex_);
-                    auto probe_sock = [](int fd) -> bool {
-                        if (fd < 0) return true;
-                        int flags = fcntl(fd, F_GETFL);
-                        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-                        char c;
-                        ssize_t r = recv(fd, &c, 1, MSG_PEEK);
-                        fcntl(fd, F_SETFL, flags);
-                        return r != 0;
-                    };
-                    if (!probe_sock(down_in_accepted_)) {
+                    if (down_in_accepted_ >= 0 && is_socket_dead(down_in_accepted_)) {
                         close(down_in_accepted_);
                         down_in_accepted_ = -1;
                     }
-                    if (!probe_sock(down_out_accepted_)) {
+                    if (down_out_accepted_ >= 0 && is_socket_dead(down_out_accepted_)) {
                         close(down_out_accepted_);
                         down_out_accepted_ = -1;
                     }
@@ -1611,6 +1622,8 @@ private:
     }
 
     void reconnect_loop() {
+        if (!is_pipeline_service(type_)) return;
+
         while (running_) {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             if (!running_) break;
@@ -1627,36 +1640,35 @@ private:
         }
     }
 
+    bool is_socket_dead(int fd) {
+        if (fd < 0) return false;
+        struct pollfd pfd = {fd, POLLIN, 0};
+        int ret = poll(&pfd, 1, 0);
+        if (ret > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) return true;
+        if (ret > 0 && (pfd.revents & POLLIN)) {
+            char probe;
+            ssize_t r = recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (r == 0) return true;
+        }
+        return false;
+    }
+
     void check_traffic_connections() {
         bool upstream_dead = false;
         bool downstream_dead = false;
 
         {
             std::lock_guard<std::mutex> lock(traffic_mutex_);
-            if (up_out_sock_ >= 0) {
-                char probe;
-                int flags = fcntl(up_out_sock_, F_GETFL);
-                fcntl(up_out_sock_, F_SETFL, flags | O_NONBLOCK);
-                ssize_t r = recv(up_out_sock_, &probe, 1, MSG_PEEK);
-                fcntl(up_out_sock_, F_SETFL, flags);
-                if (r == 0) {
-                    close_socket(up_out_sock_);
-                    close_socket(up_in_sock_);
-                    upstream_dead = true;
-                }
+            if (up_out_sock_ >= 0 && is_socket_dead(up_out_sock_)) {
+                close_socket(up_out_sock_);
+                close_socket(up_in_sock_);
+                upstream_dead = true;
             }
 
-            if (down_in_accepted_ >= 0) {
-                char probe;
-                int flags = fcntl(down_in_accepted_, F_GETFL);
-                fcntl(down_in_accepted_, F_SETFL, flags | O_NONBLOCK);
-                ssize_t r = recv(down_in_accepted_, &probe, 1, MSG_PEEK);
-                fcntl(down_in_accepted_, F_SETFL, flags);
-                if (r == 0) {
-                    close_socket(down_in_accepted_);
-                    close_socket(down_out_accepted_);
-                    downstream_dead = true;
-                }
+            if (down_in_accepted_ >= 0 && is_socket_dead(down_in_accepted_)) {
+                close_socket(down_in_accepted_);
+                close_socket(down_out_accepted_);
+                downstream_dead = true;
             }
         }
 

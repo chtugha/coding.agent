@@ -147,6 +147,7 @@ public:
                     error ? [[error description] UTF8String] : "unknown error");
                 return false;
             }
+            [model_ retain];
 
             std::printf("CoreML duration model loaded from %s\n", mlmodelc_path.c_str());
             available_ = true;
@@ -300,6 +301,7 @@ public:
                 info.har_channels = b.harc;
                 info.har_time = b.hart;
                 info.model = model;
+                [model retain];
                 buckets_.push_back(info);
                 std::printf("CoreML split decoder loaded: %s (asr=%d, f0=%d)\n", b.name, b.asr, b.f0);
             }
@@ -545,24 +547,30 @@ public:
             return {};
         }
 
-        auto f0_for_har = intermediates.f0_pred.unsqueeze(0);
-        auto har = coreml_split_decoder_->compute_har(sb->name, f0_for_har);
-        if (!har.defined() || har.numel() == 0) {
-            std::fprintf(stderr, "HAR computation failed for bucket %s\n", sb->name.c_str());
-            return {};
-        }
-
         int asr_frames = sb->asr_frames;
         int f0_frames = sb->f0_frames;
-        auto asr_padded = torch::zeros({1, 512, asr_frames});
-        int asr_actual = std::min((int)intermediates.asr.size(2), asr_frames);
-        asr_padded.slice(2, 0, asr_actual) = intermediates.asr.slice(2, 0, asr_actual);
 
         auto f0_padded = torch::zeros({1, f0_frames});
         auto n_padded = torch::zeros({1, f0_frames});
         int f0_actual = std::min(f0_len, f0_frames);
         f0_padded.slice(1, 0, f0_actual) = intermediates.f0_pred.slice(1, 0, f0_actual);
         n_padded.slice(1, 0, f0_actual) = intermediates.n_pred.slice(1, 0, f0_actual);
+
+        torch::Tensor har;
+        try {
+            har = coreml_split_decoder_->compute_har(sb->name, f0_padded);
+        } catch (const c10::Error& e) {
+            std::fprintf(stderr, "HAR computation exception for bucket %s: %s\n", sb->name.c_str(), e.what());
+            return {};
+        }
+        if (!har.defined() || har.numel() == 0) {
+            std::fprintf(stderr, "HAR computation failed for bucket %s\n", sb->name.c_str());
+            return {};
+        }
+
+        auto asr_padded = torch::zeros({1, 512, asr_frames});
+        int asr_actual = std::min((int)intermediates.asr.size(2), asr_frames);
+        asr_padded.slice(2, 0, asr_actual) = intermediates.asr.slice(2, 0, asr_actual);
 
         int har_time = sb->har_time;
         int har_channels = sb->har_channels * 2;
@@ -904,6 +912,9 @@ void signal_handler(int) {
 }
 
 int main(int argc, char* argv[]) {
+    setlinebuf(stdout);
+    setlinebuf(stderr);
+
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
