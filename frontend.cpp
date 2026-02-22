@@ -962,6 +962,10 @@ private:
                 serve_testfiles_api(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/testfiles/scan")) == 0) {
                 handle_testfiles_scan(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/settings/log_level")) == 0) {
+                handle_log_level_settings(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/test_results")) == 0) {
+                handle_test_results(c, hm);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
@@ -1076,6 +1080,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <p class="wt-sidebar-section-title">Testing</p>
 <a class="wt-nav-item active" data-page="tests" onclick="showPage('tests')">
 <span class="nav-icon">&#x1F9EA;</span>Tests<span class="nav-badge" id="testsBadge">0</span></a>
+<a class="wt-nav-item" data-page="beta-testing" onclick="showPage('beta-testing')">
+<span class="nav-icon">&#x1F3AF;</span>Beta Testing</a>
 </div>
 <div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Services</p>
@@ -1110,6 +1116,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
         h += build_ui_pages();
         h += R"WT(</main></div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
 )WT" + build_ui_js() + R"WT(
 </script></body></html>)WT";
@@ -1232,6 +1239,112 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div id="queryResults"></div>
 <div id="schemaView" class="hidden"></div>
 </div></div>
+
+<div class="wt-page" id="page-beta-testing">
+<div class="wt-content">
+<h2 class="wt-page-title">Beta Testing & Optimization</h2>
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Test Audio Files</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshTestFiles()">&#x21BB; Refresh</button>
+</div>
+<div id="testFilesContainer">Loading test files...</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Audio Injection</span></div>
+<div class="wt-field">
+<label>Select Test File</label>
+<select class="wt-select" id="injectFileSelect" style="width:100%;padding:8px">
+<option value="">-- Select a test file --</option>
+</select>
+</div>
+<div class="wt-field">
+<label>Target Call/Line</label>
+<select class="wt-select" id="injectTargetCall" style="width:100%;padding:8px">
+<option value="1">Line 1</option>
+<option value="2">Line 2</option>
+<option value="3">Line 3</option>
+<option value="4">Line 4</option>
+</select>
+</div>
+<div class="wt-field">
+<label>Inject To</label>
+<select class="wt-select" id="injectLeg" style="width:100%;padding:8px">
+<option value="a">Leg A</option>
+<option value="b">Leg B</option>
+</select>
+</div>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-primary" onclick="injectAudio()">&#x25B6; Inject Audio</button>
+</div>
+<div id="injectionStatus" style="margin-top:12px;font-size:13px"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Whisper Accuracy Test</span></div>
+<div class="wt-field">
+<label>Test Files (hold Ctrl/Cmd to select multiple)</label>
+<select class="wt-select" id="accuracyTestFiles" multiple style="width:100%;padding:8px;height:120px">
+</select>
+</div>
+<div class="wt-field">
+<label>Model</label>
+<input class="wt-input" id="accuracyModel" value="current" readonly>
+</div>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-primary" onclick="runWhisperAccuracyTest()">&#x25B6; Run Accuracy Test</button>
+</div>
+<div id="accuracyResults" style="margin-top:12px"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Test SIP Provider Status</span></div>
+<div id="sipProviderStatus">
+<p style="font-size:13px;color:var(--wt-text-secondary)">Check if test_sip_provider is running...</p>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="checkSipProvider()">&#x21BB; Check Status</button>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Service Log Levels</span></div>
+<p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Configure logging verbosity for each service (changes apply immediately)</p>
+<div id="logLevelControls"></div>
+<div style="margin-top:12px">
+<button class="wt-btn wt-btn-sm wt-btn-primary" onclick="saveAllLogLevels()">&#x1F4BE; Save All</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadLogLevels()">&#x21BB; Reload</button>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Test Results</span>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshTestResults()">&#x21BB; Refresh</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="exportTestResults()">&#x1F4E5; Export JSON</button>
+</div>
+</div>
+<div class="wt-filter-bar">
+<select class="wt-select" id="testResultsService" onchange="filterTestResults()">
+<option value="">All Services</option>
+<option value="whisper">Whisper</option>
+<option value="llama">LLaMA</option>
+<option value="kokoro">Kokoro</option>
+</select>
+<select class="wt-select" id="testResultsStatus" onchange="filterTestResults()">
+<option value="">All Status</option>
+<option value="pass">Pass</option>
+<option value="fail">Fail</option>
+</select>
+</div>
+<div id="testResultsContainer">No test results yet. Run some tests to see results here.</div>
+<div id="testResultsChart" style="margin-top:16px;display:none">
+<canvas id="metricsChart" style="max-height:300px"></canvas>
+</div>
+</div>
+
+</div></div>
 )PG";
     }
 
@@ -1252,6 +1365,7 @@ function showPage(p){
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
+  if(p==='beta-testing'){refreshTestFiles();}
 }
 
 function fetchStatus(){
@@ -1609,6 +1723,184 @@ function escapeHtml(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function refreshTestFiles(){
+  fetch('/api/testfiles').then(r=>r.json()).then(d=>{
+    var c=document.getElementById('testFilesContainer');
+    if(!d.files||d.files.length===0){
+      c.innerHTML='<p style="color:var(--wt-text-secondary);font-size:13px">No test files found in Testfiles/ directory</p>';
+      return;
+    }
+    c.innerHTML='<table class="wt-table"><thead><tr><th>File</th><th>Duration</th><th>Sample Rate</th><th>Size</th><th>Ground Truth</th></tr></thead><tbody>'+
+      d.files.map(f=>{
+        var dur=(f.duration_sec||0).toFixed(2)+'s';
+        var size=((f.size_bytes||0)/1024).toFixed(1)+' KB';
+        return '<tr><td style="font-family:var(--wt-mono);font-size:12px">'+escapeHtml(f.name)+'</td>'+
+          '<td>'+dur+'</td><td>'+f.sample_rate+' Hz</td><td>'+size+'</td>'+
+          '<td style="font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+
+          escapeHtml(f.ground_truth||'--')+'</td></tr>';
+      }).join('')+'</tbody></table>';
+    
+    var sel1=document.getElementById('injectFileSelect');
+    var sel2=document.getElementById('accuracyTestFiles');
+    sel1.innerHTML='<option value="">-- Select a test file --</option>'+d.files.map(f=>'<option value="'+escapeHtml(f.name)+'">'+escapeHtml(f.name)+'</option>').join('');
+    sel2.innerHTML=d.files.map(f=>'<option value="'+escapeHtml(f.name)+'">'+escapeHtml(f.name)+'</option>').join('');
+  }).catch(e=>console.error('Failed to load test files:',e));
+  loadLogLevels();
+}
+
+function loadLogLevels(){
+  fetch('/api/settings/log_level').then(r=>r.json()).then(d=>{
+    var c=document.getElementById('logLevelControls');
+    var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
+    var names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','KOKORO_SERVICE':'Kokoro','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
+    var levels=['ERROR','WARN','INFO','DEBUG','TRACE'];
+    c.innerHTML=services.map(s=>{
+      var current=d.log_levels&&d.log_levels[s]?d.log_levels[s]:'INFO';
+      return '<div class="wt-field"><label>'+escapeHtml(names[s]||s)+'</label><select class="wt-select" id="loglevel_'+s+'" style="width:100%;padding:8px">'+
+        levels.map(l=>'<option value="'+l+'"'+(l===current?' selected':'')+'>'+l+'</option>').join('')+'</select></div>';
+    }).join('');
+  });
+}
+
+function saveAllLogLevels(){
+  var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
+  var promises=services.map(s=>{
+    var level=document.getElementById('loglevel_'+s).value;
+    return fetch('/api/settings/log_level',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({service:s,level:level})});
+  });
+  Promise.all(promises).then(()=>alert('Log levels saved successfully!')).catch(e=>alert('Error saving log levels: '+e));
+}
+
+function injectAudio(){
+  var file=document.getElementById('injectFileSelect').value;
+  var call=document.getElementById('injectTargetCall').value;
+  var leg=document.getElementById('injectLeg').value;
+  if(!file){alert('Please select a test file');return;}
+  var status=document.getElementById('injectionStatus');
+  status.innerHTML='<span style="color:var(--wt-accent)">Injecting audio...</span>';
+  fetch('http://localhost:22011/api/inject',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({call_id:parseInt(call),file_path:'Testfiles/'+file,target_leg:leg})})
+    .then(r=>r.json()).then(d=>{
+      if(d.success){
+        status.innerHTML='<span style="color:var(--wt-success)">✓ Audio injected successfully!</span>';
+      }else{
+        status.innerHTML='<span style="color:var(--wt-danger)">✗ Injection failed: '+escapeHtml(d.error||'Unknown error')+'</span>';
+      }
+    }).catch(e=>{
+      status.innerHTML='<span style="color:var(--wt-danger)">✗ Error: Test SIP Provider not reachable (is it running on port 22011?)</span>';
+    });
+}
+
+function runWhisperAccuracyTest(){
+  var sel=document.getElementById('accuracyTestFiles');
+  var files=Array.from(sel.selectedOptions).map(o=>o.value);
+  if(files.length===0){alert('Please select at least one test file');return;}
+  var results=document.getElementById('accuracyResults');
+  results.innerHTML='<p style="color:var(--wt-accent)">Running accuracy tests on '+files.length+' file(s)...</p>';
+}
+
+function checkSipProvider(){
+  var status=document.getElementById('sipProviderStatus');
+  status.innerHTML='<p style="color:var(--wt-accent)">Checking...</p>';
+  fetch('http://localhost:22011/api/status').then(r=>r.json()).then(d=>{
+    status.innerHTML='<p style="color:var(--wt-success)">✓ Test SIP Provider is running</p>'+
+      '<p style="font-size:12px;color:var(--wt-text-secondary)">HTTP Port: '+d.http_port+', SIP Port: '+d.sip_port+'</p>';
+  }).catch(e=>{
+    status.innerHTML='<p style="color:var(--wt-danger)">✗ Test SIP Provider is NOT running</p>'+
+      '<p style="font-size:12px;color:var(--wt-text-secondary)">Start it from the Tests page</p>';
+  });
+}
+
+var testResultsCache=[];
+var metricsChart=null;
+
+function refreshTestResults(){
+  var serviceFilter=document.getElementById('testResultsService').value;
+  var statusFilter=document.getElementById('testResultsStatus').value;
+  var url='/api/test_results?service='+encodeURIComponent(serviceFilter)+'&status='+encodeURIComponent(statusFilter);
+  fetch(url).then(r=>r.json()).then(d=>{
+    testResultsCache=d.results||[];
+    displayTestResults(testResultsCache);
+  }).catch(e=>console.error('Failed to load test results:',e));
+}
+
+function filterTestResults(){
+  refreshTestResults();
+}
+
+function displayTestResults(results){
+  var c=document.getElementById('testResultsContainer');
+  if(!results||results.length===0){
+    c.innerHTML='<p style="color:var(--wt-text-secondary);font-size:13px">No test results match the filters</p>';
+    document.getElementById('testResultsChart').style.display='none';
+    return;
+  }
+  c.innerHTML='<table class="wt-table"><thead><tr><th>Service</th><th>Test Type</th><th>Status</th><th>Timestamp</th><th>Metrics</th></tr></thead><tbody>'+
+    results.map(r=>{
+      var ts=new Date(r.timestamp*1000).toLocaleString();
+      var statusBadge=r.status==='pass'?'<span class="wt-badge wt-badge-success">Pass</span>':'<span class="wt-badge wt-badge-danger">Fail</span>';
+      var metricsStr=JSON.stringify(r.metrics).substring(0,100);
+      return '<tr><td>'+escapeHtml(r.service)+'</td><td>'+escapeHtml(r.test_type)+'</td><td>'+statusBadge+'</td><td style="font-size:12px">'+ts+'</td>'+
+        '<td style="font-family:var(--wt-mono);font-size:11px">'+escapeHtml(metricsStr)+'</td></tr>';
+    }).join('')+'</tbody></table>';
+  
+  if(results.length>0){
+    document.getElementById('testResultsChart').style.display='block';
+    renderMetricsChart(results);
+  }
+}
+
+function renderMetricsChart(results){
+  var ctx=document.getElementById('metricsChart');
+  if(!ctx)return;
+  if(metricsChart){metricsChart.destroy();}
+  
+  var labels=results.map((r,i)=>'Test '+(i+1));
+  var latencies=results.map(r=>r.metrics&&r.metrics.latency_ms?r.metrics.latency_ms:0);
+  var accuracies=results.map(r=>r.metrics&&r.metrics.accuracy?r.metrics.accuracy:0);
+  
+  metricsChart=new Chart(ctx,{
+    type:'line',
+    data:{
+      labels:labels,
+      datasets:[{
+        label:'Latency (ms)',
+        data:latencies,
+        borderColor:'rgb(0,113,227)',
+        backgroundColor:'rgba(0,113,227,0.1)',
+        yAxisID:'y'
+      },{
+        label:'Accuracy (%)',
+        data:accuracies,
+        borderColor:'rgb(52,199,89)',
+        backgroundColor:'rgba(52,199,89,0.1)',
+        yAxisID:'y1'
+      }]
+    },
+    options:{
+      responsive:true,
+      interaction:{mode:'index',intersect:false},
+      scales:{
+        y:{type:'linear',display:true,position:'left',title:{display:true,text:'Latency (ms)'}},
+        y1:{type:'linear',display:true,position:'right',title:{display:true,text:'Accuracy (%)'},grid:{drawOnChartArea:false}}
+      }
+    }
+  });
+}
+
+function exportTestResults(){
+  if(testResultsCache.length===0){alert('No test results to export');return;}
+  var json=JSON.stringify(testResultsCache,null,2);
+  var blob=new Blob([json],{type:'application/json'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url;
+  a.download='test_results_'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 setInterval(fetchStatus,3000);
 setInterval(fetchTests,3000);
 setInterval(fetchServices,5000);
@@ -1624,6 +1916,73 @@ document.addEventListener('click',function(e){
 document.getElementById('sqlQuery').addEventListener('keydown',function(e){
   if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();runQuery();}
 });
+
+function refreshTestFiles(){
+  fetch('/api/testfiles').then(r=>r.json()).then(d=>{
+    var html='<table class="wt-table"><thead><tr><th>File</th><th>Duration</th><th>Sample Rate</th><th>Ground Truth</th></tr></thead><tbody>';
+    var fileSelect=document.getElementById('injectFileSelect');
+    var accuracySelect=document.getElementById('accuracyTestFiles');
+    fileSelect.innerHTML='<option value="">-- Select a test file --</option>';
+    accuracySelect.innerHTML='';
+    d.files.forEach(f=>{
+      html+='<tr><td>'+f.name+'</td><td>'+f.duration_sec.toFixed(2)+'s</td><td>'+f.sample_rate+' Hz</td><td style="max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+f.ground_truth+'</td></tr>';
+      fileSelect.innerHTML+='<option value="'+f.name+'">'+f.name+' ('+f.duration_sec.toFixed(1)+'s)</option>';
+      accuracySelect.innerHTML+='<option value="'+f.name+'">'+f.name+'</option>';
+    });
+    html+='</tbody></table>';
+    document.getElementById('testFilesContainer').innerHTML=html;
+  }).catch(e=>{
+    document.getElementById('testFilesContainer').innerHTML='<p style="color:var(--wt-danger)">Error loading test files: '+e+'</p>';
+  });
+}
+
+function injectAudio(){
+  var file=document.getElementById('injectFileSelect').value;
+  var call_id=document.getElementById('injectTargetCall').value;
+  var leg=document.getElementById('injectLeg').value;
+  if(!file){alert('Please select a test file');return;}
+  var statusDiv=document.getElementById('injectionStatus');
+  statusDiv.innerHTML='<span style="color:var(--wt-warning)">&#x23F3; Injecting '+file+'...</span>';
+  fetch('http://localhost:7070/inject',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({file:file,leg:leg})
+  }).then(r=>r.json()).then(d=>{
+    if(d.success||d.injecting){
+      statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Injecting: '+d.injecting+' to leg '+d.leg+'</span>';
+    }else{
+      statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+d.error+'</span>';
+    }
+  }).catch(e=>{
+    statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+e+'</span>';
+  });
+}
+
+function runWhisperAccuracyTest(){
+  var select=document.getElementById('accuracyTestFiles');
+  var files=Array.from(select.selectedOptions).map(o=>o.value);
+  if(files.length===0){alert('Please select at least one test file');return;}
+  var resultsDiv=document.getElementById('accuracyResults');
+  resultsDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Running accuracy test on '+files.length+' files...</p>';
+  alert('Whisper accuracy test not fully implemented yet. This will inject audio and compare transcriptions to ground truth.');
+}
+
+function checkSipProvider(){
+  var statusDiv=document.getElementById('sipProviderStatus');
+  statusDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Checking test_sip_provider...</p>';
+  fetch('http://localhost:7070/status').then(r=>r.json()).then(d=>{
+    var html='<p style="color:var(--wt-success)">&#x2713; test_sip_provider is running</p>';
+    html+='<table class="wt-table" style="margin-top:8px"><thead><tr><th>Property</th><th>Value</th></tr></thead><tbody>';
+    html+='<tr><td>Active Calls</td><td>'+(d.calls||0)+'</td></tr>';
+    html+='<tr><td>Registered Users</td><td>'+(d.users||0)+'</td></tr>';
+    html+='</tbody></table>';
+    statusDiv.innerHTML=html;
+  }).catch(e=>{
+    statusDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; test_sip_provider not running or not accessible on port 7070</p><p style="font-size:12px;color:var(--wt-text-secondary)">Error: '+e+'</p>';
+  });
+}
+
+if(currentPage==='beta-testing'){refreshTestFiles();}
 )JS";
     }
 
@@ -2289,6 +2648,291 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         json << "],\"current_args\":\"" << escape_json(current_args) << "\"";
         json << ",\"languages\":[\"de\",\"en\",\"fr\",\"es\",\"it\",\"pt\",\"nl\",\"pl\",\"ru\",\"ja\",\"zh\",\"auto\"]";
         json << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    double calculate_levenshtein_similarity(const std::string& s1, const std::string& s2) {
+        if (s1.empty() && s2.empty()) return 100.0;
+        if (s1.empty() || s2.empty()) return 0.0;
+
+        size_t len1 = s1.length(), len2 = s2.length();
+        std::vector<std::vector<size_t>> dp(len1 + 1, std::vector<size_t>(len2 + 1));
+
+        for (size_t i = 0; i <= len1; i++) dp[i][0] = i;
+        for (size_t j = 0; j <= len2; j++) dp[0][j] = j;
+
+        for (size_t i = 1; i <= len1; i++) {
+            for (size_t j = 1; j <= len2; j++) {
+                size_t cost = (std::tolower(s1[i - 1]) == std::tolower(s2[j - 1])) ? 0 : 1;
+                dp[i][j] = std::min({
+                    dp[i - 1][j] + 1,      // deletion
+                    dp[i][j - 1] + 1,      // insertion
+                    dp[i - 1][j - 1] + cost // substitution
+                });
+            }
+        }
+
+        size_t distance = dp[len1][len2];
+        size_t max_len = std::max(len1, len2);
+        double similarity = (1.0 - (double)distance / max_len) * 100.0;
+        return similarity;
+    }
+
+    void scan_testfiles_directory() {
+        std::lock_guard<std::mutex> lock(testfiles_mutex_);
+        testfiles_.clear();
+
+        DIR* dir = opendir("Testfiles");
+        if (!dir) {
+            std::cerr << "Warning: Testfiles directory not found\n";
+            return;
+        }
+
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string name = entry->d_name;
+            if (name.size() <= 4 || name.substr(name.size() - 4) != ".wav") continue;
+
+            std::string wav_path = "Testfiles/" + name;
+            std::string txt_name = name.substr(0, name.size() - 4) + ".txt";
+            std::string txt_path = "Testfiles/" + txt_name;
+
+            struct stat st;
+            if (stat(wav_path.c_str(), &st) != 0) continue;
+
+            TestFileInfo info;
+            info.name = name;
+            info.size_bytes = st.st_size;
+            info.last_modified = st.st_mtime;
+            info.sample_rate = 0;
+            info.channels = 0;
+            info.duration_sec = 0.0;
+
+            std::ifstream wav_file(wav_path, std::ios::binary);
+            if (wav_file) {
+                char riff_header[12];
+                wav_file.read(riff_header, 12);
+                if (wav_file && std::memcmp(riff_header, "RIFF", 4) == 0 && 
+                    std::memcmp(riff_header + 8, "WAVE", 4) == 0) {
+                    
+                    while (wav_file) {
+                        char chunk_id[4];
+                        uint32_t chunk_size;
+                        wav_file.read(chunk_id, 4);
+                        wav_file.read(reinterpret_cast<char*>(&chunk_size), 4);
+                        if (!wav_file) break;
+
+                        if (std::memcmp(chunk_id, "fmt ", 4) == 0) {
+                            if (chunk_size >= 16) {
+                                uint16_t audio_format;
+                                wav_file.read(reinterpret_cast<char*>(&audio_format), 2);
+                                wav_file.read(reinterpret_cast<char*>(&info.channels), 2);
+                                wav_file.read(reinterpret_cast<char*>(&info.sample_rate), 4);
+                                if (chunk_size > 16) {
+                                    wav_file.seekg(chunk_size - 16, std::ios::cur);
+                                }
+                            }
+                        } else if (std::memcmp(chunk_id, "data", 4) == 0) {
+                            if (info.sample_rate > 0 && info.channels > 0) {
+                                info.duration_sec = (double)chunk_size / (info.sample_rate * info.channels * 2);
+                            }
+                            break;
+                        } else {
+                            wav_file.seekg(chunk_size, std::ios::cur);
+                        }
+                    }
+                }
+            }
+
+            std::ifstream txt_file(txt_path);
+            if (txt_file) {
+                std::getline(txt_file, info.ground_truth);
+                size_t last_char = info.ground_truth.find_last_not_of(" \t\r\n");
+                if (last_char != std::string::npos) {
+                    info.ground_truth = info.ground_truth.substr(0, last_char + 1);
+                }
+            }
+
+            testfiles_.push_back(info);
+
+            if (db_) {
+                const char* sql = "INSERT OR REPLACE INTO testfiles (name, size_bytes, duration_sec, sample_rate, channels, ground_truth, last_modified) VALUES (?, ?, ?, ?, ?, ?, ?)";
+                sqlite3_stmt* stmt;
+                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(stmt, 1, info.name.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(stmt, 2, info.size_bytes);
+                    sqlite3_bind_double(stmt, 3, info.duration_sec);
+                    sqlite3_bind_int(stmt, 4, info.sample_rate);
+                    sqlite3_bind_int(stmt, 5, info.channels);
+                    sqlite3_bind_text(stmt, 6, info.ground_truth.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(stmt, 7, info.last_modified);
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
+            }
+        }
+        closedir(dir);
+
+        std::cout << "Scanned " << testfiles_.size() << " test files\n";
+    }
+
+    void serve_testfiles_api(struct mg_connection *c) {
+        std::lock_guard<std::mutex> lock(testfiles_mutex_);
+        
+        std::stringstream json;
+        json << "{\"files\":[";
+        bool first = true;
+        for (const auto& file : testfiles_) {
+            if (!first) json << ",";
+            json << "{"
+                 << "\"name\":\"" << escape_json(file.name) << "\","
+                 << "\"size_bytes\":" << file.size_bytes << ","
+                 << "\"duration_sec\":" << file.duration_sec << ","
+                 << "\"sample_rate\":" << file.sample_rate << ","
+                 << "\"channels\":" << file.channels << ","
+                 << "\"ground_truth\":\"" << escape_json(file.ground_truth) << "\","
+                 << "\"last_modified\":" << file.last_modified
+                 << "}";
+            first = false;
+        }
+        json << "]}";
+        
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    void handle_testfiles_scan(struct mg_connection *c) {
+        scan_testfiles_directory();
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
+            "{\"success\":true,\"scanned\":%zu}", testfiles_.size());
+    }
+
+    void handle_log_level_settings(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            if (!db_) {
+                mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
+                return;
+            }
+
+            const char* services[] = {
+                "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "WHISPER_SERVICE",
+                "LLAMA_SERVICE", "KOKORO_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", nullptr
+            };
+
+            std::stringstream json;
+            json << "{\"log_levels\":{";
+            bool first = true;
+            for (int i = 0; services[i]; i++) {
+                std::string key = std::string("log_level_") + services[i];
+                std::string level = get_setting(key, "INFO");
+                if (!first) json << ",";
+                json << "\"" << services[i] << "\":\"" << level << "\"";
+                first = false;
+            }
+            json << "}}";
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+        } else {
+            std::string body(hm->body.buf, hm->body.len);
+            std::string service = extract_json_string(body, "service");
+            std::string level = extract_json_string(body, "level");
+
+            if (service.empty() || level.empty()) {
+                mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing service or level\"}");
+                return;
+            }
+
+            const char* valid_levels[] = {"ERROR", "WARN", "INFO", "DEBUG", "TRACE", nullptr};
+            bool valid = false;
+            for (int i = 0; valid_levels[i]; i++) {
+                if (level == valid_levels[i]) {
+                    valid = true;
+                    break;
+                }
+            }
+
+            if (!valid) {
+                mg_http_reply(c, 400, "Content-Type: application/json\r\n", 
+                    "{\"error\":\"Invalid log level. Must be ERROR, WARN, INFO, DEBUG, or TRACE\"}");
+                return;
+            }
+
+            std::string key = "log_level_" + service;
+            if (db_) {
+                sqlite3_stmt* stmt;
+                const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
+                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, level.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
+            }
+
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
+                "{\"success\":true,\"service\":\"%s\",\"level\":\"%s\"}", 
+                service.c_str(), level.c_str());
+        }
+    }
+
+    void handle_test_results(struct mg_connection *c, struct mg_http_message *hm) {
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
+            return;
+        }
+
+        std::string query_str(hm->query.buf, hm->query.len);
+        std::string service_filter;
+        std::string status_filter;
+
+        size_t service_pos = query_str.find("service=");
+        if (service_pos != std::string::npos) {
+            size_t end = query_str.find('&', service_pos);
+            service_filter = query_str.substr(service_pos + 8, 
+                end == std::string::npos ? std::string::npos : end - service_pos - 8);
+        }
+
+        size_t status_pos = query_str.find("status=");
+        if (status_pos != std::string::npos) {
+            size_t end = query_str.find('&', status_pos);
+            status_filter = query_str.substr(status_pos + 7, 
+                end == std::string::npos ? std::string::npos : end - status_pos - 7);
+        }
+
+        std::stringstream sql_query;
+        sql_query << "SELECT id, service, test_type, status, metrics_json, timestamp FROM service_test_runs WHERE 1=1";
+        
+        if (!service_filter.empty()) {
+            sql_query << " AND service = '" << service_filter << "'";
+        }
+        if (!status_filter.empty()) {
+            sql_query << " AND status = '" << status_filter << "'";
+        }
+        sql_query << " ORDER BY timestamp DESC LIMIT 100";
+
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_, sql_query.str().c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Query failed\"}");
+            return;
+        }
+
+        std::stringstream json;
+        json << "{\"results\":[";
+        int count = 0;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (count > 0) json << ",";
+            json << "{";
+            json << "\"id\":" << sqlite3_column_int(stmt, 0) << ",";
+            json << "\"service\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1))) << "\",";
+            json << "\"test_type\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2))) << "\",";
+            json << "\"status\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3))) << "\",";
+            const char* metrics = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+            json << "\"metrics\":" << (metrics ? metrics : "{}") << ",";
+            json << "\"timestamp\":" << sqlite3_column_int64(stmt, 5);
+            json << "}";
+            count++;
+        }
+        sqlite3_finalize(stmt);
+        json << "]}";
+
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 

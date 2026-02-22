@@ -341,6 +341,8 @@ private:
             handle_inject(c, hm);
         } else if (mg_strcmp(hm->uri, mg_str("/status")) == 0) {
             handle_status(c);
+        } else if (mg_strcmp(hm->uri, mg_str("/calls")) == 0) {
+            handle_calls(c);
         } else {
             mg_http_reply(c, 404, CORS_HEADERS, "{\"error\":\"Not found\"}");
         }
@@ -438,6 +440,25 @@ private:
                 json << ",\"injecting\":null";
             }
         }
+        json << "}";
+        mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
+    }
+
+    void handle_calls(struct mg_connection* c) {
+        std::ostringstream json;
+        json << "{\"calls\":[";
+        if (call_ && call_->active) {
+            json << "{\"id\":" << call_->id;
+            json << ",\"leg_a\":{\"user\":\"" << call_->leg_a.user << "\",\"answered\":" << (call_->leg_a.answered ? "true" : "false") << "}";
+            json << ",\"leg_b\":{\"user\":\"" << call_->leg_b.user << "\",\"answered\":" << (call_->leg_b.answered ? "true" : "false") << "}";
+            json << ",\"relay_started\":" << (call_->relay_started ? "true" : "false");
+            json << ",\"injecting\":" << (call_->injecting ? "true" : "false");
+            auto now = std::chrono::steady_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - call_->started_at).count();
+            json << ",\"duration\":" << duration;
+            json << "}";
+        }
+        json << "],\"users\":" << users_.size();
         json << "}";
         mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
     }
@@ -980,7 +1001,8 @@ int main(int argc, char* argv[]) {
                 std::printf("HTTP Endpoints:\n");
                 std::printf("  GET  /files    List WAV files in testfiles directory\n");
                 std::printf("  POST /inject   Inject audio: {\"file\":\"sample_01.wav\",\"leg\":\"a\"}\n");
-                std::printf("  GET  /status   Call status and relay stats\n\n");
+                std::printf("  GET  /status   Call status and relay stats\n");
+                std::printf("  GET  /calls    List active calls\n\n");
                 return 0;
             default: break;
         }
