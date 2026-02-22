@@ -48,6 +48,22 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target <target> -j$(sysctl -n hw.ncpu)
 ```
 
+### Subrepo Version Check Rules
+**BEFORE EVERY BUILD**, verify that all subrepos are at the expected version:
+1. `whisper-cpp/`: MUST be **v1.8.3+**. Check: `grep 'VERSION' whisper-cpp/CMakeLists.txt` — must show `1.8.3` or newer
+2. `llama-cpp/` (when present): Check version in `llama-cpp/CMakeLists.txt`
+3. If a subrepo version is older than expected, **DO NOT BUILD** — update the subrepo first
+4. After updating a subrepo, rebuild its static libs AND rebuild all project binaries that link against it
+5. Record the verified versions in build output so future agents can confirm
+
+### Symlink Rules
+**NEVER** use symlinks to model files or binaries. Symlinks that point to temp directories, wrong files, or files with mismatched names are a critical source of bugs (e.g., a large-v3-turbo model symlinked as large-v3 caused weeks of CoreML debugging).
+1. All model files in `models/` MUST be real files, not symlinks
+2. All binaries in `bin/` MUST be real files, not symlinks
+3. Before every test run, verify: `find models/ bin/ -type l` must return empty
+4. If symlinks are found, **DELETE THEM** and replace with real files or report the issue
+5. NEVER create symlinks to files outside the project directory
+
 ### Process Management Rules
 1. ALWAYS check that only ONE frontend instance is running before tests
 2. ALL services MUST be started/stopped via the frontend API (`curl http://127.0.0.1:8080/api/services/start|stop`)
