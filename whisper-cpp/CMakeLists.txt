@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.5) # for add_link_options and implicit target directories.
 project("whisper.cpp" C CXX)
-project("whisper.cpp" VERSION 1.7.6)
+project("whisper.cpp" VERSION 1.8.3)
 include(CheckIncludeFileCXX)
 
 set(SOVERSION 1)
@@ -33,6 +33,9 @@ endif()
 
 if (EMSCRIPTEN)
     set(BUILD_SHARED_LIBS_DEFAULT OFF)
+
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
     option(WHISPER_WASM_SINGLE_FILE "whisper: embed WASM inside the generated whisper.js" ON)
 
@@ -211,14 +214,14 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/whisper.pc"
 # programs, examples and tests
 #
 
-# if (WHISPER_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
-#    include(CTest)
-#    add_subdirectory(tests)
-# endif ()
+if (WHISPER_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
+    include(CTest)
+    add_subdirectory(tests)
+endif ()
 
-# if (WHISPER_BUILD_EXAMPLES)
-#    add_subdirectory(examples)
-# endif()
+if (WHISPER_BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
 
 if (MSVC)
     set(MSVC_WARNING_FLAGS

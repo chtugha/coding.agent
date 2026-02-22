@@ -40,7 +40,7 @@ class WhisperService {
     static constexpr size_t VAD_FRAME_SIZE = 1600;
     static constexpr float VAD_THRESHOLD_MULT = 2.0f;
     static constexpr float VAD_MIN_ENERGY = 0.000002f;
-    static constexpr int VAD_SILENCE_FRAMES = 30;
+    static constexpr int VAD_SILENCE_FRAMES = 15;
     // Max 10s speech before forced flush to prevent unbounded buffering
     static constexpr size_t VAD_MAX_SPEECH_SAMPLES = 16000 * 10;
     static constexpr int VAD_CONTEXT_FRAMES = 10;
@@ -296,7 +296,7 @@ private:
         wparams.beam_search.beam_size = 5;
         wparams.temperature = 0.0f;
         wparams.temperature_inc = 0.0f;
-        wparams.initial_prompt = "Fußball-Bundesliga, Erzieher, Schwächephasen, benennt, verordnet, schäbigen";
+        wparams.initial_prompt = nullptr;
 
         auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);

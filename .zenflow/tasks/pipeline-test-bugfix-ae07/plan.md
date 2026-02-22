@@ -24,22 +24,22 @@ cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 - **MUST** enable CoreML with fallback (`-DWHISPER_COREML=1 -DWHISPER_COREML_ALLOW_FALLBACK=ON`) — allows Metal-only operation when CoreML encoder is absent
 
 ### Whisper Model Selection
-- **USE**: `models/ggml-large-v3.bin` (unquantized, 1.5GB) with **Metal-only GPU** (no CoreML encoder)
-- **DO NOT USE**: CoreML encoder models — tested extensively, ALL produce degraded transcriptions:
-  - CoreML ANE (our conversion, `--optimize-ane True`, torch 2.10): ~700ms but garbled output (missing letters, wrong language)
-  - CoreML ANE (our conversion, `--optimize-ane True`, torch 2.7): ~673ms, still garbled
-  - CoreML standard (our conversion, `--optimize-ane False`): ~840ms but still garbled
-  - Pre-converted official model (`ggerganov/whisper.cpp` on HuggingFace): ~781ms, **ALSO degraded** — same pattern of missing letters, CJK hallucinations, English word mixing
-  - Root cause: CoreML encoder integration in whisper.cpp introduces precision loss that degrades encoder embeddings — this is a fundamental whisper.cpp issue, not our conversion problem
-- **Metal-only performance**: ~1424ms avg inference for 3-5s utterances, 12/20 PASS, 8/20 WARN (>91%), 0 FAIL
+- **USE**: `models/ggml-large-v3.bin` (unquantized, 2.9GB, n_text_layer=32) with **CoreML encoder** (`models/ggml-large-v3-encoder.mlmodelc`)
+- **CRITICAL**: The model file MUST be the REAL large-v3 (2.9GB, n_text_layer=32), NOT large-v3-turbo (1.5GB, n_text_layer=4). Verify with: model reports "MTL0 total size = 3094.36 MB" in logs. If it says ~1624 MB, you have the WRONG model (turbo)!
+- **whisper-cpp version**: MUST be 1.8.3+ (updated from 1.7.6 which had CoreML precision issues)
+- **CoreML performance**: ~1200ms avg inference (after warmup), 12/20 PASS, 7/20 WARN (>90%), 1 FAIL
+- **Previous CoreML failures were caused by**: (1) wrong model file (large-v3-turbo symlinked as large-v3), (2) old whisper-cpp 1.7.6 with different Metal memory layout
 - **Number handling**: Whisper converts spoken German numbers to digits (e.g., "siebenundsechzig" → "67", "zweitausenddreiundzwanzig" → "2023"). This is ACCEPTABLE — LLaMA can handle digits. Ground truth files MUST use digit forms. Do NOT "fix" this by changing ground truths back to spelled-out forms.
 - **Default args**: `--language de models/ggml-large-v3.bin`
 
-### CoreML Model Conversion (if retrying in future)
+### CoreML Model Conversion
 - **MUST** use conda env `py312-whisper` with **torch==2.7.0** (coremltools 9.0 only tested up to torch 2.7)
 - **DO NOT** use system Python (has torch 2.10+ which is incompatible with coremltools)
 - Conda Python path: `/opt/homebrew/Caskroom/miniconda/base/envs/py312-whisper/bin/python3`
-- The `--optimize-ane True` flag in `generate-coreml-model.sh` is marked "currently broken" upstream (whisper.cpp issue #3632)
+- Use `--optimize-ane True` (works correctly with whisper-cpp 1.8.3+ and real large-v3 model)
+- Conversion command: `$CONDA_PYTHON models/convert-whisper-to-coreml.py --model large-v3 --encoder-only True --optimize-ane True`
+- Then compile: `xcrun coremlc compile models/coreml-encoder-large-v3.mlpackage models/`
+- Rename: `mv models/coreml-encoder-large-v3.mlmodelc models/ggml-large-v3-encoder.mlmodelc`
 
 ### Project binaries
 ```
