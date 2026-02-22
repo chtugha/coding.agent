@@ -36,18 +36,16 @@ struct WhisperCall {
 
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
-    // 100ms frames @ 16kHz = 1600 samples (standard VAD frame size)
-    static constexpr size_t VAD_FRAME_SIZE = 1600;
-    static constexpr float VAD_THRESHOLD_MULT = 2.0f;
-    static constexpr float VAD_MIN_ENERGY = 0.000002f;
-    static constexpr int VAD_SILENCE_FRAMES = 15;
-    // Max 10s speech before forced flush to prevent unbounded buffering
-    static constexpr size_t VAD_MAX_SPEECH_SAMPLES = 16000 * 10;
-    static constexpr int VAD_CONTEXT_FRAMES = 10;
-    // Safety timeout: force SPEECH_IDLE if no utterance completes within 10s
-    static constexpr int SPEECH_SIGNAL_TIMEOUT_S = 10;
-    // Inactivity flush: if in_speech and no new audio for this many ms, flush buffer
-    static constexpr int VAD_INACTIVITY_FLUSH_MS = 2000;
+    // VAD parameters (configurable)
+    size_t vad_frame_size_ = 1600;
+    float vad_threshold_mult_ = 2.0f;
+    float vad_min_energy_ = 0.000002f;
+    int vad_silence_frames_ = 15;
+    size_t vad_max_speech_samples_ = 16000 * 10;
+    int vad_context_frames_ = 10;
+    int speech_signal_timeout_s_ = 10;
+    int vad_inactivity_flush_ms_ = 2000;
+    bool vad_logging_enabled_ = true;
 
 public:
     WhisperService(const std::string& model_path, const std::string& language = "de") 

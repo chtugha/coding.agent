@@ -187,6 +187,7 @@ Implement transcription accuracy benchmarking against ground truth and VAD tunin
 ---
 
 ### [ ] Phase 5: Whisper Model Benchmarking
+<!-- chat-id: 130dff27-6bc5-49d9-9851-98635a661723 -->
 
 Build framework for comparing multiple Whisper models side-by-side.
 
