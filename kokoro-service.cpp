@@ -252,6 +252,10 @@ public:
 
     bool is_available() const { return available_; }
 
+    ~CoreMLDurationModel() {
+        if (model_) [model_ release];
+    }
+
 private:
     MLModel* model_ = nil;
     bool available_ = false;
@@ -395,6 +399,12 @@ public:
     }
 
     bool is_available() const { return available_; }
+
+    ~CoreMLSplitDecoder() {
+        for (auto& b : buckets_) {
+            if (b.model) [b.model release];
+        }
+    }
 
 private:
     std::vector<BucketInfo> buckets_;
@@ -580,8 +590,13 @@ public:
         har_padded.slice(1, 0, har_actual_c).slice(2, 0, har_actual_t) =
             har.slice(1, 0, har_actual_c).slice(2, 0, har_actual_t);
 
-        return coreml_split_decoder_->decode(*sb, asr_padded, f0_padded, n_padded,
-                                              intermediates.ref_s_dec, har_padded);
+        try {
+            return coreml_split_decoder_->decode(*sb, asr_padded, f0_padded, n_padded,
+                                                  intermediates.ref_s_dec, har_padded);
+        } catch (const c10::Error& e) {
+            std::fprintf(stderr, "Decoder exception for bucket %s: %s\n", sb->name.c_str(), e.what());
+            return {};
+        }
     }
 
     AlignedIntermediates run_duration_and_align(const std::vector<int64_t>& ids,

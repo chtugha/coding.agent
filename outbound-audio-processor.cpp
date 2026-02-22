@@ -11,6 +11,28 @@
 #include <cmath>
 #include "interconnect.h"
 
+static constexpr int AA_FILTER_TAPS = 15;
+static constexpr int AA_HALF_TAPS = AA_FILTER_TAPS / 2;
+static constexpr double AA_CUTOFF = 3400.0 / 12000.0;
+
+static const double* get_aa_coeffs() {
+    static double coeffs[AA_FILTER_TAPS];
+    static bool init = false;
+    if (!init) {
+        double sum = 0;
+        for (int n = 0; n < AA_FILTER_TAPS; n++) {
+            int k = n - AA_HALF_TAPS;
+            double hamming = 0.54 - 0.46 * std::cos(2.0 * M_PI * n / (AA_FILTER_TAPS - 1));
+            double sinc_val = (k == 0) ? 1.0 : std::sin(M_PI * AA_CUTOFF * k) / (M_PI * k);
+            coeffs[n] = sinc_val * hamming * AA_CUTOFF;
+            sum += coeffs[n];
+        }
+        for (int n = 0; n < AA_FILTER_TAPS; n++) coeffs[n] /= sum;
+        init = true;
+    }
+    return coeffs;
+}
+
 struct CallState {
     uint32_t id;
     std::mutex mutex;
@@ -99,9 +121,20 @@ private:
             size_t sample_count = pkt.payload_size / sizeof(float);
             const float* pcm_buf = reinterpret_cast<const float*>(pkt.payload.data());
 
+            const double* coeffs = get_aa_coeffs();
+            size_t out_len = sample_count / 3;
             std::vector<uint8_t> ulaw;
-            for (size_t i = 0; i < sample_count; i += 3) {
-                int16_t s16 = static_cast<int16_t>(pcm_buf[i] * 32767.0f);
+            ulaw.reserve(out_len);
+            for (size_t i = 0; i < out_len; i++) {
+                size_t src_pos = i * 3;
+                double filtered = 0;
+                for (int t = 0; t < AA_FILTER_TAPS; t++) {
+                    int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
+                    if (idx >= 0 && idx < static_cast<int>(sample_count)) {
+                        filtered += pcm_buf[idx] * coeffs[t];
+                    }
+                }
+                int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
                 ulaw.push_back(linear_to_ulaw(s16));
             }
 

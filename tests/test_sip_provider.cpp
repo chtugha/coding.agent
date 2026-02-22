@@ -944,6 +944,8 @@ private:
 };
 
 int main(int argc, char* argv[]) {
+    setlinebuf(stdout);
+    setlinebuf(stderr);
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 

@@ -36,7 +36,6 @@ class LlamaService {
 public:
     LlamaService(const std::string& model_path) 
         : running_(true),
-          next_seq_id_(0),
           interconnect_(whispertalk::ServiceType::LLAMA_SERVICE) {
         llama_backend_init();
         llama_model_params mparams = llama_model_default_params();
@@ -308,7 +307,7 @@ private:
         if (calls_.count(cid)) return calls_[cid];
         auto call = std::make_shared<LlamaCall>();
         call->id = cid;
-        call->seq_id = next_seq_id_++;
+        call->seq_id = 0;
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
         std::cout << "📞 Created conversation context for call_id " << cid << std::endl;
@@ -329,7 +328,6 @@ private:
     }
 
     std::atomic<bool> running_;
-    int next_seq_id_;
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;
