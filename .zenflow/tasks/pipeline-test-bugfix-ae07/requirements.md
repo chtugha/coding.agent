@@ -8,9 +8,11 @@ Build a comprehensive, incremental test suite for the WhisperTalk pipeline. Each
 
 ### 2.1 Testfiles Directory
 
-Location: `Testfiles/` in the project root. Contains 10 German speech samples committed to the repository.
+Location: `Testfiles/` in the project root. Contains 20 German speech samples committed to the repository.
 
-**Source**: Thorsten-Voice dataset (CC0 license), subset `TV-2022.10-Neutral`, recorded with a Rode Podcaster microphone. Downloaded via the HuggingFace datasets API (`Thorsten-Voice/TV-44kHz-Full`). The first 10 samples matching 3-5s duration and >= 30 character text length were selected to provide a variety of sentence structures (statements, compound words, proper nouns) suitable for testing VAD segmentation and transcription accuracy. To regenerate, use the same HuggingFace streaming query with the same selection criteria.
+**Source**: Thorsten-Voice dataset (CC0 license), subset `TV-2022.10-Neutral`, recorded with a Rode Podcaster microphone. Downloaded via the HuggingFace datasets API (`Thorsten-Voice/TV-44kHz-Full`). Samples 01-10 (3-5s) were selected for basic VAD and transcription testing. Samples 11-20 (6-7.2s) were selected as the 10 longest available samples for multi-sentence recognition and compound word testing.
+
+**Number normalization**: Whisper outputs digits (e.g. "67") for spoken numbers ("siebenundsechzig"). This is correct and expected — LLaMA understands both forms. Ground truth files MUST contain the spoken form (what the speaker actually says). The scoring script normalizes numbers before comparison. DO NOT change ground truths to digit form.
 
 | File | Duration | Transcription |
 |------|----------|---------------|
@@ -20,10 +22,20 @@ Location: `Testfiles/` in the project root. Contains 10 German speech samples co
 | sample_04.wav | 3.1s | bei dieser retro-brille ist der rahmen die besonderheit. |
 | sample_05.wav | 5.2s | als hauptlieferant gilt die konventionelle landwirtschaft mit phosphorhaltigen düngemitteln. |
 | sample_06.wav | 4.9s | auch das kommissionspapier benennt diese technologie als besonders risikoträchtig. |
-| sample_07.wav | 3.1s | der mann machte ihm zeichen, zu ihm hinüber zu kommen. |
+| sample_07.wav | 3.1s | der mann machte ihm ein zeichen, zu ihm hinüber zu kommen. |
 | sample_08.wav | 3.7s | der experte operiert nicht, verordnet aber medikamente. |
 | sample_09.wav | 4.5s | münchen bleibt trotz erneuter schwächephasen tabellenführer der fußball-bundesliga. |
 | sample_10.wav | 4.5s | wie er im schäbigen stripclub des städtchens seine blutigen klamotten wechselt. |
+| sample_11.wav | 7.2s | der siebenundsechzig-jährige erforscht spezifische eiweißstrukturen auf der zelloberfläche, sogenannte peptide. |
+| sample_12.wav | 7.1s | im november vor zwei jahren habe ich einen beitrag im mozilla forum veröffentlicht und meine stimmspende angekündigt. |
+| sample_13.wav | 6.8s | der neunundzwanzig-jährige tatverdächtige ist nach polizeiangaben vom donnerstag inzwischen in untersuchungshaft. |
+| sample_14.wav | 6.6s | teilnehmende werkstätten können auch analyse-instrumente, spezialwerkzeug und reparaturanleitungen beziehen. |
+| sample_15.wav | 6.4s | die leopoldina gilt als älteste naturwissenschaftlich-medizinische gelehrtengesellschaft in deutschland. |
+| sample_16.wav | 6.3s | bis zweitausenddreiundzwanzig hat sie dazu zunächst dreihundertfünfzig millionen euro zur verfügung. |
+| sample_17.wav | 6.3s | erstmals stellte zudem das vereinigte königreich mit zweitausendsiebenundachtzig die meisten einbürgerungen. |
+| sample_18.wav | 6.3s | bis ende zweitausendneunzehn wurden hier bereits vierhundertfünfundneunzig millionen euro investiert. |
+| sample_19.wav | 6.3s | im landratsamt im oberbayerischen kreis mühldorf ist der neunundvierzig-jährige kein unbekannter. |
+| sample_20.wav | 6.2s | beauty-trend — der aufregendste beauty-trend für die festival- und badesaison zweitausendfünfzehn? |
 
 - Format: 44.1kHz, mono, PCM_16, WAV (all files uniform for consistency)
 - Each `.wav` has a matching `.txt` with the exact expected transcription
