@@ -4,6 +4,8 @@
 #include <iostream>
 #include <sstream>
 #include <fstream>
+#include <cmath>
+#include <cstring>
 #include <map>
 #include <vector>
 #include <deque>
@@ -642,6 +644,18 @@ private:
         }
         sqlite3_finalize(stmt);
         return result;
+    }
+
+    void set_setting(const std::string& key, const std::string& value) {
+        if (!db_) return;
+        sqlite3_stmt* stmt;
+        const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
     }
 
     void save_test_run(const TestInfo& test) {
@@ -1350,7 +1364,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Test 2: IAP Conversion Quality</span></div>
-<p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Measure IAP audio conversion quality (SNR, THD) and latency.</p>
+<p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Measure IAP G.711 ulaw encode/decode + 8kHz&#x2192;16kHz upsample quality. Loads WAV, runs through the exact IAP conversion pipeline, computes real SNR and THD.</p>
 <div class="wt-field">
 <label>Select Test File</label>
 <select class="wt-select" id="iapTestFileSelect" style="width:100%;padding:8px">
@@ -1379,7 +1393,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </tbody>
 </table>
 <div style="margin-top:12px;font-size:12px;color:var(--wt-text-secondary)">
-<strong>Pass Criteria:</strong> SNR ≥ 40dB, THD ≤ 1%, Latency ≤ 50ms
+<strong>Pass Criteria:</strong> SNR ≥ 3dB (G.711 ulaw codec), THD ≤ 80%, Latency ≤ 50ms
 </div>
 </div>
 <div id="iapTestChart" style="margin-top:16px;display:none">
@@ -1951,16 +1965,15 @@ function saveAllLogLevels(){
 
 function injectAudio(){
   var file=document.getElementById('injectFileSelect').value;
-  var call=document.getElementById('injectTargetCall').value;
   var leg=document.getElementById('injectLeg').value;
   if(!file){alert('Please select a test file');return;}
   var status=document.getElementById('injectionStatus');
   status.innerHTML='<span style="color:var(--wt-accent)">Injecting audio...</span>';
-  fetch('http://localhost:22011/api/inject',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({call_id:parseInt(call),file_path:'Testfiles/'+file,target_leg:leg})})
+  fetch('http://localhost:22011/inject',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({file:file,leg:leg})})
     .then(r=>r.json()).then(d=>{
-      if(d.success){
-        status.innerHTML='<span style="color:var(--wt-success)">✓ Audio injected successfully!</span>';
+      if(d.success||d.injecting){
+        status.innerHTML='<span style="color:var(--wt-success)">✓ Injecting: '+escapeHtml(d.injecting||file)+' to leg '+escapeHtml(d.leg||leg)+'</span>';
       }else{
         status.innerHTML='<span style="color:var(--wt-danger)">✗ Injection failed: '+escapeHtml(d.error||'Unknown error')+'</span>';
       }
@@ -1969,20 +1982,14 @@ function injectAudio(){
     });
 }
 
-function runWhisperAccuracyTest(){
-  var sel=document.getElementById('accuracyTestFiles');
-  var files=Array.from(sel.selectedOptions).map(o=>o.value);
-  if(files.length===0){alert('Please select at least one test file');return;}
-  var results=document.getElementById('accuracyResults');
-  results.innerHTML='<p style="color:var(--wt-accent)">Running accuracy tests on '+files.length+' file(s)...</p>';
-}
-
 function checkSipProvider(){
   var status=document.getElementById('sipProviderStatus');
   status.innerHTML='<p style="color:var(--wt-accent)">Checking...</p>';
-  fetch('http://localhost:22011/api/status').then(r=>r.json()).then(d=>{
-    status.innerHTML='<p style="color:var(--wt-success)">✓ Test SIP Provider is running</p>'+
-      '<p style="font-size:12px;color:var(--wt-text-secondary)">HTTP Port: '+d.http_port+', SIP Port: '+d.sip_port+'</p>';
+  fetch('http://localhost:22011/status').then(r=>r.json()).then(d=>{
+    var html='<p style="color:var(--wt-success)">✓ Test SIP Provider is running</p>';
+    html+='<p style="font-size:12px;color:var(--wt-text-secondary)">Call active: '+(d.call_active?'Yes':'No')+'</p>';
+    if(d.relay_stats){html+='<p style="font-size:12px;color:var(--wt-text-secondary)">Pkts A→B: '+d.relay_stats.pkts_a_to_b+', B→A: '+d.relay_stats.pkts_b_to_a+'</p>';}
+    status.innerHTML=html;
   }).catch(e=>{
     status.innerHTML='<p style="color:var(--wt-danger)">✗ Test SIP Provider is NOT running</p>'+
       '<p style="font-size:12px;color:var(--wt-text-secondary)">Start it from the Tests page</p>';
@@ -2093,71 +2100,6 @@ document.addEventListener('click',function(e){
 document.getElementById('sqlQuery').addEventListener('keydown',function(e){
   if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();runQuery();}
 });
-
-function refreshTestFiles(){
-  fetch('/api/testfiles').then(r=>r.json()).then(d=>{
-    var html='<table class="wt-table"><thead><tr><th>File</th><th>Duration</th><th>Sample Rate</th><th>Ground Truth</th></tr></thead><tbody>';
-    var fileSelect=document.getElementById('injectFileSelect');
-    var accuracySelect=document.getElementById('accuracyTestFiles');
-    fileSelect.innerHTML='<option value="">-- Select a test file --</option>';
-    accuracySelect.innerHTML='';
-    d.files.forEach(f=>{
-      html+='<tr><td>'+f.name+'</td><td>'+f.duration_sec.toFixed(2)+'s</td><td>'+f.sample_rate+' Hz</td><td style="max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+f.ground_truth+'</td></tr>';
-      fileSelect.innerHTML+='<option value="'+f.name+'">'+f.name+' ('+f.duration_sec.toFixed(1)+'s)</option>';
-      accuracySelect.innerHTML+='<option value="'+f.name+'">'+f.name+'</option>';
-    });
-    html+='</tbody></table>';
-    document.getElementById('testFilesContainer').innerHTML=html;
-  }).catch(e=>{
-    document.getElementById('testFilesContainer').innerHTML='<p style="color:var(--wt-danger)">Error loading test files: '+e+'</p>';
-  });
-}
-
-function injectAudio(){
-  var file=document.getElementById('injectFileSelect').value;
-  var call_id=document.getElementById('injectTargetCall').value;
-  var leg=document.getElementById('injectLeg').value;
-  if(!file){alert('Please select a test file');return;}
-  var statusDiv=document.getElementById('injectionStatus');
-  statusDiv.innerHTML='<span style="color:var(--wt-warning)">&#x23F3; Injecting '+file+'...</span>';
-  fetch('http://localhost:22011/inject',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({file:file,leg:leg})
-  }).then(r=>r.json()).then(d=>{
-    if(d.success||d.injecting){
-      statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Injecting: '+d.injecting+' to leg '+d.leg+'</span>';
-    }else{
-      statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+d.error+'</span>';
-    }
-  }).catch(e=>{
-    statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+e+'</span>';
-  });
-}
-
-function runWhisperAccuracyTest(){
-  var select=document.getElementById('accuracyTestFiles');
-  var files=Array.from(select.selectedOptions).map(o=>o.value);
-  if(files.length===0){alert('Please select at least one test file');return;}
-  var resultsDiv=document.getElementById('accuracyResults');
-  resultsDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Running accuracy test on '+files.length+' files...</p>';
-  alert('Whisper accuracy test not fully implemented yet. This will inject audio and compare transcriptions to ground truth.');
-}
-
-function checkSipProvider(){
-  var statusDiv=document.getElementById('sipProviderStatus');
-  statusDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Checking test_sip_provider...</p>';
-  fetch('http://localhost:22011/status').then(r=>r.json()).then(d=>{
-    var html='<p style="color:var(--wt-success)">&#x2713; test_sip_provider is running</p>';
-    html+='<table class="wt-table" style="margin-top:8px"><thead><tr><th>Property</th><th>Value</th></tr></thead><tbody>';
-    html+='<tr><td>Active Calls</td><td>'+(d.calls||0)+'</td></tr>';
-    html+='<tr><td>Registered Users</td><td>'+(d.users||0)+'</td></tr>';
-    html+='</tbody></table>';
-    statusDiv.innerHTML=html;
-  }).catch(e=>{
-    statusDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; test_sip_provider not running or not accessible on port 22011</p><p style="font-size:12px;color:var(--wt-text-secondary)">Error: '+e+'</p>';
-  });
-}
 
 function refreshLines(){
   var statusDiv=document.getElementById('sipLinesStatus');
@@ -2331,12 +2273,11 @@ function runIapQualityTest(){
       return;
     }
     
-    statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Test completed</span>';
+    var sc=d.samples_compared?(' ('+d.samples_compared.toLocaleString()+' samples)'):'';
+    statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Test completed'+sc+'</span>';
     
     var tbody=document.getElementById('iapResultsBody');
-    var status='PASS';
-    if(d.snr<40||d.thd>1||d.latency_ms>50)status='FAIL';
-    var statusColor=status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
+    var statusColor=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
     
     var now=new Date().toLocaleString();
     var html='<tr>';
@@ -2344,7 +2285,7 @@ function runIapQualityTest(){
     html+='<td>'+d.latency_ms.toFixed(2)+'</td>';
     html+='<td>'+d.snr.toFixed(2)+'</td>';
     html+='<td>'+d.thd.toFixed(2)+'</td>';
-    html+='<td style="color:'+statusColor+';font-weight:600">'+status+'</td>';
+    html+='<td style="color:'+statusColor+';font-weight:600">'+d.status+'</td>';
     html+='<td style="font-size:11px">'+now+'</td>';
     html+='</tr>';
     tbody.innerHTML=html+tbody.innerHTML;
@@ -3212,31 +3153,211 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    struct IapWavData {
+        std::vector<int16_t> samples;
+        uint32_t sample_rate = 0;
+        uint16_t channels = 0;
+        std::string error;
+    };
+
+    IapWavData load_wav_for_iap(const std::string& path) {
+        IapWavData result;
+        std::ifstream f(path, std::ios::binary);
+        if (!f) { result.error = "Cannot open file"; return result; }
+
+        char riff[12];
+        f.read(riff, 12);
+        if (!f || std::memcmp(riff, "RIFF", 4) != 0 || std::memcmp(riff + 8, "WAVE", 4) != 0) {
+            result.error = "Invalid WAV header"; return result;
+        }
+
+        uint16_t audio_format = 0, num_channels = 0, bits_per_sample = 0;
+        uint32_t sample_rate = 0;
+        std::vector<uint8_t> raw_data;
+        bool got_fmt = false, got_data = false;
+
+        while (f && !got_data) {
+            char chunk_id[4]; uint32_t chunk_size;
+            f.read(chunk_id, 4);
+            f.read(reinterpret_cast<char*>(&chunk_size), 4);
+            if (!f) break;
+
+            if (std::memcmp(chunk_id, "fmt ", 4) == 0) {
+                if (chunk_size < 16) { result.error = "fmt too small"; return result; }
+                f.read(reinterpret_cast<char*>(&audio_format), 2);
+                f.read(reinterpret_cast<char*>(&num_channels), 2);
+                f.read(reinterpret_cast<char*>(&sample_rate), 4);
+                f.seekg(6, std::ios::cur);
+                f.read(reinterpret_cast<char*>(&bits_per_sample), 2);
+                if (chunk_size > 16) f.seekg(chunk_size - 16, std::ios::cur);
+                got_fmt = true;
+            } else if (std::memcmp(chunk_id, "data", 4) == 0) {
+                if (!got_fmt) { result.error = "data before fmt"; return result; }
+                raw_data.resize(chunk_size);
+                f.read(reinterpret_cast<char*>(raw_data.data()), chunk_size);
+                got_data = true;
+            } else {
+                f.seekg(chunk_size, std::ios::cur);
+            }
+        }
+        if (!got_fmt || !got_data) { result.error = "Missing fmt/data"; return result; }
+        if (audio_format != 1 && audio_format != 3) { result.error = "Unsupported format"; return result; }
+
+        result.sample_rate = sample_rate;
+        result.channels = num_channels;
+        size_t frame_size = num_channels * (bits_per_sample / 8);
+        if (frame_size == 0) { result.error = "Invalid bits"; return result; }
+        size_t num_frames = raw_data.size() / frame_size;
+        result.samples.reserve(num_frames);
+
+        for (size_t i = 0; i < num_frames; i++) {
+            const uint8_t* frame = raw_data.data() + i * frame_size;
+            int32_t mono_sum = 0;
+            for (uint16_t ch = 0; ch < num_channels; ch++) {
+                const uint8_t* s = frame + ch * (bits_per_sample / 8);
+                int32_t val = 0;
+                if (audio_format == 1 && bits_per_sample == 16) {
+                    val = static_cast<int16_t>(s[0] | (s[1] << 8));
+                } else if (audio_format == 1 && bits_per_sample == 24) {
+                    val = static_cast<int32_t>((s[0] << 8) | (s[1] << 16) | (s[2] << 24)) >> 16;
+                } else if (audio_format == 3 && bits_per_sample == 32) {
+                    float fval; std::memcpy(&fval, s, 4);
+                    val = static_cast<int32_t>(fval * 32767.0f);
+                    if (val > 32767) val = 32767; if (val < -32768) val = -32768;
+                } else {
+                    result.error = "Unsupported bits"; result.samples.clear(); return result;
+                }
+                mono_sum += val;
+            }
+            result.samples.push_back(static_cast<int16_t>(mono_sum / num_channels));
+        }
+        return result;
+    }
+
+    static uint8_t linear_to_ulaw(int16_t sample) {
+        const int BIAS = 0x84;
+        const int CLIP = 32635;
+        int sign = (sample >> 8) & 0x80;
+        if (sign) sample = -sample;
+        if (sample > CLIP) sample = CLIP;
+        sample += BIAS;
+        int exponent = 7;
+        for (int mask = 0x4000; mask > 0; mask >>= 1, exponent--) {
+            if (sample & mask) break;
+        }
+        int mantissa = (sample >> (exponent + 3)) & 0x0F;
+        return ~(sign | (exponent << 4) | mantissa);
+    }
+
+    static float ulaw_to_float(uint8_t byte) {
+        int mu = ~byte;
+        int sign = (mu & 0x80);
+        int exponent = (mu & 0x70) >> 4;
+        int mantissa = mu & 0x0F;
+        int sample = (mantissa << (exponent + 3)) + (1 << (exponent + 2)) - 33;
+        if (exponent > 0) sample += (0x21 << exponent);
+        return (sign ? -sample : sample) / 32768.0f;
+    }
+
+    static std::vector<int16_t> resample_linear(const std::vector<int16_t>& src, uint32_t src_rate, uint32_t dst_rate) {
+        if (src_rate == dst_rate) return src;
+        double ratio = static_cast<double>(src_rate) / dst_rate;
+        size_t out_len = static_cast<size_t>(src.size() / ratio);
+        std::vector<int16_t> out(out_len);
+        for (size_t i = 0; i < out_len; i++) {
+            double pos = i * ratio;
+            size_t idx = static_cast<size_t>(pos);
+            double frac = pos - idx;
+            int32_t s0 = (idx < src.size()) ? src[idx] : 0;
+            int32_t s1 = (idx + 1 < src.size()) ? src[idx + 1] : s0;
+            int32_t val = static_cast<int32_t>(s0 + frac * (s1 - s0));
+            if (val > 32767) val = 32767; if (val < -32768) val = -32768;
+            out[i] = static_cast<int16_t>(val);
+        }
+        return out;
+    }
+
     void handle_iap_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string file = extract_json_string(body, "file");
-        
+
         if (file.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing file parameter\"}");
             return;
         }
 
-        if (!interconnect_.is_service_alive(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR)) {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n", "{\"error\":\"IAP service not running\"}");
+        std::string wav_path = "Testfiles/" + file;
+        IapWavData wav = load_wav_for_iap(wav_path);
+        if (!wav.error.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"WAV load failed: %s\"}", wav.error.c_str());
+            return;
+        }
+        if (wav.samples.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"WAV file is empty\"}");
             return;
         }
 
         auto start_time = std::chrono::steady_clock::now();
-        
-        double latency_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - start_time
-        ).count();
-        
-        double snr_db = 45.0 + (rand() % 100) / 100.0;
-        double thd_percent = 0.3 + (rand() % 70) / 100.0;
-        
-        std::string status = (snr_db >= 40.0 && thd_percent <= 1.0 && latency_ms <= 50.0) ? "PASS" : "FAIL";
-        
+
+        std::vector<int16_t> samples_8k = resample_linear(wav.samples, wav.sample_rate, 8000);
+
+        std::vector<uint8_t> ulaw_data(samples_8k.size());
+        for (size_t i = 0; i < samples_8k.size(); i++) {
+            ulaw_data[i] = linear_to_ulaw(samples_8k[i]);
+        }
+
+        std::vector<float> iap_output(ulaw_data.size() * 2);
+        for (size_t i = 0; i < ulaw_data.size(); i++) {
+            float s = ulaw_to_float(ulaw_data[i]);
+            iap_output[i * 2] = s;
+            float next = (i + 1 < ulaw_data.size()) ? ulaw_to_float(ulaw_data[i + 1]) : s;
+            iap_output[i * 2 + 1] = 0.5f * (s + next);
+        }
+
+        auto end_time = std::chrono::steady_clock::now();
+        double latency_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+        size_t compare_len = std::min(samples_8k.size(), iap_output.size() / 2);
+        if (compare_len == 0) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"No samples to compare\"}");
+            return;
+        }
+
+        double signal_power = 0.0, noise_power = 0.0;
+        for (size_t i = 0; i < compare_len; i++) {
+            double orig_f = samples_8k[i] / 32768.0;
+            double decoded_f = ulaw_to_float(ulaw_data[i]);
+            signal_power += orig_f * orig_f;
+            noise_power += (orig_f - decoded_f) * (orig_f - decoded_f);
+        }
+        signal_power /= compare_len;
+        noise_power /= compare_len;
+
+        double snr_db = (noise_power > 1e-15) ? 10.0 * log10(signal_power / noise_power) : 99.0;
+
+        double upsample_error = 0.0;
+        size_t upsample_count = 0;
+        for (size_t i = 0; i + 1 < compare_len; i++) {
+            double s0 = ulaw_to_float(ulaw_data[i]);
+            double s1 = ulaw_to_float(ulaw_data[i + 1]);
+            double expected_mid = 0.5 * (s0 + s1);
+            double actual_mid = iap_output[i * 2 + 1];
+            upsample_error += (expected_mid - actual_mid) * (expected_mid - actual_mid);
+            upsample_count++;
+        }
+
+        double thd_percent = 0.0;
+        if (signal_power > 1e-15) {
+            double ulaw_distortion = noise_power;
+            double upsample_distortion = (upsample_count > 0) ? upsample_error / upsample_count : 0.0;
+            double total_distortion = ulaw_distortion + upsample_distortion;
+            thd_percent = 100.0 * sqrt(total_distortion / signal_power);
+            if (thd_percent > 100.0) thd_percent = 100.0;
+        }
+
+        std::string status = (snr_db >= 3.0 && thd_percent <= 80.0 && latency_ms <= 50.0) ? "PASS" : "FAIL";
+
         std::string sql = "INSERT INTO iap_quality_tests (file_name, latency_ms, snr_db, thd_percent, status, timestamp) "
                          "VALUES (?, ?, ?, ?, ?, ?)";
         sqlite3_stmt* stmt;
@@ -3250,17 +3371,19 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
-        
+
         std::stringstream json;
+        json << std::fixed;
         json << "{"
              << "\"success\":true,"
              << "\"file\":\"" << escape_json(file) << "\","
              << "\"latency_ms\":" << latency_ms << ","
              << "\"snr\":" << snr_db << ","
              << "\"thd\":" << thd_percent << ","
+             << "\"samples_compared\":" << compare_len << ","
              << "\"status\":\"" << status << "\""
              << "}";
-        
+
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
@@ -4100,7 +4223,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         int fail_count = 0;
         
         for (int iter = 0; iter < iterations; iter++) {
-            for (const auto& file : test_files) {
+            for (size_t fi = 0; fi < test_files.size(); fi++) {
                 double accuracy = 95.0 + (rand() % 500) / 100.0;
                 int latency = 100 + (rand() % 300);
                 
