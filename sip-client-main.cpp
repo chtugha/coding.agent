@@ -267,6 +267,8 @@ private:
             if (n > 0) {
                 buf[n] = '\0';
                 std::string msg(buf, n);
+                while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r' || msg.back() == '\0'))
+                    msg.pop_back();
                 std::string response = handle_line_command(msg);
                 if (!response.empty()) {
                     ::send(csock, response.c_str(), response.size(), 0);

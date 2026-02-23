@@ -539,7 +539,9 @@ private:
             std::memcpy(rtp + 4, &ts_n, 4);
             uint32_t ssrc_n = htonl(ssrc);
             std::memcpy(rtp + 8, &ssrc_n, 4);
-            std::memset(rtp + 12, 0xFF, PKT_SAMPLES);
+            // G.711 μ-law silence: 0x7F decodes to 0 (true digital silence).
+            // NOT 0xFF which decodes to -29 and triggers VAD false positives.
+            std::memset(rtp + 12, 0x7F, PKT_SAMPLES);
             sendto(target->relay_sock, rtp, sizeof(rtp), 0,
                    (struct sockaddr*)&dest, sizeof(dest));
             std::this_thread::sleep_for(std::chrono::milliseconds(20));

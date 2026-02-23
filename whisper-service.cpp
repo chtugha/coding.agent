@@ -1,5 +1,17 @@
-// Whisper Service (Interconnect-based)
+// Whisper Service — Adaptive chunked VAD with greedy streaming.
+//
+// Pipeline: IAP → [receiver_loop] → audio_buffer → [processing_loop/VAD] → chunks → [transcribe] → downstream
+//
+// VAD strategy: Energy-based with adaptive micro-pause detection.
+// Instead of waiting for full sentence silence (1500ms), we detect short pauses (~400ms)
+// between words/phrases and submit smaller chunks (1.5-4s) to Whisper. This cuts latency
+// dramatically because Whisper inference time scales ~quadratically with input length.
+// Context coherence is maintained by passing the previous transcription as initial_prompt.
+//
+// Decoding: GREEDY (not beam search). On short 2-4s segments, greedy is ~3-5x faster
+// than beam_size=5 with negligible accuracy difference. Temperature fallback handles errors.
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <string>
 #include <thread>
@@ -9,6 +21,7 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <cmath>
 #include <signal.h>
 #include <getopt.h>
 #include "interconnect.h"
@@ -24,7 +37,7 @@ struct WhisperCall {
     bool in_speech = false;
     bool speech_signaled = false;
     int silence_count = 0;
-    float noise_floor = 0.0001f;
+    float noise_floor = 0.00005f;
     int frame_count = 0;
     size_t vad_pos = 0;
     size_t speech_start = 0;
@@ -32,19 +45,35 @@ struct WhisperCall {
     std::chrono::steady_clock::time_point speech_signal_time;
     size_t last_buffer_size = 0;
     std::chrono::steady_clock::time_point last_buffer_growth;
+    // Context carry-over: previous chunk's transcription used as initial_prompt
+    // for the next chunk to maintain coherence across chunk boundaries.
+    std::string last_transcription;
 };
 
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
-    // VAD parameters (configurable)
-    size_t vad_frame_size_ = 1600;
+
+    // VAD parameters — tuned for low-latency chunked streaming.
+    // vad_frame_size_: 50ms frames (800 samples @ 16kHz) — finer granularity than 100ms
+    //   for detecting short pauses between words without cutting mid-phoneme.
+    size_t vad_frame_size_ = 800;
     float vad_threshold_mult_ = 2.0f;
-    float vad_min_energy_ = 0.000002f;
-    int vad_silence_frames_ = 15;
-    size_t vad_max_speech_samples_ = 16000 * 10;
-    int vad_context_frames_ = 10;
+    // Minimum energy threshold to distinguish speech from G.711 codec noise floor.
+    // G.711 μ-law silence (0xFF/0x7F) decodes to ±0.000885 → energy ~0.00000078.
+    // Set min_energy well above this to prevent false VAD triggers on silence.
+    float vad_min_energy_ = 0.00005f;
+    // vad_silence_frames_: 8 frames × 50ms = 400ms — triggers on word-boundary pauses
+    //   instead of full sentence gaps. Short enough for fast turnaround, long enough
+    //   to not split mid-word (German phonemes are typically <200ms).
+    int vad_silence_frames_ = 8;
+    // vad_max_speech_samples_: 4s max chunk — keeps Whisper inference under ~500ms.
+    //   Whisper's attention is O(n²) on audio length; 4s vs 10s is ~6x faster.
+    size_t vad_max_speech_samples_ = 16000 * 4;
+    // vad_min_speech_samples_: 0.5s minimum — don't transcribe noise bursts or clicks.
+    size_t vad_min_speech_samples_ = 16000 / 2;
+    int vad_context_frames_ = 4;
     int speech_signal_timeout_s_ = 10;
-    int vad_inactivity_flush_ms_ = 2000;
+    int vad_inactivity_flush_ms_ = 1000;
     bool vad_logging_enabled_ = true;
 
 public:
@@ -75,9 +104,14 @@ public:
         if (silence_ms > 0) {
             vad_silence_frames_ = silence_ms / std::max(1, (int)(vad_frame_size_ / 16));
         }
-        std::cout << "VAD config: window=" << (vad_frame_size_ / 16) << "ms"
+        int window_actual = (int)(vad_frame_size_ / 16);
+        int silence_actual = vad_silence_frames_ * window_actual;
+        std::cout << "VAD config: window=" << window_actual << "ms"
                   << " threshold=" << vad_threshold_mult_
-                  << " silence_frames=" << vad_silence_frames_ << std::endl;
+                  << " silence=" << silence_actual << "ms"
+                  << " max_chunk=" << (vad_max_speech_samples_ / 16000) << "s"
+                  << " min_chunk=" << (vad_min_speech_samples_ * 1000 / 16000) << "ms"
+                  << std::endl;
     }
 
     bool init() {
@@ -163,7 +197,12 @@ private:
 
                         call->frame_count++;
                         if (!call->in_speech) {
-                            call->noise_floor = call->noise_floor * 0.95f + energy * 0.05f;
+                            float nf = call->noise_floor * 0.95f + energy * 0.05f;
+                            // Clamp noise floor above G.711 codec quantization noise (~0.000001).
+                            // Without this clamp, the noise floor adapts arbitrarily low during
+                            // digital silence, causing the threshold to drop and triggering
+                            // false VAD activations on codec noise.
+                            call->noise_floor = std::max(nf, 0.000005f);
                         }
                         float threshold = std::max(call->noise_floor * vad_threshold_mult_, vad_min_energy_);
 
@@ -207,7 +246,7 @@ private:
                             call->in_speech = false;
                             call->silence_count = 0;
                             call->speech_start = 0;
-                            call->noise_floor = 0.0001f;
+                            call->noise_floor = 0.00005f;
                             break;
                         }
 
@@ -228,7 +267,7 @@ private:
                             call->in_speech = false;
                             call->silence_count = 0;
                             call->speech_start = 0;
-                            call->noise_floor = 0.0001f;
+                            call->noise_floor = 0.00005f;
                             break;
                         }
                     }
@@ -255,7 +294,7 @@ private:
                                 call->silence_count = 0;
                                 call->speech_start = 0;
                                 call->last_buffer_size = 0;
-                                call->noise_floor = 0.0001f;
+                                call->noise_floor = 0.00005f;
                                 if (call->speech_signaled) {
                                     call->speech_signaled = false;
                                     interconnect_.broadcast_speech_signal(call->id, false);
@@ -311,7 +350,68 @@ private:
         }
     }
 
+    // Transcribes a short audio chunk (typically 1-4s) and sends the text downstream.
+    // Uses GREEDY decoding for speed — on short chunks the accuracy difference vs beam search
+    // is negligible, but inference is 3-5x faster. Context from the previous chunk's
+    // transcription is passed via initial_prompt to maintain coherence across chunk boundaries.
+    // audio_ctx is set proportionally to the audio length to avoid Whisper wasting compute
+    // on empty spectrogram frames beyond the actual audio.
+    // Detects common Whisper hallucination patterns on near-silence audio.
+    // Returns true if the text is likely a hallucination.
+    bool is_hallucination(const std::string& text) {
+        if (text.empty()) return false;
+        std::string t = text;
+        while (!t.empty() && t.front() == ' ') t.erase(t.begin());
+        while (!t.empty() && t.back() == ' ') t.pop_back();
+        if (t.size() < 3) return true;
+        // Whisper often produces these German hallucination patterns on silence:
+        static const char* patterns[] = {
+            "Untertitel",
+            "Vielen Dank",
+            "Tschüss",
+            "Bis zum nächsten Mal",
+            "Copyright",
+            "www.",
+            "SWR",
+            "Amara.org",
+            "Danke fürs Zuschauen",
+            "Ich habe mich nicht mehr",
+            nullptr
+        };
+        for (int i = 0; patterns[i]; ++i) {
+            if (t.find(patterns[i]) != std::string::npos) return true;
+        }
+        // Detect repetitive text (same short phrase repeated)
+        if (t.size() > 20) {
+            std::string half = t.substr(0, t.size() / 2);
+            if (t.find(half, half.size()) != std::string::npos) return true;
+        }
+        return false;
+    }
+
     void transcribe_and_send(uint32_t call_id, const std::vector<float>& audio) {
+        if (audio.size() < vad_min_speech_samples_) {
+            if (vad_logging_enabled_) {
+                log_fwd_.forward("DEBUG", call_id,
+                    "Skipping chunk: %zu samples (%.0fms) below minimum %zu",
+                    audio.size(), audio.size() / 16.0, vad_min_speech_samples_);
+            }
+            return;
+        }
+
+        // RMS energy check: reject chunks that are near-silence to prevent hallucinations.
+        // G.711 codec noise floor is ~0.001 RMS; real speech is typically >0.01 RMS.
+        float rms = 0.0f;
+        for (size_t i = 0; i < audio.size(); ++i) rms += audio[i] * audio[i];
+        rms = std::sqrt(rms / audio.size());
+        if (rms < 0.005f) {
+            if (vad_logging_enabled_) {
+                log_fwd_.forward("DEBUG", call_id,
+                    "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / 16.0);
+            }
+            return;
+        }
+
         std::vector<float> normalized(audio.size());
         float peak = 0.0f;
         for (auto s : audio) peak = std::max(peak, std::abs(s));
@@ -323,16 +423,39 @@ private:
             normalized = audio;
         }
 
-        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
+        // Greedy decoding: ~3-5x faster than beam search on short segments.
+        // temperature=0 for deterministic output; temperature_inc=0.2 enables
+        // one retry at higher temperature if decoding produces garbage.
+        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wparams.language = language_.c_str();
         wparams.n_threads = 4;
         wparams.no_timestamps = true;
         wparams.single_segment = true;
-        wparams.no_context = true;
-        wparams.beam_search.beam_size = 5;
+        wparams.no_context = false;
+        wparams.greedy.best_of = 1;
         wparams.temperature = 0.0f;
-        wparams.temperature_inc = 0.0f;
-        wparams.initial_prompt = nullptr;
+        wparams.temperature_inc = 0.2f;
+
+        // Limit audio_ctx to actual audio length in 10ms Whisper frames.
+        // Whisper's encoder processes 30s (1500 frames) by default — clamping this
+        // to the actual content length avoids ~75% wasted encoder compute on 4s chunks.
+        int audio_frames = static_cast<int>(audio.size() / 160);
+        wparams.audio_ctx = std::min(1500, audio_frames + 16);
+
+        // Context carry-over: use previous chunk's transcription as initial_prompt
+        // so Whisper maintains language/style coherence across chunk boundaries.
+        // Skip carry-over if previous was a hallucination.
+        std::string prompt;
+        {
+            std::lock_guard<std::mutex> clk(calls_mutex_);
+            auto it = calls_.find(call_id);
+            if (it != calls_.end() && !it->second->last_transcription.empty()) {
+                if (!is_hallucination(it->second->last_transcription)) {
+                    prompt = it->second->last_transcription;
+                }
+            }
+        }
+        wparams.initial_prompt = prompt.empty() ? nullptr : prompt.c_str();
 
         auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);
@@ -357,7 +480,31 @@ private:
                 text += whisper_full_get_segment_text(ctx_, i);
             }
             if (!text.empty()) {
-                std::cout << "📝 [" << call_id << "] Transcription (" << whisper_ms << "ms): " << text << std::endl;
+                if (is_hallucination(text)) {
+                    if (vad_logging_enabled_) {
+                        log_fwd_.forward("DEBUG", call_id, "Hallucination filtered: %s", text.c_str());
+                    }
+                    std::cout << "👻 [" << call_id << "] Hallucination filtered: " << text << std::endl;
+                    {
+                        std::lock_guard<std::mutex> clk(calls_mutex_);
+                        auto it = calls_.find(call_id);
+                        if (it != calls_.end()) it->second->last_transcription.clear();
+                    }
+                    return;
+                }
+
+                {
+                    std::lock_guard<std::mutex> clk(calls_mutex_);
+                    auto it = calls_.find(call_id);
+                    if (it != calls_.end()) {
+                        it->second->last_transcription = text;
+                    }
+                }
+
+                double audio_dur_ms = audio.size() / 16.0;
+                double rtf = whisper_ms / audio_dur_ms;
+                std::cout << "📝 [" << call_id << "] Transcription (" << whisper_ms << "ms, RTF=" 
+                          << std::fixed << std::setprecision(2) << rtf << "): " << text << std::endl;
                 log_fwd_.forward("INFO", call_id, "Transcription (%lldms): %s", whisper_ms, text.c_str());
 
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
@@ -437,9 +584,9 @@ int main(int argc, char** argv) {
     std::string model_path;
     std::string language = "de";
 
-    int vad_window_ms = 100;
+    int vad_window_ms = 50;
     float vad_threshold = 2.0f;
-    int vad_silence_ms = -1;
+    int vad_silence_ms = 400;
 
     static struct option long_opts[] = {
         {"language", required_argument, 0, 'l'},

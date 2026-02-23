@@ -16,8 +16,6 @@ static void sig_handler(int) { g_running = false; }
 struct CallState {
     int id;
     std::chrono::steady_clock::time_point last_activity;
-    std::vector<float> buffer;
-    std::mutex mutex;
 };
 
 class InboundAudioProcessor {
@@ -92,6 +90,9 @@ private:
             size_t payload_len = pkt.payload_size - rtp_header_size;
             const uint8_t* rtp_payload = pkt.payload.data() + rtp_header_size;
 
+            // Decode G.711 μ-law → float32 and upsample 8kHz → 16kHz in one pass.
+            // Each RTP packet is 160 μ-law bytes (20ms @ 8kHz) → 320 float32 samples (20ms @ 16kHz).
+            // Forward immediately without buffering — Whisper's VAD handles segmentation.
             std::vector<float> pcm(payload_len * 2);
             for (size_t i = 0; i < payload_len; ++i) {
                 float s = ulaw_table[rtp_payload[i]];
@@ -100,27 +101,12 @@ private:
                 pcm[i*2 + 1] = 0.5f * (s + next);
             }
 
-            {
-                std::lock_guard<std::mutex> lock(state->mutex);
-                state->buffer.insert(state->buffer.end(), pcm.begin(), pcm.end());
-            }
-
-            while (true) {
-                std::vector<float> chunk;
-                {
-                    std::lock_guard<std::mutex> lock(state->mutex);
-                    if (state->buffer.size() < 1600) break;
-                    chunk.assign(state->buffer.begin(), state->buffer.begin() + 1600);
-                    state->buffer.erase(state->buffer.begin(), state->buffer.begin() + 1600);
-                }
-                whispertalk::Packet out_pkt(pkt.call_id, chunk.data(), chunk.size() * sizeof(float));
-                out_pkt.trace = pkt.trace;
-                out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
-                if (!interconnect_.send_to_downstream(out_pkt)) {
-                    if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                        std::cout << "⚠️  [" << pkt.call_id << "] Whisper disconnected, dumping stream to /dev/null" << std::endl;
-                        log_fwd_.forward("WARN", pkt.call_id, "Whisper disconnected, dumping stream");
-                    }
+            whispertalk::Packet out_pkt(pkt.call_id, pcm.data(), pcm.size() * sizeof(float));
+            out_pkt.trace = pkt.trace;
+            out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
+            if (!interconnect_.send_to_downstream(out_pkt)) {
+                if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
+                    log_fwd_.forward("WARN", pkt.call_id, "Whisper disconnected, dumping stream");
                 }
             }
         }

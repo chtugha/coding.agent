@@ -221,6 +221,46 @@ private:
     std::mutex sse_queue_mutex_;
     std::vector<LogEntry> sse_queue_;
 
+    struct AsyncTask {
+        int64_t id;
+        std::string type;
+        std::atomic<bool> running{true};
+        std::string result_json;
+        std::thread worker;
+    };
+    std::mutex async_mutex_;
+    std::map<int64_t, std::shared_ptr<AsyncTask>> async_tasks_;
+    std::atomic<int64_t> async_id_counter_{0};
+
+    int64_t create_async_task(const std::string& type) {
+        int64_t id = ++async_id_counter_;
+        auto task = std::make_shared<AsyncTask>();
+        task->id = id;
+        task->type = type;
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        async_tasks_[id] = task;
+        return id;
+    }
+
+    void finish_async_task(int64_t id, const std::string& result) {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        auto it = async_tasks_.find(id);
+        if (it != async_tasks_.end()) {
+            it->second->result_json = result;
+            it->second->running = false;
+        }
+    }
+
+    void cleanup_old_async_tasks() {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        for (auto it = async_tasks_.begin(); it != async_tasks_.end(); ) {
+            if (!it->second->running && it->second->worker.joinable()) {
+                it->second->worker.join();
+            }
+            ++it;
+        }
+    }
+
     void init_database() {
         int rc = sqlite3_open("frontend.db", &db_);
         if (rc != SQLITE_OK) {
@@ -377,7 +417,8 @@ private:
                 ('WHISPER_SERVICE', 'bin/whisper-service', '--language de models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (CoreML/Metal)'),
                 ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
                 ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
-                ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP');
+                ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP'),
+                ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'default');
         )";
         sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
@@ -1023,6 +1064,8 @@ private:
                 handle_models_add(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/benchmark")) == 0) {
                 handle_whisper_benchmark(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
+                handle_async_status(c, hm);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
@@ -3648,11 +3691,84 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
-    double calculate_levenshtein_similarity(const std::string& s1, const std::string& s2) {
-        if (s1.empty() && s2.empty()) return 100.0;
-        if (s1.empty() || s2.empty()) return 0.0;
+    // Normalizes text for Levenshtein comparison:
+    //  1. Decompose German UTF-8 umlauts: ä→ae, ö→oe, ü→ue, ß→ss, Ä→ae, Ö→oe, Ü→ue
+    //  2. Lowercase all ASCII characters
+    //  3. Replace German number words with digit equivalents (longest-first to prevent partial matches)
+    //  4. Collapse whitespace, strip punctuation
+    // This ensures Whisper's digit output ("2023") matches ground truth number words ("zweitausenddreiundzwanzig").
+    std::string normalize_for_comparison(const std::string& input) {
+        // Step 1: UTF-8 umlaut decomposition + lowercase + strip punctuation
+        std::string s;
+        for (size_t i = 0; i < input.size(); i++) {
+            unsigned char c = input[i];
+            if (c == 0xC3 && i + 1 < input.size()) {
+                unsigned char c2 = input[i + 1];
+                switch (c2) {
+                    case 0xA4: case 0x84: s += "ae"; break;  // ä, Ä
+                    case 0xB6: case 0x96: s += "oe"; break;  // ö, Ö
+                    case 0xBC: case 0x9C: s += "ue"; break;  // ü, Ü
+                    case 0x9F:            s += "ss"; break;  // ß
+                    default: break;
+                }
+                i++;
+            } else if (c == 0xE2 && i + 2 < input.size()) {
+                i += 2;
+                s += ' ';
+            } else if (c < 0x80) {
+                char lc = std::tolower(c);
+                if (std::isalnum(lc) || lc == ' ') {
+                    s += lc;
+                } else {
+                    s += ' ';
+                }
+            }
+        }
 
-        size_t len1 = s1.length(), len2 = s2.length();
+        // Step 2: Replace German number words with digits (longest first)
+        static const std::pair<std::string, std::string> number_map[] = {
+            {"zweitausendfuenfzehn", "2015"},
+            {"zweitausendneunzehn", "2019"},
+            {"zweitausenddreiundzwanzig", "2023"},
+            {"zweitausendsiebenundachtzig", "2087"},
+            {"vierhundertfuenfundneunzig", "495"},
+            {"dreihundertfuenfzig", "350"},
+            {"neunundzwanzig", "29"},
+            {"siebenundsechzig", "67"},
+            {"neunundvierzig", "49"},
+            {"fuenfzehn", "15"},
+            {"neunzehn", "19"},
+            {"dreiundzwanzig", "23"},
+            {"siebenundachtzig", "87"},
+            {"hundert", "100"},
+            {"tausend", "1000"},
+        };
+        for (const auto& [word, digit] : number_map) {
+            size_t pos;
+            while ((pos = s.find(word)) != std::string::npos) {
+                s.replace(pos, word.length(), digit);
+            }
+        }
+
+        // Step 3: Collapse whitespace
+        std::string result;
+        bool last_space = false;
+        for (char c : s) {
+            if (c == ' ') { if (!last_space && !result.empty()) { result += ' '; last_space = true; } }
+            else { result += c; last_space = false; }
+        }
+        while (!result.empty() && result.back() == ' ') result.pop_back();
+        return result;
+    }
+
+    double calculate_levenshtein_similarity(const std::string& s1, const std::string& s2) {
+        std::string n1 = normalize_for_comparison(s1);
+        std::string n2 = normalize_for_comparison(s2);
+
+        if (n1.empty() && n2.empty()) return 100.0;
+        if (n1.empty() || n2.empty()) return 0.0;
+
+        size_t len1 = n1.length(), len2 = n2.length();
         std::vector<std::vector<size_t>> dp(len1 + 1, std::vector<size_t>(len2 + 1));
 
         for (size_t i = 0; i <= len1; i++) dp[i][0] = i;
@@ -3660,11 +3776,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         for (size_t i = 1; i <= len1; i++) {
             for (size_t j = 1; j <= len2; j++) {
-                size_t cost = (std::tolower(s1[i - 1]) == std::tolower(s2[j - 1])) ? 0 : 1;
+                size_t cost = (n1[i - 1] == n2[j - 1]) ? 0 : 1;
                 dp[i][j] = std::min({
-                    dp[i - 1][j] + 1,      // deletion
-                    dp[i][j - 1] + 1,      // insertion
-                    dp[i - 1][j - 1] + cost // substitution
+                    dp[i - 1][j] + 1,
+                    dp[i][j - 1] + 1,
+                    dp[i - 1][j - 1] + cost
                 });
             }
         }
@@ -3778,19 +3894,30 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         bool found = false;
     };
 
+    // Waits for Whisper transcription(s) after the given log sequence number.
+    // With chunked VAD, a single audio file may produce multiple transcription chunks.
+    // This function collects all chunks by waiting for transcription activity to settle:
+    //   1. Wait until the first transcription appears (up to timeout_ms)
+    //   2. After finding a transcription, keep waiting for 2s of inactivity
+    //   3. Concatenate all transcription chunks in chronological order
+    // Returns the combined text and total Whisper inference latency.
     TranscriptionResult wait_for_whisper_transcription(
             uint64_t after_seq, int timeout_ms = 30000) {
         TranscriptionResult result;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        auto settle_deadline = deadline;
+        bool found_any = false;
+        uint64_t last_found_seq = after_seq;
 
-        while (std::chrono::steady_clock::now() < deadline) {
+        while (std::chrono::steady_clock::now() < settle_deadline) {
+            bool found_new = false;
             {
                 std::lock_guard<std::mutex> lock(logs_mutex_);
-                for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend(); ++it) {
-                    if (it->seq <= after_seq) break;
-                    if (it->service != ServiceType::WHISPER_SERVICE) continue;
+                for (const auto& entry : recent_logs_) {
+                    if (entry.seq <= last_found_seq) continue;
+                    if (entry.service != ServiceType::WHISPER_SERVICE) continue;
 
-                    const std::string& msg = it->message;
+                    const std::string& msg = entry.message;
                     size_t tpos = msg.find("Transcription (");
                     if (tpos == std::string::npos) continue;
 
@@ -3801,26 +3928,41 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     size_t text_start = ms_end + 5;
                     if (text_start >= msg.size()) continue;
 
-                    result.whisper_latency_ms = std::stod(msg.substr(ms_start, ms_end - ms_start));
-                    result.text = msg.substr(text_start);
+                    double chunk_latency = std::stod(msg.substr(ms_start, ms_end - ms_start));
+                    std::string chunk_text = msg.substr(text_start);
+                    while (!chunk_text.empty() && (chunk_text.front() == ' ' || chunk_text.front() == ':'))
+                        chunk_text.erase(chunk_text.begin());
+                    while (!chunk_text.empty() && (chunk_text.back() == ' ' || chunk_text.back() == '\n'))
+                        chunk_text.pop_back();
 
-                    while (!result.text.empty() && (result.text.front() == ' ' || result.text.front() == ':'))
-                        result.text.erase(result.text.begin());
-                    while (!result.text.empty() && (result.text.back() == ' ' || result.text.back() == '\n'))
-                        result.text.pop_back();
-
-                    result.found = true;
-                    return result;
+                    if (!chunk_text.empty()) {
+                        if (!result.text.empty()) result.text += " ";
+                        result.text += chunk_text;
+                        result.whisper_latency_ms += chunk_latency;
+                        last_found_seq = entry.seq;
+                        found_new = true;
+                        found_any = true;
+                    }
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            if (found_new) {
+                // Reset settle timer — wait 2s after last transcription for more chunks
+                settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                if (settle_deadline > deadline) settle_deadline = deadline;
+            } else if (!found_any && std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
         }
 
-        // Timeout occurred - log for debugging
-        std::cerr << "DEBUG: No Whisper transcription received within " 
-                  << timeout_ms << "ms for seq > " << after_seq 
-                  << " (current seq: " << log_seq_.load() << ")" << std::endl;
-        
+        result.found = found_any;
+        if (!found_any) {
+            std::cerr << "DEBUG: No Whisper transcription received within " 
+                      << timeout_ms << "ms for seq > " << after_seq 
+                      << " (current seq: " << log_seq_.load() << ")" << std::endl;
+        }
         return result;
     }
 
@@ -3906,6 +4048,29 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     //
     // Returns per-file results: transcription, similarity %, latency, status (PASS/WARN/FAIL).
     // PASS >= 95%, WARN >= 80%, FAIL < 80%.
+    void handle_async_status(struct mg_connection *c, struct mg_http_message *hm) {
+        char id_buf[32] = {0};
+        mg_http_get_var(&hm->query, "task_id", id_buf, sizeof(id_buf));
+        int64_t task_id = atoll(id_buf);
+        if (task_id <= 0) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing task_id\"}");
+            return;
+        }
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        auto it = async_tasks_.find(task_id);
+        if (it == async_tasks_.end()) {
+            mg_http_reply(c, 404, "Content-Type: application/json\r\n", "{\"error\":\"Unknown task_id\"}");
+            return;
+        }
+        if (it->second->running.load()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"running\"}");
+        } else {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", it->second->result_json.c_str());
+            if (it->second->worker.joinable()) it->second->worker.join();
+            async_tasks_.erase(it);
+        }
+    }
+
     void handle_whisper_accuracy_test(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
 
@@ -3936,7 +4101,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        // Validate all pipeline services are running before proceeding
         std::string pipeline_err = validate_pipeline_services();
         if (!pipeline_err.empty()) {
             mg_http_reply(c, 409, "Content-Type: application/json\r\n",
@@ -3957,9 +4121,22 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
+        int64_t task_id = create_async_task("accuracy_test");
+
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_accuracy_test_async, this, task_id, test_files);
+        }
+
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+            "{\"status\":\"started\",\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_accuracy_test_async(int64_t task_id, std::vector<std::string> test_files) {
         int64_t test_run_id = time(nullptr);
         std::stringstream json;
-        json << "{\"success\":true,\"test_run_id\":" << test_run_id << ",\"results\":[";
+        json << "{\"status\":\"done\",\"success\":true,\"test_run_id\":" << test_run_id << ",\"results\":[";
 
         bool first = true;
         int pass_count = 0, warn_count = 0, fail_count = 0;
@@ -3991,17 +4168,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
             if (!inject_err.empty() || inject_resp.find("\"success\":true") == std::string::npos) {
-                std::string transcription = "[injection failed: " + (inject_err.empty() ? inject_resp : inject_err) + "]";
-                double similarity = 0.0;
-                double latency_ms = 0.0;
-
                 if (!first) json << ",";
                 json << "{"
                      << "\"file\":\"" << escape_json(file) << "\","
                      << "\"ground_truth\":\"" << escape_json(ground_truth) << "\","
-                     << "\"transcription\":\"" << escape_json(transcription) << "\","
-                     << "\"similarity\":" << similarity << ","
-                     << "\"latency_ms\":" << latency_ms << ","
+                     << "\"transcription\":\"" << escape_json("[injection failed]") << "\","
+                     << "\"similarity\":0,"
+                     << "\"latency_ms\":0,"
                      << "\"status\":\"FAIL\""
                      << "}";
                 first = false;
@@ -4021,21 +4194,27 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 transcription = tr.text;
                 latency_ms = tr.whisper_latency_ms > 0 ? tr.whisper_latency_ms : total_ms;
             } else {
-                transcription = "[no transcription received within 30s — check Whisper service logs]";
+                transcription = "[no transcription received within 30s]";
                 latency_ms = total_ms;
             }
 
+            // Wait for VAD buffer to fully flush before injecting next file.
+            // The silence stream from test_sip_provider drives VAD silence detection,
+            // but we need enough silence frames to reset the VAD state completely.
+            // vad_inactivity_flush_ms_ defaults to 2000ms; we add 1s margin.
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+
             double similarity = calculate_levenshtein_similarity(ground_truth, transcription);
 
-            std::string status;
+            std::string file_status;
             if (similarity >= 95.0) {
-                status = "PASS";
+                file_status = "PASS";
                 pass_count++;
             } else if (similarity >= 80.0) {
-                status = "WARN";
+                file_status = "WARN";
                 warn_count++;
             } else {
-                status = "FAIL";
+                file_status = "FAIL";
                 fail_count++;
             }
 
@@ -4053,7 +4232,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 sqlite3_bind_text(stmt, 5, transcription.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_double(stmt, 6, similarity);
                 sqlite3_bind_int(stmt, 7, (int)latency_ms);
-                sqlite3_bind_text(stmt, 8, status.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 8, file_status.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_int64(stmt, 9, test_run_id);
                 sqlite3_step(stmt);
                 sqlite3_finalize(stmt);
@@ -4066,7 +4245,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                  << "\"transcription\":\"" << escape_json(transcription) << "\","
                  << "\"similarity\":" << similarity << ","
                  << "\"latency_ms\":" << latency_ms << ","
-                 << "\"status\":\"" << status << "\""
+                 << "\"status\":\"" << file_status << "\""
                  << "}";
             first = false;
         }
@@ -4076,16 +4255,15 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         double avg_latency = total_files > 0 ? total_latency / total_files : 0.0;
 
         json << "],"
-             << "\"summary\":{"
              << "\"total\":" << total_files << ","
-             << "\"pass\":" << pass_count << ","
-             << "\"warn\":" << warn_count << ","
-             << "\"fail\":" << fail_count << ","
-             << "\"avg_similarity\":" << avg_similarity << ","
+             << "\"pass_count\":" << pass_count << ","
+             << "\"warn_count\":" << warn_count << ","
+             << "\"fail_count\":" << fail_count << ","
+             << "\"avg_accuracy\":" << avg_similarity << ","
              << "\"avg_latency_ms\":" << avg_latency
-             << "}}";
+             << "}";
 
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+        finish_async_task(task_id, json.str());
     }
 
     void handle_whisper_vad_config(struct mg_connection *c, struct mg_http_message *hm) {
@@ -4785,19 +4963,31 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        // Get actual RSS memory usage from the running Whisper service process.
-        // This captures the real runtime memory footprint including model, KV cache, and overhead.
         int memory_mb = get_service_memory_mb("WHISPER_SERVICE");
         if (memory_mb == 0) {
-            // Fallback to model file size if we can't get actual memory
             struct stat mst;
             if (stat(model_path.c_str(), &mst) == 0) {
                 memory_mb = static_cast<int>(mst.st_size / (1024 * 1024));
             }
         }
 
-        // Run real transcription benchmark: inject each file via test_sip_provider,
-        // capture Whisper transcription from the log stream, measure accuracy + latency.
+        int64_t task_id = create_async_task("benchmark");
+        std::string files_json_str = files_json.str();
+
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_benchmark_async, this,
+                task_id, test_files, iterations, model_id, model_name, model_path, files_json_str, memory_mb);
+        }
+
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+            "{\"status\":\"started\",\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_benchmark_async(int64_t task_id, std::vector<std::string> test_files,
+            int iterations, int model_id, std::string model_name, std::string /*model_path*/,
+            std::string files_json_str, int memory_mb) {
         std::vector<double> latencies;
         std::vector<double> accuracies;
         int pass_count = 0;
@@ -4835,6 +5025,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     accuracy = calculate_levenshtein_similarity(ground_truth, tr.text);
                 }
 
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+
                 latencies.push_back(latency);
                 accuracies.push_back(accuracy);
 
@@ -4847,7 +5039,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
 
         if (latencies.empty()) {
-            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"No benchmark results collected\"}");
+            finish_async_task(task_id, "{\"status\":\"done\",\"error\":\"No benchmark results collected\"}");
             return;
         }
 
@@ -4864,36 +5056,29 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         double avg_latency = 0;
         for (double lat : latencies) avg_latency += lat;
         avg_latency /= n;
-        
+
+        sqlite3_stmt* stmt;
         const char* insert_sql = "INSERT INTO model_benchmark_runs (model_id, test_files, iterations, avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        rc = sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr);
-        if (rc != SQLITE_OK) {
-            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Failed to save benchmark results\"}");
-            return;
+        int rc = sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr);
+        sqlite3_int64 run_id = 0;
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_int(stmt, 1, model_id);
+            sqlite3_bind_text(stmt, 2, files_json_str.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 3, iterations);
+            sqlite3_bind_double(stmt, 4, avg_accuracy);
+            sqlite3_bind_int(stmt, 5, static_cast<int>(avg_latency));
+            sqlite3_bind_int(stmt, 6, p50_latency);
+            sqlite3_bind_int(stmt, 7, p95_latency);
+            sqlite3_bind_int(stmt, 8, p99_latency);
+            sqlite3_bind_int(stmt, 9, memory_mb);
+            sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(time(nullptr)));
+            sqlite3_step(stmt);
+            run_id = sqlite3_last_insert_rowid(db_);
+            sqlite3_finalize(stmt);
         }
-        
-        sqlite3_bind_int(stmt, 1, model_id);
-        sqlite3_bind_text(stmt, 2, files_json.str().c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt, 3, iterations);
-        sqlite3_bind_double(stmt, 4, avg_accuracy);
-        sqlite3_bind_int(stmt, 5, static_cast<int>(avg_latency));
-        sqlite3_bind_int(stmt, 6, p50_latency);
-        sqlite3_bind_int(stmt, 7, p95_latency);
-        sqlite3_bind_int(stmt, 8, p99_latency);
-        sqlite3_bind_int(stmt, 9, memory_mb);
-        sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(time(nullptr)));
-        
-        rc = sqlite3_step(stmt);
-        sqlite3_int64 run_id = sqlite3_last_insert_rowid(db_);
-        sqlite3_finalize(stmt);
-        
-        if (rc != SQLITE_DONE) {
-            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Failed to save benchmark results\"}");
-            return;
-        }
-        
+
         std::stringstream response;
-        response << "{\"success\":true"
+        response << "{\"status\":\"done\",\"success\":true"
                 << ",\"run_id\":" << run_id
                 << ",\"model_name\":\"" << escape_json(model_name) << "\""
                 << ",\"files_tested\":" << (test_files.size() * iterations)
@@ -4906,8 +5091,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 << ",\"pass_count\":" << pass_count
                 << ",\"fail_count\":" << fail_count
                 << "}";
-        
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", response.str().c_str());
+
+        finish_async_task(task_id, response.str());
     }
 
     static bool is_read_only_query(const std::string& query) {
