@@ -147,16 +147,21 @@ Implement isolated tests for SIP Client RTP routing and IAP conversion quality.
 
 **Verification:**
 - ✓ SIP Client RTP test panel created with auto-refresh stats every 2 seconds
-- ✓ RTP packet counters added to CallSession struct (rx/tx counts, bytes, and discard count)
-- ✓ `/api/sip/stats` endpoint returns real-time packet statistics, IAP connection status, and discard counts
+- ✓ RTP packet counters added to CallSession struct (rx/tx counts, bytes, forwarded/discarded counters)
+- ✓ `/api/sip/stats` endpoint returns real-time packet statistics, IAP connection status, forwarded/discarded counts
 - ✓ IAP codec quality test panel created with file selection and test execution
 - ✓ `/api/iap/quality_test` endpoint runs real G.711 mu-law encode/decode pipeline with SNR/THD calculations
 - ✓ Database schema extended with iap_quality_tests table for results storage
-- ✓ Historical IAP test results rendered via Chart.js bar chart
+- ✓ Historical IAP test results rendered via Chart.js dual Y-axis bar chart (SNR + THD)
 - ✓ All code thoroughly documented with algorithm explanations and metric formulas
 - ✓ Duplicate JS functions removed; API endpoint URLs corrected
 - ✓ All binaries (frontend, sip-client, IAP, test_sip_provider) compile successfully
 - ✓ Verified via Playwright: IAP test returns real metrics (SNR ~5.66dB, THD ~52.11%, PASS)
+- ✓ **Stubs removed**: Whisper accuracy test uses real pipeline (inject → SIP → IAP → Whisper → log capture → Levenshtein comparison)
+- ✓ **Stubs removed**: Model benchmark uses real pipeline measurements (no random values)
+- ✓ Helper functions added: http_post_localhost, http_get_localhost, wait_for_whisper_transcription, current_log_timestamp
+- ✓ Hardcoded test_sip_provider port extracted to `TEST_SIP_PROVIDER_PORT` constant
+- ✓ Comprehensive documentation added to all new functions including G.711 codec algorithm, SNR/THD formulas, benchmark workflow
 
 ---
 

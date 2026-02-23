@@ -210,6 +210,7 @@ private:
     std::mutex logs_mutex_;
     std::deque<LogEntry> recent_logs_;
     static constexpr size_t MAX_RECENT_LOGS = 1000;
+    static constexpr int TEST_SIP_PROVIDER_PORT = 22011;
 
     std::mutex sse_mutex_;
     std::vector<struct mg_connection*> sse_connections_;
@@ -412,7 +413,7 @@ private:
                     info.description = "Interconnect protocol tests (master/slave, heartbeat, crash recovery)";
                 } else if (name == "test_sip_provider") {
                     info.description = "SIP B2BUA test provider";
-                    info.default_args = {"--port", "5060", "--http-port", "22011", "--testfiles-dir", "Testfiles"};
+                    info.default_args = {"--port", "5060", "--http-port", std::to_string(TEST_SIP_PROVIDER_PORT), "--testfiles-dir", "Testfiles"};
                 } else if (name == "test_kokoro_cpp") {
                     info.description = "Kokoro TTS C++ tests (phonemization, CoreML inference)";
                 } else {
@@ -1539,9 +1540,11 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
     std::string build_ui_js() {
         std::string port_str = std::to_string(http_port_);
-        return R"JS(
+        std::string tsp_port_str = std::to_string(TEST_SIP_PROVIDER_PORT);
+        std::string js = R"JS(
 var currentPage='tests',currentTest=null,currentSvc=null;
 var logSSE=null,svcLogSSE=null,testLogPoll=null;
+var TSP_PORT=)JS" + tsp_port_str + R"JS(;
 
 function showPage(p){
   document.querySelectorAll('.wt-page').forEach(e=>e.classList.remove('active'));
@@ -1969,7 +1972,7 @@ function injectAudio(){
   if(!file){alert('Please select a test file');return;}
   var status=document.getElementById('injectionStatus');
   status.innerHTML='<span style="color:var(--wt-accent)">Injecting audio...</span>';
-  fetch('http://localhost:22011/inject',{method:'POST',headers:{'Content-Type':'application/json'},
+  fetch('http://localhost:'+TSP_PORT+'/inject',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({file:file,leg:leg})})
     .then(r=>r.json()).then(d=>{
       if(d.success||d.injecting){
@@ -1978,14 +1981,14 @@ function injectAudio(){
         status.innerHTML='<span style="color:var(--wt-danger)">✗ Injection failed: '+escapeHtml(d.error||'Unknown error')+'</span>';
       }
     }).catch(e=>{
-      status.innerHTML='<span style="color:var(--wt-danger)">✗ Error: Test SIP Provider not reachable (is it running on port 22011?)</span>';
+      status.innerHTML='<span style="color:var(--wt-danger)">✗ Error: Test SIP Provider not reachable (is it running on port '+TSP_PORT+'?)</span>';
     });
 }
 
 function checkSipProvider(){
   var status=document.getElementById('sipProviderStatus');
   status.innerHTML='<p style="color:var(--wt-accent)">Checking...</p>';
-  fetch('http://localhost:22011/status').then(r=>r.json()).then(d=>{
+  fetch('http://localhost:'+TSP_PORT+'/status').then(r=>r.json()).then(d=>{
     var html='<p style="color:var(--wt-success)">✓ Test SIP Provider is running</p>';
     html+='<p style="font-size:12px;color:var(--wt-text-secondary)">Call active: '+(d.call_active?'Yes':'No')+'</p>';
     if(d.relay_stats){html+='<p style="font-size:12px;color:var(--wt-text-secondary)">Pkts A→B: '+d.relay_stats.pkts_a_to_b+', B→A: '+d.relay_stats.pkts_b_to_a+'</p>';}
@@ -2492,6 +2495,7 @@ function loadAccuracyTrendChart(){
 
 if(currentPage==='beta-testing'){refreshTestFiles();loadVadConfig();}
 )JS";
+        return js;
     }
 
     void serve_theme_css(struct mg_connection *c, struct mg_http_message *hm) {
@@ -3741,7 +3745,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
 
         std::string err;
-        std::string status_body = http_get_localhost(22011, "/status", err);
+        std::string status_body = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", err);
         if (!err.empty()) {
             mg_http_reply(c, 503, "Content-Type: application/json\r\n",
                 "{\"error\":\"test_sip_provider not reachable: %s\"}", err.c_str());
@@ -3784,7 +3788,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
             std::string inject_body = "{\"file\":\"" + file + "\",\"leg\":\"a\"}";
             std::string inject_err;
-            std::string inject_resp = http_post_localhost(22011, "/inject", inject_body, inject_err);
+            std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
             if (!inject_err.empty() || inject_resp.find("\"success\":true") == std::string::npos) {
                 std::string transcription = "[injection failed: " + (inject_err.empty() ? inject_resp : inject_err) + "]";
@@ -4453,6 +4457,28 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", response.str().c_str());
     }
     
+    // Whisper Model Benchmark endpoint (POST /api/whisper/benchmark).
+    //
+    // Runs a performance benchmark for a registered Whisper model by injecting
+    // test audio through the full pipeline and measuring real metrics:
+    //   1. Validates test_sip_provider is running with an active call
+    //   2. Looks up the model in the database by model_id
+    //   3. For each iteration × test file: injects audio via test_sip_provider,
+    //      captures Whisper transcription from the log stream, and measures
+    //      accuracy (Levenshtein similarity vs ground truth) and latency
+    //   4. Computes aggregate statistics: avg accuracy, avg/p50/p95/p99 latency
+    //   5. Uses the model's file size on disk as memory estimate (MB)
+    //   6. Stores results in model_benchmark_runs table for later comparison
+    //
+    // Requires: Full pipeline running — test_sip_provider, sip-client,
+    //           inbound-audio-processor, and whisper-service with active call.
+    //
+    // Parameters (JSON body):
+    //   model_id   — registered model ID from the models table
+    //   test_files — array of WAV filenames from Testfiles/ directory
+    //   iterations — number of passes over all files (1–10, default 1)
+    //
+    // Returns: Aggregated benchmark metrics for model comparison charts.
     void handle_whisper_benchmark(struct mg_connection *c, struct mg_http_message *hm) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
@@ -4544,7 +4570,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         
         // Verify the full pipeline is running before benchmarking.
         std::string sip_err;
-        std::string sip_status = http_get_localhost(22011, "/status", sip_err);
+        std::string sip_status = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", sip_err);
         if (!sip_err.empty()) {
             mg_http_reply(c, 503, "Content-Type: application/json\r\n",
                 "{\"error\":\"test_sip_provider not reachable: %s\"}", sip_err.c_str());
@@ -4592,7 +4618,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
                 std::string inject_body = "{\"file\":\"" + file + "\",\"leg\":\"a\"}";
                 std::string inject_err;
-                http_post_localhost(22011, "/inject", inject_body, inject_err);
+                http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
                 TranscriptionResult tr = wait_for_whisper_transcription(ts_before, 30000);
                 auto t1 = std::chrono::steady_clock::now();
