@@ -31,10 +31,12 @@ struct CallSession {
     uint16_t seq = 0;
     uint32_t ts = 0;
     uint32_t ssrc = 0;
-    std::atomic<uint64_t> rtp_rx_count{0};
-    std::atomic<uint64_t> rtp_tx_count{0};
-    std::atomic<uint64_t> rtp_rx_bytes{0};
-    std::atomic<uint64_t> rtp_tx_bytes{0};
+    std::atomic<uint64_t> rtp_rx_count{0};     // Total RTP packets received from network
+    std::atomic<uint64_t> rtp_tx_count{0};     // Total RTP packets sent to network
+    std::atomic<uint64_t> rtp_rx_bytes{0};     // Total bytes received
+    std::atomic<uint64_t> rtp_tx_bytes{0};     // Total bytes sent
+    std::atomic<uint64_t> rtp_fwd_count{0};    // Packets successfully forwarded to IAP
+    std::atomic<uint64_t> rtp_discard_count{0}; // Packets discarded (IAP not connected)
     std::chrono::steady_clock::time_point start_time;
 
     CallSession(int i, int line, std::string scid) : id(i), line_index(line), sip_call_id(scid) {
@@ -166,6 +168,8 @@ public:
         return out.str();
     }
 
+    // Returns stats string: "STATS <n_calls> <id>:<line>:<rx>:<tx>:<rx_bytes>:<tx_bytes>:<duration>:<fwd>:<discard> ..."
+    // fwd = packets forwarded to IAP, discard = packets discarded (IAP offline)
     std::string get_stats() {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         std::ostringstream out;
@@ -180,7 +184,9 @@ public:
                 << ":" << session->rtp_tx_count.load()
                 << ":" << session->rtp_rx_bytes.load()
                 << ":" << session->rtp_tx_bytes.load()
-                << ":" << duration_sec;
+                << ":" << duration_sec
+                << ":" << session->rtp_fwd_count.load()
+                << ":" << session->rtp_discard_count.load();
         }
         return out.str();
     }
@@ -366,6 +372,8 @@ private:
         }
     }
 
+    // Receives RTP packets from the network and forwards them to IAP via interconnect.
+    // Tracks packet counts: received, forwarded (sent to IAP), and discarded (IAP offline).
     void rtp_receiver_loop(std::shared_ptr<CallSession> session) {
         char buf[2048];
         struct sockaddr_in sender{};
@@ -382,7 +390,10 @@ private:
             whispertalk::Packet pkt(session->id, buf, n);
             pkt.trace.record(whispertalk::ServiceType::SIP_CLIENT, 0);
             pkt.trace.record(whispertalk::ServiceType::SIP_CLIENT, 1);
-            if (!interconnect_.send_to_downstream(pkt)) {
+            if (interconnect_.send_to_downstream(pkt)) {
+                session->rtp_fwd_count++;
+            } else {
+                session->rtp_discard_count++;
                 if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 }
