@@ -3540,15 +3540,185 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return similarity;
     }
 
+    // Makes a simple HTTP POST request to localhost:<port><path> with JSON body.
+    // Returns the response body string, or sets error on failure.
+    // Used to communicate with test_sip_provider for audio injection.
+    std::string http_post_localhost(int port, const std::string& path,
+                                   const std::string& json_body, std::string& error) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) { error = "socket() failed"; return ""; }
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        struct timeval tv{5, 0};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(sock);
+            error = "connect() failed — is test_sip_provider running on port " + std::to_string(port) + "?";
+            return "";
+        }
+
+        std::string req = "POST " + path + " HTTP/1.1\r\n"
+                          "Host: localhost:" + std::to_string(port) + "\r\n"
+                          "Content-Type: application/json\r\n"
+                          "Content-Length: " + std::to_string(json_body.size()) + "\r\n"
+                          "Connection: close\r\n\r\n" + json_body;
+        if (send(sock, req.c_str(), req.size(), 0) < 0) {
+            close(sock);
+            error = "send() failed";
+            return "";
+        }
+
+        std::string response;
+        char buf[4096];
+        while (true) {
+            ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+            if (n <= 0) break;
+            response.append(buf, n);
+        }
+        close(sock);
+
+        size_t body_start = response.find("\r\n\r\n");
+        if (body_start == std::string::npos) {
+            error = "Malformed HTTP response";
+            return "";
+        }
+        return response.substr(body_start + 4);
+    }
+
+    // Makes a simple HTTP GET request to localhost:<port><path>.
+    std::string http_get_localhost(int port, const std::string& path, std::string& error) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) { error = "socket() failed"; return ""; }
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        struct timeval tv{5, 0};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(sock);
+            error = "connect() failed — is test_sip_provider running on port " + std::to_string(port) + "?";
+            return "";
+        }
+
+        std::string req = "GET " + path + " HTTP/1.1\r\n"
+                          "Host: localhost:" + std::to_string(port) + "\r\n"
+                          "Connection: close\r\n\r\n";
+        if (send(sock, req.c_str(), req.size(), 0) < 0) {
+            close(sock);
+            error = "send() failed";
+            return "";
+        }
+
+        std::string response;
+        char buf[4096];
+        while (true) {
+            ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+            if (n <= 0) break;
+            response.append(buf, n);
+        }
+        close(sock);
+
+        size_t body_start = response.find("\r\n\r\n");
+        if (body_start == std::string::npos) {
+            error = "Malformed HTTP response";
+            return "";
+        }
+        return response.substr(body_start + 4);
+    }
+
+    // Waits for a Whisper transcription message in the log stream.
+    // Scans the log buffer for messages from WHISPER_SERVICE containing "Transcription"
+    // that arrived after the given start_time. Returns the transcription text and
+    // whisper's own measured latency (from the log message format "Transcription (<ms>ms): <text>").
+    // Polls every 200ms for up to timeout_ms milliseconds.
+    struct TranscriptionResult {
+        std::string text;
+        double whisper_latency_ms = 0.0;
+        bool found = false;
+    };
+
+    TranscriptionResult wait_for_whisper_transcription(
+            const std::string& start_timestamp, int timeout_ms = 30000) {
+        TranscriptionResult result;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard<std::mutex> lock(logs_mutex_);
+                for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend(); ++it) {
+                    if (it->service != ServiceType::WHISPER_SERVICE) continue;
+                    if (it->timestamp < start_timestamp) break;
+
+                    const std::string& msg = it->message;
+                    size_t tpos = msg.find("Transcription (");
+                    if (tpos == std::string::npos) continue;
+
+                    size_t ms_start = tpos + 15;
+                    size_t ms_end = msg.find("ms)", ms_start);
+                    if (ms_end == std::string::npos) continue;
+
+                    size_t text_start = ms_end + 5;
+                    if (text_start >= msg.size()) continue;
+
+                    result.whisper_latency_ms = std::stod(msg.substr(ms_start, ms_end - ms_start));
+                    result.text = msg.substr(text_start);
+
+                    while (!result.text.empty() && (result.text.front() == ' ' || result.text.front() == ':'))
+                        result.text.erase(result.text.begin());
+                    while (!result.text.empty() && (result.text.back() == ' ' || result.text.back() == '\n'))
+                        result.text.pop_back();
+
+                    result.found = true;
+                    return result;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        return result;
+    }
+
+    // Returns the current timestamp string matching the format used by log entries.
+    std::string current_log_timestamp() {
+        time_t now = time(nullptr);
+        char timebuf[64];
+        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
+        return timebuf;
+    }
+
+    // Whisper Accuracy Test endpoint (POST /api/whisper/accuracy_test).
+    //
+    // Runs a real end-to-end transcription test through the full pipeline:
+    //   1. Injects each selected test file via test_sip_provider (/inject endpoint)
+    //   2. Audio flows: test_sip_provider → SIP Client → IAP → Whisper Service
+    //   3. Captures Whisper's transcription from the log stream (LogForwarder UDP)
+    //   4. Compares transcription against ground truth text using Levenshtein similarity
+    //
+    // Requires: test_sip_provider, sip-client, inbound-audio-processor, and
+    //           whisper-service all running with an active call established.
+    //
+    // Returns per-file results: transcription, similarity %, latency, status (PASS/WARN/FAIL).
+    // PASS >= 95%, WARN >= 80%, FAIL < 80%.
     void handle_whisper_accuracy_test(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
-        
+
         size_t files_start = body.find("\"files\":");
         if (files_start == std::string::npos) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing files parameter\"}");
             return;
         }
-        
+
         std::vector<std::string> test_files;
         size_t arr_start = body.find('[', files_start);
         size_t arr_end = body.find(']', arr_start);
@@ -3564,21 +3734,35 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 pos = quote2 + 1;
             }
         }
-        
+
         if (test_files.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"No test files specified\"}");
             return;
         }
-        
+
+        std::string err;
+        std::string status_body = http_get_localhost(22011, "/status", err);
+        if (!err.empty()) {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"test_sip_provider not reachable: %s\"}", err.c_str());
+            return;
+        }
+        if (status_body.find("\"call_active\":true") == std::string::npos) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
+                "{\"error\":\"No active call in test_sip_provider. Start SIP client and establish a call first.\"}");
+            return;
+        }
+
         int64_t test_run_id = time(nullptr);
         std::stringstream json;
         json << "{\"success\":true,\"test_run_id\":" << test_run_id << ",\"results\":[";
-        
+
         bool first = true;
         int pass_count = 0, warn_count = 0, fail_count = 0;
         double total_similarity = 0.0;
         double total_latency = 0.0;
-        
+        int processed = 0;
+
         for (const auto& file : test_files) {
             std::string ground_truth;
             {
@@ -3590,30 +3774,75 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     }
                 }
             }
-            
+
             if (ground_truth.empty()) {
                 continue;
             }
-            
-            std::string transcription = "Test transcription for " + file;
+
+            std::string ts_before = current_log_timestamp();
+            auto inject_start = std::chrono::steady_clock::now();
+
+            std::string inject_body = "{\"file\":\"" + file + "\",\"leg\":\"a\"}";
+            std::string inject_err;
+            std::string inject_resp = http_post_localhost(22011, "/inject", inject_body, inject_err);
+
+            if (!inject_err.empty() || inject_resp.find("\"success\":true") == std::string::npos) {
+                std::string transcription = "[injection failed: " + (inject_err.empty() ? inject_resp : inject_err) + "]";
+                double similarity = 0.0;
+                double latency_ms = 0.0;
+
+                if (!first) json << ",";
+                json << "{"
+                     << "\"file\":\"" << escape_json(file) << "\","
+                     << "\"ground_truth\":\"" << escape_json(ground_truth) << "\","
+                     << "\"transcription\":\"" << escape_json(transcription) << "\","
+                     << "\"similarity\":" << similarity << ","
+                     << "\"latency_ms\":" << latency_ms << ","
+                     << "\"status\":\"FAIL\""
+                     << "}";
+                first = false;
+                fail_count++;
+                continue;
+            }
+
+            // Wait for the injected audio to be processed by the full pipeline.
+            // Audio duration determines minimum wait: WAV files are typically 2-10 seconds,
+            // plus Whisper inference time (1-5s), plus VAD silence detection (1-2s).
+            // We use a generous 30-second timeout to handle long files + slow inference.
+            TranscriptionResult tr = wait_for_whisper_transcription(ts_before, 30000);
+
+            auto inject_end = std::chrono::steady_clock::now();
+            double total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                inject_end - inject_start).count();
+
+            std::string transcription;
+            double latency_ms;
+            if (tr.found) {
+                transcription = tr.text;
+                latency_ms = tr.whisper_latency_ms > 0 ? tr.whisper_latency_ms : total_ms;
+            } else {
+                transcription = "[no transcription received within 30s — check Whisper service logs]";
+                latency_ms = total_ms;
+            }
+
             double similarity = calculate_levenshtein_similarity(ground_truth, transcription);
-            double latency_ms = 150.0 + (rand() % 200);
-            
+
             std::string status;
-            if (similarity >= 99.5) {
+            if (similarity >= 95.0) {
                 status = "PASS";
                 pass_count++;
-            } else if (similarity >= 90.0) {
+            } else if (similarity >= 80.0) {
                 status = "WARN";
                 warn_count++;
             } else {
                 status = "FAIL";
                 fail_count++;
             }
-            
+
             total_similarity += similarity;
             total_latency += latency_ms;
-            
+            processed++;
+
             const char* sql = "INSERT INTO whisper_accuracy_tests (test_run_id, file_name, model_name, ground_truth, transcription, similarity_percent, latency_ms, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
             sqlite3_stmt* stmt;
             if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -3629,7 +3858,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 sqlite3_step(stmt);
                 sqlite3_finalize(stmt);
             }
-            
+
             if (!first) json << ",";
             json << "{"
                  << "\"file\":\"" << escape_json(file) << "\","
@@ -3641,11 +3870,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                  << "}";
             first = false;
         }
-        
-        int total_files = test_files.size();
+
+        int total_files = processed;
         double avg_similarity = total_files > 0 ? total_similarity / total_files : 0.0;
         double avg_latency = total_files > 0 ? total_latency / total_files : 0.0;
-        
+
         json << "],"
              << "\"summary\":{"
              << "\"total\":" << total_files << ","
@@ -3655,7 +3884,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
              << "\"avg_similarity\":" << avg_similarity << ","
              << "\"avg_latency_ms\":" << avg_latency
              << "}}";
-        
+
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
@@ -4313,19 +4542,71 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
         files_json << "]";
         
+        // Verify the full pipeline is running before benchmarking.
+        std::string sip_err;
+        std::string sip_status = http_get_localhost(22011, "/status", sip_err);
+        if (!sip_err.empty()) {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"test_sip_provider not reachable: %s\"}", sip_err.c_str());
+            return;
+        }
+        if (sip_status.find("\"call_active\":true") == std::string::npos) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
+                "{\"error\":\"No active call. Start SIP client + IAP + Whisper and establish a call first.\"}");
+            return;
+        }
+
+        // Use model file size as memory estimate (loaded model size on disk ≈ runtime footprint).
+        int memory_mb = 0;
+        {
+            struct stat mst;
+            if (stat(model_path.c_str(), &mst) == 0) {
+                memory_mb = static_cast<int>(mst.st_size / (1024 * 1024));
+            }
+        }
+
+        // Run real transcription benchmark: inject each file via test_sip_provider,
+        // capture Whisper transcription from the log stream, measure accuracy + latency.
         std::vector<double> latencies;
         std::vector<double> accuracies;
         int pass_count = 0;
         int fail_count = 0;
-        
+
         for (int iter = 0; iter < iterations; iter++) {
             for (size_t fi = 0; fi < test_files.size(); fi++) {
-                double accuracy = 95.0 + (rand() % 500) / 100.0;
-                int latency = 100 + (rand() % 300);
-                
+                const auto& file = test_files[fi];
+
+                std::string ground_truth;
+                {
+                    std::lock_guard<std::mutex> lock(testfiles_mutex_);
+                    for (const auto& tf : testfiles_) {
+                        if (tf.name == file) {
+                            ground_truth = tf.ground_truth;
+                            break;
+                        }
+                    }
+                }
+
+                std::string ts_before = current_log_timestamp();
+                auto t0 = std::chrono::steady_clock::now();
+
+                std::string inject_body = "{\"file\":\"" + file + "\",\"leg\":\"a\"}";
+                std::string inject_err;
+                http_post_localhost(22011, "/inject", inject_body, inject_err);
+
+                TranscriptionResult tr = wait_for_whisper_transcription(ts_before, 30000);
+                auto t1 = std::chrono::steady_clock::now();
+                double elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+                double latency = tr.found ? (tr.whisper_latency_ms > 0 ? tr.whisper_latency_ms : elapsed_ms) : elapsed_ms;
+                double accuracy = 0.0;
+                if (tr.found && !ground_truth.empty()) {
+                    accuracy = calculate_levenshtein_similarity(ground_truth, tr.text);
+                }
+
                 latencies.push_back(latency);
                 accuracies.push_back(accuracy);
-                
+
                 if (accuracy >= 95.0) {
                     pass_count++;
                 } else {
@@ -4333,25 +4614,25 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 }
             }
         }
-        
+
+        if (latencies.empty()) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"No benchmark results collected\"}");
+            return;
+        }
+
         std::sort(latencies.begin(), latencies.end());
         double avg_accuracy = 0;
         for (double acc : accuracies) avg_accuracy += acc;
         avg_accuracy /= accuracies.size();
-        
-        int p50_idx = static_cast<int>(latencies.size() * 0.50);
-        int p95_idx = static_cast<int>(latencies.size() * 0.95);
-        int p99_idx = static_cast<int>(latencies.size() * 0.99);
-        
-        int p50_latency = static_cast<int>(latencies[p50_idx]);
-        int p95_latency = static_cast<int>(latencies[p95_idx]);
-        int p99_latency = static_cast<int>(latencies[p99_idx]);
-        
+
+        size_t n = latencies.size();
+        int p50_latency = static_cast<int>(latencies[n * 50 / 100]);
+        int p95_latency = static_cast<int>(latencies[std::min(n - 1, n * 95 / 100)]);
+        int p99_latency = static_cast<int>(latencies[std::min(n - 1, n * 99 / 100)]);
+
         double avg_latency = 0;
         for (double lat : latencies) avg_latency += lat;
-        avg_latency /= latencies.size();
-        
-        int memory_mb = 500 + (rand() % 1500);
+        avg_latency /= n;
         
         const char* insert_sql = "INSERT INTO model_benchmark_runs (model_id, test_files, iterations, avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         rc = sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr);
