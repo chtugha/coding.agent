@@ -680,12 +680,17 @@ private:
     static constexpr size_t SEND_BUF_SIZE = 65536;
     static constexpr int MASTER_FAILURE_THRESHOLD = 3;
     static constexpr int PORT_RECLAIM_WAIT_MS = 500;
-    static constexpr int HEARTBEAT_INTERVAL_S = 2;
-    static constexpr int HEARTBEAT_RECV_TIMEOUT_MS = 1000;
+    // Real-time heartbeat: 250ms instead of 2s for low-latency master failure detection
+    static constexpr int HEARTBEAT_INTERVAL_MS = 250;
+    static constexpr int HEARTBEAT_RECV_TIMEOUT_MS = 500;
     static constexpr int SYNC_RECV_TIMEOUT_MS = 500;
-    static constexpr int STEP_DOWN_RECV_TIMEOUT_MS = 3000;
+    static constexpr int STEP_DOWN_RECV_TIMEOUT_MS = 2000;
     static constexpr int DEMOTION_REGISTER_RETRIES = 3;
     static constexpr int DEMOTION_REGISTER_BACKOFF_MS = 200;
+    // Service crash detection: 1.5s timeout instead of 5s for real-time responsiveness
+    static constexpr int SERVICE_CRASH_TIMEOUT_MS = 1500;
+    // Reconnection polling: 500ms instead of 2s for faster recovery
+    static constexpr int RECONNECT_POLL_INTERVAL_MS = 500;
     PortConfig ports_;
 
     mutable std::mutex call_id_mutex_;
@@ -790,12 +795,21 @@ private:
     }
 
     bool try_reclaim_master_port() {
+        std::fprintf(stderr, "[%s] Attempting to reclaim master ports from promoted slave...\n",
+                    service_type_to_string(type_));
+        
         int sock = connect_to_port("127.0.0.1", 22222);
-        if (sock < 0) return false;
+        if (sock < 0) {
+            std::fprintf(stderr, "[%s] Failed to connect to port 22222 - no promoted master found\n",
+                        service_type_to_string(type_));
+            return false;
+        }
 
         std::string msg = "STEP_DOWN";
         if (!send_all(sock, msg.c_str(), msg.size())) {
             close(sock);
+            std::fprintf(stderr, "[%s] Failed to send STEP_DOWN command\n",
+                        service_type_to_string(type_));
             return false;
         }
 
@@ -808,28 +822,48 @@ private:
             buf[n] = '\0';
             std::string resp(buf);
             if (resp.substr(0, 12) == "STEPPED_DOWN") {
+                std::fprintf(stderr, "[%s] ✓ Promoted slave acknowledged step-down\n",
+                            service_type_to_string(type_));
                 if (resp.size() > 13) {
                     state_str = resp.substr(13);
                 }
             } else {
+                std::fprintf(stderr, "[%s] Unexpected response from promoted master: %s\n",
+                            service_type_to_string(type_), resp.substr(0, 20).c_str());
                 return false;
             }
         } else {
+            std::fprintf(stderr, "[%s] No response from promoted master during reclaim\n",
+                        service_type_to_string(type_));
             return false;
         }
 
+        // Wait for the promoted master to fully release the ports
         std::this_thread::sleep_for(std::chrono::milliseconds(PORT_RECLAIM_WAIT_MS));
 
-        int sock_in = create_listen_socket(22222);
-        if (sock_in < 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(PORT_RECLAIM_WAIT_MS));
+        // Try with exponential backoff: 500ms, 1000ms, 1500ms
+        int sock_in = -1;
+        for (int retry = 0; retry < 3 && sock_in < 0; retry++) {
+            if (retry > 0) {
+                int wait_ms = PORT_RECLAIM_WAIT_MS * (retry + 1);
+                std::fprintf(stderr, "[%s] Port 22222 still busy, retry %d after %dms...\n",
+                            service_type_to_string(type_), retry + 1, wait_ms);
+                std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+            }
             sock_in = create_listen_socket(22222);
-            if (sock_in < 0) return false;
+        }
+        
+        if (sock_in < 0) {
+            std::fprintf(stderr, "[%s] ✗ Failed to bind port 22222 after 3 retries - port collision\n",
+                        service_type_to_string(type_));
+            return false;
         }
 
         int sock_out = create_listen_socket(33333);
         if (sock_out < 0) {
             close(sock_in);
+            std::fprintf(stderr, "[%s] ✗ Failed to bind port 33333 - port collision\n",
+                        service_type_to_string(type_));
             return false;
         }
 
@@ -1258,7 +1292,7 @@ private:
 
     void heartbeat_loop() {
         while (running_) {
-            std::this_thread::sleep_for(std::chrono::seconds(HEARTBEAT_INTERVAL_S));
+            std::this_thread::sleep_for(std::chrono::milliseconds(HEARTBEAT_INTERVAL_MS));
             if (!running_) break;
             
             if (!is_master_) {
@@ -1281,7 +1315,7 @@ private:
                     std::lock_guard<std::mutex> lock(registry_mutex_);
                     for (auto it = last_heartbeat_.begin(); it != last_heartbeat_.end(); ) {
                         auto elapsed = std::chrono::steady_clock::now() - it->second;
-                        if (elapsed > std::chrono::seconds(5)) {
+                        if (elapsed > std::chrono::milliseconds(SERVICE_CRASH_TIMEOUT_MS)) {
                             crashed.push_back(it->first);
                             ServiceType crashed_type = it->first;
                             it = last_heartbeat_.erase(it);
@@ -1440,6 +1474,9 @@ private:
     }
 
     void check_and_reclaim_master() {
+        // Check for double master situation: another service may have promoted to master
+        // while the original master was starting up. This can happen if services start
+        // in the wrong order or if there's a race condition during startup.
         std::vector<uint16_t> slave_ports;
         {
             std::lock_guard<std::mutex> lock(registry_mutex_);
@@ -1448,26 +1485,40 @@ private:
             }
         }
 
+        if (!slave_ports.empty()) {
+            std::fprintf(stderr, "[%s] ⚠️  WARNING: Detected potential double master scenario during startup\n",
+                        service_type_to_string(type_));
+            std::fprintf(stderr, "[%s]     Found %zu registered services while claiming master role\n",
+                        service_type_to_string(type_), slave_ports.size());
+        }
+
+        int demoted_count = 0;
         for (uint16_t port : slave_ports) {
             int sock = connect_to_port("127.0.0.1", port);
             if (sock < 0) continue;
             std::string msg = "STEP_DOWN";
             send_all(sock, msg.c_str(), msg.size());
             char buf[64];
-            ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, 2000);
+            ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, STEP_DOWN_RECV_TIMEOUT_MS);
             close(sock);
 
             if (n > 0) {
                 buf[n] = '\0';
                 std::string resp(buf);
                 if (resp.substr(0, 12) == "STEPPED_DOWN") {
-                    std::fprintf(stderr, "[%s] Reclaimed master from promoted slave at port %u\n",
+                    demoted_count++;
+                    std::fprintf(stderr, "[%s] ✓ Reclaimed master from promoted slave at port %u\n",
                                 service_type_to_string(type_), port);
                     if (resp.size() > 13) {
                         absorb_stepped_down_state(resp.substr(13));
                     }
                 }
             }
+        }
+
+        if (demoted_count > 0) {
+            std::fprintf(stderr, "[%s] Successfully demoted %d slave(s) that had promoted to master\n",
+                        service_type_to_string(type_), demoted_count);
         }
     }
 
@@ -1625,7 +1676,7 @@ private:
         if (!is_pipeline_service(type_)) return;
 
         while (running_) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(RECONNECT_POLL_INTERVAL_MS));
             if (!running_) break;
 
             ConnectionState us;
