@@ -37,6 +37,7 @@ struct LogEntry {
     uint32_t call_id;
     std::string level;
     std::string message;
+    uint64_t seq = 0;
 };
 
 struct TestInfo {
@@ -209,6 +210,7 @@ private:
     
     std::mutex logs_mutex_;
     std::deque<LogEntry> recent_logs_;
+    std::atomic<uint64_t> log_seq_{0};
     static constexpr size_t MAX_RECENT_LOGS = 1000;
     static constexpr int TEST_SIP_PROVIDER_PORT = 22011;
 
@@ -551,6 +553,14 @@ private:
             if (!is_allowed_binary(svc.binary_path)) return false;
 
             std::string use_args = args_override.empty() ? svc.default_args : args_override;
+
+            if (name == "WHISPER_SERVICE" && args_override.empty()) {
+                std::string vad_w = get_setting("whisper_vad_window_ms", "");
+                std::string vad_t = get_setting("whisper_vad_threshold", "");
+                if (!vad_w.empty()) use_args += " --vad-window-ms " + vad_w;
+                if (!vad_t.empty()) use_args += " --vad-threshold " + vad_t;
+            }
+
             auto argv_strings = split_args(use_args);
 
             mkdir("logs", 0755);
@@ -788,6 +798,7 @@ private:
 
         {
             std::lock_guard<std::mutex> lock(logs_mutex_);
+            entry.seq = ++log_seq_;
             recent_logs_.push_back(entry);
             if (recent_logs_.size() > MAX_RECENT_LOGS) {
                 recent_logs_.pop_front();
@@ -3641,11 +3652,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return response.substr(body_start + 4);
     }
 
-    // Waits for a Whisper transcription message in the log stream.
-    // Scans the log buffer for messages from WHISPER_SERVICE containing "Transcription"
-    // that arrived after the given start_time. Returns the transcription text and
-    // whisper's own measured latency (from the log message format "Transcription (<ms>ms): <text>").
-    // Polls every 200ms for up to timeout_ms milliseconds.
     struct TranscriptionResult {
         std::string text;
         double whisper_latency_ms = 0.0;
@@ -3653,7 +3659,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     };
 
     TranscriptionResult wait_for_whisper_transcription(
-            const std::string& start_timestamp, int timeout_ms = 30000) {
+            uint64_t after_seq, int timeout_ms = 30000) {
         TranscriptionResult result;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 
@@ -3661,8 +3667,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             {
                 std::lock_guard<std::mutex> lock(logs_mutex_);
                 for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend(); ++it) {
+                    if (it->seq <= after_seq) break;
                     if (it->service != ServiceType::WHISPER_SERVICE) continue;
-                    if (it->timestamp < start_timestamp) break;
 
                     const std::string& msg = it->message;
                     size_t tpos = msg.find("Transcription (");
@@ -3693,12 +3699,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return result;
     }
 
-    // Returns the current timestamp string matching the format used by log entries.
-    std::string current_log_timestamp() {
-        time_t now = time(nullptr);
-        char timebuf[64];
-        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
-        return timebuf;
+    uint64_t current_log_seq() {
+        return log_seq_.load();
     }
 
     // Whisper Accuracy Test endpoint (POST /api/whisper/accuracy_test).
@@ -3783,7 +3785,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 continue;
             }
 
-            std::string ts_before = current_log_timestamp();
+            uint64_t seq_before = current_log_seq();
             auto inject_start = std::chrono::steady_clock::now();
 
             std::string inject_body = "{\"file\":\"" + file + "\",\"leg\":\"a\"}";
@@ -3809,11 +3811,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 continue;
             }
 
-            // Wait for the injected audio to be processed by the full pipeline.
-            // Audio duration determines minimum wait: WAV files are typically 2-10 seconds,
-            // plus Whisper inference time (1-5s), plus VAD silence detection (1-2s).
-            // We use a generous 30-second timeout to handle long files + slow inference.
-            TranscriptionResult tr = wait_for_whisper_transcription(ts_before, 30000);
+            TranscriptionResult tr = wait_for_whisper_transcription(seq_before, 30000);
 
             auto inject_end = std::chrono::steady_clock::now();
             double total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4613,14 +4611,14 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     }
                 }
 
-                std::string ts_before = current_log_timestamp();
+                uint64_t seq_before = current_log_seq();
                 auto t0 = std::chrono::steady_clock::now();
 
                 std::string inject_body = "{\"file\":\"" + file + "\",\"leg\":\"a\"}";
                 std::string inject_err;
                 http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
-                TranscriptionResult tr = wait_for_whisper_transcription(ts_before, 30000);
+                TranscriptionResult tr = wait_for_whisper_transcription(seq_before, 30000);
                 auto t1 = std::chrono::steady_clock::now();
                 double elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
