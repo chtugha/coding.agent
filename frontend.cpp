@@ -1169,6 +1169,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
         h += R"WT(</main></div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
 <script>
 )WT" + build_ui_js() + R"WT(
 </script></body></html>)WT";
@@ -1464,6 +1466,13 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <label>Model</label>
 <input class="wt-input" id="accuracyModel" value="current" readonly>
 </div>
+<div style="padding:10px;background:var(--wt-card-hover);border-radius:6px;margin-top:8px;border-left:3px solid var(--wt-primary)">
+<div style="font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:6px">&#x2699; Current VAD Settings (will be used on next Whisper start)</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+<div><strong>Window:</strong> <span id="currentVadWindow" style="color:var(--wt-primary)">100</span> ms</div>
+<div><strong>Threshold:</strong> <span id="currentVadThreshold" style="color:var(--wt-primary)">2.0</span></div>
+</div>
+</div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
 <div class="wt-field">
 <label>VAD Window (ms): <span id="vadWindowValue">100</span></label>
@@ -1566,9 +1575,9 @@ function showPage(p){
   currentPage=p;
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
+  if(p==='beta-testing'){refreshTestFiles();loadVadConfig();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
-  if(p==='beta-testing'){refreshTestFiles();}
 }
 
 function fetchStatus(){
@@ -2079,6 +2088,40 @@ function renderMetricsChart(results){
     options:{
       responsive:true,
       interaction:{mode:'index',intersect:false},
+      plugins:{
+        tooltip:{
+          enabled:true,
+          mode:'index',
+          intersect:false,
+          backgroundColor:'rgba(0,0,0,0.8)',
+          titleColor:'#fff',
+          bodyColor:'#fff',
+          borderColor:'rgba(0,113,227,0.5)',
+          borderWidth:1,
+          padding:12,
+          displayColors:true,
+          callbacks:{
+            title:function(items){return 'Test: '+items[0].label;},
+            label:function(ctx){
+              var label=ctx.dataset.label||'';
+              if(label)label+=': ';
+              label+=ctx.parsed.y.toFixed(2);
+              if(ctx.datasetIndex===0)label+=' ms';
+              else label+=' %';
+              return label;
+            }
+          }
+        },
+        zoom:{
+          pan:{enabled:true,mode:'x',modifierKey:'shift'},
+          zoom:{
+            wheel:{enabled:true,speed:0.1},
+            pinch:{enabled:true},
+            mode:'x'
+          },
+          limits:{x:{min:'original',max:'original'}}
+        }
+      },
       scales:{
         y:{type:'linear',display:true,position:'left',title:{display:true,text:'Latency (ms)'}},
         y1:{type:'linear',display:true,position:'right',title:{display:true,text:'Accuracy (%)'},grid:{drawOnChartArea:false}}
@@ -2331,10 +2374,53 @@ function renderIapChart(){
       {label:'SNR (dB)',data:snrData,backgroundColor:'rgba(59,130,246,0.7)',yAxisID:'y'},
       {label:'THD (%)',data:thdData,backgroundColor:colors,yAxisID:'y1'}
     ]},
-    options:{responsive:true,interaction:{mode:'index',intersect:false},
-      scales:{y:{type:'linear',position:'left',title:{display:true,text:'SNR (dB)'}},
-              y1:{type:'linear',position:'right',title:{display:true,text:'THD (%)'},grid:{drawOnChartArea:false}}},
-      plugins:{title:{display:true,text:'IAP Codec Quality - Historical Results'},legend:{position:'bottom'}}
+    options:{
+      responsive:true,
+      interaction:{mode:'index',intersect:false},
+      scales:{
+        y:{type:'linear',position:'left',title:{display:true,text:'SNR (dB)'}},
+        y1:{type:'linear',position:'right',title:{display:true,text:'THD (%)'},grid:{drawOnChartArea:false}}
+      },
+      plugins:{
+        title:{display:true,text:'IAP Codec Quality - Historical Results'},
+        legend:{position:'bottom'},
+        tooltip:{
+          enabled:true,
+          mode:'index',
+          intersect:false,
+          backgroundColor:'rgba(0,0,0,0.8)',
+          titleColor:'#fff',
+          bodyColor:'#fff',
+          borderColor:'rgba(59,130,246,0.5)',
+          borderWidth:1,
+          padding:12,
+          displayColors:true,
+          callbacks:{
+            title:function(items){return 'File: '+items[0].label+'.wav';},
+            label:function(ctx){
+              var label=ctx.dataset.label||'';
+              if(label)label+=': ';
+              label+=ctx.parsed.y.toFixed(2);
+              if(ctx.datasetIndex===0)label+=' dB';
+              else label+=' %';
+              return label;
+            },
+            afterBody:function(items){
+              var idx=items[0].dataIndex;
+              return 'Status: '+window.iapTestHistory[idx].status;
+            }
+          }
+        },
+        zoom:{
+          pan:{enabled:true,mode:'x',modifierKey:'shift'},
+          zoom:{
+            wheel:{enabled:true,speed:0.1},
+            pinch:{enabled:true},
+            mode:'x'
+          },
+          limits:{x:{min:'original',max:'original'}}
+        }
+      }
     }
   });
 }
@@ -2353,6 +2439,9 @@ function loadVadConfig(){
     document.getElementById('vadThresholdSlider').value=d.threshold;
     updateVadWindowDisplay(d.window_ms);
     updateVadThresholdDisplay(d.threshold);
+    // Update current settings display
+    document.getElementById('currentVadWindow').textContent=d.window_ms;
+    document.getElementById('currentVadThreshold').textContent=d.threshold;
   }).catch(e=>console.error('Failed to load VAD config:',e));
 }
 
@@ -2366,6 +2455,9 @@ function saveVadConfig(){
     body:JSON.stringify({window_ms:window_ms,threshold:threshold})
   }).then(r=>r.json()).then(d=>{
     if(d.success){
+      // Update current settings display
+      document.getElementById('currentVadWindow').textContent=d.window_ms;
+      document.getElementById('currentVadThreshold').textContent=d.threshold;
       alert('VAD configuration saved successfully!');
     }
   }).catch(e=>console.error('Failed to save VAD config:',e));
@@ -2479,8 +2571,41 @@ function loadAccuracyTrendChart(){
       options:{
         responsive:true,
         maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
         plugins:{
-          legend:{position:'top'}
+          legend:{position:'top'},
+          tooltip:{
+            enabled:true,
+            mode:'index',
+            intersect:false,
+            backgroundColor:'rgba(0,0,0,0.8)',
+            titleColor:'#fff',
+            bodyColor:'#fff',
+            borderColor:'rgba(52,199,89,0.5)',
+            borderWidth:1,
+            padding:12,
+            displayColors:true,
+            callbacks:{
+              title:function(items){return items[0].label;},
+              label:function(ctx){
+                var label=ctx.dataset.label||'';
+                if(label)label+=': ';
+                label+=ctx.parsed.y.toFixed(2);
+                if(ctx.datasetIndex===0)label+=' %';
+                else label+=' ms';
+                return label;
+              }
+            }
+          },
+          zoom:{
+            pan:{enabled:true,mode:'x',modifierKey:'shift'},
+            zoom:{
+              wheel:{enabled:true,speed:0.1},
+              pinch:{enabled:true},
+              mode:'x'
+            },
+            limits:{x:{min:'original',max:'original'}}
+          }
         },
         scales:{
           y:{
@@ -3696,11 +3821,81 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
 
+        // Timeout occurred - log for debugging
+        std::cerr << "DEBUG: No Whisper transcription received within " 
+                  << timeout_ms << "ms for seq > " << after_seq 
+                  << " (current seq: " << log_seq_.load() << ")" << std::endl;
+        
         return result;
     }
 
     uint64_t current_log_seq() {
         return log_seq_.load();
+    }
+
+    // Helper function to check if a service is currently running.
+    // Returns true if the service exists in services_ list and has a valid PID.
+    bool is_service_running(const std::string& service_name) {
+        std::lock_guard<std::mutex> lock(services_mutex_);
+        for (const auto& svc : services_) {
+            if (svc.name == service_name && svc.pid > 0) {
+                // Verify PID is still alive
+                if (kill(svc.pid, 0) == 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Validates that all required pipeline services are running.
+    // Returns error message if any service is down, empty string if all OK.
+    std::string validate_pipeline_services() {
+        if (!is_service_running("SIP_CLIENT")) {
+            return "SIP Client (sip-client-main) is not running. Start it first.";
+        }
+        if (!is_service_running("INBOUND_AUDIO_PROCESSOR")) {
+            return "Inbound Audio Processor (inbound-audio-processor) is not running. Start it first.";
+        }
+        if (!is_service_running("WHISPER_SERVICE")) {
+            return "Whisper Service (whisper-service) is not running. Start it first.";
+        }
+        return "";
+    }
+
+    // Gets the actual RSS (Resident Set Size) memory usage in MB for a running service.
+    // Returns 0 if the service is not running or memory cannot be determined.
+    // Uses ps command on macOS to get RSS memory.
+    int get_service_memory_mb(const std::string& service_name) {
+        pid_t pid = 0;
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            for (const auto& svc : services_) {
+                if (svc.name == service_name && svc.pid > 0) {
+                    if (kill(svc.pid, 0) == 0) {
+                        pid = svc.pid;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (pid == 0) return 0;
+        
+        // Use ps to get RSS in KB, then convert to MB
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), "ps -o rss= -p %d 2>/dev/null", pid);
+        FILE* fp = popen(cmd, "r");
+        if (!fp) return 0;
+        
+        char buf[128];
+        int rss_kb = 0;
+        if (fgets(buf, sizeof(buf), fp)) {
+            rss_kb = atoi(buf);
+        }
+        pclose(fp);
+        
+        return rss_kb / 1024;  // Convert KB to MB
     }
 
     // Whisper Accuracy Test endpoint (POST /api/whisper/accuracy_test).
@@ -3743,6 +3938,14 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         if (test_files.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"No test files specified\"}");
+            return;
+        }
+
+        // Validate all pipeline services are running before proceeding
+        std::string pipeline_err = validate_pipeline_services();
+        if (!pipeline_err.empty()) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
+                "{\"error\":\"%s\"}", pipeline_err.c_str());
             return;
         }
 
@@ -4566,6 +4769,14 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
         files_json << "]";
         
+        // Validate all pipeline services are running before benchmarking
+        std::string pipeline_err = validate_pipeline_services();
+        if (!pipeline_err.empty()) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
+                "{\"error\":\"%s\"}", pipeline_err.c_str());
+            return;
+        }
+        
         // Verify the full pipeline is running before benchmarking.
         std::string sip_err;
         std::string sip_status = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", sip_err);
@@ -4580,9 +4791,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        // Use model file size as memory estimate (loaded model size on disk ≈ runtime footprint).
-        int memory_mb = 0;
-        {
+        // Get actual RSS memory usage from the running Whisper service process.
+        // This captures the real runtime memory footprint including model, KV cache, and overhead.
+        int memory_mb = get_service_memory_mb("WHISPER_SERVICE");
+        if (memory_mb == 0) {
+            // Fallback to model file size if we can't get actual memory
             struct stat mst;
             if (stat(model_path.c_str(), &mst) == 0) {
                 memory_mb = static_cast<int>(mst.st_size / (1024 * 1024));
