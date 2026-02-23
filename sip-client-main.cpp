@@ -80,7 +80,7 @@ public:
             return false;
         }
 
-        std::cout << "Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
+        std::cout << "Interconnect initialized (peer-to-peer)" << std::endl;
 
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::SIP_CLIENT);
 
@@ -92,9 +92,24 @@ public:
             this->handle_call_end(call_id);
         });
 
-        interconnect_.register_custom_negotiation_handler([this](const std::string& msg) -> std::string {
-            return handle_line_command(msg);
-        });
+        cmd_port_ = whispertalk::service_cmd_port(whispertalk::ServiceType::SIP_CLIENT);
+        cmd_sock_ = socket(AF_INET, SOCK_STREAM, 0);
+        if (cmd_sock_ >= 0) {
+            int opt = 1;
+            setsockopt(cmd_sock_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            struct sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            addr.sin_port = htons(cmd_port_);
+            if (bind(cmd_sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
+                listen(cmd_sock_, 4) < 0) {
+                close(cmd_sock_);
+                cmd_sock_ = -1;
+                std::cerr << "Failed to bind command port " << cmd_port_ << std::endl;
+            } else {
+                std::cout << "Command port listening on " << cmd_port_ << std::endl;
+            }
+        }
 
         return true;
     }
@@ -201,6 +216,7 @@ public:
         }
 
         std::thread out_thread(&SipClient::outbound_audio_loop, this);
+        std::thread cmd_thread(&SipClient::command_listener_loop, this);
 
         while (running_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -217,10 +233,49 @@ public:
             if (line->reg_thread.joinable()) line->reg_thread.join();
         }
         out_thread.join();
+        if (cmd_sock_ >= 0) { close(cmd_sock_); cmd_sock_ = -1; }
+        cmd_thread.join();
         interconnect_.shutdown();
     }
 
 private:
+    int cmd_sock_ = -1;
+    uint16_t cmd_port_ = 0;
+
+    void command_listener_loop() {
+        while (running_) {
+            if (cmd_sock_ < 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+            struct pollfd pfd = {cmd_sock_, POLLIN, 0};
+            int ret = poll(&pfd, 1, 200);
+            if (ret <= 0) continue;
+            if (!(pfd.revents & POLLIN)) continue;
+
+            struct sockaddr_in client_addr{};
+            socklen_t clen = sizeof(client_addr);
+            int csock = accept(cmd_sock_, (struct sockaddr*)&client_addr, &clen);
+            if (csock < 0) continue;
+
+            struct timeval tv{2, 0};
+            setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(csock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+            char buf[4096];
+            ssize_t n = recv(csock, buf, sizeof(buf) - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string msg(buf, n);
+                std::string response = handle_line_command(msg);
+                if (!response.empty()) {
+                    ::send(csock, response.c_str(), response.size(), 0);
+                }
+            }
+            close(csock);
+        }
+    }
+
     void sip_loop(std::shared_ptr<SipLine> line) {
         char buf[4096];
         while (running_ && line->line_running) {

@@ -86,7 +86,7 @@ public:
             return false;
         }
 
-        std::cout << "🔗 Interconnect initialized (master=" << interconnect_.is_master() << ")" << std::endl;
+        std::cout << "Interconnect initialized (peer-to-peer)" << std::endl;
 
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::WHISPER_SERVICE);
 

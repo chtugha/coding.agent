@@ -488,6 +488,15 @@ private:
         }
     }
 
+    bool is_service_running_unlocked(const std::string& name) {
+        for (const auto& svc : services_) {
+            if (svc.name == name) {
+                return svc.managed && svc.pid > 0;
+            }
+        }
+        return false;
+    }
+
     static std::vector<std::string> split_args(const std::string& s) {
         std::vector<std::string> result;
         std::istringstream iss(s);
@@ -540,14 +549,12 @@ private:
             if (svc.name != name) continue;
             if (svc.managed && svc.pid > 0) return false;
 
-            ServiceType st = parse_service_type(name);
-            if (interconnect_.is_service_alive(st)) {
+            {
                 std::string bin_name = svc.binary_path;
                 size_t slash = bin_name.rfind('/');
                 if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
                 kill_ghost_processes(bin_name);
-                usleep(500000);
-                if (interconnect_.is_service_alive(st)) return false;
+                usleep(200000);
             }
 
             if (!is_allowed_binary(svc.binary_path)) return false;
@@ -615,7 +622,6 @@ private:
                 if (waitpid(svc.pid, &status, WNOHANG) == svc.pid) {
                     svc.managed = false;
                     svc.pid = 0;
-                    interconnect_.unregister_service(parse_service_type(name));
                     return true;
                 }
                 usleep(100000);
@@ -624,7 +630,6 @@ private:
             waitpid(svc.pid, nullptr, 0);
             svc.managed = false;
             svc.pid = 0;
-            interconnect_.unregister_service(parse_service_type(name));
             return true;
         }
         return false;
@@ -2756,14 +2761,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         for (size_t i = 0; i < services_.size(); i++) {
             if (i > 0) json << ",";
             const auto& svc = services_[i];
-            ServiceType st = parse_service_type(svc.name);
-            bool alive = interconnect_.is_service_alive(st);
-            std::string status = "offline";
-            if (svc.managed && svc.pid > 0) {
-                status = alive ? "running" : "starting";
-            } else if (alive) {
-                status = "running (external)";
-            }
+            bool alive = svc.managed && svc.pid > 0;
+            std::string status = alive ? "running" : "offline";
 
             json << "{"
                  << "\"name\":\"" << escape_json(svc.name) << "\","
@@ -3104,11 +3103,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         stop_service(name);
 
-        for (int i = 0; i < 20; i++) {
-            ServiceType st = parse_service_type(name);
-            if (!interconnect_.is_service_alive(st)) break;
-            usleep(100000);
-        }
+        usleep(500000);
 
         if (start_service(name, args)) {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"restarted\"}");
@@ -3157,8 +3152,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     std::string send_negotiation_command(whispertalk::ServiceType target, const std::string& cmd) {
-        whispertalk::PortConfig ports = interconnect_.query_service_ports(target);
-        if (ports.neg_in == 0) return "";
+        uint16_t port = whispertalk::service_cmd_port(target);
+        if (port == 0) return "";
 
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) return "";
@@ -3166,7 +3161,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-        addr.sin_port = htons(ports.neg_in);
+        addr.sin_port = htons(port);
 
         struct timeval tv{2, 0};
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -3323,7 +3318,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
         }
 
-        json << "],\"downstream_connected\":" << (interconnect_.is_service_alive(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR) ? "true" : "false") << "}";
+        json << "],\"downstream_connected\":" << (is_service_running("INBOUND_AUDIO_PROCESSOR") ? "true" : "false") << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
@@ -4516,8 +4511,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         {
             std::lock_guard<std::mutex> lock(services_mutex_);
             for (const auto& svc : services_) {
-                ServiceType st = parse_service_type(svc.name);
-                if (interconnect_.is_service_alive(st)) svc_count++;
+                if (svc.managed && svc.pid > 0) svc_count++;
             }
         }
 
@@ -4548,7 +4542,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
              << ",\"running_tests\":" << running_tests
              << ",\"log_buffer_size\":" << log_count
              << ",\"sse_connections\":" << sse_count
-             << ",\"is_master\":" << (interconnect_.is_master() ? "true" : "false")
+             << ",\"architecture\":\"peer-to-peer\""
              << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }

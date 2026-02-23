@@ -65,6 +65,10 @@ inline const char* service_type_to_string(ServiceType type) {
     }
 }
 
+// Pipeline topology:
+//   SIP_CLIENT -> IAP -> WHISPER -> LLAMA -> KOKORO -> OAP -> SIP_CLIENT (loop)
+// "downstream" = the service we SEND data TO (next in pipeline)
+// "upstream"   = the service that sends data TO US (previous in pipeline)
 inline ServiceType upstream_of(ServiceType type) {
     switch (type) {
         case ServiceType::INBOUND_AUDIO_PROCESSOR: return ServiceType::SIP_CLIENT;
@@ -150,28 +154,39 @@ struct PacketTrace {
     }
 };
 
-struct PortConfig {
-    uint16_t neg_in;
-    uint16_t neg_out;
-    uint16_t down_in;
-    uint16_t down_out;
-    uint16_t up_in;
-    uint16_t up_out;
-
-    PortConfig() : neg_in(0), neg_out(0), down_in(0), down_out(0), up_in(0), up_out(0) {}
-
-    PortConfig(uint16_t neg_in_port, uint16_t neg_out_port) 
-        : neg_in(neg_in_port), neg_out(neg_out_port) {
-        down_in = neg_in + 1;
-        down_out = neg_in + 2;
-        up_in = neg_out + 1;
-        up_out = neg_out + 2;
+// Fixed port assignment per service. Each service gets a base port.
+// From that base: +0 = mgmt listen (from upstream), +1 = data listen (from upstream)
+// The service CONNECTS to its downstream neighbor's listen ports.
+//
+// Port map (all on 127.0.0.1):
+//   SIP_CLIENT (base 13100): mgmt_listen=13100, data_listen=13101
+//   IAP        (base 13110): mgmt_listen=13110, data_listen=13111
+//   WHISPER    (base 13120): mgmt_listen=13120, data_listen=13121
+//   LLAMA      (base 13130): mgmt_listen=13130, data_listen=13131
+//   KOKORO     (base 13140): mgmt_listen=13140, data_listen=13141
+//   OAP        (base 13150): mgmt_listen=13150, data_listen=13151
+//   FRONTEND   (base 13160): mgmt_listen=13160, data_listen=13161
+//
+// Data flow example: SIP sends data to IAP by connecting to IAP's data_listen (13111).
+// IAP sends management msgs to SIP by connecting to SIP's mgmt_listen (13100).
+inline uint16_t service_base_port(ServiceType type) {
+    switch (type) {
+        case ServiceType::SIP_CLIENT:                return 13100;
+        case ServiceType::INBOUND_AUDIO_PROCESSOR:   return 13110;
+        case ServiceType::WHISPER_SERVICE:            return 13120;
+        case ServiceType::LLAMA_SERVICE:              return 13130;
+        case ServiceType::KOKORO_SERVICE:             return 13140;
+        case ServiceType::OUTBOUND_AUDIO_PROCESSOR:   return 13150;
+        case ServiceType::FRONTEND:                   return 13160;
+        default: return 0;
     }
+}
 
-    bool is_valid() const {
-        return neg_in > 0 && neg_out > 0;
-    }
-};
+inline uint16_t service_mgmt_port(ServiceType type) { return service_base_port(type); }
+inline uint16_t service_data_port(ServiceType type) { return service_base_port(type) + 1; }
+// Command port: for out-of-band text commands from the frontend (e.g., ADD_LINE, GET_STATS).
+// Only services that need frontend commands use this (+2 offset).
+inline uint16_t service_cmd_port(ServiceType type) { return service_base_port(type) + 2; }
 
 struct Packet {
     static constexpr uint32_t MAX_PAYLOAD_SIZE = 1024 * 1024;
@@ -252,23 +267,33 @@ enum class ConnectionState {
     FAILED
 };
 
+// Management message types sent over the mgmt channel.
+// Format: 1-byte type, then type-specific payload.
+enum class MgmtMsgType : uint8_t {
+    CALL_END       = 1,   // payload: 4 bytes call_id
+    SPEECH_ACTIVE  = 2,   // payload: 4 bytes call_id
+    SPEECH_IDLE    = 3,   // payload: 4 bytes call_id
+    PING           = 4,   // no payload (keepalive probe)
+    PONG           = 5,   // no payload (keepalive response)
+    CUSTOM         = 10,  // payload: 2-byte len + string
+};
+
+// Peer-to-peer interconnect node. No master/slave. No heartbeats.
+// Each service listens on 2 fixed TCP ports (mgmt + data) for its upstream neighbor.
+// Each service connects to 2 fixed TCP ports on its downstream neighbor.
+// TCP keepalive + send/recv errors provide instant crash detection.
 class InterconnectNode {
 public:
     InterconnectNode(ServiceType type) 
         : type_(type), 
-          is_master_(false),
-          was_original_master_(false),
           running_(false),
-          master_heartbeat_failures_(0),
           max_known_call_id_(0),
-          neg_in_sock_(-1),
-          neg_out_sock_(-1),
-          down_in_listen_sock_(-1),
-          down_out_listen_sock_(-1),
-          down_in_accepted_(-1),
-          down_out_accepted_(-1),
-          up_in_sock_(-1),
-          up_out_sock_(-1),
+          mgmt_listen_sock_(-1),
+          data_listen_sock_(-1),
+          upstream_mgmt_accepted_(-1),
+          upstream_data_accepted_(-1),
+          downstream_mgmt_sock_(-1),
+          downstream_data_sock_(-1),
           upstream_state_(ConnectionState::DISCONNECTED),
           downstream_state_(ConnectionState::DISCONNECTED) {}
 
@@ -277,51 +302,58 @@ public:
     }
 
     bool initialize() {
-        if (!scan_and_bind_ports()) {
+        if (!is_pipeline_service(type_)) {
+            running_ = true;
+            return true;
+        }
+
+        uint16_t mgmt_port = service_mgmt_port(type_);
+        uint16_t data_port = service_data_port(type_);
+
+        mgmt_listen_sock_ = create_listen_socket(mgmt_port);
+        if (mgmt_listen_sock_ < 0) {
+            std::fprintf(stderr, "[%s] Failed to bind mgmt port %u\n",
+                        service_type_to_string(type_), mgmt_port);
             return false;
         }
 
-        bool pipeline = is_pipeline_service(type_);
-
-        if (pipeline && !bind_traffic_listen_ports()) {
-            close_socket(neg_in_sock_);
-            close_socket(neg_out_sock_);
+        data_listen_sock_ = create_listen_socket(data_port);
+        if (data_listen_sock_ < 0) {
+            close_socket(mgmt_listen_sock_);
+            std::fprintf(stderr, "[%s] Failed to bind data port %u\n",
+                        service_type_to_string(type_), data_port);
             return false;
         }
 
         running_ = true;
 
-        neg_thread_ = std::thread(&InterconnectNode::negotiation_loop, this);
-        heartbeat_thread_ = std::thread(&InterconnectNode::heartbeat_loop, this);
-        if (pipeline) {
-            accept_thread_ = std::thread(&InterconnectNode::accept_loop, this);
-            reconnect_thread_ = std::thread(&InterconnectNode::reconnect_loop, this);
-        }
+        accept_thread_ = std::thread(&InterconnectNode::accept_loop, this);
+        downstream_connect_thread_ = std::thread(&InterconnectNode::downstream_connect_loop, this);
+        mgmt_recv_thread_ = std::thread(&InterconnectNode::mgmt_recv_loop, this);
 
+        std::fprintf(stderr, "[%s] Interconnect ready: mgmt=%u data=%u\n",
+                    service_type_to_string(type_), mgmt_port, data_port);
         return true;
     }
 
     void shutdown() {
         if (!running_.exchange(false)) return;
 
-        close_socket(up_in_sock_);
-        close_socket(up_out_sock_);
-        close_socket(down_in_accepted_);
-        close_socket(down_out_accepted_);
-        close_socket(down_in_listen_sock_);
-        close_socket(down_out_listen_sock_);
-        close_socket(neg_in_sock_);
-        close_socket(neg_out_sock_);
+        close_socket(upstream_mgmt_accepted_);
+        close_socket(upstream_data_accepted_);
+        close_socket(downstream_mgmt_sock_);
+        close_socket(downstream_data_sock_);
+        close_socket(mgmt_listen_sock_);
+        close_socket(data_listen_sock_);
 
-        if (neg_thread_.joinable()) neg_thread_.join();
-        if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
         if (accept_thread_.joinable()) accept_thread_.join();
-        if (reconnect_thread_.joinable()) reconnect_thread_.join();
+        if (downstream_connect_thread_.joinable()) downstream_connect_thread_.join();
+        if (mgmt_recv_thread_.joinable()) mgmt_recv_thread_.join();
     }
 
-    bool is_master() const { return is_master_; }
-    bool was_promoted() const { return is_master_ && !was_original_master_; }
-    const PortConfig& ports() const { return ports_; }
+    // Kept for API compat — always false now (no master/slave concept)
+    bool is_master() const { return false; }
+    bool was_promoted() const { return false; }
     ServiceType type() const { return type_; }
 
     ConnectionState upstream_state() const {
@@ -334,59 +366,65 @@ public:
         return downstream_state_;
     }
 
+    // Connect to downstream neighbor's listen ports.
+    // Called once at startup; reconnect_loop handles retries.
     bool connect_to_downstream() {
         if (!is_pipeline_service(type_)) return false;
 
-        PortConfig downstream_ports = query_downstream_ports();
-        if (!downstream_ports.is_valid()) {
+        ServiceType ds = downstream_of(type_);
+        uint16_t ds_mgmt = service_mgmt_port(ds);
+        uint16_t ds_data = service_data_port(ds);
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            downstream_state_ = ConnectionState::CONNECTING;
+        }
+
+        int mgmt_sock = connect_to_port_with_timeout("127.0.0.1", ds_mgmt, 2000);
+        if (mgmt_sock < 0) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            downstream_state_ = ConnectionState::DISCONNECTED;
             return false;
+        }
+
+        int data_sock = connect_to_port_with_timeout("127.0.0.1", ds_data, 2000);
+        if (data_sock < 0) {
+            ::close(mgmt_sock);
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            downstream_state_ = ConnectionState::DISCONNECTED;
+            return false;
+        }
+
+        setup_socket_options(mgmt_sock);
+        setup_socket_options(data_sock);
+
+        {
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            close_socket(downstream_mgmt_sock_);
+            close_socket(downstream_data_sock_);
+            downstream_mgmt_sock_ = mgmt_sock;
+            downstream_data_sock_ = data_sock;
         }
 
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            upstream_state_ = ConnectionState::CONNECTING;
+            downstream_state_ = ConnectionState::CONNECTED;
         }
 
-        int out_sock = connect_to_port_with_timeout("127.0.0.1", downstream_ports.down_in, 5000);
-        if (out_sock < 0) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            upstream_state_ = ConnectionState::FAILED;
-            return false;
-        }
-
-        int in_sock = connect_to_port_with_timeout("127.0.0.1", downstream_ports.down_out, 5000);
-        if (in_sock < 0) {
-            close(out_sock);
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            upstream_state_ = ConnectionState::FAILED;
-            return false;
-        }
-
-        setup_socket_options(out_sock);
-        setup_socket_options(in_sock);
-
-        {
-            std::lock_guard<std::mutex> lock(traffic_mutex_);
-            close_socket(up_out_sock_);
-            close_socket(up_in_sock_);
-            up_out_sock_ = out_sock;
-            up_in_sock_ = in_sock;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            upstream_state_ = ConnectionState::CONNECTED;
-        }
-
+        std::fprintf(stderr, "[%s] Connected to downstream %s (mgmt=%u data=%u)\n",
+                    service_type_to_string(type_),
+                    service_type_to_string(ds), ds_mgmt, ds_data);
         return true;
     }
 
+    // Send a data packet to our downstream neighbor (next in pipeline).
+    // SIP -> IAP: SIP calls send_to_downstream, which writes to IAP's data_listen.
     bool send_to_downstream(const Packet& pkt) {
         std::lock_guard<std::mutex> lock(send_downstream_mutex_);
         int sock;
         {
-            std::lock_guard<std::mutex> tl(traffic_mutex_);
-            sock = up_out_sock_;
+            std::lock_guard<std::mutex> dl(downstream_mutex_);
+            sock = downstream_data_sock_;
         }
         if (sock < 0) return false;
 
@@ -395,27 +433,26 @@ public:
             thread_local uint8_t buf[SEND_BUF_SIZE];
             pkt.serialize_into(buf);
             if (!send_all_with_timeout(sock, buf, total, 100)) {
-                mark_upstream_failed();
+                mark_downstream_failed();
                 return false;
             }
         } else {
-            std::fprintf(stderr, "send_to_downstream: packet %zu > %zu, heap fallback\n",
-                         total, SEND_BUF_SIZE);
             auto data = pkt.serialize();
             if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
-                mark_upstream_failed();
+                mark_downstream_failed();
                 return false;
             }
         }
         return true;
     }
 
+    // Send a data packet back to upstream neighbor (reverse direction, e.g. OAP -> SIP).
     bool send_to_upstream(const Packet& pkt) {
         std::lock_guard<std::mutex> lock(send_upstream_mutex_);
         int sock;
         {
-            std::lock_guard<std::mutex> tl(traffic_mutex_);
-            sock = down_out_accepted_;
+            std::lock_guard<std::mutex> ul(upstream_mutex_);
+            sock = upstream_data_accepted_;
         }
         if (sock < 0) return false;
 
@@ -424,90 +461,70 @@ public:
             thread_local uint8_t buf[SEND_BUF_SIZE];
             pkt.serialize_into(buf);
             if (!send_all_with_timeout(sock, buf, total, 100)) {
-                mark_downstream_failed();
+                mark_upstream_failed();
                 return false;
             }
         } else {
-            std::fprintf(stderr, "send_to_upstream: packet %zu > %zu, heap fallback\n",
-                         total, SEND_BUF_SIZE);
             auto data = pkt.serialize();
             if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
-                mark_downstream_failed();
+                mark_upstream_failed();
                 return false;
             }
         }
         return true;
     }
 
+    // Receive data from upstream neighbor (they connected to our data_listen port).
     bool recv_from_upstream(Packet& pkt, int timeout_ms = 100) {
         int sock;
         {
-            std::lock_guard<std::mutex> lock(traffic_mutex_);
-            sock = down_in_accepted_;
+            std::lock_guard<std::mutex> lock(upstream_mutex_);
+            sock = upstream_data_accepted_;
         }
         if (sock < 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
             return false;
         }
-        return recv_packet(sock, pkt, timeout_ms);
+        bool ok = recv_packet(sock, pkt, timeout_ms);
+        if (!ok && sock >= 0) {
+            if (is_socket_dead(sock)) {
+                mark_upstream_failed();
+            }
+        }
+        return ok;
     }
 
+    // Receive data from downstream neighbor (we connected to their data_listen, they reply).
     bool recv_from_downstream(Packet& pkt, int timeout_ms = 100) {
         int sock;
         {
-            std::lock_guard<std::mutex> lock(traffic_mutex_);
-            sock = up_in_sock_;
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            sock = downstream_data_sock_;
         }
         if (sock < 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
             return false;
         }
-        return recv_packet(sock, pkt, timeout_ms);
-    }
-
-    uint32_t reserve_call_id(uint32_t proposed_id) {
-        if (is_master_) {
-            std::lock_guard<std::mutex> lock(call_id_mutex_);
-            uint32_t final_id = (proposed_id > max_known_call_id_) ? proposed_id : max_known_call_id_ + 1;
-            max_known_call_id_ = final_id;
-            active_call_ids_.insert(final_id);
-            return final_id;
-        } else {
-            int sock = connect_to_master();
-            if (sock < 0) return 0;
-
-            std::string msg = "RESERVE_CALL_ID " + std::to_string(proposed_id);
-            if (!send_all(sock, msg.c_str(), msg.size())) {
-                close(sock);
-                return 0;
+        bool ok = recv_packet(sock, pkt, timeout_ms);
+        if (!ok && sock >= 0) {
+            if (is_socket_dead(sock)) {
+                mark_downstream_failed();
             }
-
-            char buffer[64];
-            ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
-            close(sock);
-
-            if (n <= 0) return 0;
-            buffer[n] = '\0';
-
-            std::string response(buffer);
-            if (response.substr(0, 17) == "CALL_ID_RESERVED ") {
-                uint32_t reserved_id = std::stoul(response.substr(17));
-                std::lock_guard<std::mutex> lock(call_id_mutex_);
-                if (reserved_id > max_known_call_id_) {
-                    max_known_call_id_ = reserved_id;
-                }
-                active_call_ids_.insert(reserved_id);
-                return reserved_id;
-            }
-
-            return 0;
         }
+        return ok;
     }
 
-    int connect_to_master() {
-        return connect_to_port("127.0.0.1", 22222);
+    // Call ID management — local only, no master needed.
+    // Each service can independently assign call IDs since only SIP_CLIENT creates them.
+    uint32_t reserve_call_id(uint32_t proposed_id) {
+        std::lock_guard<std::mutex> lock(call_id_mutex_);
+        uint32_t final_id = (proposed_id > max_known_call_id_) ? proposed_id : max_known_call_id_ + 1;
+        max_known_call_id_ = final_id;
+        active_call_ids_.insert(final_id);
+        return final_id;
     }
 
+    // Broadcast CALL_END to downstream neighbor via mgmt channel.
     void broadcast_call_end(uint32_t call_id) {
         bool already_ended = false;
         {
@@ -523,48 +540,7 @@ public:
             call_end_handler_(call_id);
         }
 
-        if (is_master_) {
-            std::string msg = "CALL_END " + std::to_string(call_id);
-            std::vector<std::pair<ServiceType, uint16_t>> targets;
-
-            {
-                std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-                for (const auto& [type, config] : service_registry_) {
-                    targets.push_back({type, config.neg_in});
-                }
-            }
-
-            std::set<ServiceType> acked;
-            std::mutex ack_mutex;
-
-            std::vector<std::thread> send_threads;
-            for (const auto& target : targets) {
-                ServiceType stype = target.first;
-                uint16_t port = target.second;
-                send_threads.emplace_back([&, stype, port]() {
-                    int sock = connect_to_port("127.0.0.1", port);
-                    if (sock < 0) return;
-                    if (send_all(sock, msg.c_str(), msg.size())) {
-                        char buf[64];
-                        ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, 5000);
-                        if (n > 0) {
-                            buf[n] = '\0';
-                            std::string resp(buf);
-                            std::string expected = "CALL_END_ACK " + std::to_string(call_id);
-                            if (resp == expected) {
-                                std::lock_guard<std::mutex> al(ack_mutex);
-                                acked.insert(stype);
-                            }
-                        }
-                    }
-                    close(sock);
-                });
-            }
-
-            for (auto& t : send_threads) {
-                if (t.joinable()) t.join();
-            }
-        }
+        send_mgmt_to_downstream(MgmtMsgType::CALL_END, call_id);
     }
 
     void register_call_end_handler(std::function<void(uint32_t)> handler) {
@@ -572,42 +548,18 @@ public:
     }
 
     void broadcast_speech_signal(uint32_t call_id, bool active) {
-        std::string msg = (active ? "SPEECH_ACTIVE " : "SPEECH_IDLE ") + std::to_string(call_id);
-
-        if (is_master_) {
-            if (active) {
-                std::lock_guard<std::mutex> lock(speech_mutex_);
-                speech_active_calls_.insert(call_id);
-            } else {
-                std::lock_guard<std::mutex> lock(speech_mutex_);
-                speech_active_calls_.erase(call_id);
-            }
-            if (speech_signal_handler_) {
-                speech_signal_handler_(call_id, active);
-            }
-
-            std::vector<std::pair<ServiceType, uint16_t>> targets;
-            {
-                std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-                for (const auto& [type, config] : service_registry_) {
-                    targets.push_back({type, config.neg_in});
-                }
-            }
-
-            for (const auto& [stype, port] : targets) {
-                int sock = connect_to_port("127.0.0.1", port);
-                if (sock < 0) continue;
-                send_all(sock, msg.c_str(), msg.size());
-                close(sock);
-            }
-        } else {
-            uint16_t master_port = 22222;
-            int sock = connect_to_port("127.0.0.1", master_port);
-            if (sock >= 0) {
-                send_all(sock, msg.c_str(), msg.size());
-                close(sock);
-            }
+        {
+            std::lock_guard<std::mutex> lock(speech_mutex_);
+            if (active) speech_active_calls_.insert(call_id);
+            else speech_active_calls_.erase(call_id);
         }
+
+        if (speech_signal_handler_) {
+            speech_signal_handler_(call_id, active);
+        }
+
+        MgmtMsgType msg_type = active ? MgmtMsgType::SPEECH_ACTIVE : MgmtMsgType::SPEECH_IDLE;
+        send_mgmt_to_downstream(msg_type, call_id);
     }
 
     void register_speech_signal_handler(std::function<void(uint32_t, bool)> handler) {
@@ -615,7 +567,7 @@ public:
     }
 
     void register_custom_negotiation_handler(std::function<std::string(const std::string&)> handler) {
-        custom_negotiation_handler_ = handler;
+        custom_handler_ = handler;
     }
 
     bool is_speech_active(uint32_t call_id) const {
@@ -623,15 +575,9 @@ public:
         return speech_active_calls_.count(call_id) > 0;
     }
 
-    bool is_service_alive(ServiceType svc_type) const {
-        if (!is_master_) return false;
-        
-        std::lock_guard<std::mutex> lock(registry_mutex_);
-        auto it = last_heartbeat_.find(svc_type);
-        if (it == last_heartbeat_.end()) return false;
-        
-        auto elapsed = std::chrono::steady_clock::now() - it->second;
-        return elapsed < std::chrono::seconds(5);
+    // No longer needed (no master registry). Returns false.
+    bool is_service_alive(ServiceType /*svc_type*/) const {
+        return false;
     }
 
     size_t active_call_count() const {
@@ -644,1051 +590,374 @@ public:
         return ended_call_ids_.size();
     }
 
-    void unregister_service(ServiceType svc_type) {
-        if (!is_master_) return;
-        std::lock_guard<std::mutex> lock(registry_mutex_);
-        service_registry_.erase(svc_type);
-        last_heartbeat_.erase(svc_type);
-    }
+    // No-ops for removed master/slave features
+    void unregister_service(ServiceType) {}
+    size_t registered_service_count() const { return 0; }
 
-    size_t registered_service_count() const {
-        if (!is_master_) return 0;
-        std::lock_guard<std::mutex> lock(registry_mutex_);
-        return service_registry_.size();
-    }
+    // Not applicable without master registry. Use downstream_state() instead.
+    struct PortConfig {
+        uint16_t neg_in = 0, neg_out = 0, down_in = 0, down_out = 0, up_in = 0, up_out = 0;
+        bool is_valid() const { return false; }
+    };
+    PortConfig query_service_ports(ServiceType) const { return PortConfig(); }
+    PortConfig ports() const { return PortConfig(); }
 
-    PortConfig query_service_ports(ServiceType svc_type) const {
-        if (is_master_) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = service_registry_.find(svc_type);
-            if (it != service_registry_.end()) return it->second;
-            return PortConfig();
+    // Connect to master — not applicable. Returns -1.
+    int connect_to_master() { return -1; }
+
+    uint16_t frontend_log_port() const { return FRONTEND_LOG_PORT; }
+
+    // Send a custom command to our downstream's mgmt channel and wait for response.
+    std::string send_custom_to_downstream(const std::string& msg, int timeout_ms = 2000) {
+        int sock;
+        {
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            sock = downstream_mgmt_sock_;
         }
-        return PortConfig();
-    }
+        if (sock < 0) return "";
 
-    uint16_t frontend_log_port() const {
-        return FRONTEND_LOG_PORT;
+        uint8_t buf[3 + 65535];
+        buf[0] = static_cast<uint8_t>(MgmtMsgType::CUSTOM);
+        uint16_t len = static_cast<uint16_t>(std::min(msg.size(), (size_t)65535));
+        uint16_t net_len = htons(len);
+        memcpy(buf + 1, &net_len, 2);
+        memcpy(buf + 3, msg.data(), len);
+
+        std::lock_guard<std::mutex> lock(send_downstream_mgmt_mutex_);
+        if (!send_all_with_timeout(sock, buf, 3 + len, timeout_ms)) return "";
+
+        uint8_t resp_hdr[3];
+        if (!recv_exact(sock, resp_hdr, 3, timeout_ms)) return "";
+        uint16_t resp_len;
+        memcpy(&resp_len, resp_hdr + 1, 2);
+        resp_len = ntohs(resp_len);
+        if (resp_len == 0) return "";
+
+        std::string resp(resp_len, '\0');
+        if (!recv_exact(sock, resp.data(), resp_len, timeout_ms)) return "";
+        return resp;
     }
 
 private:
     ServiceType type_;
-    bool is_master_;
-    bool was_original_master_;
     std::atomic<bool> running_;
-    int master_heartbeat_failures_;
     static constexpr size_t SEND_BUF_SIZE = 65536;
-    static constexpr int MASTER_FAILURE_THRESHOLD = 3;
-    static constexpr int PORT_RECLAIM_WAIT_MS = 500;
-    // Real-time heartbeat: 250ms instead of 2s for low-latency master failure detection
-    static constexpr int HEARTBEAT_INTERVAL_MS = 250;
-    static constexpr int HEARTBEAT_RECV_TIMEOUT_MS = 500;
-    static constexpr int SYNC_RECV_TIMEOUT_MS = 500;
-    static constexpr int STEP_DOWN_RECV_TIMEOUT_MS = 2000;
-    static constexpr int DEMOTION_REGISTER_RETRIES = 3;
-    static constexpr int DEMOTION_REGISTER_BACKOFF_MS = 200;
-    // Service crash detection: 1.5s timeout instead of 5s for real-time responsiveness
-    static constexpr int SERVICE_CRASH_TIMEOUT_MS = 1500;
-    // Reconnection polling: 500ms instead of 2s for faster recovery
-    static constexpr int RECONNECT_POLL_INTERVAL_MS = 500;
-    PortConfig ports_;
+    static constexpr int DOWNSTREAM_RECONNECT_MS = 500;
 
     mutable std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;
     std::set<uint32_t> active_call_ids_;
     std::set<uint32_t> ended_call_ids_;
 
-    int neg_in_sock_;
-    int neg_out_sock_;
+    int mgmt_listen_sock_;
+    int data_listen_sock_;
 
-    int down_in_listen_sock_;
-    int down_out_listen_sock_;
-    int down_in_accepted_;
-    int down_out_accepted_;
+    mutable std::mutex upstream_mutex_;
+    int upstream_mgmt_accepted_;
+    int upstream_data_accepted_;
 
-    int up_in_sock_;
-    int up_out_sock_;
+    mutable std::mutex downstream_mutex_;
+    int downstream_mgmt_sock_;
+    int downstream_data_sock_;
+
+    std::mutex send_downstream_mutex_;
+    std::mutex send_upstream_mutex_;
+    std::mutex send_downstream_mgmt_mutex_;
+    std::mutex send_upstream_mgmt_mutex_;
 
     mutable std::mutex state_mutex_;
     ConnectionState upstream_state_;
     ConnectionState downstream_state_;
 
-    mutable std::mutex traffic_mutex_;
-    std::mutex send_downstream_mutex_;
-    std::mutex send_upstream_mutex_;
-
-    std::thread neg_thread_;
-    std::thread heartbeat_thread_;
     std::thread accept_thread_;
-    std::thread reconnect_thread_;
-
-    mutable std::mutex registry_mutex_;
-    std::map<ServiceType, PortConfig> service_registry_;
-    std::map<ServiceType, std::chrono::steady_clock::time_point> last_heartbeat_;
+    std::thread downstream_connect_thread_;
+    std::thread mgmt_recv_thread_;
 
     std::function<void(uint32_t)> call_end_handler_;
     std::function<void(uint32_t, bool)> speech_signal_handler_;
-    std::function<std::string(const std::string&)> custom_negotiation_handler_;
+    std::function<std::string(const std::string&)> custom_handler_;
     mutable std::mutex speech_mutex_;
     std::set<uint32_t> speech_active_calls_;
 
-    PortConfig downstream_neighbor_ports_;
-    std::mutex downstream_neighbor_mutex_;
-
-    std::mutex synced_registry_mutex_;
-    std::map<ServiceType, PortConfig> synced_registry_;
-    uint32_t synced_max_call_id_ = 0;
-
-    bool scan_and_bind_ports() {
-        const uint16_t BASE_NEG_IN = 22222;
-        const uint16_t BASE_NEG_OUT = 33333;
-        const uint16_t INCREMENT = 3;
-        const int MAX_ATTEMPTS = 100;
-
-        int sock_in = create_listen_socket(BASE_NEG_IN);
-        if (sock_in >= 0) {
-            int sock_out = create_listen_socket(BASE_NEG_OUT);
-            if (sock_out >= 0) {
-                neg_in_sock_ = sock_in;
-                neg_out_sock_ = sock_out;
-                ports_ = PortConfig(BASE_NEG_IN, BASE_NEG_OUT);
-                is_master_ = true;
-                was_original_master_ = true;
-                check_and_reclaim_master();
-                return true;
-            }
-            close(sock_in);
-        } else {
-            if (try_reclaim_master_port()) {
-                return true;
-            }
-        }
-
-        for (int attempt = 1; attempt < MAX_ATTEMPTS; ++attempt) {
-            uint16_t try_neg_in = BASE_NEG_IN + (attempt * INCREMENT);
-            uint16_t try_neg_out = BASE_NEG_OUT + (attempt * INCREMENT);
-
-            sock_in = create_listen_socket(try_neg_in);
-            if (sock_in < 0) continue;
-
-            int sock_out = create_listen_socket(try_neg_out);
-            if (sock_out < 0) {
-                close(sock_in);
-                continue;
-            }
-
-            neg_in_sock_ = sock_in;
-            neg_out_sock_ = sock_out;
-            ports_ = PortConfig(try_neg_in, try_neg_out);
-            is_master_ = false;
-
-            if (!register_with_master()) {
-                close_socket(neg_in_sock_);
-                close_socket(neg_out_sock_);
-                return false;
-            }
-
-            return true;
-        }
-
-        return false;
-    }
-
-    bool try_reclaim_master_port() {
-        std::fprintf(stderr, "[%s] Attempting to reclaim master ports from promoted slave...\n",
-                    service_type_to_string(type_));
-        
-        int sock = connect_to_port("127.0.0.1", 22222);
-        if (sock < 0) {
-            std::fprintf(stderr, "[%s] Failed to connect to port 22222 - no promoted master found\n",
-                        service_type_to_string(type_));
-            return false;
-        }
-
-        std::string msg = "STEP_DOWN";
-        if (!send_all(sock, msg.c_str(), msg.size())) {
-            close(sock);
-            std::fprintf(stderr, "[%s] Failed to send STEP_DOWN command\n",
-                        service_type_to_string(type_));
-            return false;
-        }
-
-        char buf[256];
-        ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, STEP_DOWN_RECV_TIMEOUT_MS);
-        close(sock);
-
-        std::string state_str;
-        if (n > 0) {
-            buf[n] = '\0';
-            std::string resp(buf);
-            if (resp.substr(0, 12) == "STEPPED_DOWN") {
-                std::fprintf(stderr, "[%s] ✓ Promoted slave acknowledged step-down\n",
-                            service_type_to_string(type_));
-                if (resp.size() > 13) {
-                    state_str = resp.substr(13);
-                }
-            } else {
-                std::fprintf(stderr, "[%s] Unexpected response from promoted master: %s\n",
-                            service_type_to_string(type_), resp.substr(0, 20).c_str());
-                return false;
-            }
-        } else {
-            std::fprintf(stderr, "[%s] No response from promoted master during reclaim\n",
-                        service_type_to_string(type_));
-            return false;
-        }
-
-        // Wait for the promoted master to fully release the ports
-        std::this_thread::sleep_for(std::chrono::milliseconds(PORT_RECLAIM_WAIT_MS));
-
-        // Try with exponential backoff: 500ms, 1000ms, 1500ms
-        int sock_in = -1;
-        for (int retry = 0; retry < 3 && sock_in < 0; retry++) {
-            if (retry > 0) {
-                int wait_ms = PORT_RECLAIM_WAIT_MS * (retry + 1);
-                std::fprintf(stderr, "[%s] Port 22222 still busy, retry %d after %dms...\n",
-                            service_type_to_string(type_), retry + 1, wait_ms);
-                std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
-            }
-            sock_in = create_listen_socket(22222);
-        }
-        
-        if (sock_in < 0) {
-            std::fprintf(stderr, "[%s] ✗ Failed to bind port 22222 after 3 retries - port collision\n",
-                        service_type_to_string(type_));
-            return false;
-        }
-
-        int sock_out = create_listen_socket(33333);
-        if (sock_out < 0) {
-            close(sock_in);
-            std::fprintf(stderr, "[%s] ✗ Failed to bind port 33333 - port collision\n",
-                        service_type_to_string(type_));
-            return false;
-        }
-
-        neg_in_sock_ = sock_in;
-        neg_out_sock_ = sock_out;
-        ports_ = PortConfig(22222, 33333);
-        is_master_ = true;
-        was_original_master_ = true;
-
-        if (!state_str.empty()) {
-            absorb_stepped_down_state(state_str);
-        }
-
-        std::fprintf(stderr, "[%s] Reclaimed master role from promoted slave\n",
-                    service_type_to_string(type_));
-        return true;
-    }
-
-    bool bind_traffic_listen_ports() {
-        down_in_listen_sock_ = create_listen_socket(ports_.down_in);
-        if (down_in_listen_sock_ < 0) return false;
-
-        down_out_listen_sock_ = create_listen_socket(ports_.down_out);
-        if (down_out_listen_sock_ < 0) {
-            close_socket(down_in_listen_sock_);
-            return false;
-        }
-        return true;
-    }
-
-    bool register_with_master() {
-        int sock = connect_to_port("127.0.0.1", 22222);
-        if (sock < 0) return false;
-
-        std::string msg = "REGISTER " + std::to_string(static_cast<int>(type_)) + " " +
-                         std::to_string(ports_.neg_in) + " " + std::to_string(ports_.neg_out);
-        
-        if (!send_all(sock, msg.c_str(), msg.size())) {
-            close(sock);
-            return false;
-        }
-
-        char buffer[64];
-        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
-        close(sock);
-
-        if (n <= 0) return false;
-        buffer[n] = '\0';
-        return std::string(buffer) == "REGISTER_ACK";
-    }
-
-    PortConfig query_downstream_ports() {
-        ServiceType downstream = downstream_of(type_);
-
-        if (is_master_) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = service_registry_.find(downstream);
-            if (it != service_registry_.end()) return it->second;
-            return PortConfig();
-        }
-
-        int sock = connect_to_port("127.0.0.1", 22222);
-        if (sock < 0) return PortConfig();
-
-        std::string msg = "GET_DOWNSTREAM " + std::to_string(static_cast<int>(type_));
-        if (!send_all(sock, msg.c_str(), msg.size())) {
-            close(sock);
-            return PortConfig();
-        }
-
-        char buffer[128];
-        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
-        close(sock);
-
-        if (n <= 0) return PortConfig();
-        buffer[n] = '\0';
-        std::string resp(buffer);
-
-        if (resp.substr(0, 6) == "PORTS ") {
-            return parse_ports_response(resp);
-        }
-
-        return PortConfig();
-    }
-
-    PortConfig query_upstream_ports() {
-        ServiceType upstream = upstream_of(type_);
-
-        if (is_master_) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = service_registry_.find(upstream);
-            if (it != service_registry_.end()) return it->second;
-            return PortConfig();
-        }
-
-        int sock = connect_to_port("127.0.0.1", 22222);
-        if (sock < 0) return PortConfig();
-
-        std::string msg = "GET_UPSTREAM " + std::to_string(static_cast<int>(type_));
-        if (!send_all(sock, msg.c_str(), msg.size())) {
-            close(sock);
-            return PortConfig();
-        }
-
-        char buffer[128];
-        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
-        close(sock);
-
-        if (n <= 0) return PortConfig();
-        buffer[n] = '\0';
-        std::string resp(buffer);
-
-        if (resp.substr(0, 6) == "PORTS ") {
-            return parse_ports_response(resp);
-        }
-
-        return PortConfig();
-    }
-
-    PortConfig parse_ports_response(const std::string& resp) {
-        size_t sp1 = resp.find(' ', 6);
-        if (sp1 == std::string::npos) return PortConfig();
-        uint16_t ni = static_cast<uint16_t>(std::stoul(resp.substr(6, sp1 - 6)));
-        uint16_t no = static_cast<uint16_t>(std::stoul(resp.substr(sp1 + 1)));
-        return PortConfig(ni, no);
-    }
-
-    void negotiation_loop() {
-        while (running_) {
-            pollfd pfd;
-            pfd.fd = neg_in_sock_;
-            pfd.events = POLLIN;
-            
-            int ret = poll(&pfd, 1, 100);
-            if (ret <= 0) continue;
-
-            sockaddr_in client_addr;
-            socklen_t addr_len = sizeof(client_addr);
-            int client_sock = accept(neg_in_sock_, (sockaddr*)&client_addr, &addr_len);
-            if (client_sock < 0) continue;
-
-            std::thread([this, client_sock]() {
-                handle_negotiation_message(client_sock);
-            }).detach();
-        }
-    }
-
-    void handle_negotiation_message(int sock) {
-        char buffer[1024];
-        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, 2000);
-        if (n <= 0) {
-            close(sock);
-            return;
-        }
-
-        buffer[n] = '\0';
-        std::string msg(buffer);
-        std::string response;
-
-        if (is_master_) {
-            if (msg.substr(0, 9) == "REGISTER ") {
-                size_t sp1 = msg.find(' ', 9);
-                size_t sp2 = msg.find(' ', sp1 + 1);
-                
-                ServiceType svc_type = static_cast<ServiceType>(std::stoi(msg.substr(9, sp1 - 9)));
-                uint16_t neg_in = static_cast<uint16_t>(std::stoul(msg.substr(sp1 + 1, sp2 - sp1 - 1)));
-                uint16_t neg_out = static_cast<uint16_t>(std::stoul(msg.substr(sp2 + 1)));
-                
-                std::lock_guard<std::mutex> lock(registry_mutex_);
-                service_registry_[svc_type] = PortConfig(neg_in, neg_out);
-                last_heartbeat_[svc_type] = std::chrono::steady_clock::now();
-                
-                response = "REGISTER_ACK";
-            }
-            else if (msg.substr(0, 16) == "RESERVE_CALL_ID ") {
-                uint32_t proposed = std::stoul(msg.substr(16));
-                uint32_t reserved = reserve_call_id(proposed);
-                response = "CALL_ID_RESERVED " + std::to_string(reserved);
-            }
-            else if (msg.substr(0, 10) == "HEARTBEAT ") {
-                ServiceType svc_type = static_cast<ServiceType>(std::stoi(msg.substr(10)));
-                std::lock_guard<std::mutex> lock(registry_mutex_);
-                last_heartbeat_[svc_type] = std::chrono::steady_clock::now();
-                response = "HEARTBEAT_ACK";
-            }
-            else if (msg.substr(0, 15) == "GET_DOWNSTREAM ") {
-                ServiceType requester = static_cast<ServiceType>(std::stoi(msg.substr(15)));
-                ServiceType downstream = downstream_of(requester);
-                
-                std::lock_guard<std::mutex> lock(registry_mutex_);
-                auto it = service_registry_.find(downstream);
-                if (it != service_registry_.end()) {
-                    response = "PORTS " + std::to_string(it->second.neg_in) + " " + std::to_string(it->second.neg_out);
-                } else {
-                    response = "SERVICE_UNAVAILABLE";
-                }
-            }
-            else if (msg.substr(0, 13) == "GET_UPSTREAM ") {
-                ServiceType requester = static_cast<ServiceType>(std::stoi(msg.substr(13)));
-                ServiceType upstream = upstream_of(requester);
-
-                if (upstream == type_) {
-                    response = "PORTS " + std::to_string(ports_.neg_in) + " " + std::to_string(ports_.neg_out);
-                } else {
-                    std::lock_guard<std::mutex> lock(registry_mutex_);
-                    auto it = service_registry_.find(upstream);
-                    if (it != service_registry_.end()) {
-                        response = "PORTS " + std::to_string(it->second.neg_in) + " " + std::to_string(it->second.neg_out);
-                    } else {
-                        response = "SERVICE_UNAVAILABLE";
-                    }
-                }
-            }
-        }
-
-        if (msg.substr(0, 14) == "SYNC_REGISTRY ") {
-            std::string data = msg.substr(14);
-            size_t sp = data.find(' ');
-            uint32_t max_cid = std::stoul(sp == std::string::npos ? data : data.substr(0, sp));
-
-            std::map<ServiceType, PortConfig> registry;
-            if (sp != std::string::npos) {
-                std::string entries = data.substr(sp + 1);
-                size_t pos = 0;
-                while (pos < entries.size()) {
-                    size_t next = entries.find(' ', pos);
-                    std::string entry = (next == std::string::npos) ? entries.substr(pos) : entries.substr(pos, next - pos);
-                    if (!entry.empty()) {
-                        {
-                            size_t c1 = entry.find(':');
-                            size_t c2 = entry.find(':', c1 + 1);
-                            if (c1 != std::string::npos && c2 != std::string::npos) {
-                                ServiceType svc = static_cast<ServiceType>(std::stoi(entry.substr(0, c1)));
-                                uint16_t ni = static_cast<uint16_t>(std::stoul(entry.substr(c1 + 1, c2 - c1 - 1)));
-                                uint16_t no = static_cast<uint16_t>(std::stoul(entry.substr(c2 + 1)));
-                                registry[svc] = PortConfig(ni, no);
-                            }
-                        }
-                    }
-                    if (next == std::string::npos) break;
-                    pos = next + 1;
-                }
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(synced_registry_mutex_);
-                synced_registry_ = registry;
-                synced_max_call_id_ = max_cid;
-            }
-            response = "SYNC_ACK";
-        }
-        else if (msg == "STEP_DOWN") {
-            if (is_master_ && !was_original_master_) {
-                std::string state;
-                {
-                    std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
-                    state = std::to_string(max_known_call_id_);
-                }
-                {
-                    std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-                    for (const auto& [svc, cfg] : service_registry_) {
-                        state += " " + std::to_string(static_cast<int>(svc)) +
-                                 ":" + std::to_string(cfg.neg_in) +
-                                 ":" + std::to_string(cfg.neg_out);
-                    }
-                }
-                response = "STEPPED_DOWN " + state;
-                send_all(sock, response.c_str(), response.size());
-                close(sock);
-
-                demote_to_slave();
-                return;
-            } else {
-                response = "NOT_PROMOTED";
-            }
-        }
-        else if (msg.substr(0, 11) == "NEW_MASTER ") {
-            master_heartbeat_failures_ = 0;
-            response = "NEW_MASTER_ACK";
-        }
-
-        if (msg.substr(0, 14) == "SPEECH_ACTIVE " || msg.substr(0, 12) == "SPEECH_IDLE ") {
-            bool active = (msg.substr(0, 14) == "SPEECH_ACTIVE ");
-            uint32_t call_id = std::stoul(msg.substr(active ? 14 : 12));
-
-            {
-                std::lock_guard<std::mutex> lock(speech_mutex_);
-                if (active) speech_active_calls_.insert(call_id);
-                else speech_active_calls_.erase(call_id);
-            }
-
-            if (speech_signal_handler_) {
-                speech_signal_handler_(call_id, active);
-            }
-
-            if (is_master_) {
-                std::vector<std::pair<ServiceType, uint16_t>> targets;
-                {
-                    std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-                    for (const auto& [type, config] : service_registry_) {
-                        targets.push_back({type, config.neg_in});
-                    }
-                }
-                std::string relay = msg;
-                for (const auto& [stype, port] : targets) {
-                    int rsock = connect_to_port("127.0.0.1", port);
-                    if (rsock < 0) continue;
-                    send_all(rsock, relay.c_str(), relay.size());
-                    ::close(rsock);
-                }
-            }
-
-            response = active ? "SPEECH_ACTIVE_ACK" : "SPEECH_IDLE_ACK";
-        }
-
-        if (msg.substr(0, 9) == "CALL_END ") {
-            uint32_t call_id = std::stoul(msg.substr(9));
-            
-            bool already_cleaned = false;
-            {
-                std::lock_guard<std::mutex> lock(call_id_mutex_);
-                if (ended_call_ids_.count(call_id) > 0) {
-                    already_cleaned = true;
-                }
-                ended_call_ids_.insert(call_id);
-                active_call_ids_.erase(call_id);
-            }
-            
-            if (!already_cleaned && call_end_handler_) {
-                call_end_handler_(call_id);
-            }
-
-            response = "CALL_END_ACK " + std::to_string(call_id);
-        }
-
-        if (response.empty() && custom_negotiation_handler_) {
-            response = custom_negotiation_handler_(msg);
-        }
-
-        if (!response.empty()) {
-            send_all(sock, response.c_str(), response.size());
-        }
-
-        close(sock);
-    }
-
+    // Accept incoming connections from upstream on our mgmt + data listen ports.
     void accept_loop() {
         while (running_) {
-            bool need_down_in = false;
-            bool need_down_out = false;
+            bool need_mgmt = false, need_data = false;
             {
-                std::lock_guard<std::mutex> lock(traffic_mutex_);
-                need_down_in = (down_in_accepted_ < 0);
-                need_down_out = (down_out_accepted_ < 0);
+                std::lock_guard<std::mutex> lock(upstream_mutex_);
+                need_mgmt = (upstream_mgmt_accepted_ < 0);
+                need_data = (upstream_data_accepted_ < 0);
             }
 
-            if (need_down_in && down_in_listen_sock_ >= 0) {
-                pollfd pfd;
-                pfd.fd = down_in_listen_sock_;
-                pfd.events = POLLIN;
-                if (poll(&pfd, 1, 100) > 0) {
+            if (need_mgmt && mgmt_listen_sock_ >= 0) {
+                pollfd pfd = {mgmt_listen_sock_, POLLIN, 0};
+                if (poll(&pfd, 1, 50) > 0 && (pfd.revents & POLLIN)) {
                     sockaddr_in addr;
                     socklen_t len = sizeof(addr);
-                    int accepted = accept(down_in_listen_sock_, (sockaddr*)&addr, &len);
+                    int accepted = accept(mgmt_listen_sock_, (sockaddr*)&addr, &len);
                     if (accepted >= 0) {
                         setup_socket_options(accepted);
-                        std::lock_guard<std::mutex> lock(traffic_mutex_);
-                        if (down_in_accepted_ >= 0) {
-                            close(down_in_accepted_);
-                        }
-                        down_in_accepted_ = accepted;
-                        update_downstream_state_locked();
+                        std::lock_guard<std::mutex> lock(upstream_mutex_);
+                        if (upstream_mgmt_accepted_ >= 0) ::close(upstream_mgmt_accepted_);
+                        upstream_mgmt_accepted_ = accepted;
+                        update_upstream_state();
+                        std::fprintf(stderr, "[%s] Upstream mgmt connected\n",
+                                    service_type_to_string(type_));
                     }
                 }
             }
 
-            if (need_down_out && down_out_listen_sock_ >= 0) {
-                pollfd pfd;
-                pfd.fd = down_out_listen_sock_;
-                pfd.events = POLLIN;
-                if (poll(&pfd, 1, 100) > 0) {
+            if (need_data && data_listen_sock_ >= 0) {
+                pollfd pfd = {data_listen_sock_, POLLIN, 0};
+                if (poll(&pfd, 1, 50) > 0 && (pfd.revents & POLLIN)) {
                     sockaddr_in addr;
                     socklen_t len = sizeof(addr);
-                    int accepted = accept(down_out_listen_sock_, (sockaddr*)&addr, &len);
+                    int accepted = accept(data_listen_sock_, (sockaddr*)&addr, &len);
                     if (accepted >= 0) {
                         setup_socket_options(accepted);
-                        std::lock_guard<std::mutex> lock(traffic_mutex_);
-                        if (down_out_accepted_ >= 0) {
-                            close(down_out_accepted_);
-                        }
-                        down_out_accepted_ = accepted;
-                        update_downstream_state_locked();
+                        std::lock_guard<std::mutex> lock(upstream_mutex_);
+                        if (upstream_data_accepted_ >= 0) ::close(upstream_data_accepted_);
+                        upstream_data_accepted_ = accepted;
+                        update_upstream_state();
+                        std::fprintf(stderr, "[%s] Upstream data connected\n",
+                                    service_type_to_string(type_));
                     }
                 }
             }
 
-            if (!need_down_in && !need_down_out) {
+            if (!need_mgmt && !need_data) {
                 {
-                    std::lock_guard<std::mutex> lock(traffic_mutex_);
-                    if (down_in_accepted_ >= 0 && is_socket_dead(down_in_accepted_)) {
-                        close(down_in_accepted_);
-                        down_in_accepted_ = -1;
+                    std::lock_guard<std::mutex> lock(upstream_mutex_);
+                    if (upstream_mgmt_accepted_ >= 0 && is_socket_dead(upstream_mgmt_accepted_)) {
+                        std::fprintf(stderr, "[%s] Upstream mgmt peer disconnected\n",
+                                    service_type_to_string(type_));
+                        close_socket(upstream_mgmt_accepted_);
+                        update_upstream_state();
                     }
-                    if (down_out_accepted_ >= 0 && is_socket_dead(down_out_accepted_)) {
-                        close(down_out_accepted_);
-                        down_out_accepted_ = -1;
+                    if (upstream_data_accepted_ >= 0 && is_socket_dead(upstream_data_accepted_)) {
+                        std::fprintf(stderr, "[%s] Upstream data peer disconnected\n",
+                                    service_type_to_string(type_));
+                        close_socket(upstream_data_accepted_);
+                        update_upstream_state();
                     }
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
     }
 
-    void update_downstream_state_locked() {
+    void update_upstream_state() {
         ConnectionState new_state;
-        if (down_in_accepted_ >= 0 && down_out_accepted_ >= 0) {
+        if (upstream_mgmt_accepted_ >= 0 && upstream_data_accepted_ >= 0) {
             new_state = ConnectionState::CONNECTED;
-        } else if (down_in_accepted_ >= 0 || down_out_accepted_ >= 0) {
+        } else if (upstream_mgmt_accepted_ >= 0 || upstream_data_accepted_ >= 0) {
             new_state = ConnectionState::CONNECTING;
         } else {
             new_state = ConnectionState::DISCONNECTED;
         }
         std::lock_guard<std::mutex> lock(state_mutex_);
-        downstream_state_ = new_state;
+        upstream_state_ = new_state;
     }
 
-    void heartbeat_loop() {
-        while (running_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(HEARTBEAT_INTERVAL_MS));
-            if (!running_) break;
-            
-            if (!is_master_) {
-                bool hb_ok = send_heartbeat_to_master();
-                if (hb_ok) {
-                    master_heartbeat_failures_ = 0;
-                } else {
-                    master_heartbeat_failures_++;
-                    if (master_heartbeat_failures_ >= MASTER_FAILURE_THRESHOLD) {
-                        std::fprintf(stderr, "[%s] Master unreachable (%d failures) — attempting promotion\n",
-                                    service_type_to_string(type_), master_heartbeat_failures_);
-                        if (attempt_promote_to_master()) {
-                            master_heartbeat_failures_ = 0;
-                        }
-                    }
-                }
-            } else {
-                std::vector<ServiceType> crashed;
-                {
-                    std::lock_guard<std::mutex> lock(registry_mutex_);
-                    for (auto it = last_heartbeat_.begin(); it != last_heartbeat_.end(); ) {
-                        auto elapsed = std::chrono::steady_clock::now() - it->second;
-                        if (elapsed > std::chrono::milliseconds(SERVICE_CRASH_TIMEOUT_MS)) {
-                            crashed.push_back(it->first);
-                            ServiceType crashed_type = it->first;
-                            it = last_heartbeat_.erase(it);
-                            service_registry_.erase(crashed_type);
-                        } else {
-                            ++it;
-                        }
-                    }
-                }
-
-                for (ServiceType ct : crashed) {
-                    notify_neighbors_of_crash(ct);
-                }
-
-                sync_registry_to_slaves();
-            }
-
-            check_traffic_connections();
-        }
-    }
-
-    bool send_heartbeat_to_master() {
-        int sock = connect_to_port("127.0.0.1", 22222);
-        if (sock < 0) return false;
-
-        std::string msg = "HEARTBEAT " + std::to_string(static_cast<int>(type_));
-        if (!send_all(sock, msg.c_str(), msg.size())) {
-            close(sock);
-            return false;
-        }
-
-        char buffer[64];
-        ssize_t n = recv_with_timeout(sock, buffer, sizeof(buffer) - 1, HEARTBEAT_RECV_TIMEOUT_MS);
-        close(sock);
-        return (n > 0);
-    }
-
-    void sync_registry_to_slaves() {
-        std::string payload;
-        std::vector<std::pair<ServiceType, uint16_t>> targets;
-        {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
-            payload = "SYNC_REGISTRY " + std::to_string(max_known_call_id_);
-            for (const auto& [svc, cfg] : service_registry_) {
-                payload += " " + std::to_string(static_cast<int>(svc)) +
-                           ":" + std::to_string(cfg.neg_in) +
-                           ":" + std::to_string(cfg.neg_out);
-                targets.push_back({svc, cfg.neg_in});
-            }
-        }
-
-        for (const auto& [svc, port] : targets) {
-            int sock = connect_to_port("127.0.0.1", port);
-            if (sock < 0) continue;
-            send_all(sock, payload.c_str(), payload.size());
-            char buf[32];
-            recv_with_timeout(sock, buf, sizeof(buf) - 1, SYNC_RECV_TIMEOUT_MS);
-            close(sock);
-        }
-    }
-
-    bool attempt_promote_to_master() {
-        const uint16_t MASTER_NEG_IN = 22222;
-        const uint16_t MASTER_NEG_OUT = 33333;
-
-        int new_neg_in = create_listen_socket(MASTER_NEG_IN);
-        if (new_neg_in < 0) {
-            return false;
-        }
-
-        int new_neg_out = create_listen_socket(MASTER_NEG_OUT);
-        if (new_neg_out < 0) {
-            close(new_neg_in);
-            return false;
-        }
-
-        close_socket(neg_in_sock_);
-        close_socket(neg_out_sock_);
-
-        neg_in_sock_ = new_neg_in;
-        neg_out_sock_ = new_neg_out;
-
-        PortConfig old_ports = ports_;
-        ports_ = PortConfig(MASTER_NEG_IN, MASTER_NEG_OUT);
-        is_master_ = true;
-
-        {
-            std::lock_guard<std::mutex> lock(synced_registry_mutex_);
-            std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-            service_registry_ = synced_registry_;
-            service_registry_.erase(type_);
-            {
-                std::lock_guard<std::mutex> cid_lock(call_id_mutex_);
-                if (synced_max_call_id_ > max_known_call_id_) {
-                    max_known_call_id_ = synced_max_call_id_;
-                }
-            }
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            for (auto it = last_heartbeat_.begin(); it != last_heartbeat_.end(); ) {
-                it = last_heartbeat_.erase(it);
-            }
-        }
-
-        rebind_traffic_ports_for_promotion(old_ports);
-
-        std::fprintf(stderr, "[%s] PROMOTED to master (port 22222)\n",
-                    service_type_to_string(type_));
-
-        notify_slaves_of_new_master();
-
-        return true;
-    }
-
-    void rebind_traffic_ports_for_promotion(const PortConfig& /*old_ports*/) {
-        close_socket(down_in_listen_sock_);
-        close_socket(down_out_listen_sock_);
-        close_socket(down_in_accepted_);
-        close_socket(down_out_accepted_);
-
-        down_in_listen_sock_ = create_listen_socket(ports_.down_in);
-        down_out_listen_sock_ = create_listen_socket(ports_.down_out);
-
-        if (down_in_listen_sock_ < 0 || down_out_listen_sock_ < 0) {
-            std::fprintf(stderr, "[%s] Warning: could not rebind traffic ports after promotion\n",
-                        service_type_to_string(type_));
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            downstream_state_ = ConnectionState::DISCONNECTED;
-        }
-    }
-
-    void notify_slaves_of_new_master() {
-        std::vector<std::pair<ServiceType, uint16_t>> targets;
-        {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            for (const auto& [svc, cfg] : service_registry_) {
-                targets.push_back({svc, cfg.neg_in});
-            }
-        }
-
-        std::string msg = "NEW_MASTER " + std::to_string(static_cast<int>(type_));
-        for (const auto& [svc, port] : targets) {
-            int sock = connect_to_port("127.0.0.1", port);
-            if (sock < 0) continue;
-            send_all(sock, msg.c_str(), msg.size());
-            char buf[32];
-            recv_with_timeout(sock, buf, sizeof(buf) - 1, 500);
-            close(sock);
-        }
-    }
-
-    void check_and_reclaim_master() {
-        // Check for double master situation: another service may have promoted to master
-        // while the original master was starting up. This can happen if services start
-        // in the wrong order or if there's a race condition during startup.
-        std::vector<uint16_t> slave_ports;
-        {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            for (const auto& [svc, cfg] : service_registry_) {
-                slave_ports.push_back(cfg.neg_in);
-            }
-        }
-
-        if (!slave_ports.empty()) {
-            std::fprintf(stderr, "[%s] ⚠️  WARNING: Detected potential double master scenario during startup\n",
-                        service_type_to_string(type_));
-            std::fprintf(stderr, "[%s]     Found %zu registered services while claiming master role\n",
-                        service_type_to_string(type_), slave_ports.size());
-        }
-
-        int demoted_count = 0;
-        for (uint16_t port : slave_ports) {
-            int sock = connect_to_port("127.0.0.1", port);
-            if (sock < 0) continue;
-            std::string msg = "STEP_DOWN";
-            send_all(sock, msg.c_str(), msg.size());
-            char buf[64];
-            ssize_t n = recv_with_timeout(sock, buf, sizeof(buf) - 1, STEP_DOWN_RECV_TIMEOUT_MS);
-            close(sock);
-
-            if (n > 0) {
-                buf[n] = '\0';
-                std::string resp(buf);
-                if (resp.substr(0, 12) == "STEPPED_DOWN") {
-                    demoted_count++;
-                    std::fprintf(stderr, "[%s] ✓ Reclaimed master from promoted slave at port %u\n",
-                                service_type_to_string(type_), port);
-                    if (resp.size() > 13) {
-                        absorb_stepped_down_state(resp.substr(13));
-                    }
-                }
-            }
-        }
-
-        if (demoted_count > 0) {
-            std::fprintf(stderr, "[%s] Successfully demoted %d slave(s) that had promoted to master\n",
-                        service_type_to_string(type_), demoted_count);
-        }
-    }
-
-    void absorb_stepped_down_state(const std::string& state_str) {
-        size_t sp = state_str.find(' ');
-        if (sp == std::string::npos && !state_str.empty()) {
-            uint32_t their_max = std::stoul(state_str);
-            std::lock_guard<std::mutex> lock(call_id_mutex_);
-            if (their_max > max_known_call_id_) {
-                max_known_call_id_ = their_max;
-            }
-            return;
-        }
-        if (sp == std::string::npos) return;
-
-        uint32_t their_max = std::stoul(state_str.substr(0, sp));
-        {
-            std::lock_guard<std::mutex> lock(call_id_mutex_);
-            if (their_max > max_known_call_id_) {
-                max_known_call_id_ = their_max;
-            }
-        }
-
-        std::string entries = state_str.substr(sp + 1);
-        std::lock_guard<std::mutex> lock(registry_mutex_);
-        size_t pos = 0;
-        while (pos < entries.size()) {
-            size_t next = entries.find(' ', pos);
-            std::string entry = (next == std::string::npos) ? entries.substr(pos) : entries.substr(pos, next - pos);
-            if (!entry.empty()) {
-                size_t c1 = entry.find(':');
-                size_t c2 = entry.find(':', c1 + 1);
-                if (c1 != std::string::npos && c2 != std::string::npos) {
-                    ServiceType svc = static_cast<ServiceType>(std::stoi(entry.substr(0, c1)));
-                    uint16_t ni = static_cast<uint16_t>(std::stoul(entry.substr(c1 + 1, c2 - c1 - 1)));
-                    uint16_t no = static_cast<uint16_t>(std::stoul(entry.substr(c2 + 1)));
-                    if (service_registry_.find(svc) == service_registry_.end()) {
-                        service_registry_[svc] = PortConfig(ni, no);
-                        last_heartbeat_[svc] = std::chrono::steady_clock::now();
-                    }
-                }
-            }
-            if (next == std::string::npos) break;
-            pos = next + 1;
-        }
-    }
-
-    bool demote_to_slave() {
-        std::fprintf(stderr, "[%s] Demoting from master to slave\n", service_type_to_string(type_));
-
-        is_master_ = false;
-        was_original_master_ = false;
-
-        close_socket(neg_in_sock_);
-        close_socket(neg_out_sock_);
-        close_socket(down_in_listen_sock_);
-        close_socket(down_out_listen_sock_);
-        close_socket(down_in_accepted_);
-        close_socket(down_out_accepted_);
-
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            downstream_state_ = ConnectionState::DISCONNECTED;
-        }
-
-        const uint16_t BASE_NEG_IN = 22222;
-        const uint16_t BASE_NEG_OUT = 33333;
-        const uint16_t INCREMENT = 3;
-        const int MAX_ATTEMPTS = 100;
-        bool bound = false;
-
-        for (int attempt = 1; attempt < MAX_ATTEMPTS; ++attempt) {
-            uint16_t try_neg_in = BASE_NEG_IN + (attempt * INCREMENT);
-            uint16_t try_neg_out = BASE_NEG_OUT + (attempt * INCREMENT);
-
-            int sock_in = create_listen_socket(try_neg_in);
-            if (sock_in < 0) continue;
-
-            int sock_out = create_listen_socket(try_neg_out);
-            if (sock_out < 0) {
-                close(sock_in);
-                continue;
-            }
-
-            neg_in_sock_ = sock_in;
-            neg_out_sock_ = sock_out;
-            ports_ = PortConfig(try_neg_in, try_neg_out);
-            bound = true;
-            break;
-        }
-
-        if (!bound) {
-            std::fprintf(stderr, "[%s] Failed to bind slave ports after demotion\n",
-                        service_type_to_string(type_));
-            return false;
-        }
-
-        down_in_listen_sock_ = create_listen_socket(ports_.down_in);
-        down_out_listen_sock_ = create_listen_socket(ports_.down_out);
-
-        bool registered = false;
-        for (int retry = 0; retry < DEMOTION_REGISTER_RETRIES; ++retry) {
-            if (register_with_master()) {
-                registered = true;
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(
-                DEMOTION_REGISTER_BACKOFF_MS * (1 << retry)));
-        }
-        if (!registered) {
-            std::fprintf(stderr, "[%s] Failed to register with master after %d retries\n",
-                        service_type_to_string(type_), DEMOTION_REGISTER_RETRIES);
-        }
-
-        master_heartbeat_failures_ = 0;
-
-        std::fprintf(stderr, "[%s] Demoted to slave (ports %u/%u)\n",
-                    service_type_to_string(type_), ports_.neg_in, ports_.neg_out);
-        return true;
-    }
-
-    void notify_neighbors_of_crash(ServiceType crashed_type) {
-        ServiceType up = upstream_of(crashed_type);
-        ServiceType down = downstream_of(crashed_type);
-
-        std::string msg = "SERVICE_CRASHED " + std::to_string(static_cast<int>(crashed_type));
-
-        auto send_crash_notification = [&](ServiceType target) {
-            uint16_t port = 0;
-            if (target == type_) {
-                if (call_end_handler_) {}
-                return;
-            }
-            {
-                std::lock_guard<std::mutex> lock(registry_mutex_);
-                auto it = service_registry_.find(target);
-                if (it != service_registry_.end()) {
-                    port = it->second.neg_in;
-                }
-            }
-            if (port > 0) {
-                int sock = connect_to_port("127.0.0.1", port);
-                if (sock >= 0) {
-                    send_all(sock, msg.c_str(), msg.size());
-                    close(sock);
-                }
-            }
-        };
-
-        send_crash_notification(up);
-        send_crash_notification(down);
-    }
-
-    void reconnect_loop() {
+    // Continuously try to connect to downstream neighbor.
+    void downstream_connect_loop() {
         if (!is_pipeline_service(type_)) return;
 
         while (running_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(RECONNECT_POLL_INTERVAL_MS));
-            if (!running_) break;
-
-            ConnectionState us;
+            ConnectionState ds;
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);
-                us = upstream_state_;
+                ds = downstream_state_;
             }
 
-            if (us == ConnectionState::DISCONNECTED || us == ConnectionState::FAILED) {
+            if (ds == ConnectionState::DISCONNECTED || ds == ConnectionState::FAILED) {
                 connect_to_downstream();
+            } else {
+                {
+                    std::lock_guard<std::mutex> lock(downstream_mutex_);
+                    bool dead = false;
+                    if (downstream_data_sock_ >= 0 && is_socket_dead(downstream_data_sock_)) {
+                        std::fprintf(stderr, "[%s] Downstream data connection lost\n",
+                                    service_type_to_string(type_));
+                        close_socket(downstream_data_sock_);
+                        close_socket(downstream_mgmt_sock_);
+                        dead = true;
+                    }
+                    if (downstream_mgmt_sock_ >= 0 && is_socket_dead(downstream_mgmt_sock_)) {
+                        std::fprintf(stderr, "[%s] Downstream mgmt connection lost\n",
+                                    service_type_to_string(type_));
+                        close_socket(downstream_mgmt_sock_);
+                        close_socket(downstream_data_sock_);
+                        dead = true;
+                    }
+                    if (dead) {
+                        std::lock_guard<std::mutex> sl(state_mutex_);
+                        downstream_state_ = ConnectionState::DISCONNECTED;
+                    }
+                }
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(DOWNSTREAM_RECONNECT_MS));
+        }
+    }
+
+    // Receive management messages from upstream neighbor.
+    void mgmt_recv_loop() {
+        while (running_) {
+            int sock;
+            {
+                std::lock_guard<std::mutex> lock(upstream_mutex_);
+                sock = upstream_mgmt_accepted_;
+            }
+            if (sock < 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            pollfd pfd = {sock, POLLIN, 0};
+            int pr = poll(&pfd, 1, 100);
+            if (pr <= 0) continue;
+            if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+                mark_upstream_failed();
+                continue;
+            }
+
+            uint8_t type_byte;
+            ssize_t n = recv(sock, &type_byte, 1, MSG_PEEK);
+            if (n <= 0) {
+                if (n == 0) mark_upstream_failed();
+                continue;
+            }
+
+            if (!recv_exact(sock, &type_byte, 1, 500)) {
+                continue;
+            }
+
+            MgmtMsgType msg_type = static_cast<MgmtMsgType>(type_byte);
+
+            switch (msg_type) {
+                case MgmtMsgType::CALL_END: {
+                    uint32_t net_cid;
+                    if (recv_exact(sock, &net_cid, 4, 500)) {
+                        uint32_t cid = ntohl(net_cid);
+                        handle_remote_call_end(cid);
+                    }
+                    break;
+                }
+                case MgmtMsgType::SPEECH_ACTIVE:
+                case MgmtMsgType::SPEECH_IDLE: {
+                    uint32_t net_cid;
+                    if (recv_exact(sock, &net_cid, 4, 500)) {
+                        uint32_t cid = ntohl(net_cid);
+                        bool active = (msg_type == MgmtMsgType::SPEECH_ACTIVE);
+                        {
+                            std::lock_guard<std::mutex> lock(speech_mutex_);
+                            if (active) speech_active_calls_.insert(cid);
+                            else speech_active_calls_.erase(cid);
+                        }
+                        if (speech_signal_handler_) {
+                            speech_signal_handler_(cid, active);
+                        }
+                        // Forward downstream
+                        send_mgmt_to_downstream(msg_type, cid);
+                    }
+                    break;
+                }
+                case MgmtMsgType::PING: {
+                    uint8_t pong = static_cast<uint8_t>(MgmtMsgType::PONG);
+                    std::lock_guard<std::mutex> lock(send_upstream_mgmt_mutex_);
+                    send_all_with_timeout(sock, &pong, 1, 100);
+                    break;
+                }
+                case MgmtMsgType::PONG:
+                    break;
+                case MgmtMsgType::CUSTOM: {
+                    uint16_t net_len;
+                    if (!recv_exact(sock, &net_len, 2, 500)) break;
+                    uint16_t len = ntohs(net_len);
+                    if (len == 0 || len > 65535) break;
+                    std::string msg(len, '\0');
+                    if (!recv_exact(sock, msg.data(), len, 2000)) break;
+
+                    std::string response;
+                    if (custom_handler_) {
+                        response = custom_handler_(msg);
+                    }
+
+                    // Send response back
+                    uint8_t resp_buf[3 + 65535];
+                    resp_buf[0] = static_cast<uint8_t>(MgmtMsgType::CUSTOM);
+                    uint16_t resp_len = static_cast<uint16_t>(std::min(response.size(), (size_t)65535));
+                    uint16_t net_resp_len = htons(resp_len);
+                    memcpy(resp_buf + 1, &net_resp_len, 2);
+                    if (resp_len > 0) memcpy(resp_buf + 3, response.data(), resp_len);
+                    {
+                        std::lock_guard<std::mutex> lock(send_upstream_mgmt_mutex_);
+                        send_all_with_timeout(sock, resp_buf, 3 + resp_len, 2000);
+                    }
+                    break;
+                }
+                default:
+                    break;
             }
         }
+    }
+
+    void handle_remote_call_end(uint32_t call_id) {
+        bool already_ended = false;
+        {
+            std::lock_guard<std::mutex> lock(call_id_mutex_);
+            if (ended_call_ids_.count(call_id) > 0) already_ended = true;
+            ended_call_ids_.insert(call_id);
+            active_call_ids_.erase(call_id);
+        }
+
+        if (!already_ended && call_end_handler_) {
+            call_end_handler_(call_id);
+        }
+
+        // Forward call_end downstream
+        send_mgmt_to_downstream(MgmtMsgType::CALL_END, call_id);
+    }
+
+    // Send a management message (type + 4-byte call_id) to downstream mgmt channel.
+    void send_mgmt_to_downstream(MgmtMsgType msg_type, uint32_t call_id) {
+        int sock;
+        {
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            sock = downstream_mgmt_sock_;
+        }
+        if (sock < 0) return;
+
+        uint8_t buf[5];
+        buf[0] = static_cast<uint8_t>(msg_type);
+        uint32_t net_cid = htonl(call_id);
+        memcpy(buf + 1, &net_cid, 4);
+
+        std::lock_guard<std::mutex> lock(send_downstream_mgmt_mutex_);
+        if (!send_all_with_timeout(sock, buf, 5, 100)) {
+            // Don't mark failed for mgmt send failure — data channel matters more
+        }
+    }
+
+    void mark_upstream_failed() {
+        {
+            std::lock_guard<std::mutex> lock(upstream_mutex_);
+            close_socket(upstream_mgmt_accepted_);
+            close_socket(upstream_data_accepted_);
+        }
+        std::lock_guard<std::mutex> sl(state_mutex_);
+        upstream_state_ = ConnectionState::DISCONNECTED;
+    }
+
+    void mark_downstream_failed() {
+        {
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            close_socket(downstream_mgmt_sock_);
+            close_socket(downstream_data_sock_);
+        }
+        std::lock_guard<std::mutex> sl(state_mutex_);
+        downstream_state_ = ConnectionState::DISCONNECTED;
     }
 
     bool is_socket_dead(int fd) {
@@ -1704,52 +973,6 @@ private:
         return false;
     }
 
-    void check_traffic_connections() {
-        bool upstream_dead = false;
-        bool downstream_dead = false;
-
-        {
-            std::lock_guard<std::mutex> lock(traffic_mutex_);
-            if (up_out_sock_ >= 0 && is_socket_dead(up_out_sock_)) {
-                close_socket(up_out_sock_);
-                close_socket(up_in_sock_);
-                upstream_dead = true;
-            }
-
-            if (down_in_accepted_ >= 0 && is_socket_dead(down_in_accepted_)) {
-                close_socket(down_in_accepted_);
-                close_socket(down_out_accepted_);
-                downstream_dead = true;
-            }
-        }
-
-        if (upstream_dead || downstream_dead) {
-            std::lock_guard<std::mutex> sl(state_mutex_);
-            if (upstream_dead) upstream_state_ = ConnectionState::FAILED;
-            if (downstream_dead) downstream_state_ = ConnectionState::DISCONNECTED;
-        }
-    }
-
-    void mark_upstream_failed() {
-        {
-            std::lock_guard<std::mutex> lock(traffic_mutex_);
-            close_socket(up_out_sock_);
-            close_socket(up_in_sock_);
-        }
-        std::lock_guard<std::mutex> sl(state_mutex_);
-        upstream_state_ = ConnectionState::FAILED;
-    }
-
-    void mark_downstream_failed() {
-        {
-            std::lock_guard<std::mutex> lock(traffic_mutex_);
-            close_socket(down_in_accepted_);
-            close_socket(down_out_accepted_);
-        }
-        std::lock_guard<std::mutex> sl(state_mutex_);
-        downstream_state_ = ConnectionState::DISCONNECTED;
-    }
-
     int create_listen_socket(uint16_t port) {
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) return -1;
@@ -1763,29 +986,12 @@ private:
         addr.sin_port = htons(port);
 
         if (bind(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
-            close(sock);
+            ::close(sock);
             return -1;
         }
 
-        if (listen(sock, 10) < 0) {
-            close(sock);
-            return -1;
-        }
-
-        return sock;
-    }
-
-    int connect_to_port(const char* host, uint16_t port) {
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) return -1;
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = inet_addr(host);
-        addr.sin_port = htons(port);
-
-        if (connect(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
-            close(sock);
+        if (listen(sock, 4) < 0) {
+            ::close(sock);
             return -1;
         }
 
@@ -1806,7 +1012,7 @@ private:
 
         int ret = connect(sock, (sockaddr*)&addr, sizeof(addr));
         if (ret < 0 && errno != EINPROGRESS) {
-            close(sock);
+            ::close(sock);
             return -1;
         }
 
@@ -1815,13 +1021,11 @@ private:
             return sock;
         }
 
-        pollfd pfd;
-        pfd.fd = sock;
-        pfd.events = POLLOUT;
+        pollfd pfd = {sock, POLLOUT, 0};
         int poll_ret = poll(&pfd, 1, timeout_ms);
 
         if (poll_ret <= 0) {
-            close(sock);
+            ::close(sock);
             return -1;
         }
 
@@ -1829,7 +1033,7 @@ private:
         socklen_t errlen = sizeof(error);
         getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &errlen);
         if (error != 0) {
-            close(sock);
+            ::close(sock);
             return -1;
         }
 
@@ -1844,18 +1048,32 @@ private:
 #endif
         int opt_tcp = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &opt_tcp, sizeof(opt_tcp));
+
+        // Enable TCP keepalive for fast dead-peer detection.
+        int keepalive = 1;
+        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+#ifdef TCP_KEEPIDLE
+        int idle = 2;
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#endif
+#ifdef TCP_KEEPINTVL
+        int intvl = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#ifdef TCP_KEEPCNT
+        int cnt = 2;
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
     }
 
     bool send_all(int sock, const void* data, size_t len) {
         const uint8_t* ptr = static_cast<const uint8_t*>(data);
         size_t sent = 0;
-
         while (sent < len) {
             ssize_t n = send(sock, ptr + sent, len - sent, 0);
             if (n <= 0) return false;
             sent += n;
         }
-
         return true;
     }
 
@@ -1869,9 +1087,7 @@ private:
                 deadline - std::chrono::steady_clock::now()).count();
             if (remaining <= 0) return false;
 
-            pollfd pfd;
-            pfd.fd = sock;
-            pfd.events = POLLOUT;
+            pollfd pfd = {sock, POLLOUT, 0};
             int pr = poll(&pfd, 1, static_cast<int>(remaining));
             if (pr <= 0) return false;
             if (pfd.revents & (POLLERR | POLLHUP)) return false;
@@ -1887,9 +1103,7 @@ private:
     }
 
     ssize_t recv_with_timeout(int sock, void* buf, size_t len, int timeout_ms) {
-        pollfd pfd;
-        pfd.fd = sock;
-        pfd.events = POLLIN;
+        pollfd pfd = {sock, POLLIN, 0};
         int ret = poll(&pfd, 1, timeout_ms);
         if (ret <= 0) return -1;
         if (pfd.revents & POLLERR) return -1;
@@ -1908,9 +1122,7 @@ private:
                 deadline - std::chrono::steady_clock::now()).count();
             if (remaining <= 0) return false;
 
-            pollfd pfd;
-            pfd.fd = sock;
-            pfd.events = POLLIN;
+            pollfd pfd = {sock, POLLIN, 0};
             int pr = poll(&pfd, 1, static_cast<int>(remaining));
             if (pr <= 0) return false;
             if (pfd.revents & POLLERR) return false;
@@ -1956,7 +1168,7 @@ private:
     void close_socket(int& sock) {
         if (sock >= 0) {
             ::shutdown(sock, SHUT_RDWR);
-            close(sock);
+            ::close(sock);
             sock = -1;
         }
     }

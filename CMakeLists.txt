@@ -300,6 +300,12 @@ if(TARGET kokoro-service)
 endif()
 install(TARGETS ${INSTALL_TARGETS} RUNTIME DESTINATION bin)
 
+# 8. Test SIP Provider (runtime tool, not a unit test)
+add_executable(test_sip_provider tests/test_sip_provider.cpp mongoose.c)
+target_link_libraries(test_sip_provider PRIVATE Threads::Threads)
+target_compile_definitions(test_sip_provider PRIVATE MG_ENABLE_PACKED_FS=0)
+set_property(TARGET test_sip_provider PROPERTY CXX_STANDARD 17)
+
 # Tests
 if(BUILD_TESTS)
     add_executable(test_sanity tests/test_sanity.cpp)
@@ -330,11 +336,6 @@ if(BUILD_TESTS)
                 BUILD_RPATH "${TORCH_CMAKE_PREFIX}/../../lib")
         endif()
     endif()
-
-    add_executable(test_sip_provider tests/test_sip_provider.cpp mongoose.c)
-    target_link_libraries(test_sip_provider PRIVATE Threads::Threads)
-    target_compile_definitions(test_sip_provider PRIVATE MG_ENABLE_PACKED_FS=0)
-    set_property(TARGET test_sip_provider PROPERTY CXX_STANDARD 17)
 
     add_executable(test_sip_provider_unit tests/test_sip_provider_unit.cpp)
     target_link_libraries(test_sip_provider_unit PRIVATE GTest::gtest_main Threads::Threads)

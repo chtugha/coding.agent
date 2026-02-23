@@ -203,6 +203,43 @@ Implement transcription accuracy benchmarking against ground truth and VAD tunin
 
 ---
 
+### [x] Phase 4b: Interconnect Architecture Redesign
+<!-- chat-id: new-task-ae38 -->
+
+Complete rewrite of interconnect.h from master/slave to peer-to-peer architecture.
+
+**Deliverables:**
+- ✓ Peer-to-peer interconnect (no master/slave)
+- ✓ Fixed port assignment per service (deterministic)
+- ✓ Separate mgmt + data TCP channels
+- ✓ TCP keepalive for crash detection (no heartbeats)
+- ✓ Command port for frontend-to-service text commands
+- ✓ All services updated for new API
+- ✓ Frontend service status via PID tracking (not interconnect registry)
+- ✓ Test suite rewritten for new architecture
+
+**Changes:**
+- [x] Rewrote interconnect.h: 2014 → ~1224 lines, eliminated master/slave election, heartbeat threads, centralized registry
+- [x] Fixed port map: SIP=13100, IAP=13110, Whisper=13120, LLaMA=13130, Kokoro=13140, OAP=13150, Frontend=13160
+- [x] Added command port (base+2) for frontend text protocol commands
+- [x] SIP Client: added command_listener_loop on port 13102
+- [x] Frontend: replaced is_service_alive() with PID-based is_service_running()
+- [x] Removed all interconnect_.unregister_service(), is_service_alive(), is_master() usage
+- [x] Cleaned up old API stubs (PortConfig, query_service_ports, connect_to_master)
+- [x] Updated all service init messages from "master=..." to "peer-to-peer"
+- [x] Moved test_sip_provider out of BUILD_TESTS block in CMakeLists.txt (it's a runtime tool)
+- [x] Rewrote test_interconnect.cpp: 22 tests covering ports, topology, connection, packets, mgmt messages, reconnection, multi-hop pipeline
+
+**Verification:**
+- ✓ All binaries compile: frontend, sip-client, IAP, whisper-service, OAP, kokoro-service, test_sip_provider
+- ✓ llama-service has pre-existing llama.h missing issue (not related to interconnect)
+- ✓ Playwright: 17/17 tests pass (frontend load, status API, services API, start/stop services, test files, beta testing page)
+- ✓ Status API returns `"architecture":"peer-to-peer"` instead of `"is_master":...`
+- ✓ Service start/stop works correctly via frontend API
+- ✓ IAP codec quality test works: SNR=5.41dB, THD=53.64%, PASS
+
+---
+
 ### [ ] Phase 5: Whisper Model Benchmarking
 <!-- chat-id: 130dff27-6bc5-49d9-9851-98635a661723 -->
 
