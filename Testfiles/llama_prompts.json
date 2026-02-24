@@ -1,0 +1,72 @@
+[
+  {
+    "id": 1,
+    "prompt": "Was ist die Hauptstadt von Deutschland?",
+    "expected_keywords": ["Berlin"],
+    "category": "factual",
+    "max_words": 15
+  },
+  {
+    "id": 2,
+    "prompt": "Wie ist das Wetter heute?",
+    "expected_keywords": ["Wetter", "weiß", "Auskunft", "leider"],
+    "category": "conversational",
+    "max_words": 20
+  },
+  {
+    "id": 3,
+    "prompt": "Kannst du mir ein gutes Restaurant empfehlen?",
+    "expected_keywords": ["Restaurant", "empfehlen", "gerne"],
+    "category": "recommendation",
+    "max_words": 25
+  },
+  {
+    "id": 4,
+    "prompt": "Wie spät ist es?",
+    "expected_keywords": ["Uhr", "Zeit", "leider"],
+    "category": "conversational",
+    "max_words": 15
+  },
+  {
+    "id": 5,
+    "prompt": "Erzähl mir einen kurzen Witz.",
+    "expected_keywords": [],
+    "category": "creative",
+    "max_words": 30
+  },
+  {
+    "id": 6,
+    "prompt": "Was bedeutet das Wort Gemütlichkeit?",
+    "expected_keywords": ["Gemütlichkeit", "Behaglichkeit", "Wohlfühlen", "gemütlich"],
+    "category": "factual",
+    "max_words": 25
+  },
+  {
+    "id": 7,
+    "prompt": "Bitte verbinde mich mit dem Kundendienst.",
+    "expected_keywords": ["Kundendienst", "verbinde", "weiterleiten", "Moment"],
+    "category": "task",
+    "max_words": 20
+  },
+  {
+    "id": 8,
+    "prompt": "Ich habe ein Problem mit meiner Bestellung.",
+    "expected_keywords": ["Problem", "Bestellung", "helfen", "Nummer"],
+    "category": "support",
+    "max_words": 25
+  },
+  {
+    "id": 9,
+    "prompt": "Danke für deine Hilfe, auf Wiedersehen!",
+    "expected_keywords": ["Wiedersehen", "gerne", "schönen"],
+    "category": "farewell",
+    "max_words": 15
+  },
+  {
+    "id": 10,
+    "prompt": "Nenne mir drei Sehenswürdigkeiten in München.",
+    "expected_keywords": ["München", "Marienplatz", "Frauenkirche", "Hofbräuhaus", "Englischer Garten"],
+    "category": "factual",
+    "max_words": 30
+  }
+]

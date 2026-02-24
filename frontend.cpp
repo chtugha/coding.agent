@@ -367,14 +367,23 @@ private:
             CREATE TABLE IF NOT EXISTS model_benchmark_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 model_id INTEGER,
+                model_name TEXT,
+                model_type TEXT DEFAULT 'whisper',
+                backend TEXT,
                 test_files TEXT,
                 iterations INTEGER,
+                files_tested INTEGER,
                 avg_accuracy REAL,
                 avg_latency_ms INTEGER,
                 p50_latency_ms INTEGER,
                 p95_latency_ms INTEGER,
                 p99_latency_ms INTEGER,
                 memory_mb INTEGER,
+                pass_count INTEGER DEFAULT 0,
+                fail_count INTEGER DEFAULT 0,
+                avg_tokens REAL,
+                interrupt_latency_ms REAL,
+                german_pct REAL,
                 timestamp INTEGER,
                 FOREIGN KEY(model_id) REFERENCES models(id)
             );
@@ -415,6 +424,22 @@ private:
         if (rc != SQLITE_OK) {
             std::cerr << "SQL error: " << errmsg << "\n";
             sqlite3_free(errmsg);
+        }
+
+        const char* migrations[] = {
+            "ALTER TABLE model_benchmark_runs ADD COLUMN model_name TEXT",
+            "ALTER TABLE model_benchmark_runs ADD COLUMN model_type TEXT DEFAULT 'whisper'",
+            "ALTER TABLE model_benchmark_runs ADD COLUMN backend TEXT",
+            "ALTER TABLE model_benchmark_runs ADD COLUMN files_tested INTEGER",
+            "ALTER TABLE model_benchmark_runs ADD COLUMN pass_count INTEGER DEFAULT 0",
+            "ALTER TABLE model_benchmark_runs ADD COLUMN fail_count INTEGER DEFAULT 0",
+            "ALTER TABLE model_benchmark_runs ADD COLUMN avg_tokens REAL",
+            "ALTER TABLE model_benchmark_runs ADD COLUMN interrupt_latency_ms REAL",
+            "ALTER TABLE model_benchmark_runs ADD COLUMN german_pct REAL",
+            nullptr
+        };
+        for (int i = 0; migrations[i]; i++) {
+            sqlite3_exec(db_, migrations[i], nullptr, nullptr, nullptr);
         }
 
         const char* seed = R"(
@@ -1075,6 +1100,14 @@ private:
                 handle_models_add(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/benchmark")) == 0) {
                 handle_whisper_benchmark(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/llama/prompts")) == 0) {
+                handle_llama_prompts(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/llama/quality_test")) == 0) {
+                handle_llama_quality_test(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/llama/shutup_test")) == 0) {
+                handle_llama_shutup_test(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/llama/benchmark")) == 0) {
+                handle_llama_benchmark(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
                 handle_async_status(c, hm);
             } else {
@@ -1572,6 +1605,30 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 
 <div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Test 4: LLaMA Response Quality</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Send test prompts directly to LLaMA service and evaluate response quality.
+  Requires: LLaMA service running. Does not require full pipeline.
+</p>
+<div class="wt-field">
+<label>Test Prompts</label>
+<select class="wt-select" id="llamaTestPrompts" multiple style="width:100%;padding:8px;height:100px">
+</select>
+</div>
+<div class="wt-field">
+<label>Custom Prompt (optional)</label>
+<input class="wt-input" id="llamaCustomPrompt" placeholder="Type a custom German prompt...">
+</div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button class="wt-btn wt-btn-primary" onclick="runLlamaQualityTest()">&#x25B6; Run Quality Test</button>
+<button class="wt-btn wt-btn-secondary" onclick="runLlamaShutupTest()">&#x1F910; Shut-up Test</button>
+</div>
+<div id="llamaTestStatus" style="margin-top:8px;font-size:12px"></div>
+<div id="llamaTestResults" style="margin-top:12px"></div>
+<div id="llamaShutupResult" style="margin-top:8px"></div>
+</div>
+
+<div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Test SIP Provider Status</span></div>
 <div id="sipProviderStatus">
 <p style="font-size:13px;color:var(--wt-text-secondary)">Check if test_sip_provider is running...</p>
@@ -1706,6 +1763,32 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <button class="wt-btn wt-btn-primary" onclick="addLlamaModel()">+ Register Model</button>
 <div id="addLlamaModelStatus" style="margin-top:8px;font-size:12px"></div>
 </div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Run LLaMA Benchmark</span></div>
+<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end;margin-bottom:8px">
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Model</label>
+    <select class="wt-select" id="llamaBenchmarkModelId"><option value="">-- select model --</option></select>
+  </div>
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Iterations (per prompt)</label>
+    <select class="wt-select" id="llamaBenchmarkIterations">
+      <option value="1">1 pass</option>
+      <option value="2">2 passes</option>
+      <option value="3">3 passes</option>
+    </select>
+  </div>
+  <button class="wt-btn wt-btn-primary" onclick="runLlamaBenchmark()" id="llamaBenchmarkRunBtn">&#x25B6; Run Benchmark</button>
+</div>
+<div style="font-size:12px;color:var(--wt-text-muted);margin-bottom:8px">
+  Sends all test prompts to LLaMA service and measures response quality, latency, and German compliance.
+  Requires: LLaMA service running.
+</div>
+<div id="llamaBenchmarkStatus"></div>
+<div id="llamaBenchmarkResults" style="margin-top:12px"></div>
+</div>
+
 </div><!-- end modelTabLlama -->
 
 <!-- Comparison Panel -->
@@ -1746,7 +1829,7 @@ function showPage(p){
   currentPage=p;
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
-  if(p==='beta-testing'){refreshTestFiles();loadVadConfig();}
+  if(p==='beta-testing'){refreshTestFiles();loadVadConfig();loadLlamaPrompts();}
   if(p==='models'){loadModels();loadModelComparison();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
@@ -2176,6 +2259,79 @@ function injectAudio(){
     }).catch(e=>{
       status.innerHTML='<span style="color:var(--wt-danger)">✗ Error: Test SIP Provider not reachable (is it running on port '+TSP_PORT+'?)</span>';
     });
+}
+
+var llamaPrompts=[];
+function loadLlamaPrompts(){
+  fetch('/api/llama/prompts').then(r=>r.json()).then(d=>{
+    llamaPrompts=d.prompts||[];
+    var sel=document.getElementById('llamaTestPrompts');
+    if(!sel) return;
+    sel.innerHTML='';
+    llamaPrompts.forEach(function(p){
+      var opt=document.createElement('option');
+      opt.value=p.id;
+      opt.textContent='['+p.category+'] '+p.prompt;
+      opt.selected=true;
+      sel.appendChild(opt);
+    });
+  }).catch(function(){});
+}
+
+function runLlamaQualityTest(){
+  var status=document.getElementById('llamaTestStatus');
+  var results=document.getElementById('llamaTestResults');
+  var sel=document.getElementById('llamaTestPrompts');
+  var custom=document.getElementById('llamaCustomPrompt').value.trim();
+  var selectedIds=Array.from(sel.selectedOptions).map(function(o){return parseInt(o.value);});
+  var prompts=llamaPrompts.filter(function(p){return selectedIds.indexOf(p.id)>=0;});
+  if(custom){prompts.push({id:0,prompt:custom,expected_keywords:[],category:'custom',max_words:30});}
+  if(prompts.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one prompt or enter a custom prompt.</span>';return;}
+  status.innerHTML='<span style="color:var(--wt-accent)">Running quality test ('+prompts.length+' prompts)...</span>';
+  results.innerHTML='';
+  fetch('/api/llama/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts:prompts})})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
+      status.innerHTML='<span style="color:var(--wt-success)">Quality test complete — '+d.results.length+' prompts tested.</span>';
+      var html='<table class="wt-table"><tr><th>Prompt</th><th>Response</th><th>Latency</th><th>Words</th><th>Keywords</th><th>German</th><th>Score</th></tr>';
+      d.results.forEach(function(r){
+        var scoreColor=r.score>=80?'var(--wt-success)':r.score>=50?'var(--wt-warning)':'var(--wt-danger)';
+        html+='<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.prompt)+'</td>';
+        html+='<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.response)+'</td>';
+        html+='<td>'+r.latency_ms+'ms</td>';
+        html+='<td>'+r.word_count+(r.word_count>r.max_words?' <span style="color:var(--wt-danger)">!</span>':'')+'</td>';
+        html+='<td>'+r.keywords_found+'/'+r.keywords_total+'</td>';
+        html+='<td>'+(r.is_german?'<span style="color:var(--wt-success)">Ja</span>':'<span style="color:var(--wt-danger)">Nein</span>')+'</td>';
+        html+='<td style="color:'+scoreColor+';font-weight:bold">'+r.score+'%</td></tr>';
+      });
+      html+='</table>';
+      if(d.summary){
+        html+='<div style="margin-top:10px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px">';
+        html+='<strong>Summary:</strong> Avg Score: '+d.summary.avg_score+'% | Avg Latency: '+d.summary.avg_latency_ms+'ms | German: '+d.summary.german_pct+'%';
+        html+='</div>';
+      }
+      results.innerHTML=html;
+    }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(e.message)+'</span>';});
+}
+
+function runLlamaShutupTest(){
+  var status=document.getElementById('llamaTestStatus');
+  var result=document.getElementById('llamaShutupResult');
+  status.innerHTML='<span style="color:var(--wt-accent)">Running shut-up test...</span>';
+  result.innerHTML='';
+  fetch('/api/llama/shutup_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:'Erzähl mir eine lange Geschichte über einen Ritter.'})})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
+      status.innerHTML='<span style="color:var(--wt-success)">Shut-up test complete.</span>';
+      var interruptColor=d.interrupt_latency_ms<=100?'var(--wt-success)':d.interrupt_latency_ms<=500?'var(--wt-warning)':'var(--wt-danger)';
+      var html='<div class="wt-card" style="margin:0;padding:10px">';
+      html+='<p><strong>Interrupt latency:</strong> <span style="color:'+interruptColor+';font-weight:bold">'+d.interrupt_latency_ms+'ms</span>';
+      html+=' (target: &lt;500ms)</p>';
+      html+='<p><strong>Total generation time:</strong> '+d.total_ms+'ms</p>';
+      html+='<p><strong>Result:</strong> '+(d.interrupt_latency_ms<=500?'<span style="color:var(--wt-success)">PASS</span>':'<span style="color:var(--wt-danger)">FAIL — too slow</span>')+'</p>';
+      html+='</div>';
+      result.innerHTML=html;
+    }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(e.message)+'</span>';});
 }
 
 function checkSipProvider(){
@@ -2624,6 +2780,8 @@ function loadModels(){
     renderModelsTable('whisperModelsTable','whisper',data.whisper||[]);
     renderModelsTable('llamaModelsTable','llama',data.llama||[]);
     populateBenchmarkModelSelect(data.whisper||[]);
+    var llamaModelsWithType=(data.llama||[]).map(function(m){m.type='llama';return m;});
+    populateLlamaBenchmarkSelect(llamaModelsWithType);
   }).catch(e=>{ console.error('loadModels error',e); });
 }
 
@@ -2820,21 +2978,29 @@ function renderComparisonTable(runs){
   var el=document.getElementById('comparisonTable');
   if(!runs.length){el.innerHTML='<em>No benchmark runs yet.</em>';return;}
   var html='<table class="wt-table"><thead><tr>'
-    +'<th>Model</th><th>Backend</th><th>Accuracy %</th>'
-    +'<th>Avg Latency</th><th>P50</th><th>P95</th><th>P99</th><th>Memory</th><th>Date</th>'
+    +'<th>Model</th><th>Type</th><th>Backend</th><th>Score %</th>'
+    +'<th>Avg Latency</th><th>P50</th><th>P95</th><th>Memory</th><th>Extra</th><th>Date</th>'
     +'</tr></thead><tbody>';
   runs.forEach(r=>{
     var accColor=r.avg_accuracy>=95?'var(--wt-success)':r.avg_accuracy>=80?'var(--wt-warning)':'var(--wt-danger)';
     var date=new Date(r.timestamp*1000).toLocaleString();
+    var typeLabel=(r.model_type||'whisper').toUpperCase();
+    var extra='';
+    if(r.model_type==='llama'){
+      extra='DE:'+((r.german_pct||0).toFixed(0))+'% Int:'+(r.interrupt_latency_ms||0).toFixed(0)+'ms';
+    } else {
+      extra='P:'+(r.pass_count||0)+' F:'+(r.fail_count||0);
+    }
     html+='<tr>'
       +'<td><strong>'+escapeHtml(r.model_name)+'</strong></td>'
+      +'<td><span style="font-size:10px;padding:2px 6px;border-radius:3px;background:'+(r.model_type==='llama'?'#7c3aed':'#2563eb')+';color:#fff">'+typeLabel+'</span></td>'
       +'<td>'+escapeHtml(r.backend)+'</td>'
       +'<td style="color:'+accColor+';font-weight:700">'+r.avg_accuracy.toFixed(1)+'%</td>'
       +'<td>'+r.avg_latency_ms+'ms</td>'
       +'<td>'+r.p50_latency_ms+'ms</td>'
       +'<td>'+r.p95_latency_ms+'ms</td>'
-      +'<td>'+r.p99_latency_ms+'ms</td>'
       +'<td>'+r.memory_mb+'MB</td>'
+      +'<td style="font-size:11px">'+extra+'</td>'
       +'<td style="font-size:11px">'+date+'</td>'
       +'</tr>';
   });
@@ -2875,6 +3041,88 @@ function renderComparisonChart(runs){
       }
     }
   });
+}
+
+var llamaBenchmarkPollInterval=null;
+
+function populateLlamaBenchmarkSelect(models){
+  var sel=document.getElementById('llamaBenchmarkModelId');
+  if(!sel) return;
+  var cur=sel.value;
+  sel.innerHTML='<option value="">-- select model --</option>';
+  models.filter(function(m){return m.type==='llama';}).forEach(function(m){
+    var opt=document.createElement('option');
+    opt.value=m.id;
+    opt.textContent=m.name+' ('+m.backend+')';
+    sel.appendChild(opt);
+  });
+  if(cur) sel.value=cur;
+}
+
+function runLlamaBenchmark(){
+  if(llamaBenchmarkPollInterval){clearInterval(llamaBenchmarkPollInterval);llamaBenchmarkPollInterval=null;}
+  var modelId=document.getElementById('llamaBenchmarkModelId').value;
+  var iterations=parseInt(document.getElementById('llamaBenchmarkIterations').value)||1;
+  if(!modelId){alert('Please select a LLaMA model first.');return;}
+  var btn=document.getElementById('llamaBenchmarkRunBtn');
+  btn.disabled=true;btn.textContent='Running...';
+  document.getElementById('llamaBenchmarkStatus').innerHTML='<span style="color:var(--wt-accent)">Starting LLaMA benchmark...</span>';
+  document.getElementById('llamaBenchmarkResults').innerHTML='';
+  fetch('/api/llama/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model_id:parseInt(modelId),iterations:iterations})})
+  .then(r=>{
+    if(r.status===202) return r.json();
+    return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
+  }).then(d=>{
+    document.getElementById('llamaBenchmarkStatus').innerHTML=
+      '<span style="color:var(--wt-accent)">Benchmark running (task '+d.task_id+')...</span>';
+    llamaBenchmarkPollInterval=setInterval(()=>pollLlamaBenchmarkTask(d.task_id),2000);
+  }).catch(e=>{
+    if(llamaBenchmarkPollInterval){clearInterval(llamaBenchmarkPollInterval);llamaBenchmarkPollInterval=null;}
+    btn.disabled=false;btn.textContent='\u25B6 Run Benchmark';
+    document.getElementById('llamaBenchmarkStatus').innerHTML=
+      '<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+  });
+}
+
+function pollLlamaBenchmarkTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(r=>r.json()).then(d=>{
+    if(d.status==='running') return;
+    clearInterval(llamaBenchmarkPollInterval);
+    var btn=document.getElementById('llamaBenchmarkRunBtn');
+    btn.disabled=false;btn.textContent='\u25B6 Run Benchmark';
+    if(d.error){
+      document.getElementById('llamaBenchmarkStatus').innerHTML=
+        '<span style="color:var(--wt-danger)">Benchmark failed: '+escapeHtml(d.error)+'</span>';
+      return;
+    }
+    document.getElementById('llamaBenchmarkStatus').innerHTML=
+      '<span style="color:var(--wt-success)">\u2713 LLaMA Benchmark complete</span>';
+    renderLlamaBenchmarkResults(d);
+    loadModelComparison();
+  }).catch(e=>console.error('pollLlamaBenchmarkTask',e));
+}
+
+function renderLlamaBenchmarkResults(r){
+  var html='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">'
+    +'<div class="wt-card" style="padding:12px;text-align:center">'
+    +'<div style="font-size:24px;font-weight:700">'+r.avg_score.toFixed(1)+'%</div>'
+    +'<div style="font-size:11px;color:var(--wt-text-muted)">Avg Quality Score</div></div>'
+    +'<div class="wt-card" style="padding:12px;text-align:center">'
+    +'<div style="font-size:24px;font-weight:700">'+r.avg_latency_ms.toFixed(0)+'ms</div>'
+    +'<div style="font-size:11px;color:var(--wt-text-muted)">Avg Latency</div></div>'
+    +'<div class="wt-card" style="padding:12px;text-align:center">'
+    +'<div style="font-size:24px;font-weight:700">'+r.german_pct.toFixed(0)+'%</div>'
+    +'<div style="font-size:11px;color:var(--wt-text-muted)">German Compliance</div></div>'
+    +'<div class="wt-card" style="padding:12px;text-align:center">'
+    +'<div style="font-size:24px;font-weight:700">'+r.avg_tokens.toFixed(1)+'</div>'
+    +'<div style="font-size:11px;color:var(--wt-text-muted)">Avg Words</div></div>'
+    +'</div>'
+    +'<div style="font-size:12px;color:var(--wt-text-muted);margin-top:8px">'
+    +'P50: '+r.p50_latency_ms+'ms &nbsp; P95: '+r.p95_latency_ms+'ms'
+    +' &nbsp;|&nbsp; Interrupt: '+r.interrupt_latency_ms+'ms &nbsp;|&nbsp; Prompts: '+r.prompts_tested
+    +'</div>';
+  document.getElementById('llamaBenchmarkResults').innerHTML=html;
 }
 
 // ===== END MODELS PAGE =====
@@ -4287,6 +4535,44 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return response.substr(body_start + 4);
     }
 
+    std::string tcp_command(int port, const std::string& cmd, std::string& error, int timeout_s = 15) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) { error = "socket() failed"; return ""; }
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        struct timeval tv{timeout_s, 0};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(sock);
+            error = "connect() failed — is service running on port " + std::to_string(port) + "?";
+            return "";
+        }
+
+        if (send(sock, cmd.c_str(), cmd.size(), 0) < 0) {
+            close(sock);
+            error = "send() failed";
+            return "";
+        }
+
+        std::string response;
+        char buf[4096];
+        while (true) {
+            ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+            if (n <= 0) break;
+            response.append(buf, n);
+        }
+        close(sock);
+        while (!response.empty() && (response.back() == '\n' || response.back() == '\r'))
+            response.pop_back();
+        return response;
+    }
+
     struct TranscriptionResult {
         std::string text;
         double whisper_latency_ms = 0.0;
@@ -4439,19 +4725,481 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return rss_kb / 1024;  // Convert KB to MB
     }
 
-    // Whisper Accuracy Test endpoint (POST /api/whisper/accuracy_test).
-    //
-    // Runs a real end-to-end transcription test through the full pipeline:
-    //   1. Injects each selected test file via test_sip_provider (/inject endpoint)
-    //   2. Audio flows: test_sip_provider → SIP Client → IAP → VAD → Whisper Service
-    //   3. Captures Whisper's transcription from the log stream (LogForwarder UDP)
-    //   4. Compares transcription against ground truth text using Levenshtein similarity
-    //
-    // Requires: test_sip_provider, sip-client, inbound-audio-processor, vad-service,
-    //           and whisper-service all running with an active call established.
-    //
-    // Returns per-file results: transcription, similarity %, latency, status (PASS/WARN/FAIL).
-    // PASS >= 95%, WARN >= 80%, FAIL < 80%.
+    void handle_llama_prompts(struct mg_connection *c) {
+        std::string prompts_path = "Testfiles/llama_prompts.json";
+        FILE* fp = fopen(prompts_path.c_str(), "r");
+        if (!fp) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"prompts\":[]}");
+            return;
+        }
+        std::string content;
+        char buf[4096];
+        while (size_t n = fread(buf, 1, sizeof(buf), fp)) content.append(buf, n);
+        fclose(fp);
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"prompts\":%s}", content.c_str());
+    }
+
+    void handle_llama_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
+        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+
+        std::string ping_err;
+        std::string ping_resp = tcp_command(llama_cmd_port, "PING", ping_err, 3);
+        if (ping_resp != "PONG") {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"LLaMA service not reachable (port %d): %s\"}", llama_cmd_port, ping_err.c_str());
+            return;
+        }
+
+        struct mg_str json_body = hm->body;
+        std::string body(json_body.buf, json_body.len);
+
+        struct PromptInfo {
+            int id;
+            std::string prompt;
+            std::vector<std::string> expected_keywords;
+            std::string category;
+            int max_words;
+        };
+        std::vector<PromptInfo> prompts;
+
+        int prompts_len = 0;
+        int prompts_ofs = mg_json_get(json_body, "$.prompts", &prompts_len);
+        if (prompts_ofs >= 0) {
+            struct mg_str arr = mg_str_n(json_body.buf + prompts_ofs, (size_t)prompts_len);
+            struct mg_str key, val;
+            size_t ofs = 0;
+            while ((ofs = mg_json_next(arr, ofs, &key, &val)) > 0) {
+                if (val.len < 2 || val.buf[0] != '{') continue;
+                PromptInfo pi;
+                pi.id = (int)mg_json_get_long(val, "$.id", 0);
+                int plen = 0;
+                int pofs = mg_json_get(val, "$.prompt", &plen);
+                if (pofs >= 0 && plen >= 2) {
+                    char pbuf[1024];
+                    if (mg_json_unescape(mg_str_n(val.buf + pofs + 1, plen - 2), pbuf, sizeof(pbuf)))
+                        pi.prompt = pbuf;
+                }
+                pi.max_words = (int)mg_json_get_long(val, "$.max_words", 30);
+                int clen = 0;
+                int cofs = mg_json_get(val, "$.category", &clen);
+                if (cofs >= 0 && clen >= 2) {
+                    char cbuf[64];
+                    if (mg_json_unescape(mg_str_n(val.buf + cofs + 1, clen - 2), cbuf, sizeof(cbuf)))
+                        pi.category = cbuf;
+                }
+                int klen = 0;
+                int kofs = mg_json_get(val, "$.expected_keywords", &klen);
+                if (kofs >= 0) {
+                    struct mg_str karr = mg_str_n(val.buf + kofs, (size_t)klen);
+                    struct mg_str kk, kv;
+                    size_t ko = 0;
+                    while ((ko = mg_json_next(karr, ko, &kk, &kv)) > 0) {
+                        if (kv.len >= 2 && kv.buf[0] == '"') {
+                            char kbuf[256];
+                            if (mg_json_unescape(mg_str_n(kv.buf + 1, kv.len - 2), kbuf, sizeof(kbuf)))
+                                pi.expected_keywords.push_back(kbuf);
+                        }
+                    }
+                }
+                if (!pi.prompt.empty()) prompts.push_back(pi);
+            }
+        }
+
+        if (prompts.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"No prompts provided\"}");
+            return;
+        }
+
+        std::string results_json = "[";
+        double total_score = 0, total_latency = 0;
+        int german_count = 0;
+
+        for (size_t i = 0; i < prompts.size(); i++) {
+            const auto& p = prompts[i];
+            std::string cmd = "TEST_PROMPT:" + p.prompt;
+            std::string err;
+            std::string resp = tcp_command(llama_cmd_port, cmd, err, 15);
+
+            std::string response_text;
+            double latency_ms = 0;
+            if (resp.rfind("RESPONSE:", 0) == 0) {
+                size_t ms_end = resp.find("ms:", 9);
+                if (ms_end != std::string::npos) {
+                    latency_ms = std::stod(resp.substr(9, ms_end - 9));
+                    response_text = resp.substr(ms_end + 3);
+                }
+            } else {
+                response_text = "(no response)";
+            }
+
+            int word_count = 0;
+            {
+                bool in_word = false;
+                for (char ch : response_text) {
+                    if (ch == ' ' || ch == '\n' || ch == '\t') { in_word = false; }
+                    else if (!in_word) { in_word = true; word_count++; }
+                }
+            }
+
+            int keywords_found = 0;
+            for (const auto& kw : p.expected_keywords) {
+                std::string lower_resp = response_text;
+                std::string lower_kw = kw;
+                for (auto& ch : lower_resp) ch = tolower((unsigned char)ch);
+                for (auto& ch : lower_kw) ch = tolower((unsigned char)ch);
+                if (lower_resp.find(lower_kw) != std::string::npos) keywords_found++;
+            }
+
+            bool is_german = false;
+            {
+                const char* german_markers[] = {"ich", "der", "die", "das", "ist", "ein", "und",
+                    "für", "mit", "auf", "den", "dem", "des", "von", "als", "auch", "nicht",
+                    "sich", "wie", "kann", "gerne", "bitte", "danke", "ja", "nein"};
+                std::string lower_resp = response_text;
+                for (auto& ch : lower_resp) ch = tolower((unsigned char)ch);
+                int german_hits = 0;
+                for (const auto* marker : german_markers) {
+                    if (lower_resp.find(marker) != std::string::npos) german_hits++;
+                }
+                is_german = german_hits >= 2;
+            }
+
+            double score = 0;
+            double keyword_pct = p.expected_keywords.empty() ? 100.0 :
+                (keywords_found * 100.0 / p.expected_keywords.size());
+            double brevity_score = (word_count <= p.max_words) ? 100.0 :
+                std::max(0.0, 100.0 - (word_count - p.max_words) * 5.0);
+            double german_score = is_german ? 100.0 : 0.0;
+            score = keyword_pct * 0.4 + brevity_score * 0.3 + german_score * 0.3;
+
+            total_score += score;
+            total_latency += latency_ms;
+            if (is_german) german_count++;
+
+            if (i > 0) results_json += ",";
+            results_json += "{\"prompt\":\"" + escape_json(p.prompt)
+                + "\",\"response\":\"" + escape_json(response_text)
+                + "\",\"latency_ms\":" + std::to_string((int)latency_ms)
+                + ",\"word_count\":" + std::to_string(word_count)
+                + ",\"max_words\":" + std::to_string(p.max_words)
+                + ",\"keywords_found\":" + std::to_string(keywords_found)
+                + ",\"keywords_total\":" + std::to_string((int)p.expected_keywords.size())
+                + ",\"is_german\":" + (is_german ? "true" : "false")
+                + ",\"score\":" + std::to_string((int)score) + "}";
+
+            if (db_) {
+                const char* sql = "INSERT INTO test_results (test_name,service,status,details,timestamp) "
+                    "VALUES ('llama_quality',?1,?2,?3,strftime('%s','now'))";
+                sqlite3_stmt* stmt = nullptr;
+                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(stmt, 1, "llama", -1, SQLITE_STATIC);
+                    std::string status_str = score >= 80 ? "pass" : score >= 50 ? "warn" : "fail";
+                    sqlite3_bind_text(stmt, 2, status_str.c_str(), -1, SQLITE_TRANSIENT);
+                    std::string details = p.prompt + " → " + response_text + " (" + std::to_string((int)latency_ms) + "ms, score:" + std::to_string((int)score) + "%)";
+                    sqlite3_bind_text(stmt, 3, details.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
+            }
+        }
+        results_json += "]";
+
+        double avg_score = prompts.empty() ? 0 : total_score / prompts.size();
+        double avg_latency = prompts.empty() ? 0 : total_latency / prompts.size();
+        double german_pct = prompts.empty() ? 0 : (german_count * 100.0 / prompts.size());
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"results\":%s,\"summary\":{\"avg_score\":%.1f,\"avg_latency_ms\":%.0f,\"german_pct\":%.0f}}",
+            results_json.c_str(), avg_score, avg_latency, german_pct);
+    }
+
+    void handle_llama_shutup_test(struct mg_connection *c, struct mg_http_message *hm) {
+        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+
+        struct mg_str json_body = hm->body;
+        int plen = 0;
+        int pofs = mg_json_get(json_body, "$.prompt", &plen);
+        std::string prompt = "Erzähl mir eine lange Geschichte über einen Ritter.";
+        if (pofs >= 0 && plen >= 2) {
+            char pbuf[1024];
+            if (mg_json_unescape(mg_str_n(json_body.buf + pofs + 1, plen - 2), pbuf, sizeof(pbuf)))
+                prompt = pbuf;
+        }
+
+        std::string cmd = "SHUTUP_TEST:" + prompt;
+        std::string err;
+        std::string resp = tcp_command(llama_cmd_port, cmd, err, 15);
+
+        if (resp.empty()) {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"LLaMA service not reachable: %s\"}", err.c_str());
+            return;
+        }
+
+        double interrupt_ms = 0, total_ms = 0;
+        if (resp.rfind("SHUTUP_RESULT:", 0) == 0) {
+            size_t p1 = resp.find("ms:", 14);
+            if (p1 != std::string::npos) {
+                interrupt_ms = std::stod(resp.substr(14, p1 - 14));
+                size_t p2 = resp.find("ms", p1 + 3);
+                if (p2 != std::string::npos) {
+                    total_ms = std::stod(resp.substr(p1 + 3, p2 - (p1 + 3)));
+                }
+            }
+        }
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"interrupt_latency_ms\":%.0f,\"total_ms\":%.0f}", interrupt_ms, total_ms);
+    }
+
+    void handle_llama_benchmark(struct mg_connection *c, struct mg_http_message *hm) {
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
+            return;
+        }
+
+        struct mg_str json_body = hm->body;
+        int model_id = (int)mg_json_get_long(json_body, "$.model_id", 0);
+        int iterations = (int)mg_json_get_long(json_body, "$.iterations", 1);
+        if (model_id == 0) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing model_id\"}");
+            return;
+        }
+        if (iterations < 1) iterations = 1;
+        if (iterations > 10) iterations = 10;
+
+        std::string model_name, model_path, model_backend;
+        {
+            const char* sql = "SELECT name, path, backend FROM models WHERE id=? AND service='llama'";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int(stmt, 1, model_id);
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    model_name = (const char*)sqlite3_column_text(stmt, 0);
+                    model_path = (const char*)sqlite3_column_text(stmt, 1);
+                    model_backend = (const char*)sqlite3_column_text(stmt, 2);
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+        if (model_name.empty()) {
+            mg_http_reply(c, 404, "Content-Type: application/json\r\n", "{\"error\":\"LLaMA model not found\"}");
+            return;
+        }
+
+        int64_t task_id = create_async_task("llama_benchmark");
+
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_llama_benchmark_async_wrapper, this,
+                task_id, model_id, model_name, model_path, model_backend, iterations);
+        }
+
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_llama_benchmark_async_wrapper(int64_t task_id, int model_id,
+            std::string model_name, std::string model_path, std::string model_backend, int iterations) {
+        std::string result = run_llama_benchmark_async(model_id, model_name, model_path, model_backend, iterations);
+        finish_async_task(task_id, result);
+    }
+
+    std::string run_llama_benchmark_async(int model_id, const std::string& model_name,
+            const std::string& model_path, const std::string& model_backend, int iterations) {
+        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+
+        std::string ping_err;
+        std::string ping_resp = tcp_command(llama_cmd_port, "PING", ping_err, 3);
+        if (ping_resp != "PONG") {
+            return "{\"error\":\"LLaMA service not reachable\"}";
+        }
+
+        std::string prompts_path = "Testfiles/llama_prompts.json";
+        FILE* fp = fopen(prompts_path.c_str(), "r");
+        if (!fp) return "{\"error\":\"Test prompts file not found\"}";
+        std::string content;
+        char buf[4096];
+        while (size_t n = fread(buf, 1, sizeof(buf), fp)) content.append(buf, n);
+        fclose(fp);
+
+        struct PromptEntry {
+            std::string prompt;
+            std::vector<std::string> keywords;
+            int max_words;
+        };
+        std::vector<PromptEntry> prompts;
+
+        struct mg_str jbody = mg_str(content.c_str());
+        struct mg_str key, val;
+        size_t ofs = 0;
+        while ((ofs = mg_json_next(jbody, ofs, &key, &val)) > 0) {
+            if (val.len < 2 || val.buf[0] != '{') continue;
+            PromptEntry pe;
+            int plen = 0;
+            int pofs = mg_json_get(val, "$.prompt", &plen);
+            if (pofs >= 0 && plen >= 2) {
+                char pbuf[1024];
+                if (mg_json_unescape(mg_str_n(val.buf + pofs + 1, plen - 2), pbuf, sizeof(pbuf)))
+                    pe.prompt = pbuf;
+            }
+            pe.max_words = (int)mg_json_get_long(val, "$.max_words", 30);
+            int klen = 0;
+            int kofs = mg_json_get(val, "$.expected_keywords", &klen);
+            if (kofs >= 0) {
+                struct mg_str karr = mg_str_n(val.buf + kofs, (size_t)klen);
+                struct mg_str kk, kv;
+                size_t ko = 0;
+                while ((ko = mg_json_next(karr, ko, &kk, &kv)) > 0) {
+                    if (kv.len >= 2 && kv.buf[0] == '"') {
+                        char kbuf[256];
+                        if (mg_json_unescape(mg_str_n(kv.buf + 1, kv.len - 2), kbuf, sizeof(kbuf)))
+                            pe.keywords.push_back(kbuf);
+                    }
+                }
+            }
+            if (!pe.prompt.empty()) prompts.push_back(pe);
+        }
+
+        if (prompts.empty()) return "{\"error\":\"No test prompts found\"}";
+
+        std::vector<double> latencies;
+        std::vector<double> scores;
+        int german_count = 0;
+        int total_words = 0;
+        double interrupt_latency = 0;
+
+        for (int iter = 0; iter < iterations; iter++) {
+            for (const auto& p : prompts) {
+                std::string cmd = "TEST_PROMPT:" + p.prompt;
+                std::string err;
+                std::string resp = tcp_command(llama_cmd_port, cmd, err, 15);
+
+                std::string response_text;
+                double latency_ms = 0;
+                if (resp.rfind("RESPONSE:", 0) == 0) {
+                    size_t ms_end = resp.find("ms:", 9);
+                    if (ms_end != std::string::npos) {
+                        latency_ms = std::stod(resp.substr(9, ms_end - 9));
+                        response_text = resp.substr(ms_end + 3);
+                    }
+                }
+                latencies.push_back(latency_ms);
+
+                int word_count = 0;
+                {
+                    bool in_word = false;
+                    for (char ch : response_text) {
+                        if (ch == ' ' || ch == '\n' || ch == '\t') { in_word = false; }
+                        else if (!in_word) { in_word = true; word_count++; }
+                    }
+                }
+                total_words += word_count;
+
+                int keywords_found = 0;
+                for (const auto& kw : p.keywords) {
+                    std::string lr = response_text, lk = kw;
+                    for (auto& ch : lr) ch = tolower((unsigned char)ch);
+                    for (auto& ch : lk) ch = tolower((unsigned char)ch);
+                    if (lr.find(lk) != std::string::npos) keywords_found++;
+                }
+
+                bool is_german = false;
+                {
+                    const char* markers[] = {"ich", "der", "die", "das", "ist", "ein", "und",
+                        "für", "mit", "auf", "den", "dem", "des", "von", "als", "auch", "nicht",
+                        "sich", "wie", "kann", "gerne", "bitte", "danke", "ja", "nein"};
+                    std::string lr = response_text;
+                    for (auto& ch : lr) ch = tolower((unsigned char)ch);
+                    int hits = 0;
+                    for (const auto* m : markers) { if (lr.find(m) != std::string::npos) hits++; }
+                    is_german = hits >= 2;
+                }
+                if (is_german) german_count++;
+
+                double kw_pct = p.keywords.empty() ? 100.0 : (keywords_found * 100.0 / p.keywords.size());
+                double brevity = (word_count <= p.max_words) ? 100.0 : std::max(0.0, 100.0 - (word_count - p.max_words) * 5.0);
+                double gscore = is_german ? 100.0 : 0.0;
+                scores.push_back(kw_pct * 0.4 + brevity * 0.3 + gscore * 0.3);
+            }
+        }
+
+        {
+            std::string shutup_cmd = "SHUTUP_TEST:Erzähl mir eine sehr lange und detaillierte Geschichte.";
+            std::string err;
+            std::string resp = tcp_command(llama_cmd_port, shutup_cmd, err, 15);
+            if (resp.rfind("SHUTUP_RESULT:", 0) == 0) {
+                size_t p1 = resp.find("ms:", 14);
+                if (p1 != std::string::npos) {
+                    interrupt_latency = std::stod(resp.substr(14, p1 - 14));
+                }
+            }
+        }
+
+        std::sort(latencies.begin(), latencies.end());
+        int n = (int)latencies.size();
+        double avg_latency = 0, avg_score = 0;
+        for (double v : latencies) avg_latency += v;
+        for (double v : scores) avg_score += v;
+        avg_latency = n > 0 ? avg_latency / n : 0;
+        avg_score = n > 0 ? avg_score / scores.size() : 0;
+        double p50 = n > 0 ? latencies[n / 2] : 0;
+        double p95 = n > 0 ? latencies[(int)(n * 0.95)] : 0;
+        double p99 = n > 0 ? latencies[(int)(n * 0.99)] : 0;
+        int total_runs = n;
+        double german_pct = total_runs > 0 ? (german_count * 100.0 / total_runs) : 0;
+        double avg_words = total_runs > 0 ? (double)total_words / total_runs : 0;
+
+        struct stat st;
+        double memory_mb = 0;
+        if (stat(model_path.c_str(), &st) == 0) {
+            memory_mb = st.st_size / (1024.0 * 1024.0);
+        }
+
+        if (db_) {
+            const char* sql = "INSERT INTO model_benchmark_runs "
+                "(model_id, model_name, model_type, backend, avg_accuracy, avg_latency_ms, "
+                "p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, files_tested, "
+                "pass_count, fail_count, timestamp, avg_tokens, interrupt_latency_ms, german_pct) "
+                "VALUES (?1,?2,'llama',?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,strftime('%s','now'),?13,?14,?15) "
+                "RETURNING id";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int(stmt, 1, model_id);
+                sqlite3_bind_text(stmt, 2, model_name.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 3, model_backend.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_double(stmt, 4, avg_score);
+                sqlite3_bind_double(stmt, 5, avg_latency);
+                sqlite3_bind_int(stmt, 6, (int)p50);
+                sqlite3_bind_int(stmt, 7, (int)p95);
+                sqlite3_bind_int(stmt, 8, (int)p99);
+                sqlite3_bind_double(stmt, 9, memory_mb);
+                sqlite3_bind_int(stmt, 10, (int)prompts.size());
+                int pass_count = 0, fail_count = 0;
+                for (double s : scores) { if (s >= 80) pass_count++; else fail_count++; }
+                sqlite3_bind_int(stmt, 11, pass_count);
+                sqlite3_bind_int(stmt, 12, fail_count);
+                sqlite3_bind_double(stmt, 13, avg_words);
+                sqlite3_bind_double(stmt, 14, interrupt_latency);
+                sqlite3_bind_double(stmt, 15, german_pct);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        char result[1024];
+        snprintf(result, sizeof(result),
+            "{\"avg_score\":%.1f,\"avg_latency_ms\":%.0f,\"p50_latency_ms\":%d,\"p95_latency_ms\":%d,"
+            "\"p99_latency_ms\":%d,\"memory_mb\":%.0f,\"prompts_tested\":%d,"
+            "\"german_pct\":%.0f,\"avg_tokens\":%.1f,\"interrupt_latency_ms\":%.0f,"
+            "\"pass_count\":%d,\"fail_count\":%d}",
+            avg_score, avg_latency, (int)p50, (int)p95, (int)p99, memory_mb,
+            (int)prompts.size(), german_pct, avg_words, interrupt_latency,
+            (int)std::count_if(scores.begin(), scores.end(), [](double s){ return s >= 80; }),
+            (int)std::count_if(scores.begin(), scores.end(), [](double s){ return s < 80; }));
+        return result;
+    }
+
     void handle_async_status(struct mg_connection *c, struct mg_http_message *hm) {
         char id_buf[32] = {0};
         mg_http_get_var(&hm->query, "task_id", id_buf, sizeof(id_buf));
@@ -5191,11 +5939,16 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
 
         const char* query =
-            "SELECT r.id, r.model_id, m.name, m.service, m.backend, "
+            "SELECT r.id, r.model_id, "
+            "COALESCE(r.model_name, m.name) as name, "
+            "COALESCE(r.model_type, m.service) as type, "
+            "COALESCE(r.backend, m.backend) as backend, "
             "r.avg_accuracy, r.avg_latency_ms, r.p50_latency_ms, r.p95_latency_ms, "
-            "r.p99_latency_ms, r.memory_mb, r.timestamp "
+            "r.p99_latency_ms, r.memory_mb, r.timestamp, "
+            "r.pass_count, r.fail_count, r.files_tested, "
+            "r.avg_tokens, r.interrupt_latency_ms, r.german_pct "
             "FROM model_benchmark_runs r "
-            "JOIN models m ON m.id = r.model_id "
+            "LEFT JOIN models m ON m.id = r.model_id "
             "ORDER BY r.timestamp DESC LIMIT 100";
 
         sqlite3_stmt* stmt;
@@ -5218,7 +5971,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                  << "\"run_id\":" << sqlite3_column_int(stmt, 0)
                  << ",\"model_id\":" << sqlite3_column_int(stmt, 1)
                  << ",\"model_name\":\"" << escape_json(col_str(2)) << "\""
-                 << ",\"service\":\"" << escape_json(col_str(3)) << "\""
+                 << ",\"model_type\":\"" << escape_json(col_str(3)) << "\""
                  << ",\"backend\":\"" << escape_json(col_str(4)) << "\""
                  << ",\"avg_accuracy\":" << sqlite3_column_double(stmt, 5)
                  << ",\"avg_latency_ms\":" << sqlite3_column_int(stmt, 6)
@@ -5227,6 +5980,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                  << ",\"p99_latency_ms\":" << sqlite3_column_int(stmt, 9)
                  << ",\"memory_mb\":" << sqlite3_column_int(stmt, 10)
                  << ",\"timestamp\":" << sqlite3_column_int64(stmt, 11)
+                 << ",\"pass_count\":" << sqlite3_column_int(stmt, 12)
+                 << ",\"fail_count\":" << sqlite3_column_int(stmt, 13)
+                 << ",\"files_tested\":" << sqlite3_column_int(stmt, 14)
+                 << ",\"avg_tokens\":" << sqlite3_column_double(stmt, 15)
+                 << ",\"interrupt_latency_ms\":" << sqlite3_column_double(stmt, 16)
+                 << ",\"german_pct\":" << sqlite3_column_double(stmt, 17)
                  << "}";
         }
         sqlite3_finalize(stmt);
@@ -5423,7 +6182,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::lock_guard<std::mutex> lock(async_mutex_);
             auto& task = async_tasks_[task_id];
             task->worker = std::thread(&FrontendServer::run_benchmark_async, this,
-                task_id, test_files, iterations, model_id, model_name, model_path, files_json_str, memory_mb);
+                task_id, test_files, iterations, model_id, model_name, backend, files_json_str, memory_mb);
         }
 
         mg_http_reply(c, 202, "Content-Type: application/json\r\n",
@@ -5431,7 +6190,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     void run_benchmark_async(int64_t task_id, std::vector<std::string> test_files,
-            int iterations, int model_id, std::string model_name, std::string /*model_path*/,
+            int iterations, int model_id, std::string model_name, std::string model_backend,
             std::string files_json_str, int memory_mb) {
         std::vector<double> latencies;
         std::vector<double> accuracies;
@@ -5504,19 +6263,27 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         sqlite3_int64 run_id = 0;
         sqlite3_stmt* ins_stmt;
-        const char* insert_sql = "INSERT INTO model_benchmark_runs (model_id, test_files, iterations, avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id";
+        const char* insert_sql = "INSERT INTO model_benchmark_runs "
+            "(model_id, model_name, model_type, backend, test_files, iterations, files_tested, "
+            "avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, "
+            "memory_mb, pass_count, fail_count, timestamp) "
+            "VALUES (?1,?2,'whisper',?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,strftime('%s','now')) RETURNING id";
         int ins_rc = sqlite3_prepare_v2(db_, insert_sql, -1, &ins_stmt, nullptr);
         if (ins_rc == SQLITE_OK) {
             sqlite3_bind_int(ins_stmt, 1, model_id);
-            sqlite3_bind_text(ins_stmt, 2, files_json_str.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(ins_stmt, 3, iterations);
-            sqlite3_bind_double(ins_stmt, 4, avg_accuracy);
-            sqlite3_bind_int(ins_stmt, 5, static_cast<int>(avg_latency));
-            sqlite3_bind_int(ins_stmt, 6, p50_latency);
-            sqlite3_bind_int(ins_stmt, 7, p95_latency);
-            sqlite3_bind_int(ins_stmt, 8, p99_latency);
-            sqlite3_bind_int(ins_stmt, 9, memory_mb);
-            sqlite3_bind_int64(ins_stmt, 10, static_cast<sqlite3_int64>(time(nullptr)));
+            sqlite3_bind_text(ins_stmt, 2, model_name.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(ins_stmt, 3, model_backend.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(ins_stmt, 4, files_json_str.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(ins_stmt, 5, iterations);
+            sqlite3_bind_int(ins_stmt, 6, (int)test_files.size());
+            sqlite3_bind_double(ins_stmt, 7, avg_accuracy);
+            sqlite3_bind_int(ins_stmt, 8, static_cast<int>(avg_latency));
+            sqlite3_bind_int(ins_stmt, 9, p50_latency);
+            sqlite3_bind_int(ins_stmt, 10, p95_latency);
+            sqlite3_bind_int(ins_stmt, 11, p99_latency);
+            sqlite3_bind_int(ins_stmt, 12, memory_mb);
+            sqlite3_bind_int(ins_stmt, 13, pass_count);
+            sqlite3_bind_int(ins_stmt, 14, fail_count);
             if (sqlite3_step(ins_stmt) == SQLITE_ROW) {
                 run_id = sqlite3_column_int64(ins_stmt, 0);
             }

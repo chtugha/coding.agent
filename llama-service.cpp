@@ -10,6 +10,11 @@
 #include <cstring>
 #include <queue>
 #include <condition_variable>
+#include <poll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <unistd.h>
 #include "interconnect.h"
 #include "llama.h"
 
@@ -104,8 +109,9 @@ public:
     void run() {
         std::thread receiver_thread(&LlamaService::receiver_loop, this);
         std::thread worker_thread(&LlamaService::worker_loop, this);
+        std::thread cmd_thread(&LlamaService::command_listener_loop, this);
         
-        std::cout << "🇩🇪 LLaMA German Service running" << std::endl;
+        std::cout << "LLaMA German Service running" << std::endl;
         
         try {
             while (running_) {
@@ -119,6 +125,8 @@ public:
         work_cv_.notify_all();
         if (receiver_thread.joinable()) receiver_thread.join();
         if (worker_thread.joinable()) worker_thread.join();
+        if (cmd_sock_ >= 0) { close(cmd_sock_); cmd_sock_ = -1; }
+        if (cmd_thread.joinable()) cmd_thread.join();
         interconnect_.shutdown();
     }
 
@@ -327,6 +335,123 @@ private:
         }
     }
 
+    void command_listener_loop() {
+        uint16_t cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+        int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (server_fd < 0) return;
+        int opt = 1;
+        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(cmd_port);
+        if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
+            listen(server_fd, 4) < 0) {
+            close(server_fd);
+            std::cerr << "Failed to bind command port " << cmd_port << std::endl;
+            return;
+        }
+        cmd_sock_ = server_fd;
+        std::cout << "Command listener on port " << cmd_port << std::endl;
+
+        while (running_) {
+            struct pollfd pfd = {server_fd, POLLIN, 0};
+            if (poll(&pfd, 1, 200) <= 0) continue;
+            if (!(pfd.revents & POLLIN)) continue;
+
+            struct sockaddr_in client_addr{};
+            socklen_t clen = sizeof(client_addr);
+            int csock = accept(server_fd, (struct sockaddr*)&client_addr, &clen);
+            if (csock < 0) continue;
+
+            struct timeval tv{10, 0};
+            setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(csock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+            char buf[4096];
+            ssize_t n = recv(csock, buf, sizeof(buf) - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string cmd(buf);
+                std::string response = handle_command(cmd);
+                send(csock, response.c_str(), response.size(), 0);
+            }
+            close(csock);
+        }
+        close(server_fd);
+        cmd_sock_ = -1;
+    }
+
+    std::string handle_command(const std::string& cmd) {
+        if (cmd.rfind("TEST_PROMPT:", 0) == 0) {
+            std::string prompt = cmd.substr(12);
+            uint32_t test_cid = 99999;
+            auto start = std::chrono::steady_clock::now();
+            std::string response = process_call(test_cid, prompt);
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+
+            {
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                if (calls_.count(test_cid)) {
+                    std::lock_guard<std::mutex> llama_lock(llama_mutex_);
+                    llama_memory_t mem = llama_get_memory(ctx_);
+                    llama_memory_seq_rm(mem, calls_[test_cid]->seq_id, -1, -1);
+                    calls_.erase(test_cid);
+                }
+            }
+
+            return "RESPONSE:" + std::to_string(elapsed) + "ms:" + response + "\n";
+        }
+        if (cmd.rfind("SHUTUP_TEST:", 0) == 0) {
+            std::string prompt = cmd.substr(12);
+            uint32_t test_cid = 99998;
+
+            auto call = get_or_create_call(test_cid);
+            auto gen_start = std::chrono::steady_clock::now();
+
+            std::thread gen_thread([this, test_cid, prompt]() {
+                process_call(test_cid, prompt);
+            });
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            auto interrupt_start = std::chrono::steady_clock::now();
+            {
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                auto it = calls_.find(test_cid);
+                if (it != calls_.end()) {
+                    it->second->generating = false;
+                }
+            }
+            auto interrupt_end = std::chrono::steady_clock::now();
+            double interrupt_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+                interrupt_end - interrupt_start).count() / 1000.0;
+
+            gen_thread.join();
+
+            double total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - gen_start).count();
+
+            {
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                if (calls_.count(test_cid)) {
+                    std::lock_guard<std::mutex> llama_lock(llama_mutex_);
+                    llama_memory_t mem = llama_get_memory(ctx_);
+                    llama_memory_seq_rm(mem, calls_[test_cid]->seq_id, -1, -1);
+                    calls_.erase(test_cid);
+                }
+            }
+
+            return "SHUTUP_RESULT:" + std::to_string(interrupt_ms) + "ms:" + std::to_string(total_ms) + "ms\n";
+        }
+        if (cmd == "PING") {
+            return "PONG\n";
+        }
+        return "ERROR:Unknown command\n";
+    }
+
+    int cmd_sock_ = -1;
     std::atomic<bool> running_;
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
