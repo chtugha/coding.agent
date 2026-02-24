@@ -158,6 +158,7 @@ public:
         auto last_flush = std::chrono::steady_clock::now();
         auto last_rotation = last_flush;
         auto last_svc_check = std::chrono::steady_clock::now();
+        auto last_async_cleanup = std::chrono::steady_clock::now();
         while (!s_sigint_received) {
             mg_mgr_poll(&mgr_, 100);
             check_test_status();
@@ -171,6 +172,10 @@ public:
             if (now - last_svc_check >= std::chrono::seconds(2)) {
                 check_service_status();
                 last_svc_check = now;
+            }
+            if (now - last_async_cleanup >= std::chrono::seconds(30)) {
+                cleanup_old_async_tasks();
+                last_async_cleanup = now;
             }
             if (now - last_rotation >= std::chrono::hours(1)) {
                 rotate_logs();
@@ -254,10 +259,12 @@ private:
     void cleanup_old_async_tasks() {
         std::lock_guard<std::mutex> lock(async_mutex_);
         for (auto it = async_tasks_.begin(); it != async_tasks_.end(); ) {
-            if (!it->second->running && it->second->worker.joinable()) {
-                it->second->worker.join();
+            if (!it->second->running) {
+                if (it->second->worker.joinable()) it->second->worker.join();
+                it = async_tasks_.erase(it);
+            } else {
+                ++it;
             }
-            ++it;
         }
     }
 
