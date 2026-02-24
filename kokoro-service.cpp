@@ -756,7 +756,6 @@ public:
 
         std::printf("Kokoro TTS Service initialized (German, voice=%s, decoder=coreml-split)\n",
                    voice_name.c_str());
-        std::printf("  Negotiation ports: IN=%u OUT=%u\n", node_.ports().neg_in, node_.ports().neg_out);
         std::printf("  Is master: %s\n", node_.is_master() ? "yes" : "no");
         std::printf("  CoreML duration: %s\n", pipeline_.has_coreml() ? "ENABLED (ANE)" : "DISABLED");
 

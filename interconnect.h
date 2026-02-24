@@ -593,17 +593,6 @@ public:
         return ended_call_ids_.size();
     }
 
-    // Not applicable without master registry. Use downstream_state() instead.
-    struct PortConfig {
-        uint16_t neg_in = 0, neg_out = 0, down_in = 0, down_out = 0, up_in = 0, up_out = 0;
-        bool is_valid() const { return false; }
-    };
-    PortConfig query_service_ports(ServiceType) const { return PortConfig(); }
-    PortConfig ports() const { return PortConfig(); }
-
-    // Connect to master — not applicable. Returns -1.
-    int connect_to_master() { return -1; }
-
     uint16_t frontend_log_port() const { return FRONTEND_LOG_PORT; }
 
     // Send a custom command to our downstream's mgmt channel and wait for response.
@@ -831,32 +820,31 @@ private:
 
             MgmtMsgType msg_type = static_cast<MgmtMsgType>(type_byte);
 
+            bool mark_failed = false;
             switch (msg_type) {
                 case MgmtMsgType::CALL_END: {
                     uint32_t net_cid;
-                    if (recv_exact(sock, &net_cid, 4, 500)) {
-                        uint32_t cid = ntohl(net_cid);
-                        handle_remote_call_end(cid);
-                    }
+                    if (!recv_exact(sock, &net_cid, 4, 500)) { mark_failed = true; break; }
+                    uint32_t cid = ntohl(net_cid);
+                    handle_remote_call_end(cid);
                     break;
                 }
                 case MgmtMsgType::SPEECH_ACTIVE:
                 case MgmtMsgType::SPEECH_IDLE: {
                     uint32_t net_cid;
-                    if (recv_exact(sock, &net_cid, 4, 500)) {
-                        uint32_t cid = ntohl(net_cid);
-                        bool active = (msg_type == MgmtMsgType::SPEECH_ACTIVE);
-                        {
-                            std::lock_guard<std::mutex> lock(speech_mutex_);
-                            if (active) speech_active_calls_.insert(cid);
-                            else speech_active_calls_.erase(cid);
-                        }
-                        if (speech_signal_handler_) {
-                            speech_signal_handler_(cid, active);
-                        }
-                        // Forward downstream
-                        send_mgmt_to_downstream(msg_type, cid);
+                    if (!recv_exact(sock, &net_cid, 4, 500)) { mark_failed = true; break; }
+                    uint32_t cid = ntohl(net_cid);
+                    bool active = (msg_type == MgmtMsgType::SPEECH_ACTIVE);
+                    {
+                        std::lock_guard<std::mutex> lock(speech_mutex_);
+                        if (active) speech_active_calls_.insert(cid);
+                        else speech_active_calls_.erase(cid);
                     }
+                    if (speech_signal_handler_) {
+                        speech_signal_handler_(cid, active);
+                    }
+                    // Forward downstream
+                    send_mgmt_to_downstream(msg_type, cid);
                     break;
                 }
                 case MgmtMsgType::PING: {
@@ -869,11 +857,11 @@ private:
                     break;
                 case MgmtMsgType::CUSTOM: {
                     uint16_t net_len;
-                    if (!recv_exact(sock, &net_len, 2, 500)) break;
+                    if (!recv_exact(sock, &net_len, 2, 500)) { mark_failed = true; break; }
                     uint16_t len = ntohs(net_len);
-                    if (len == 0 || len > 65535) break;
+                    if (len == 0 || len > 65535) { mark_failed = true; break; }
                     std::string msg(len, '\0');
-                    if (!recv_exact(sock, msg.data(), len, 2000)) break;
+                    if (!recv_exact(sock, msg.data(), len, 2000)) { mark_failed = true; break; }
 
                     std::string response;
                     if (custom_handler_) {
@@ -895,6 +883,10 @@ private:
                 }
                 default:
                     break;
+            }
+            if (mark_failed) {
+                mark_upstream_failed();
+                continue;
             }
         }
     }
