@@ -98,6 +98,60 @@ static std::string escape_json(const std::string& s) {
     return result;
 }
 
+static bool detect_german(const std::string& text) {
+    static const char* markers[] = {"ich", "der", "die", "das", "ist", "ein", "und",
+        "für", "mit", "auf", "den", "dem", "des", "von", "als", "auch", "nicht",
+        "sich", "wie", "kann", "gerne", "bitte", "danke", "ja", "nein"};
+    std::string lower = text;
+    for (auto& ch : lower) ch = tolower((unsigned char)ch);
+    int hits = 0;
+    for (const auto* m : markers) { if (lower.find(m) != std::string::npos) hits++; }
+    return hits >= 2;
+}
+
+static int count_words(const std::string& text) {
+    int count = 0;
+    bool in_word = false;
+    for (char ch : text) {
+        if (ch == ' ' || ch == '\n' || ch == '\t') { in_word = false; }
+        else if (!in_word) { in_word = true; count++; }
+    }
+    return count;
+}
+
+static int count_keyword_matches(const std::string& text, const std::vector<std::string>& keywords) {
+    std::string lower = text;
+    for (auto& ch : lower) ch = tolower((unsigned char)ch);
+    int found = 0;
+    for (const auto& kw : keywords) {
+        std::string lk = kw;
+        for (auto& ch : lk) ch = tolower((unsigned char)ch);
+        if (lower.find(lk) != std::string::npos) found++;
+    }
+    return found;
+}
+
+struct LlamaScoreResult {
+    double score;
+    int word_count;
+    int keywords_found;
+    bool is_german;
+};
+
+static LlamaScoreResult score_llama_response(const std::string& response,
+        const std::vector<std::string>& keywords, int max_words) {
+    LlamaScoreResult r;
+    r.word_count = count_words(response);
+    r.keywords_found = count_keyword_matches(response, keywords);
+    r.is_german = detect_german(response);
+    double kw_pct = keywords.empty() ? 100.0 : (r.keywords_found * 100.0 / keywords.size());
+    double brevity = (r.word_count <= max_words) ? 100.0 :
+        std::max(0.0, 100.0 - (r.word_count - max_words) * 5.0);
+    double german = r.is_german ? 100.0 : 0.0;
+    r.score = kw_pct * 0.4 + brevity * 0.3 + german * 0.3;
+    return r;
+}
+
 class FrontendServer {
 public:
     FrontendServer(uint16_t http_port = 8080) 
@@ -2278,7 +2332,11 @@ function loadLlamaPrompts(){
   }).catch(function(){});
 }
 
+var llamaQualityPoll=null;
+var llamaShutupPoll=null;
+
 function runLlamaQualityTest(){
+  if(llamaQualityPoll){clearInterval(llamaQualityPoll);llamaQualityPoll=null;}
   var status=document.getElementById('llamaTestStatus');
   var results=document.getElementById('llamaTestResults');
   var sel=document.getElementById('llamaTestPrompts');
@@ -2290,48 +2348,83 @@ function runLlamaQualityTest(){
   status.innerHTML='<span style="color:var(--wt-accent)">Running quality test ('+prompts.length+' prompts)...</span>';
   results.innerHTML='';
   fetch('/api/llama/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts:prompts})})
-    .then(r=>r.json()).then(d=>{
-      if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
-      status.innerHTML='<span style="color:var(--wt-success)">Quality test complete — '+d.results.length+' prompts tested.</span>';
-      var html='<table class="wt-table"><tr><th>Prompt</th><th>Response</th><th>Latency</th><th>Words</th><th>Keywords</th><th>German</th><th>Score</th></tr>';
-      d.results.forEach(function(r){
-        var scoreColor=r.score>=80?'var(--wt-success)':r.score>=50?'var(--wt-warning)':'var(--wt-danger)';
-        html+='<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.prompt)+'</td>';
-        html+='<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.response)+'</td>';
-        html+='<td>'+r.latency_ms+'ms</td>';
-        html+='<td>'+r.word_count+(r.word_count>r.max_words?' <span style="color:var(--wt-danger)">!</span>':'')+'</td>';
-        html+='<td>'+r.keywords_found+'/'+r.keywords_total+'</td>';
-        html+='<td>'+(r.is_german?'<span style="color:var(--wt-success)">Ja</span>':'<span style="color:var(--wt-danger)">Nein</span>')+'</td>';
-        html+='<td style="color:'+scoreColor+';font-weight:bold">'+r.score+'%</td></tr>';
-      });
-      html+='</table>';
-      if(d.summary){
-        html+='<div style="margin-top:10px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px">';
-        html+='<strong>Summary:</strong> Avg Score: '+d.summary.avg_score+'% | Avg Latency: '+d.summary.avg_latency_ms+'ms | German: '+d.summary.german_pct+'%';
-        html+='</div>';
-      }
-      results.innerHTML=html;
-    }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(e.message)+'</span>';});
+    .then(r=>{
+      if(r.status===202) return r.json();
+      return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
+    }).then(d=>{
+      status.innerHTML='<span style="color:var(--wt-accent)">Quality test running (task '+d.task_id+', '+prompts.length+' prompts)...</span>';
+      llamaQualityPoll=setInterval(()=>pollLlamaQualityTask(d.task_id),2000);
+    }).catch(e=>{
+      if(llamaQualityPoll){clearInterval(llamaQualityPoll);llamaQualityPoll=null;}
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+    });
+}
+
+function pollLlamaQualityTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(r=>r.json()).then(d=>{
+    if(d.status==='running') return;
+    clearInterval(llamaQualityPoll);llamaQualityPoll=null;
+    var status=document.getElementById('llamaTestStatus');
+    var results=document.getElementById('llamaTestResults');
+    if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
+    status.innerHTML='<span style="color:var(--wt-success)">Quality test complete — '+d.results.length+' prompts tested.</span>';
+    var html='<table class="wt-table"><tr><th>Prompt</th><th>Response</th><th>Latency</th><th>Words</th><th>Keywords</th><th>German</th><th>Score</th></tr>';
+    d.results.forEach(function(r){
+      var scoreColor=r.score>=80?'var(--wt-success)':r.score>=50?'var(--wt-warning)':'var(--wt-danger)';
+      html+='<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.prompt)+'</td>';
+      html+='<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.response)+'</td>';
+      html+='<td>'+r.latency_ms+'ms</td>';
+      html+='<td>'+r.word_count+(r.word_count>r.max_words?' <span style="color:var(--wt-danger)">!</span>':'')+'</td>';
+      html+='<td>'+r.keywords_found+'/'+r.keywords_total+'</td>';
+      html+='<td>'+(r.is_german?'<span style="color:var(--wt-success)">Ja</span>':'<span style="color:var(--wt-danger)">Nein</span>')+'</td>';
+      html+='<td style="color:'+scoreColor+';font-weight:bold">'+r.score+'%</td></tr>';
+    });
+    html+='</table>';
+    if(d.summary){
+      html+='<div style="margin-top:10px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px">';
+      html+='<strong>Summary:</strong> Avg Score: '+d.summary.avg_score+'% | Avg Latency: '+d.summary.avg_latency_ms+'ms | German: '+d.summary.german_pct+'%';
+      html+='</div>';
+    }
+    results.innerHTML=html;
+  }).catch(e=>console.error('pollLlamaQualityTask',e));
 }
 
 function runLlamaShutupTest(){
+  if(llamaShutupPoll){clearInterval(llamaShutupPoll);llamaShutupPoll=null;}
   var status=document.getElementById('llamaTestStatus');
   var result=document.getElementById('llamaShutupResult');
   status.innerHTML='<span style="color:var(--wt-accent)">Running shut-up test...</span>';
   result.innerHTML='';
   fetch('/api/llama/shutup_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:'Erzähl mir eine lange Geschichte über einen Ritter.'})})
-    .then(r=>r.json()).then(d=>{
-      if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
-      status.innerHTML='<span style="color:var(--wt-success)">Shut-up test complete.</span>';
-      var interruptColor=d.interrupt_latency_ms<=100?'var(--wt-success)':d.interrupt_latency_ms<=500?'var(--wt-warning)':'var(--wt-danger)';
-      var html='<div class="wt-card" style="margin:0;padding:10px">';
-      html+='<p><strong>Interrupt latency:</strong> <span style="color:'+interruptColor+';font-weight:bold">'+d.interrupt_latency_ms+'ms</span>';
-      html+=' (target: &lt;500ms)</p>';
-      html+='<p><strong>Total generation time:</strong> '+d.total_ms+'ms</p>';
-      html+='<p><strong>Result:</strong> '+(d.interrupt_latency_ms<=500?'<span style="color:var(--wt-success)">PASS</span>':'<span style="color:var(--wt-danger)">FAIL — too slow</span>')+'</p>';
-      html+='</div>';
-      result.innerHTML=html;
-    }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(e.message)+'</span>';});
+    .then(r=>{
+      if(r.status===202) return r.json();
+      return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
+    }).then(d=>{
+      status.innerHTML='<span style="color:var(--wt-accent)">Shut-up test running (task '+d.task_id+')...</span>';
+      llamaShutupPoll=setInterval(()=>pollLlamaShutupTask(d.task_id),1000);
+    }).catch(e=>{
+      if(llamaShutupPoll){clearInterval(llamaShutupPoll);llamaShutupPoll=null;}
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+    });
+}
+
+function pollLlamaShutupTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(r=>r.json()).then(d=>{
+    if(d.status==='running') return;
+    clearInterval(llamaShutupPoll);llamaShutupPoll=null;
+    var status=document.getElementById('llamaTestStatus');
+    var result=document.getElementById('llamaShutupResult');
+    if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
+    status.innerHTML='<span style="color:var(--wt-success)">Shut-up test complete.</span>';
+    var interruptColor=d.interrupt_latency_ms<=100?'var(--wt-success)':d.interrupt_latency_ms<=500?'var(--wt-warning)':'var(--wt-danger)';
+    var html='<div class="wt-card" style="margin:0;padding:10px">';
+    html+='<p><strong>Interrupt latency:</strong> <span style="color:'+interruptColor+';font-weight:bold">'+d.interrupt_latency_ms+'ms</span>';
+    html+=' (target: &lt;500ms)</p>';
+    html+='<p><strong>Total generation time:</strong> '+d.total_ms+'ms</p>';
+    html+='<p><strong>Result:</strong> '+(d.interrupt_latency_ms<=500?'<span style="color:var(--wt-success)">PASS</span>':'<span style="color:var(--wt-danger)">FAIL — too slow</span>')+'</p>';
+    html+='</div>';
+    result.innerHTML=html;
+  }).catch(e=>console.error('pollLlamaShutupTask',e));
 }
 
 function checkSipProvider(){
@@ -4739,9 +4832,68 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"prompts\":%s}", content.c_str());
     }
 
-    void handle_llama_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
-        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+    struct QualityPrompt {
+        int id;
+        std::string prompt;
+        std::vector<std::string> expected_keywords;
+        std::string category;
+        int max_words;
+    };
 
+    std::vector<QualityPrompt> parse_llama_prompts(struct mg_str json_body) {
+        std::vector<QualityPrompt> prompts;
+        int prompts_len = 0;
+        int prompts_ofs = mg_json_get(json_body, "$.prompts", &prompts_len);
+        if (prompts_ofs < 0) return prompts;
+        struct mg_str arr = mg_str_n(json_body.buf + prompts_ofs, (size_t)prompts_len);
+        struct mg_str key, val;
+        size_t ofs = 0;
+        while ((ofs = mg_json_next(arr, ofs, &key, &val)) > 0) {
+            if (val.len < 2 || val.buf[0] != '{') continue;
+            QualityPrompt pi;
+            pi.id = (int)mg_json_get_long(val, "$.id", 0);
+            int plen = 0;
+            int pofs = mg_json_get(val, "$.prompt", &plen);
+            if (pofs >= 0 && plen >= 2) {
+                char pbuf[1024];
+                if (mg_json_unescape(mg_str_n(val.buf + pofs + 1, plen - 2), pbuf, sizeof(pbuf)))
+                    pi.prompt = pbuf;
+            }
+            pi.max_words = (int)mg_json_get_long(val, "$.max_words", 30);
+            int clen = 0;
+            int cofs = mg_json_get(val, "$.category", &clen);
+            if (cofs >= 0 && clen >= 2) {
+                char cbuf[64];
+                if (mg_json_unescape(mg_str_n(val.buf + cofs + 1, clen - 2), cbuf, sizeof(cbuf)))
+                    pi.category = cbuf;
+            }
+            int klen = 0;
+            int kofs = mg_json_get(val, "$.expected_keywords", &klen);
+            if (kofs >= 0) {
+                struct mg_str karr = mg_str_n(val.buf + kofs, (size_t)klen);
+                struct mg_str kk, kv;
+                size_t ko = 0;
+                while ((ko = mg_json_next(karr, ko, &kk, &kv)) > 0) {
+                    if (kv.len >= 2 && kv.buf[0] == '"') {
+                        char kbuf[256];
+                        if (mg_json_unescape(mg_str_n(kv.buf + 1, kv.len - 2), kbuf, sizeof(kbuf)))
+                            pi.expected_keywords.push_back(kbuf);
+                    }
+                }
+            }
+            if (!pi.prompt.empty()) prompts.push_back(pi);
+        }
+        return prompts;
+    }
+
+    void handle_llama_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
+        std::vector<QualityPrompt> prompts = parse_llama_prompts(hm->body);
+        if (prompts.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"No prompts provided\"}");
+            return;
+        }
+
+        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
         std::string ping_err;
         std::string ping_resp = tcp_command(llama_cmd_port, "PING", ping_err, 3);
         if (ping_resp != "PONG") {
@@ -4750,65 +4902,18 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        struct mg_str json_body = hm->body;
-        std::string body(json_body.buf, json_body.len);
-
-        struct PromptInfo {
-            int id;
-            std::string prompt;
-            std::vector<std::string> expected_keywords;
-            std::string category;
-            int max_words;
-        };
-        std::vector<PromptInfo> prompts;
-
-        int prompts_len = 0;
-        int prompts_ofs = mg_json_get(json_body, "$.prompts", &prompts_len);
-        if (prompts_ofs >= 0) {
-            struct mg_str arr = mg_str_n(json_body.buf + prompts_ofs, (size_t)prompts_len);
-            struct mg_str key, val;
-            size_t ofs = 0;
-            while ((ofs = mg_json_next(arr, ofs, &key, &val)) > 0) {
-                if (val.len < 2 || val.buf[0] != '{') continue;
-                PromptInfo pi;
-                pi.id = (int)mg_json_get_long(val, "$.id", 0);
-                int plen = 0;
-                int pofs = mg_json_get(val, "$.prompt", &plen);
-                if (pofs >= 0 && plen >= 2) {
-                    char pbuf[1024];
-                    if (mg_json_unescape(mg_str_n(val.buf + pofs + 1, plen - 2), pbuf, sizeof(pbuf)))
-                        pi.prompt = pbuf;
-                }
-                pi.max_words = (int)mg_json_get_long(val, "$.max_words", 30);
-                int clen = 0;
-                int cofs = mg_json_get(val, "$.category", &clen);
-                if (cofs >= 0 && clen >= 2) {
-                    char cbuf[64];
-                    if (mg_json_unescape(mg_str_n(val.buf + cofs + 1, clen - 2), cbuf, sizeof(cbuf)))
-                        pi.category = cbuf;
-                }
-                int klen = 0;
-                int kofs = mg_json_get(val, "$.expected_keywords", &klen);
-                if (kofs >= 0) {
-                    struct mg_str karr = mg_str_n(val.buf + kofs, (size_t)klen);
-                    struct mg_str kk, kv;
-                    size_t ko = 0;
-                    while ((ko = mg_json_next(karr, ko, &kk, &kv)) > 0) {
-                        if (kv.len >= 2 && kv.buf[0] == '"') {
-                            char kbuf[256];
-                            if (mg_json_unescape(mg_str_n(kv.buf + 1, kv.len - 2), kbuf, sizeof(kbuf)))
-                                pi.expected_keywords.push_back(kbuf);
-                        }
-                    }
-                }
-                if (!pi.prompt.empty()) prompts.push_back(pi);
-            }
+        int64_t task_id = create_async_task("llama_quality_test");
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_llama_quality_test_async, this,
+                task_id, std::move(prompts));
         }
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
 
-        if (prompts.empty()) {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"No prompts provided\"}");
-            return;
-        }
+    void run_llama_quality_test_async(int64_t task_id, std::vector<QualityPrompt> prompts) {
+        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
 
         std::string results_json = "[";
         double total_score = 0, total_latency = 0;
@@ -4816,9 +4921,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         for (size_t i = 0; i < prompts.size(); i++) {
             const auto& p = prompts[i];
-            std::string cmd = "TEST_PROMPT:" + p.prompt;
             std::string err;
-            std::string resp = tcp_command(llama_cmd_port, cmd, err, 15);
+            std::string resp = tcp_command(llama_cmd_port, "TEST_PROMPT:" + p.prompt, err, 15);
 
             std::string response_text;
             double latency_ms = 0;
@@ -4832,60 +4936,21 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 response_text = "(no response)";
             }
 
-            int word_count = 0;
-            {
-                bool in_word = false;
-                for (char ch : response_text) {
-                    if (ch == ' ' || ch == '\n' || ch == '\t') { in_word = false; }
-                    else if (!in_word) { in_word = true; word_count++; }
-                }
-            }
-
-            int keywords_found = 0;
-            for (const auto& kw : p.expected_keywords) {
-                std::string lower_resp = response_text;
-                std::string lower_kw = kw;
-                for (auto& ch : lower_resp) ch = tolower((unsigned char)ch);
-                for (auto& ch : lower_kw) ch = tolower((unsigned char)ch);
-                if (lower_resp.find(lower_kw) != std::string::npos) keywords_found++;
-            }
-
-            bool is_german = false;
-            {
-                const char* german_markers[] = {"ich", "der", "die", "das", "ist", "ein", "und",
-                    "für", "mit", "auf", "den", "dem", "des", "von", "als", "auch", "nicht",
-                    "sich", "wie", "kann", "gerne", "bitte", "danke", "ja", "nein"};
-                std::string lower_resp = response_text;
-                for (auto& ch : lower_resp) ch = tolower((unsigned char)ch);
-                int german_hits = 0;
-                for (const auto* marker : german_markers) {
-                    if (lower_resp.find(marker) != std::string::npos) german_hits++;
-                }
-                is_german = german_hits >= 2;
-            }
-
-            double score = 0;
-            double keyword_pct = p.expected_keywords.empty() ? 100.0 :
-                (keywords_found * 100.0 / p.expected_keywords.size());
-            double brevity_score = (word_count <= p.max_words) ? 100.0 :
-                std::max(0.0, 100.0 - (word_count - p.max_words) * 5.0);
-            double german_score = is_german ? 100.0 : 0.0;
-            score = keyword_pct * 0.4 + brevity_score * 0.3 + german_score * 0.3;
-
-            total_score += score;
+            LlamaScoreResult sr = score_llama_response(response_text, p.expected_keywords, p.max_words);
+            total_score += sr.score;
             total_latency += latency_ms;
-            if (is_german) german_count++;
+            if (sr.is_german) german_count++;
 
             if (i > 0) results_json += ",";
             results_json += "{\"prompt\":\"" + escape_json(p.prompt)
                 + "\",\"response\":\"" + escape_json(response_text)
                 + "\",\"latency_ms\":" + std::to_string((int)latency_ms)
-                + ",\"word_count\":" + std::to_string(word_count)
+                + ",\"word_count\":" + std::to_string(sr.word_count)
                 + ",\"max_words\":" + std::to_string(p.max_words)
-                + ",\"keywords_found\":" + std::to_string(keywords_found)
+                + ",\"keywords_found\":" + std::to_string(sr.keywords_found)
                 + ",\"keywords_total\":" + std::to_string((int)p.expected_keywords.size())
-                + ",\"is_german\":" + (is_german ? "true" : "false")
-                + ",\"score\":" + std::to_string((int)score) + "}";
+                + ",\"is_german\":" + (sr.is_german ? "true" : "false")
+                + ",\"score\":" + std::to_string((int)sr.score) + "}";
 
             if (db_) {
                 const char* sql = "INSERT INTO test_results (test_name,service,status,details,timestamp) "
@@ -4893,9 +4958,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 sqlite3_stmt* stmt = nullptr;
                 if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
                     sqlite3_bind_text(stmt, 1, "llama", -1, SQLITE_STATIC);
-                    std::string status_str = score >= 80 ? "pass" : score >= 50 ? "warn" : "fail";
+                    std::string status_str = sr.score >= 80 ? "pass" : sr.score >= 50 ? "warn" : "fail";
                     sqlite3_bind_text(stmt, 2, status_str.c_str(), -1, SQLITE_TRANSIENT);
-                    std::string details = p.prompt + " → " + response_text + " (" + std::to_string((int)latency_ms) + "ms, score:" + std::to_string((int)score) + "%)";
+                    std::string details = p.prompt + " -> " + response_text + " (" + std::to_string((int)latency_ms) + "ms, score:" + std::to_string((int)sr.score) + "%)";
                     sqlite3_bind_text(stmt, 3, details.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_step(stmt);
                     sqlite3_finalize(stmt);
@@ -4908,13 +4973,22 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         double avg_latency = prompts.empty() ? 0 : total_latency / prompts.size();
         double german_pct = prompts.empty() ? 0 : (german_count * 100.0 / prompts.size());
 
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+        char result[8192];
+        snprintf(result, sizeof(result),
             "{\"results\":%s,\"summary\":{\"avg_score\":%.1f,\"avg_latency_ms\":%.0f,\"german_pct\":%.0f}}",
             results_json.c_str(), avg_score, avg_latency, german_pct);
+        finish_async_task(task_id, result);
     }
 
     void handle_llama_shutup_test(struct mg_connection *c, struct mg_http_message *hm) {
         uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+
+        std::string ping_err;
+        if (tcp_command(llama_cmd_port, "PING", ping_err, 3) != "PONG") {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"LLaMA service not reachable: %s\"}", ping_err.c_str());
+            return;
+        }
 
         struct mg_str json_body = hm->body;
         int plen = 0;
@@ -4926,13 +5000,23 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 prompt = pbuf;
         }
 
-        std::string cmd = "SHUTUP_TEST:" + prompt;
+        int64_t task_id = create_async_task("llama_shutup_test");
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_llama_shutup_test_async, this,
+                task_id, prompt);
+        }
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_llama_shutup_test_async(int64_t task_id, std::string prompt) {
+        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
         std::string err;
-        std::string resp = tcp_command(llama_cmd_port, cmd, err, 15);
+        std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt, err, 15);
 
         if (resp.empty()) {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"LLaMA service not reachable: %s\"}", err.c_str());
+            finish_async_task(task_id, "{\"error\":\"LLaMA service not reachable\"}");
             return;
         }
 
@@ -4948,8 +5032,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
         }
 
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+        char result[256];
+        snprintf(result, sizeof(result),
             "{\"interrupt_latency_ms\":%.0f,\"total_ms\":%.0f}", interrupt_ms, total_ms);
+        finish_async_task(task_id, result);
     }
 
     void handle_llama_benchmark(struct mg_connection *c, struct mg_http_message *hm) {
@@ -5086,41 +5172,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 }
                 latencies.push_back(latency_ms);
 
-                int word_count = 0;
-                {
-                    bool in_word = false;
-                    for (char ch : response_text) {
-                        if (ch == ' ' || ch == '\n' || ch == '\t') { in_word = false; }
-                        else if (!in_word) { in_word = true; word_count++; }
-                    }
-                }
-                total_words += word_count;
-
-                int keywords_found = 0;
-                for (const auto& kw : p.keywords) {
-                    std::string lr = response_text, lk = kw;
-                    for (auto& ch : lr) ch = tolower((unsigned char)ch);
-                    for (auto& ch : lk) ch = tolower((unsigned char)ch);
-                    if (lr.find(lk) != std::string::npos) keywords_found++;
-                }
-
-                bool is_german = false;
-                {
-                    const char* markers[] = {"ich", "der", "die", "das", "ist", "ein", "und",
-                        "für", "mit", "auf", "den", "dem", "des", "von", "als", "auch", "nicht",
-                        "sich", "wie", "kann", "gerne", "bitte", "danke", "ja", "nein"};
-                    std::string lr = response_text;
-                    for (auto& ch : lr) ch = tolower((unsigned char)ch);
-                    int hits = 0;
-                    for (const auto* m : markers) { if (lr.find(m) != std::string::npos) hits++; }
-                    is_german = hits >= 2;
-                }
-                if (is_german) german_count++;
-
-                double kw_pct = p.keywords.empty() ? 100.0 : (keywords_found * 100.0 / p.keywords.size());
-                double brevity = (word_count <= p.max_words) ? 100.0 : std::max(0.0, 100.0 - (word_count - p.max_words) * 5.0);
-                double gscore = is_german ? 100.0 : 0.0;
-                scores.push_back(kw_pct * 0.4 + brevity * 0.3 + gscore * 0.3);
+                LlamaScoreResult sr = score_llama_response(response_text, p.keywords, p.max_words);
+                total_words += sr.word_count;
+                if (sr.is_german) german_count++;
+                scores.push_back(sr.score);
             }
         }
 

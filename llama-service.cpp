@@ -414,21 +414,20 @@ private:
                 process_call(test_cid, prompt);
             });
 
+            auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (std::chrono::steady_clock::now() < wait_deadline) {
+                if (call->generating.load()) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
             auto interrupt_start = std::chrono::steady_clock::now();
-            {
-                std::lock_guard<std::mutex> lock(calls_mutex_);
-                auto it = calls_.find(test_cid);
-                if (it != calls_.end()) {
-                    it->second->generating = false;
-                }
-            }
+            call->generating = false;
+
+            gen_thread.join();
             auto interrupt_end = std::chrono::steady_clock::now();
             double interrupt_ms = std::chrono::duration_cast<std::chrono::microseconds>(
                 interrupt_end - interrupt_start).count() / 1000.0;
-
-            gen_thread.join();
 
             double total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - gen_start).count();
@@ -451,8 +450,8 @@ private:
         return "ERROR:Unknown command\n";
     }
 
-    int cmd_sock_ = -1;
     std::atomic<bool> running_;
+    int cmd_sock_ = -1;
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;

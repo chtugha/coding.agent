@@ -415,7 +415,7 @@ TEST(MgmtMessageTest, SpeechSignalPropagation) {
         speech_received = true;
     });
 
-    upstream.signal_speech(1, true);
+    upstream.broadcast_speech_signal(1, true);
 
     for (int i = 0; i < 50 && !speech_received; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
