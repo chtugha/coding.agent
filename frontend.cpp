@@ -4973,10 +4973,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         double avg_latency = prompts.empty() ? 0 : total_latency / prompts.size();
         double german_pct = prompts.empty() ? 0 : (german_count * 100.0 / prompts.size());
 
-        char result[8192];
-        snprintf(result, sizeof(result),
-            "{\"results\":%s,\"summary\":{\"avg_score\":%.1f,\"avg_latency_ms\":%.0f,\"german_pct\":%.0f}}",
-            results_json.c_str(), avg_score, avg_latency, german_pct);
+        std::string result = "{\"results\":" + results_json
+            + ",\"summary\":{\"avg_score\":" + std::to_string(avg_score)
+            + ",\"avg_latency_ms\":" + std::to_string((int)avg_latency)
+            + ",\"german_pct\":" + std::to_string((int)german_pct) + "}}";
         finish_async_task(task_id, result);
     }
 
