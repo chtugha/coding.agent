@@ -359,9 +359,6 @@ public:
         if (mgmt_recv_thread_.joinable()) mgmt_recv_thread_.join();
     }
 
-    // Kept for API compat — always false now (no master/slave concept)
-    bool is_master() const { return false; }
-    bool was_promoted() const { return false; }
     ServiceType type() const { return type_; }
 
     ConnectionState upstream_state() const {
@@ -859,7 +856,7 @@ private:
                     uint16_t net_len;
                     if (!recv_exact(sock, &net_len, 2, 500)) { mark_failed = true; break; }
                     uint16_t len = ntohs(net_len);
-                    if (len == 0 || len > 65535) { mark_failed = true; break; }
+                    if (len == 0) { mark_failed = true; break; }
                     std::string msg(len, '\0');
                     if (!recv_exact(sock, msg.data(), len, 2000)) { mark_failed = true; break; }
 

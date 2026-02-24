@@ -113,12 +113,6 @@ TEST(TopologyTest, UpstreamDownstreamMapping) {
     EXPECT_EQ(upstream_of(ServiceType::SIP_CLIENT), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
 }
 
-TEST(PeerToPeerTest, NoMasterSlaveAnymore) {
-    InterconnectNode node(ServiceType::SIP_CLIENT);
-    EXPECT_FALSE(node.is_master());
-    EXPECT_FALSE(node.was_promoted());
-}
-
 TEST(ServiceTypeTest, EnumToString) {
     EXPECT_STREQ(service_type_to_string(ServiceType::SIP_CLIENT), "SIP_CLIENT");
     EXPECT_STREQ(service_type_to_string(ServiceType::INBOUND_AUDIO_PROCESSOR), "INBOUND_AUDIO_PROCESSOR");
@@ -612,6 +606,5 @@ TEST(PipelineServiceTest, FrontendIsNotPipelineService) {
 TEST(FrontendNodeTest, FrontendInitializesWithoutPorts) {
     InterconnectNode frontend(ServiceType::FRONTEND);
     EXPECT_TRUE(frontend.initialize());
-    EXPECT_FALSE(frontend.is_master());
     frontend.shutdown();
 }
