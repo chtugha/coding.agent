@@ -5261,7 +5261,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         int size_mb = static_cast<int>(st.st_size / (1024 * 1024));
         
         sqlite3_stmt* stmt;
-        const char* insert_sql = "INSERT INTO models (service, name, path, backend, size_mb, config_json, added_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)";
+        const char* insert_sql = "INSERT INTO models (service, name, path, backend, size_mb, config_json, added_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id";
         int rc = sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr);
         if (rc != SQLITE_OK) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database prepare failed\"}");
@@ -5277,10 +5277,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(time(nullptr)));
         
         rc = sqlite3_step(stmt);
-        sqlite3_int64 model_id = sqlite3_last_insert_rowid(db_);
+        sqlite3_int64 model_id = 0;
+        if (rc == SQLITE_ROW) {
+            model_id = sqlite3_column_int64(stmt, 0);
+        }
         sqlite3_finalize(stmt);
         
-        if (rc != SQLITE_DONE) {
+        if (model_id == 0) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Failed to insert model\"}");
             return;
         }
