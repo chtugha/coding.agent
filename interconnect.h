@@ -583,11 +583,6 @@ public:
         return speech_active_calls_.count(call_id) > 0;
     }
 
-    // No longer needed (no master registry). Returns false.
-    bool is_service_alive(ServiceType /*svc_type*/) const {
-        return false;
-    }
-
     size_t active_call_count() const {
         std::lock_guard<std::mutex> lock(call_id_mutex_);
         return active_call_ids_.size();
@@ -597,10 +592,6 @@ public:
         std::lock_guard<std::mutex> lock(call_id_mutex_);
         return ended_call_ids_.size();
     }
-
-    // No-ops for removed master/slave features
-    void unregister_service(ServiceType) {}
-    size_t registered_service_count() const { return 0; }
 
     // Not applicable without master registry. Use downstream_state() instead.
     struct PortConfig {
@@ -781,9 +772,9 @@ private:
             if (ds == ConnectionState::DISCONNECTED || ds == ConnectionState::FAILED) {
                 connect_to_downstream();
             } else {
+                bool dead = false;
                 {
                     std::lock_guard<std::mutex> lock(downstream_mutex_);
-                    bool dead = false;
                     if (downstream_data_sock_ >= 0 && is_socket_dead(downstream_data_sock_)) {
                         std::fprintf(stderr, "[%s] Downstream data connection lost\n",
                                     service_type_to_string(type_));
@@ -798,10 +789,10 @@ private:
                         close_socket(downstream_data_sock_);
                         dead = true;
                     }
-                    if (dead) {
-                        std::lock_guard<std::mutex> sl(state_mutex_);
-                        downstream_state_ = ConnectionState::DISCONNECTED;
-                    }
+                }
+                if (dead) {
+                    std::lock_guard<std::mutex> sl(state_mutex_);
+                    downstream_state_ = ConnectionState::DISCONNECTED;
                 }
             }
 
@@ -831,13 +822,10 @@ private:
             }
 
             uint8_t type_byte;
-            ssize_t n = recv(sock, &type_byte, 1, MSG_PEEK);
-            if (n <= 0) {
-                if (n == 0) mark_upstream_failed();
-                continue;
-            }
-
             if (!recv_exact(sock, &type_byte, 1, 500)) {
+                // Connection closed or errored — recv_exact returns false on EOF (n==0)
+                // and on read errors. Mark upstream failed so reconnect logic kicks in.
+                mark_upstream_failed();
                 continue;
             }
 

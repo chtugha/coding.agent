@@ -226,6 +226,10 @@ private:
                             call->silence_count = 0;
                             call->speech_start = 0;
                             call->noise_floor = 0.00005f;
+                            if (call->speech_signaled) {
+                                call->speech_signaled = false;
+                                interconnect_.broadcast_speech_signal(call->id, false);
+                            }
                             break;
                         }
 
@@ -247,6 +251,10 @@ private:
                             call->silence_count = 0;
                             call->speech_start = 0;
                             call->noise_floor = 0.00005f;
+                            if (call->speech_signaled) {
+                                call->speech_signaled = false;
+                                interconnect_.broadcast_speech_signal(call->id, false);
+                            }
                             break;
                         }
                     }
