@@ -15,6 +15,11 @@
 #include <unordered_map>
 #include <vector>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <unistd.h>
+#include <cmath>
 
 #ifdef KOKORO_COREML
 #import <CoreML/CoreML.h>
@@ -770,6 +775,8 @@ public:
             std::printf("Downstream (OAP) not available yet - will auto-reconnect\n");
         }
 
+        std::thread cmd_thread(&KokoroService::command_listener_loop, this);
+
         std::printf("Kokoro service ready - waiting for text from LLaMA\n");
 
         while (running_) {
@@ -784,15 +791,143 @@ public:
         }
 
         shutdown_all_calls();
+
+        if (cmd_sock_ >= 0) ::close(cmd_sock_);
+        cmd_sock_ = -1;
+        if (cmd_thread.joinable()) cmd_thread.join();
     }
 
     void shutdown() {
         running_ = false;
+        if (cmd_sock_ >= 0) ::close(cmd_sock_);
+        cmd_sock_ = -1;
         shutdown_all_calls();
         node_.shutdown();
     }
 
 private:
+    void command_listener_loop() {
+        uint16_t port = whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE);
+        cmd_sock_ = socket(AF_INET, SOCK_STREAM, 0);
+        if (cmd_sock_ < 0) return;
+
+        int opt = 1;
+        setsockopt(cmd_sock_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(port);
+
+        if (bind(cmd_sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            std::fprintf(stderr, "Kokoro cmd: bind port %d failed\n", port);
+            return;
+        }
+        listen(cmd_sock_, 4);
+        std::printf("Kokoro command listener on port %d\n", port);
+
+        while (running_) {
+            struct pollfd pfd{cmd_sock_, POLLIN, 0};
+            int r = poll(&pfd, 1, 200);
+            if (r <= 0) continue;
+
+            int csock = accept(cmd_sock_, nullptr, nullptr);
+            if (csock < 0) continue;
+
+            struct timeval tv{10, 0};
+            setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(csock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+            char buf[4096];
+            int n = (int)recv(csock, buf, sizeof(buf) - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string cmd(buf);
+                while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r'))
+                    cmd.pop_back();
+                std::string response = handle_command(cmd);
+                send(csock, response.c_str(), response.size(), 0);
+            }
+            ::close(csock);
+        }
+    }
+
+    std::string handle_command(const std::string& cmd) {
+        if (cmd.rfind("TEST_SYNTH:", 0) == 0) {
+            std::string text = cmd.substr(11);
+            auto start = std::chrono::steady_clock::now();
+            auto samples = pipeline_.synthesize(text);
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+
+            if (samples.empty()) {
+                return "ERROR:synthesis failed\n";
+            }
+
+            double duration_s = (double)samples.size() / KOKORO_SAMPLE_RATE;
+            double rtf = (elapsed / 1000.0) / duration_s;
+
+            float peak = 0.0f;
+            double sum_sq = 0.0;
+            for (float s : samples) {
+                float a = std::abs(s);
+                if (a > peak) peak = a;
+                sum_sq += s * s;
+            }
+            double rms = std::sqrt(sum_sq / samples.size());
+
+            return "SYNTH_RESULT:" + std::to_string(elapsed) + "ms:"
+                + std::to_string(samples.size()) + ":" + std::to_string(KOKORO_SAMPLE_RATE) + ":"
+                + std::to_string(duration_s) + "s:rtf=" + std::to_string(rtf)
+                + ":peak=" + std::to_string(peak) + ":rms=" + std::to_string(rms) + "\n";
+        }
+        if (cmd.rfind("BENCHMARK:", 0) == 0) {
+            std::string text = cmd.substr(10);
+            int iterations = 5;
+            size_t sep = text.find('|');
+            if (sep != std::string::npos) {
+                iterations = std::max(1, std::atoi(text.substr(sep + 1).c_str()));
+                text = text.substr(0, sep);
+            }
+
+            std::vector<double> latencies;
+            size_t total_samples = 0;
+            for (int i = 0; i < iterations; i++) {
+                auto t0 = std::chrono::steady_clock::now();
+                auto samples = pipeline_.synthesize(text);
+                auto ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (!samples.empty()) {
+                    latencies.push_back(ms);
+                    total_samples = samples.size();
+                }
+            }
+
+            if (latencies.empty()) {
+                return "ERROR:all iterations failed\n";
+            }
+
+            std::sort(latencies.begin(), latencies.end());
+            double sum = 0;
+            for (double v : latencies) sum += v;
+            double avg = sum / latencies.size();
+            double p50 = latencies[latencies.size() / 2];
+            double p95 = latencies[std::min(latencies.size() - 1, (size_t)(latencies.size() * 0.95))];
+            double duration_s = (double)total_samples / KOKORO_SAMPLE_RATE;
+            double rtf_avg = (avg / 1000.0) / duration_s;
+
+            return "BENCH_RESULT:" + std::to_string((int)avg) + "ms:"
+                + std::to_string((int)p50) + "ms:" + std::to_string((int)p95) + "ms:"
+                + std::to_string((int)latencies.size()) + "/" + std::to_string(iterations) + ":"
+                + std::to_string(total_samples) + "@" + std::to_string(KOKORO_SAMPLE_RATE) + ":"
+                + "rtf=" + std::to_string(rtf_avg) + "\n";
+        }
+        if (cmd == "PING") {
+            return "PONG\n";
+        }
+        return "ERROR:Unknown command\n";
+    }
+
     void dispatch_text_packet(const Packet& pkt) {
         std::string text(reinterpret_cast<const char*>(pkt.payload.data()), pkt.payload.size());
 
@@ -911,6 +1046,7 @@ private:
     LogForwarder log_fwd_;
     KokoroPipeline pipeline_;
     std::atomic<bool> running_{true};
+    int cmd_sock_ = -1;
     std::map<uint32_t, std::shared_ptr<CallContext>> calls_;
     std::mutex calls_mutex_;
 };

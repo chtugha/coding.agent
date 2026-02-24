@@ -1162,6 +1162,10 @@ private:
                 handle_llama_shutup_test(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/llama/benchmark")) == 0) {
                 handle_llama_benchmark(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/kokoro/quality_test")) == 0) {
+                handle_kokoro_quality_test(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/kokoro/benchmark")) == 0) {
+                handle_kokoro_benchmark(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
                 handle_async_status(c, hm);
             } else {
@@ -1680,6 +1684,30 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div id="llamaTestStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="llamaTestResults" style="margin-top:12px"></div>
 <div id="llamaShutupResult" style="margin-top:8px"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Synthesize German phrases via Kokoro TTS and measure latency, RTF, audio quality.
+  Requires: Kokoro service running. Does not require full pipeline.
+</p>
+<div class="wt-field">
+<label>Custom Phrase (optional)</label>
+<input class="wt-input" id="kokoroCustomPhrase" placeholder="Type a German phrase to synthesize...">
+</div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button class="wt-btn wt-btn-primary" onclick="runKokoroQualityTest()">&#x25B6; Run Quality Test</button>
+<button class="wt-btn wt-btn-secondary" onclick="runKokoroBenchmark()">&#x23F1; Benchmark</button>
+<select class="wt-select" id="kokoroBenchIter" style="width:80px">
+<option value="3">3 iter</option>
+<option value="5" selected>5 iter</option>
+<option value="10">10 iter</option>
+</select>
+</div>
+<div id="kokoroTestStatus" style="margin-top:8px;font-size:12px"></div>
+<div id="kokoroTestResults" style="margin-top:12px"></div>
+<div id="kokoroBenchResult" style="margin-top:8px"></div>
 </div>
 
 <div class="wt-card">
@@ -2425,6 +2453,107 @@ function pollLlamaShutupTask(taskId){
     html+='</div>';
     result.innerHTML=html;
   }).catch(e=>console.error('pollLlamaShutupTask',e));
+}
+
+var kokoroQualityPoll=null;
+var kokoroBenchPoll=null;
+
+function runKokoroQualityTest(){
+  if(kokoroQualityPoll){clearInterval(kokoroQualityPoll);kokoroQualityPoll=null;}
+  var status=document.getElementById('kokoroTestStatus');
+  var results=document.getElementById('kokoroTestResults');
+  var custom=document.getElementById('kokoroCustomPhrase').value.trim();
+  var body={};
+  if(custom) body.phrases=[custom];
+  status.innerHTML='<span style="color:var(--wt-accent)">Running Kokoro quality test...</span>';
+  results.innerHTML='';
+  fetch('/api/kokoro/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>{
+      if(r.status===202) return r.json();
+      return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
+    }).then(d=>{
+      status.innerHTML='<span style="color:var(--wt-accent)">Quality test running (task '+d.task_id+')...</span>';
+      kokoroQualityPoll=setInterval(()=>pollKokoroQualityTask(d.task_id),2000);
+    }).catch(e=>{
+      if(kokoroQualityPoll){clearInterval(kokoroQualityPoll);kokoroQualityPoll=null;}
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+    });
+}
+
+function pollKokoroQualityTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(r=>r.json()).then(d=>{
+    if(d.status==='running') return;
+    clearInterval(kokoroQualityPoll);kokoroQualityPoll=null;
+    var status=document.getElementById('kokoroTestStatus');
+    var results=document.getElementById('kokoroTestResults');
+    if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
+    status.innerHTML='<span style="color:var(--wt-success)">Quality test complete — '+d.results.length+' phrases tested.</span>';
+    var html='<table class="wt-table"><tr><th>Phrase</th><th>Latency</th><th>Samples</th><th>Duration</th><th>RTF</th><th>Peak</th><th>RMS</th><th>Status</th></tr>';
+    d.results.forEach(function(r){
+      var color=r.status==='pass'?'var(--wt-success)':r.status==='warn'?'var(--wt-warning)':'var(--wt-danger)';
+      html+='<tr><td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.phrase)+'</td>';
+      html+='<td>'+r.latency_ms+'ms</td>';
+      html+='<td>'+r.samples+'</td>';
+      html+='<td>'+r.duration_s.toFixed(2)+'s</td>';
+      html+='<td style="color:'+color+';font-weight:bold">'+r.rtf.toFixed(3)+'</td>';
+      html+='<td>'+r.peak.toFixed(3)+'</td>';
+      html+='<td>'+r.rms.toFixed(4)+'</td>';
+      html+='<td style="color:'+color+'">'+r.status.toUpperCase()+'</td></tr>';
+    });
+    html+='</table>';
+    if(d.summary){
+      html+='<div style="margin-top:10px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px">';
+      html+='<strong>Summary:</strong> Avg Latency: '+d.summary.avg_latency_ms+'ms | Avg RTF: '+d.summary.avg_rtf.toFixed(3);
+      html+=' | Total Audio: '+d.summary.total_duration_s.toFixed(1)+'s | Success: '+d.summary.success_count+'/'+d.summary.total_count;
+      html+='</div>';
+    }
+    results.innerHTML=html;
+  }).catch(e=>console.error('pollKokoroQualityTask',e));
+}
+
+function runKokoroBenchmark(){
+  if(kokoroBenchPoll){clearInterval(kokoroBenchPoll);kokoroBenchPoll=null;}
+  var status=document.getElementById('kokoroTestStatus');
+  var result=document.getElementById('kokoroBenchResult');
+  var iterations=parseInt(document.getElementById('kokoroBenchIter').value)||5;
+  var custom=document.getElementById('kokoroCustomPhrase').value.trim();
+  var body={iterations:iterations};
+  if(custom) body.phrase=custom;
+  status.innerHTML='<span style="color:var(--wt-accent)">Running Kokoro benchmark ('+iterations+' iterations)...</span>';
+  result.innerHTML='';
+  fetch('/api/kokoro/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>{
+      if(r.status===202) return r.json();
+      return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
+    }).then(d=>{
+      status.innerHTML='<span style="color:var(--wt-accent)">Benchmark running (task '+d.task_id+')...</span>';
+      kokoroBenchPoll=setInterval(()=>pollKokoroBenchTask(d.task_id),2000);
+    }).catch(e=>{
+      if(kokoroBenchPoll){clearInterval(kokoroBenchPoll);kokoroBenchPoll=null;}
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+    });
+}
+
+function pollKokoroBenchTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(r=>r.json()).then(d=>{
+    if(d.status==='running') return;
+    clearInterval(kokoroBenchPoll);kokoroBenchPoll=null;
+    var status=document.getElementById('kokoroTestStatus');
+    var result=document.getElementById('kokoroBenchResult');
+    if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
+    status.innerHTML='<span style="color:var(--wt-success)">Benchmark complete.</span>';
+    var rtfColor=d.rtf<0.5?'var(--wt-success)':d.rtf<1.0?'var(--wt-warning)':'var(--wt-danger)';
+    var html='<div class="wt-card" style="margin:0;padding:10px">';
+    html+='<p><strong>Phrase:</strong> '+escapeHtml(d.phrase)+'</p>';
+    html+='<p><strong>Avg latency:</strong> '+d.avg_ms+'ms | <strong>P50:</strong> '+d.p50_ms+'ms | <strong>P95:</strong> '+d.p95_ms+'ms</p>';
+    html+='<p><strong>RTF:</strong> <span style="color:'+rtfColor+';font-weight:bold">'+d.rtf.toFixed(3)+'</span>';
+    html+=' (target: &lt;1.0, ideal: &lt;0.5)</p>';
+    html+='<p><strong>Audio:</strong> '+d.samples+' samples @ '+d.sample_rate+'Hz = '+d.duration_s.toFixed(2)+'s</p>';
+    html+='<p><strong>Success:</strong> '+d.success+'/'+d.total+' iterations</p>';
+    html+='<p><strong>Result:</strong> '+(d.rtf<1.0?'<span style="color:var(--wt-success)">PASS — real-time capable</span>':'<span style="color:var(--wt-danger)">FAIL — too slow for real-time</span>')+'</p>';
+    html+='</div>';
+    result.innerHTML=html;
+  }).catch(e=>console.error('pollKokoroBenchTask',e));
 }
 
 function checkSipProvider(){
@@ -5253,6 +5382,260 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             (int)std::count_if(scores.begin(), scores.end(), [](double s){ return s >= 80; }),
             (int)std::count_if(scores.begin(), scores.end(), [](double s){ return s < 80; }));
         return result;
+    }
+
+    void handle_kokoro_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+        std::string ping_err;
+        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"Kokoro service not reachable (port %d): %s\"}", kokoro_cmd_port, ping_err.c_str());
+            return;
+        }
+
+        struct mg_str json_body = hm->body;
+        struct mg_str key, val;
+        std::vector<std::string> phrases;
+        int plen = 0;
+        int pofs = mg_json_get(json_body, "$.phrases", &plen);
+        if (pofs >= 0) {
+            struct mg_str arr = mg_str_n(json_body.buf + pofs, (size_t)plen);
+            size_t ofs = 0;
+            while ((ofs = mg_json_next(arr, ofs, &key, &val)) > 0) {
+                if (val.len >= 2 && val.buf[0] == '"') {
+                    char buf[1024];
+                    if (mg_json_unescape(mg_str_n(val.buf + 1, val.len - 2), buf, sizeof(buf)))
+                        phrases.push_back(buf);
+                }
+            }
+        }
+
+        if (phrases.empty()) {
+            phrases = {
+                "Hallo, wie kann ich Ihnen helfen?",
+                "Die Hauptstadt von Deutschland ist Berlin.",
+                "Guten Morgen, ich bin Ihr Sprachassistent.",
+                "Das Wetter ist heute sehr schoen und die Sonne scheint.",
+                "Vielen Dank fuer Ihren Anruf, auf Wiedersehen!"
+            };
+        }
+
+        int64_t task_id = create_async_task("kokoro_quality_test");
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_kokoro_quality_test_async, this,
+                task_id, std::move(phrases));
+        }
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_kokoro_quality_test_async(int64_t task_id, std::vector<std::string> phrases) {
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+
+        std::string results_json = "[";
+        double total_latency = 0;
+        int success_count = 0;
+        double total_rtf = 0;
+        double total_duration = 0;
+
+        for (size_t i = 0; i < phrases.size(); i++) {
+            std::string err;
+            std::string resp = tcp_command(kokoro_cmd_port, "TEST_SYNTH:" + phrases[i], err, 15);
+
+            double latency_ms = 0;
+            long samples = 0;
+            int sample_rate = 0;
+            double duration_s = 0;
+            double rtf = 0;
+            float peak = 0;
+            double rms = 0;
+            bool ok = false;
+
+            if (resp.rfind("SYNTH_RESULT:", 0) == 0) {
+                ok = true;
+                size_t p = 13;
+                size_t ms_end = resp.find("ms:", p);
+                if (ms_end != std::string::npos) {
+                    latency_ms = std::stod(resp.substr(p, ms_end - p));
+                    p = ms_end + 3;
+                }
+                size_t c1 = resp.find(':', p);
+                if (c1 != std::string::npos) { samples = std::stol(resp.substr(p, c1 - p)); p = c1 + 1; }
+                size_t c2 = resp.find(':', p);
+                if (c2 != std::string::npos) { sample_rate = std::stoi(resp.substr(p, c2 - p)); p = c2 + 1; }
+                size_t c3 = resp.find("s:", p);
+                if (c3 != std::string::npos) { duration_s = std::stod(resp.substr(p, c3 - p)); p = c3 + 2; }
+                size_t rtf_pos = resp.find("rtf=", p);
+                if (rtf_pos != std::string::npos) {
+                    size_t rtf_end = resp.find(':', rtf_pos + 4);
+                    rtf = std::stod(resp.substr(rtf_pos + 4, rtf_end - rtf_pos - 4));
+                }
+                size_t peak_pos = resp.find("peak=", p);
+                if (peak_pos != std::string::npos) {
+                    size_t peak_end = resp.find(':', peak_pos + 5);
+                    peak = std::stof(resp.substr(peak_pos + 5, peak_end - peak_pos - 5));
+                }
+                size_t rms_pos = resp.find("rms=", p);
+                if (rms_pos != std::string::npos) {
+                    rms = std::stod(resp.substr(rms_pos + 4));
+                }
+            }
+
+            std::string status_str = "fail";
+            if (ok) {
+                success_count++;
+                total_latency += latency_ms;
+                total_rtf += rtf;
+                total_duration += duration_s;
+                status_str = (rtf < 1.0) ? "pass" : "warn";
+            }
+
+            if (i > 0) results_json += ",";
+            results_json += "{\"phrase\":\"" + escape_json(phrases[i])
+                + "\",\"latency_ms\":" + std::to_string((int)latency_ms)
+                + ",\"samples\":" + std::to_string(samples)
+                + ",\"sample_rate\":" + std::to_string(sample_rate)
+                + ",\"duration_s\":" + std::to_string(duration_s)
+                + ",\"rtf\":" + std::to_string(rtf)
+                + ",\"peak\":" + std::to_string(peak)
+                + ",\"rms\":" + std::to_string(rms)
+                + ",\"status\":\"" + status_str
+                + "\",\"ok\":" + (ok ? "true" : "false") + "}";
+
+            if (db_) {
+                const char* sql = "INSERT INTO test_results (test_name,service,status,details,timestamp) "
+                    "VALUES ('kokoro_quality',?1,?2,?3,strftime('%s','now'))";
+                sqlite3_stmt* stmt = nullptr;
+                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(stmt, 1, "kokoro", -1, SQLITE_STATIC);
+                    sqlite3_bind_text(stmt, 2, status_str.c_str(), -1, SQLITE_TRANSIENT);
+                    std::string details = phrases[i] + " -> " + std::to_string((int)latency_ms) + "ms, "
+                        + std::to_string(samples) + " samples, RTF=" + std::to_string(rtf);
+                    sqlite3_bind_text(stmt, 3, details.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
+            }
+        }
+        results_json += "]";
+
+        double avg_latency = success_count > 0 ? total_latency / success_count : 0;
+        double avg_rtf = success_count > 0 ? total_rtf / success_count : 0;
+
+        std::string result = "{\"results\":" + results_json
+            + ",\"summary\":{\"avg_latency_ms\":" + std::to_string((int)avg_latency)
+            + ",\"avg_rtf\":" + std::to_string(avg_rtf)
+            + ",\"total_duration_s\":" + std::to_string(total_duration)
+            + ",\"success_count\":" + std::to_string(success_count)
+            + ",\"total_count\":" + std::to_string((int)phrases.size()) + "}}";
+        finish_async_task(task_id, result);
+    }
+
+    void handle_kokoro_benchmark(struct mg_connection *c, struct mg_http_message *hm) {
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+        std::string ping_err;
+        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"Kokoro service not reachable (port %d): %s\"}", kokoro_cmd_port, ping_err.c_str());
+            return;
+        }
+
+        struct mg_str json_body = hm->body;
+        int iterations = (int)mg_json_get_long(json_body, "$.iterations", 5);
+        if (iterations < 1) iterations = 1;
+        if (iterations > 20) iterations = 20;
+
+        int plen = 0;
+        std::string phrase = "Guten Tag, wie kann ich Ihnen helfen?";
+        int pofs = mg_json_get(json_body, "$.phrase", &plen);
+        if (pofs >= 0 && plen >= 2) {
+            char pbuf[1024];
+            if (mg_json_unescape(mg_str_n(json_body.buf + pofs + 1, plen - 2), pbuf, sizeof(pbuf)))
+                phrase = pbuf;
+        }
+
+        int64_t task_id = create_async_task("kokoro_benchmark");
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_kokoro_benchmark_async, this,
+                task_id, phrase, iterations);
+        }
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_kokoro_benchmark_async(int64_t task_id, std::string phrase, int iterations) {
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+
+        std::string bench_cmd = "BENCHMARK:" + phrase + "|" + std::to_string(iterations);
+        std::string err;
+        std::string resp = tcp_command(kokoro_cmd_port, bench_cmd, err, 60);
+
+        if (resp.rfind("BENCH_RESULT:", 0) != 0) {
+            finish_async_task(task_id, "{\"error\":\"Benchmark failed: " + escape_json(err.empty() ? resp : err) + "\"}");
+            return;
+        }
+
+        int avg_ms = 0, p50_ms = 0, p95_ms = 0;
+        int success = 0, total = 0;
+        long total_samples = 0;
+        int sample_rate = 0;
+        double rtf = 0;
+
+        size_t p = 13;
+        size_t c1 = resp.find("ms:", p);
+        if (c1 != std::string::npos) { avg_ms = std::stoi(resp.substr(p, c1 - p)); p = c1 + 3; }
+        size_t c2 = resp.find("ms:", p);
+        if (c2 != std::string::npos) { p50_ms = std::stoi(resp.substr(p, c2 - p)); p = c2 + 3; }
+        size_t c3 = resp.find("ms:", p);
+        if (c3 != std::string::npos) { p95_ms = std::stoi(resp.substr(p, c3 - p)); p = c3 + 3; }
+        size_t slash = resp.find('/', p);
+        if (slash != std::string::npos) {
+            success = std::stoi(resp.substr(p, slash - p));
+            size_t c4 = resp.find(':', slash + 1);
+            if (c4 != std::string::npos) { total = std::stoi(resp.substr(slash + 1, c4 - slash - 1)); p = c4 + 1; }
+        }
+        size_t at = resp.find('@', p);
+        if (at != std::string::npos) {
+            total_samples = std::stol(resp.substr(p, at - p));
+            size_t c5 = resp.find(':', at + 1);
+            if (c5 != std::string::npos) { sample_rate = std::stoi(resp.substr(at + 1, c5 - at - 1)); p = c5 + 1; }
+        }
+        size_t rtf_pos = resp.find("rtf=", p);
+        if (rtf_pos != std::string::npos) {
+            rtf = std::stod(resp.substr(rtf_pos + 4));
+        }
+
+        double duration_s = sample_rate > 0 ? (double)total_samples / sample_rate : 0;
+
+        if (db_) {
+            const char* sql = "INSERT INTO test_results (test_name,service,status,details,timestamp) "
+                "VALUES ('kokoro_benchmark','kokoro',?1,?2,strftime('%s','now'))";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                std::string status = rtf < 1.0 ? "pass" : "warn";
+                sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_TRANSIENT);
+                std::string details = "avg=" + std::to_string(avg_ms) + "ms p50=" + std::to_string(p50_ms)
+                    + "ms p95=" + std::to_string(p95_ms) + "ms RTF=" + std::to_string(rtf)
+                    + " (" + std::to_string(success) + "/" + std::to_string(total) + " ok)";
+                sqlite3_bind_text(stmt, 2, details.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        std::string result = "{\"avg_ms\":" + std::to_string(avg_ms)
+            + ",\"p50_ms\":" + std::to_string(p50_ms)
+            + ",\"p95_ms\":" + std::to_string(p95_ms)
+            + ",\"success\":" + std::to_string(success)
+            + ",\"total\":" + std::to_string(total)
+            + ",\"samples\":" + std::to_string(total_samples)
+            + ",\"sample_rate\":" + std::to_string(sample_rate)
+            + ",\"duration_s\":" + std::to_string(duration_s)
+            + ",\"rtf\":" + std::to_string(rtf)
+            + ",\"phrase\":\"" + escape_json(phrase) + "\"}";
+        finish_async_task(task_id, result);
     }
 
     void handle_async_status(struct mg_connection *c, struct mg_http_message *hm) {
