@@ -57,6 +57,7 @@ static bool process_alive(pid_t pid) {
 struct Pipeline {
     pid_t sip = -1;
     pid_t iap = -1;
+    pid_t vad = -1;
     pid_t whisper = -1;
     pid_t llama = -1;
     pid_t kokoro = -1;
@@ -94,6 +95,10 @@ struct Pipeline {
         if (iap <= 0) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+        vad = launch_process("vad-service", {}, env);
+        if (vad <= 0) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
         whisper = launch_process("whisper-service", {}, env);
         if (whisper <= 0) return false;
         std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -114,8 +119,9 @@ struct Pipeline {
     }
 
     bool all_alive() {
-        return process_alive(sip) && process_alive(iap) && process_alive(whisper) &&
-               process_alive(llama) && process_alive(kokoro) && process_alive(oap);
+        return process_alive(sip) && process_alive(iap) && process_alive(vad) &&
+               process_alive(whisper) && process_alive(llama) &&
+               process_alive(kokoro) && process_alive(oap);
     }
 
     void shutdown() {
@@ -124,9 +130,10 @@ struct Pipeline {
         kill_process(kokoro);
         kill_process(llama);
         kill_process(whisper);
+        kill_process(vad);
         kill_process(iap);
         kill_process(sip);
-        provider = sip = iap = whisper = llama = kokoro = oap = -1;
+        provider = sip = iap = vad = whisper = llama = kokoro = oap = -1;
     }
 };
 
@@ -172,7 +179,7 @@ TEST_F(EndToEndTest, SingleCallFullPipeline) {
     std::this_thread::sleep_for(std::chrono::seconds(10));
     ASSERT_TRUE(pipeline.all_alive()) << "One or more services crashed during startup";
 
-    std::printf("  All 6 services alive. Call in progress.\n");
+    std::printf("  All 7 services alive. Call in progress.\n");
     std::printf("  Running call for 30 seconds (with injected 400Hz tone)...\n");
 
     bool any_crashed = false;

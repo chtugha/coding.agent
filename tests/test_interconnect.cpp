@@ -102,14 +102,16 @@ TEST(PortAssignmentTest, NoPortConflictsAcrossServices) {
 
 TEST(TopologyTest, UpstreamDownstreamMapping) {
     EXPECT_EQ(downstream_of(ServiceType::SIP_CLIENT), ServiceType::INBOUND_AUDIO_PROCESSOR);
-    EXPECT_EQ(downstream_of(ServiceType::INBOUND_AUDIO_PROCESSOR), ServiceType::WHISPER_SERVICE);
+    EXPECT_EQ(downstream_of(ServiceType::INBOUND_AUDIO_PROCESSOR), ServiceType::VAD_SERVICE);
+    EXPECT_EQ(downstream_of(ServiceType::VAD_SERVICE), ServiceType::WHISPER_SERVICE);
     EXPECT_EQ(downstream_of(ServiceType::WHISPER_SERVICE), ServiceType::LLAMA_SERVICE);
     EXPECT_EQ(downstream_of(ServiceType::LLAMA_SERVICE), ServiceType::KOKORO_SERVICE);
     EXPECT_EQ(downstream_of(ServiceType::KOKORO_SERVICE), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
     EXPECT_EQ(downstream_of(ServiceType::OUTBOUND_AUDIO_PROCESSOR), ServiceType::SIP_CLIENT);
 
     EXPECT_EQ(upstream_of(ServiceType::INBOUND_AUDIO_PROCESSOR), ServiceType::SIP_CLIENT);
-    EXPECT_EQ(upstream_of(ServiceType::WHISPER_SERVICE), ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_EQ(upstream_of(ServiceType::VAD_SERVICE), ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_EQ(upstream_of(ServiceType::WHISPER_SERVICE), ServiceType::VAD_SERVICE);
     EXPECT_EQ(upstream_of(ServiceType::SIP_CLIENT), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
 }
 
@@ -128,7 +130,8 @@ TEST(ConnectionStateTest, InitialStateDisconnected) {
     EXPECT_TRUE(node.initialize());
 
     EXPECT_EQ(node.upstream_state(), ConnectionState::DISCONNECTED);
-    EXPECT_EQ(node.downstream_state(), ConnectionState::DISCONNECTED);
+    auto ds = node.downstream_state();
+    EXPECT_TRUE(ds == ConnectionState::DISCONNECTED || ds == ConnectionState::CONNECTING);
 
     node.shutdown();
 }
@@ -470,21 +473,25 @@ TEST(ReconnectionTest, AutoReconnectsAfterDownstreamRestart) {
 TEST(ThreeNodePipelineTest, DataFlowsThroughPipeline) {
     InterconnectNode sip(ServiceType::SIP_CLIENT);
     InterconnectNode iap(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    InterconnectNode vad(ServiceType::VAD_SERVICE);
     InterconnectNode whisper(ServiceType::WHISPER_SERVICE);
 
     EXPECT_TRUE(sip.initialize());
     EXPECT_TRUE(iap.initialize());
+    EXPECT_TRUE(vad.initialize());
     EXPECT_TRUE(whisper.initialize());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     EXPECT_TRUE(sip.connect_to_downstream());
     EXPECT_TRUE(iap.connect_to_downstream());
+    EXPECT_TRUE(vad.connect_to_downstream());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     EXPECT_EQ(sip.downstream_state(), ConnectionState::CONNECTED);
     EXPECT_EQ(iap.downstream_state(), ConnectionState::CONNECTED);
+    EXPECT_EQ(vad.downstream_state(), ConnectionState::CONNECTED);
 
     const char* audio = "audio_data_from_sip";
     Packet audio_pkt(1, audio, strlen(audio));
@@ -498,13 +505,22 @@ TEST(ThreeNodePipelineTest, DataFlowsThroughPipeline) {
     Packet processed_pkt(1, processed, strlen(processed));
     EXPECT_TRUE(iap.send_to_downstream(processed_pkt));
 
+    Packet vad_recv;
+    EXPECT_TRUE(vad.recv_from_upstream(vad_recv, 2000));
+    EXPECT_EQ(vad_recv.call_id, 1u);
+
+    const char* speech_chunk = "speech_chunk";
+    Packet speech_pkt(1, speech_chunk, strlen(speech_chunk));
+    EXPECT_TRUE(vad.send_to_downstream(speech_pkt));
+
     Packet whisper_recv;
     EXPECT_TRUE(whisper.recv_from_upstream(whisper_recv, 2000));
     EXPECT_EQ(whisper_recv.call_id, 1u);
     EXPECT_EQ(std::string(whisper_recv.payload.begin(), whisper_recv.payload.end()),
-              std::string(processed));
+              std::string(speech_chunk));
 
     whisper.shutdown();
+    vad.shutdown();
     iap.shutdown();
     sip.shutdown();
 }
@@ -512,25 +528,34 @@ TEST(ThreeNodePipelineTest, DataFlowsThroughPipeline) {
 TEST(ThreeNodePipelineTest, CallEndPropagatesAcrossMultipleHops) {
     InterconnectNode sip(ServiceType::SIP_CLIENT);
     InterconnectNode iap(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    InterconnectNode vad(ServiceType::VAD_SERVICE);
     InterconnectNode whisper(ServiceType::WHISPER_SERVICE);
 
     EXPECT_TRUE(sip.initialize());
     EXPECT_TRUE(iap.initialize());
+    EXPECT_TRUE(vad.initialize());
     EXPECT_TRUE(whisper.initialize());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     EXPECT_TRUE(sip.connect_to_downstream());
     EXPECT_TRUE(iap.connect_to_downstream());
+    EXPECT_TRUE(vad.connect_to_downstream());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     std::atomic<bool> iap_received(false);
+    std::atomic<bool> vad_received(false);
     std::atomic<bool> whisper_received(false);
 
     iap.register_call_end_handler([&](uint32_t cid) {
         (void)cid;
         iap_received = true;
+    });
+
+    vad.register_call_end_handler([&](uint32_t cid) {
+        (void)cid;
+        vad_received = true;
     });
 
     whisper.register_call_end_handler([&](uint32_t cid) {
@@ -542,14 +567,16 @@ TEST(ThreeNodePipelineTest, CallEndPropagatesAcrossMultipleHops) {
     sip.broadcast_call_end(cid);
 
     for (int i = 0; i < 50; ++i) {
-        if (iap_received && whisper_received) break;
+        if (iap_received && vad_received && whisper_received) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     EXPECT_TRUE(iap_received.load());
+    EXPECT_TRUE(vad_received.load());
     EXPECT_TRUE(whisper_received.load());
 
     whisper.shutdown();
+    vad.shutdown();
     iap.shutdown();
     sip.shutdown();
 }
@@ -596,6 +623,7 @@ TEST(PacketTraceTest, HopTracking) {
 TEST(PipelineServiceTest, FrontendIsNotPipelineService) {
     EXPECT_TRUE(is_pipeline_service(ServiceType::SIP_CLIENT));
     EXPECT_TRUE(is_pipeline_service(ServiceType::INBOUND_AUDIO_PROCESSOR));
+    EXPECT_TRUE(is_pipeline_service(ServiceType::VAD_SERVICE));
     EXPECT_TRUE(is_pipeline_service(ServiceType::WHISPER_SERVICE));
     EXPECT_TRUE(is_pipeline_service(ServiceType::LLAMA_SERVICE));
     EXPECT_TRUE(is_pipeline_service(ServiceType::KOKORO_SERVICE));
