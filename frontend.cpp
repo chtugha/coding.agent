@@ -414,6 +414,7 @@ private:
             INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
                 ('SIP_CLIENT', 'bin/sip-client', '--lines 2 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
                 ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
+                ('VAD_SERVICE', 'bin/vad-service', '', 'Voice Activity Detection + speech segmentation'),
                 ('WHISPER_SERVICE', 'bin/whisper-service', '--language de models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (CoreML/Metal)'),
                 ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
                 ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
@@ -602,7 +603,7 @@ private:
 
             std::string use_args = args_override.empty() ? svc.default_args : args_override;
 
-            if (name == "WHISPER_SERVICE" && args_override.empty()) {
+            if (name == "VAD_SERVICE" && args_override.empty()) {
                 std::string vad_w = get_setting("whisper_vad_window_ms", "");
                 std::string vad_t = get_setting("whisper_vad_threshold", "");
                 if (!vad_w.empty()) use_args += " --vad-window-ms " + vad_w;
@@ -806,6 +807,7 @@ private:
     static ServiceType parse_service_type(const std::string& name) {
         if (name == "SIP_CLIENT") return ServiceType::SIP_CLIENT;
         if (name == "INBOUND_AUDIO_PROCESSOR") return ServiceType::INBOUND_AUDIO_PROCESSOR;
+        if (name == "VAD_SERVICE") return ServiceType::VAD_SERVICE;
         if (name == "WHISPER_SERVICE") return ServiceType::WHISPER_SERVICE;
         if (name == "LLAMA_SERVICE") return ServiceType::LLAMA_SERVICE;
         if (name == "KOKORO_SERVICE") return ServiceType::KOKORO_SERVICE;
@@ -1299,6 +1301,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <option value="">All Services</option>
 <option value="SIP_CLIENT">SIP Client</option>
 <option value="INBOUND_AUDIO_PROCESSOR">Inbound Audio</option>
+<option value="VAD_SERVICE">VAD</option>
 <option value="WHISPER_SERVICE">Whisper ASR</option>
 <option value="LLAMA_SERVICE">LLaMA LLM</option>
 <option value="KOKORO_SERVICE">Kokoro TTS</option>
@@ -1749,7 +1752,7 @@ function fetchServices(){
       var status=s.online?'<span class="wt-badge wt-badge-success"><span class="wt-status-dot online"></span>Online</span>'
         :'<span class="wt-badge wt-badge-secondary"><span class="wt-status-dot offline"></span>Offline</span>';
       var desc={'SIP_CLIENT':'SIP/RTP Gateway','INBOUND_AUDIO_PROCESSOR':'G.711 Decode & Resample',
-        'WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM','KOKORO_SERVICE':'Kokoro TTS',
+        'VAD_SERVICE':'Voice Activity Detection','WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM','KOKORO_SERVICE':'Kokoro TTS',
         'OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP'};
       var eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
       var safeAttr=s.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
@@ -2013,8 +2016,8 @@ function refreshTestFiles(){
 function loadLogLevels(){
   fetch('/api/settings/log_level').then(r=>r.json()).then(d=>{
     var c=document.getElementById('logLevelControls');
-    var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
-    var names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','KOKORO_SERVICE':'Kokoro','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
+    var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
+    var names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','VAD_SERVICE':'VAD','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','KOKORO_SERVICE':'Kokoro','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
     var levels=['ERROR','WARN','INFO','DEBUG','TRACE'];
     c.innerHTML=services.map(s=>{
       var current=d.log_levels&&d.log_levels[s]?d.log_levels[s]:'INFO';
@@ -2025,7 +2028,7 @@ function loadLogLevels(){
 }
 
 function saveAllLogLevels(){
-  var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
+  var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
   var promises=services.map(s=>{
     var level=document.getElementById('loglevel_'+s).value;
     return fetch('/api/settings/log_level',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -3997,6 +4000,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         if (!is_service_running("INBOUND_AUDIO_PROCESSOR")) {
             return "Inbound Audio Processor (inbound-audio-processor) is not running. Start it first.";
         }
+        if (!is_service_running("VAD_SERVICE")) {
+            return "VAD Service (vad-service) is not running. Start it first.";
+        }
         if (!is_service_running("WHISPER_SERVICE")) {
             return "Whisper Service (whisper-service) is not running. Start it first.";
         }
@@ -4042,12 +4048,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     //
     // Runs a real end-to-end transcription test through the full pipeline:
     //   1. Injects each selected test file via test_sip_provider (/inject endpoint)
-    //   2. Audio flows: test_sip_provider → SIP Client → IAP → Whisper Service
+    //   2. Audio flows: test_sip_provider → SIP Client → IAP → VAD → Whisper Service
     //   3. Captures Whisper's transcription from the log stream (LogForwarder UDP)
     //   4. Compares transcription against ground truth text using Levenshtein similarity
     //
-    // Requires: test_sip_provider, sip-client, inbound-audio-processor, and
-    //           whisper-service all running with an active call established.
+    // Requires: test_sip_provider, sip-client, inbound-audio-processor, vad-service,
+    //           and whisper-service all running with an active call established.
     //
     // Returns per-file results: transcription, similarity %, latency, status (PASS/WARN/FAIL).
     // PASS >= 95%, WARN >= 80%, FAIL < 80%.
@@ -4487,7 +4493,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
 
             const char* services[] = {
-                "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "WHISPER_SERVICE",
+                "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE", "WHISPER_SERVICE",
                 "LLAMA_SERVICE", "KOKORO_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", nullptr
             };
 
@@ -4847,7 +4853,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     //   6. Stores results in model_benchmark_runs table for later comparison
     //
     // Requires: Full pipeline running — test_sip_provider, sip-client,
-    //           inbound-audio-processor, and whisper-service with active call.
+    //           inbound-audio-processor, vad-service, and whisper-service with active call.
     //
     // Parameters (JSON body):
     //   model_id   — registered model ID from the models table
@@ -4962,7 +4968,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
         if (sip_status.find("\"call_active\":true") == std::string::npos) {
             mg_http_reply(c, 409, "Content-Type: application/json\r\n",
-                "{\"error\":\"No active call. Start SIP client + IAP + Whisper and establish a call first.\"}");
+                "{\"error\":\"No active call. Start SIP client + IAP + VAD + Whisper and establish a call first.\"}");
             return;
         }
 

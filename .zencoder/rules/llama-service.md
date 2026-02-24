@@ -1,7 +1,12 @@
+---
+description: LLaMA Service Summary
+alwaysApply: true
+---
+
 # LLaMA Service
 
 ## Overview
-The **LLaMA Service** (`llama-service.cpp`) generates intelligence responses based on the transcribed text from Whisper.
+The **LLaMA Service** (`llama-service.cpp`) generates intelligent responses based on the transcribed text from Whisper.
 
 ## Internal Function
 - **Inference**: Uses the **Llama-3.2-1B-Instruct** model (Q8_0 GGUF) with `llama_chat_apply_template` for robust, template-aware conversation logic.
@@ -10,7 +15,7 @@ The **LLaMA Service** (`llama-service.cpp`) generates intelligence responses bas
 - **Session Isolation**: Each call has an independent conversational context managed via sequence IDs in the KV cache.
 
 ## Inbound Connections
-- **Whisper Service (TCP)**: Receives transcribed text on port 8083.
+- **Whisper Service (TCP)**: Receives transcribed text via interconnect on ports 13130 (mgmt) and 13131 (data).
 
 ## Outbound Connections
-- **Kokoro TTS (TCP)**: Sends generated response text to the TTS service on port 8090.
+- **Kokoro TTS (TCP)**: Sends generated response text to Kokoro on ports 13140 (mgmt) and 13141 (data).

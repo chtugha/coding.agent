@@ -31,6 +31,7 @@ static constexpr uint16_t FRONTEND_LOG_PORT = 22022;
 enum class ServiceType : uint8_t {
     SIP_CLIENT = 1,
     INBOUND_AUDIO_PROCESSOR = 2,
+    VAD_SERVICE = 8,
     WHISPER_SERVICE = 3,
     LLAMA_SERVICE = 4,
     KOKORO_SERVICE = 5,
@@ -42,6 +43,7 @@ inline bool is_pipeline_service(ServiceType type) {
     switch (type) {
         case ServiceType::SIP_CLIENT:
         case ServiceType::INBOUND_AUDIO_PROCESSOR:
+        case ServiceType::VAD_SERVICE:
         case ServiceType::WHISPER_SERVICE:
         case ServiceType::LLAMA_SERVICE:
         case ServiceType::KOKORO_SERVICE:
@@ -56,6 +58,7 @@ inline const char* service_type_to_string(ServiceType type) {
     switch (type) {
         case ServiceType::SIP_CLIENT: return "SIP_CLIENT";
         case ServiceType::INBOUND_AUDIO_PROCESSOR: return "INBOUND_AUDIO_PROCESSOR";
+        case ServiceType::VAD_SERVICE: return "VAD_SERVICE";
         case ServiceType::WHISPER_SERVICE: return "WHISPER_SERVICE";
         case ServiceType::LLAMA_SERVICE: return "LLAMA_SERVICE";
         case ServiceType::KOKORO_SERVICE: return "KOKORO_SERVICE";
@@ -66,13 +69,14 @@ inline const char* service_type_to_string(ServiceType type) {
 }
 
 // Pipeline topology:
-//   SIP_CLIENT -> IAP -> WHISPER -> LLAMA -> KOKORO -> OAP -> SIP_CLIENT (loop)
+//   SIP_CLIENT -> IAP -> VAD -> WHISPER -> LLAMA -> KOKORO -> OAP -> SIP_CLIENT (loop)
 // "downstream" = the service we SEND data TO (next in pipeline)
 // "upstream"   = the service that sends data TO US (previous in pipeline)
 inline ServiceType upstream_of(ServiceType type) {
     switch (type) {
         case ServiceType::INBOUND_AUDIO_PROCESSOR: return ServiceType::SIP_CLIENT;
-        case ServiceType::WHISPER_SERVICE: return ServiceType::INBOUND_AUDIO_PROCESSOR;
+        case ServiceType::VAD_SERVICE: return ServiceType::INBOUND_AUDIO_PROCESSOR;
+        case ServiceType::WHISPER_SERVICE: return ServiceType::VAD_SERVICE;
         case ServiceType::LLAMA_SERVICE: return ServiceType::WHISPER_SERVICE;
         case ServiceType::KOKORO_SERVICE: return ServiceType::LLAMA_SERVICE;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::KOKORO_SERVICE;
@@ -84,7 +88,8 @@ inline ServiceType upstream_of(ServiceType type) {
 inline ServiceType downstream_of(ServiceType type) {
     switch (type) {
         case ServiceType::SIP_CLIENT: return ServiceType::INBOUND_AUDIO_PROCESSOR;
-        case ServiceType::INBOUND_AUDIO_PROCESSOR: return ServiceType::WHISPER_SERVICE;
+        case ServiceType::INBOUND_AUDIO_PROCESSOR: return ServiceType::VAD_SERVICE;
+        case ServiceType::VAD_SERVICE: return ServiceType::WHISPER_SERVICE;
         case ServiceType::WHISPER_SERVICE: return ServiceType::LLAMA_SERVICE;
         case ServiceType::LLAMA_SERVICE: return ServiceType::KOKORO_SERVICE;
         case ServiceType::KOKORO_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
@@ -145,6 +150,7 @@ struct PacketTrace {
         switch (id) {
             case 1: return "SIP";
             case 2: return "IAP";
+            case 8: return "VAD";
             case 3: return "WHI";
             case 4: return "LLM";
             case 5: return "KOK";
@@ -161,6 +167,7 @@ struct PacketTrace {
 // Port map (all on 127.0.0.1):
 //   SIP_CLIENT (base 13100): mgmt_listen=13100, data_listen=13101
 //   IAP        (base 13110): mgmt_listen=13110, data_listen=13111
+//   VAD        (base 13115): mgmt_listen=13115, data_listen=13116
 //   WHISPER    (base 13120): mgmt_listen=13120, data_listen=13121
 //   LLAMA      (base 13130): mgmt_listen=13130, data_listen=13131
 //   KOKORO     (base 13140): mgmt_listen=13140, data_listen=13141
@@ -173,6 +180,7 @@ inline uint16_t service_base_port(ServiceType type) {
     switch (type) {
         case ServiceType::SIP_CLIENT:                return 13100;
         case ServiceType::INBOUND_AUDIO_PROCESSOR:   return 13110;
+        case ServiceType::VAD_SERVICE:               return 13115;
         case ServiceType::WHISPER_SERVICE:            return 13120;
         case ServiceType::LLAMA_SERVICE:              return 13130;
         case ServiceType::KOKORO_SERVICE:             return 13140;

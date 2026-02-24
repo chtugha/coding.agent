@@ -170,6 +170,11 @@ Implement isolated tests for SIP Client RTP routing and IAP conversion quality.
 - ✓ **Transcription collector improved**: settle timeout increased from 2s to 4s to capture multi-chunk VAD output
 - ✓ **Debug diagnostics cleaned up**: removed temporary chunk dump code and duplicate wparams settings
 - ✓ **Pipeline verified**: 10-file accuracy test avg 92.8% (5 PASS, 4 WARN, 1 FAIL), avg latency 1050ms
+- ✓ **VAD extracted to standalone service**: Created `vad-service.cpp` (~442 lines) as separate pipeline stage (IAP → VAD → Whisper)
+- ✓ **Whisper simplified**: Removed all VAD code from whisper-service.cpp (658 → 345 lines), now pure transcription service
+- ✓ **Interconnect updated**: VAD_SERVICE (type 8) at base port 13115 inserted between IAP and Whisper in topology
+- ✓ **Frontend updated**: VAD_SERVICE added to service management, pipeline validation, log filters, service arrays
+- ✓ **All 8 binaries compile**: frontend, sip-client, IAP, vad-service (82KB), whisper-service (2.4MB), OAP, kokoro-service, test_sip_provider
 
 ---
 

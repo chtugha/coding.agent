@@ -9,7 +9,7 @@ alwaysApply: true
 WhisperTalk is a high-performance, real-time speech-to-speech system designed for low-latency communication. It features a simplified microservice pipeline that integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** (TTS). The system uses a standalone SIP client as an RTP gateway and is optimized for Apple Silicon (CoreML/Metal).
 
 ## Structure
-The project is organized as a linear pipeline of 5 core C++ programs and 1 Python service.
+The project is organized as a linear pipeline of 7 core C++ programs.
 - [./coding.agent/](./coding.agent/): Core workspace containing all source code.
 - [./coding.agent/whisper-cpp/](./coding.agent/whisper-cpp/): Integration for the whisper.cpp ASR engine.
 - [./coding.agent/llama-cpp/](./coding.agent/llama-cpp/): Integration for the llama.cpp LLM engine.
@@ -31,13 +31,19 @@ The project is organized as a linear pipeline of 5 core C++ programs and 1 Pytho
 - **Complexity**: Keep services consolidated into single files whenever possible.
 - **Decoupling**: Services should only communicate with their direct inbound and outbound neighbors. Database and discovery services are removed to minimize fault surface area.
 
+## Pipeline
+```
+SIP Client → IAP → VAD → Whisper → LLaMA → Kokoro → OAP → SIP Client (loop)
+```
+
 ## Core Components
 - **SIP Client**: [./coding.agent/sip-client-main.cpp](./coding.agent/sip-client-main.cpp) ([Summary](./sip-client.md))
 - **Inbound Audio Processor**: [./coding.agent/inbound-audio-processor.cpp](./coding.agent/inbound-audio-processor.cpp) ([Summary](./inbound-audio-processor.md))
-- **Outbound Audio Processor**: [./coding.agent/outbound-audio-processor.cpp](./coding.agent/outbound-audio-processor.cpp) ([Summary](./outbound-audio-processor.md))
+- **VAD Service**: [./coding.agent/vad-service.cpp](./coding.agent/vad-service.cpp) ([Summary](./vad-service.md))
 - **Whisper Service**: [./coding.agent/whisper-service.cpp](./coding.agent/whisper-service.cpp) ([Summary](./whisper-service.md))
 - **LLaMA Service**: [./coding.agent/llama-service.cpp](./coding.agent/llama-service.cpp) ([Summary](./llama-service.md))
-- **Kokoro TTS Service**: [./coding.agent/kokoro_service.py](./coding.agent/kokoro_service.py) ([Summary](./kokoro-service.md))
+- **Kokoro TTS Service**: [./coding.agent/kokoro-service.cpp](./coding.agent/kokoro-service.cpp) ([Summary](./kokoro-service.md))
+- **Outbound Audio Processor**: [./coding.agent/outbound-audio-processor.cpp](./coding.agent/outbound-audio-processor.cpp) ([Summary](./outbound-audio-processor.md))
 
 ## Build & Installation
 ```bash

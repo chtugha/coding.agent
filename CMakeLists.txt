@@ -162,6 +162,10 @@ target_link_libraries(sip-client PRIVATE Threads::Threads)
 add_executable(inbound-audio-processor inbound-audio-processor.cpp)
 target_link_libraries(inbound-audio-processor PRIVATE Threads::Threads)
 
+# 2b. VAD Service
+add_executable(vad-service vad-service.cpp)
+target_link_libraries(vad-service PRIVATE Threads::Threads)
+
 # 3. Outbound Audio Processor
 add_executable(outbound-audio-processor outbound-audio-processor.cpp)
 target_link_libraries(outbound-audio-processor PRIVATE Threads::Threads)
@@ -294,7 +298,7 @@ if(APPLE)
 endif()
 
 # Install
-set(INSTALL_TARGETS sip-client inbound-audio-processor outbound-audio-processor whisper-service llama-service frontend)
+set(INSTALL_TARGETS sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service frontend)
 if(TARGET kokoro-service)
     list(APPEND INSTALL_TARGETS kokoro-service)
 endif()
