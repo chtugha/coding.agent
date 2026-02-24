@@ -865,16 +865,15 @@ private:
                         response = custom_handler_(msg);
                     }
 
-                    // Send response back
-                    uint8_t resp_buf[3 + 65535];
-                    resp_buf[0] = static_cast<uint8_t>(MgmtMsgType::CUSTOM);
                     uint16_t resp_len = static_cast<uint16_t>(std::min(response.size(), (size_t)65535));
+                    std::vector<uint8_t> resp_buf(3 + resp_len);
+                    resp_buf[0] = static_cast<uint8_t>(MgmtMsgType::CUSTOM);
                     uint16_t net_resp_len = htons(resp_len);
-                    memcpy(resp_buf + 1, &net_resp_len, 2);
-                    if (resp_len > 0) memcpy(resp_buf + 3, response.data(), resp_len);
+                    memcpy(resp_buf.data() + 1, &net_resp_len, 2);
+                    if (resp_len > 0) memcpy(resp_buf.data() + 3, response.data(), resp_len);
                     {
                         std::lock_guard<std::mutex> lock(send_upstream_mgmt_mutex_);
-                        send_all_with_timeout(sock, resp_buf, 3 + resp_len, 2000);
+                        send_all_with_timeout(sock, resp_buf.data(), 3 + resp_len, 2000);
                     }
                     break;
                 }

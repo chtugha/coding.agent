@@ -200,7 +200,6 @@ private:
     uint16_t log_port_;
     InterconnectNode interconnect_;
     sqlite3* db_;
-    std::mutex db_mutex_;
     bool db_write_mode_ = false;
     struct mg_mgr mgr_;
     std::thread log_thread_;
@@ -2107,7 +2106,6 @@ function escapeHtml(s){
   if(!s)return'';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
-function jsEscapeStr(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');}
 
 function refreshTestFiles(){
   fetch('/api/testfiles').then(r=>r.json()).then(d=>{
@@ -4569,7 +4567,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             uint64_t seq_before = current_log_seq();
             auto inject_start = std::chrono::steady_clock::now();
 
-            std::string inject_body = "{\"file\":\"" + file + "\",\"leg\":\"a\"}";
+            std::string inject_body = "{\"file\":\"" + escape_json(file) + "\",\"leg\":\"a\"}";
             std::string inject_err;
             std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
@@ -4628,23 +4626,20 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             total_latency += latency_ms;
             processed++;
 
-            {
-                std::lock_guard<std::mutex> db_lock(db_mutex_);
-                const char* sql = "INSERT INTO whisper_accuracy_tests (test_run_id, file_name, model_name, ground_truth, transcription, similarity_percent, latency_ms, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
-                sqlite3_stmt* stmt;
-                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_int64(stmt, 1, test_run_id);
-                    sqlite3_bind_text(stmt, 2, file.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 3, "current", -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 4, ground_truth.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 5, transcription.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_double(stmt, 6, similarity);
-                    sqlite3_bind_int(stmt, 7, (int)latency_ms);
-                    sqlite3_bind_text(stmt, 8, file_status.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(stmt, 9, test_run_id);
-                    sqlite3_step(stmt);
-                    sqlite3_finalize(stmt);
-                }
+            const char* sql = "INSERT INTO whisper_accuracy_tests (test_run_id, file_name, model_name, ground_truth, transcription, similarity_percent, latency_ms, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, test_run_id);
+                sqlite3_bind_text(stmt, 2, file.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 3, "current", -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 4, ground_truth.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 5, transcription.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_double(stmt, 6, similarity);
+                sqlite3_bind_int(stmt, 7, (int)latency_ms);
+                sqlite3_bind_text(stmt, 8, file_status.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(stmt, 9, test_run_id);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
             }
 
             if (!first) json << ",";
@@ -5458,7 +5453,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 uint64_t seq_before = current_log_seq();
                 auto t0 = std::chrono::steady_clock::now();
 
-                std::string inject_body = "{\"file\":\"" + file + "\",\"leg\":\"a\"}";
+                std::string inject_body = "{\"file\":\"" + escape_json(file) + "\",\"leg\":\"a\"}";
                 std::string inject_err;
                 http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
@@ -5506,7 +5501,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         sqlite3_int64 run_id = 0;
         {
-            std::lock_guard<std::mutex> db_lock(db_mutex_);
             sqlite3_stmt* stmt;
             const char* insert_sql = "INSERT INTO model_benchmark_runs (model_id, test_files, iterations, avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
             int rc = sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr);
