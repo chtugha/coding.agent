@@ -200,6 +200,7 @@ private:
     uint16_t log_port_;
     InterconnectNode interconnect_;
     sqlite3* db_;
+    std::mutex db_mutex_;
     bool db_write_mode_ = false;
     struct mg_mgr mgr_;
     std::thread log_thread_;
@@ -2104,8 +2105,9 @@ function toggleThemeMenu(){
 
 function escapeHtml(s){
   if(!s)return'';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+function jsEscapeStr(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');}
 
 function refreshTestFiles(){
   fetch('/api/testfiles').then(r=>r.json()).then(d=>{
@@ -2641,7 +2643,7 @@ function renderModelsTable(containerId, service, models){
       +'<td>'+escapeHtml(m.backend)+'</td>'
       +'<td>'+m.size_mb+'</td>'
       +'<td style="font-size:11px">'+added+'</td>'
-      +'<td><button class="wt-btn wt-btn-sm wt-btn-primary" onclick="selectModelForBenchmark('+m.id+',\''+escapeHtml(m.name)+'\')">Benchmark</button></td>'
+      +'<td><button class="wt-btn wt-btn-sm wt-btn-primary" data-model-id="'+m.id+'" data-model-name="'+escapeHtml(m.name)+'" onclick="selectModelForBenchmark(this.dataset.modelId,this.dataset.modelName)">Benchmark</button></td>'
       +'</tr>';
   });
   html+='</tbody></table>';
@@ -2720,6 +2722,7 @@ function addLlamaModel(){
 var benchmarkPollInterval=null;
 
 function runBenchmark(){
+  if(benchmarkPollInterval){clearInterval(benchmarkPollInterval);benchmarkPollInterval=null;}
   var modelId=document.getElementById('benchmarkModelId').value;
   var iterations=parseInt(document.getElementById('benchmarkIterations').value)||1;
   if(!modelId){alert('Please select a model first.');return;}
@@ -2759,6 +2762,7 @@ function runBenchmark(){
       '<span style="color:var(--wt-accent)">Benchmark running (task '+d.task_id+', '+testFiles.length+' files × '+iterations+' iterations)...</span>';
     benchmarkPollInterval=setInterval(()=>pollBenchmarkTask(d.task_id),2000);
   }).catch(e=>{
+    if(benchmarkPollInterval){clearInterval(benchmarkPollInterval);benchmarkPollInterval=null;}
     btn.disabled=false;btn.textContent='▶ Run Benchmark';
     document.getElementById('benchmarkStatus').innerHTML=
       '<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -4624,20 +4628,23 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             total_latency += latency_ms;
             processed++;
 
-            const char* sql = "INSERT INTO whisper_accuracy_tests (test_run_id, file_name, model_name, ground_truth, transcription, similarity_percent, latency_ms, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
-            sqlite3_stmt* stmt;
-            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_int64(stmt, 1, test_run_id);
-                sqlite3_bind_text(stmt, 2, file.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 3, "current", -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 4, ground_truth.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 5, transcription.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_double(stmt, 6, similarity);
-                sqlite3_bind_int(stmt, 7, (int)latency_ms);
-                sqlite3_bind_text(stmt, 8, file_status.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int64(stmt, 9, test_run_id);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
+            {
+                std::lock_guard<std::mutex> db_lock(db_mutex_);
+                const char* sql = "INSERT INTO whisper_accuracy_tests (test_run_id, file_name, model_name, ground_truth, transcription, similarity_percent, latency_ms, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                sqlite3_stmt* stmt;
+                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int64(stmt, 1, test_run_id);
+                    sqlite3_bind_text(stmt, 2, file.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 3, "current", -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 4, ground_truth.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 5, transcription.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_double(stmt, 6, similarity);
+                    sqlite3_bind_int(stmt, 7, (int)latency_ms);
+                    sqlite3_bind_text(stmt, 8, file_status.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(stmt, 9, test_run_id);
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
             }
 
             if (!first) json << ",";
@@ -5316,59 +5323,41 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
         
-        std::string body(hm->body.buf, hm->body.len);
-        
-        size_t model_id_pos = body.find("\"model_id\":");
-        if (model_id_pos == std::string::npos) {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing model_id parameter\"}");
-            return;
-        }
-        
-        int model_id = 0;
-        size_t num_start = body.find_first_of("0123456789", model_id_pos);
-        if (num_start != std::string::npos) {
-            model_id = atoi(body.c_str() + num_start);
-        }
-        
+        struct mg_str json_body = hm->body;
+
+        int model_id = (int)mg_json_get_long(json_body, "$.model_id", 0);
         if (model_id == 0) {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid model_id\"}");
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing or invalid model_id\"}");
             return;
         }
-        
+
         std::vector<std::string> test_files;
-        size_t files_start = body.find("\"test_files\":");
-        if (files_start != std::string::npos) {
-            size_t arr_start = body.find('[', files_start);
-            size_t arr_end = body.find(']', arr_start);
-            if (arr_start != std::string::npos && arr_end != std::string::npos) {
-                std::string arr_content = body.substr(arr_start + 1, arr_end - arr_start - 1);
-                size_t pos = 0;
-                while (pos < arr_content.length()) {
-                    size_t quote1 = arr_content.find('"', pos);
-                    if (quote1 == std::string::npos) break;
-                    size_t quote2 = arr_content.find('"', quote1 + 1);
-                    if (quote2 == std::string::npos) break;
-                    test_files.push_back(arr_content.substr(quote1 + 1, quote2 - quote1 - 1));
-                    pos = quote2 + 1;
+        {
+            struct mg_str key, val;
+            size_t ofs = 0;
+            int arr_len = 0;
+            int arr_ofs = mg_json_get(json_body, "$.test_files", &arr_len);
+            if (arr_ofs >= 0) {
+                struct mg_str arr = mg_str_n(json_body.buf + arr_ofs, (size_t)arr_len);
+                while ((ofs = mg_json_next(arr, ofs, &key, &val)) > 0) {
+                    if (val.len >= 2 && val.buf[0] == '"') {
+                        char buf[512];
+                        if (mg_json_unescape(mg_str_n(val.buf + 1, val.len - 2), buf, sizeof(buf))) {
+                            test_files.push_back(buf);
+                        }
+                    }
                 }
             }
         }
-        
+
         if (test_files.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"No test files specified\"}");
             return;
         }
-        
-        int iterations = 1;
-        size_t iter_pos = body.find("\"iterations\":");
-        if (iter_pos != std::string::npos) {
-            size_t num_start = body.find_first_of("0123456789", iter_pos);
-            if (num_start != std::string::npos) {
-                iterations = atoi(body.c_str() + num_start);
-                if (iterations < 1) iterations = 1;
-                if (iterations > 10) iterations = 10;
-            }
-        }
+
+        int iterations = (int)mg_json_get_long(json_body, "$.iterations", 1);
+        if (iterations < 1) iterations = 1;
+        if (iterations > 10) iterations = 10;
         
         sqlite3_stmt* stmt;
         const char* model_query = "SELECT name, path, backend, config_json FROM models WHERE id = ?";
@@ -5515,24 +5504,27 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         for (double lat : latencies) avg_latency += lat;
         avg_latency /= n;
 
-        sqlite3_stmt* stmt;
-        const char* insert_sql = "INSERT INTO model_benchmark_runs (model_id, test_files, iterations, avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        int rc = sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr);
         sqlite3_int64 run_id = 0;
-        if (rc == SQLITE_OK) {
-            sqlite3_bind_int(stmt, 1, model_id);
-            sqlite3_bind_text(stmt, 2, files_json_str.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(stmt, 3, iterations);
-            sqlite3_bind_double(stmt, 4, avg_accuracy);
-            sqlite3_bind_int(stmt, 5, static_cast<int>(avg_latency));
-            sqlite3_bind_int(stmt, 6, p50_latency);
-            sqlite3_bind_int(stmt, 7, p95_latency);
-            sqlite3_bind_int(stmt, 8, p99_latency);
-            sqlite3_bind_int(stmt, 9, memory_mb);
-            sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(time(nullptr)));
-            sqlite3_step(stmt);
-            run_id = sqlite3_last_insert_rowid(db_);
-            sqlite3_finalize(stmt);
+        {
+            std::lock_guard<std::mutex> db_lock(db_mutex_);
+            sqlite3_stmt* stmt;
+            const char* insert_sql = "INSERT INTO model_benchmark_runs (model_id, test_files, iterations, avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            int rc = sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr);
+            if (rc == SQLITE_OK) {
+                sqlite3_bind_int(stmt, 1, model_id);
+                sqlite3_bind_text(stmt, 2, files_json_str.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(stmt, 3, iterations);
+                sqlite3_bind_double(stmt, 4, avg_accuracy);
+                sqlite3_bind_int(stmt, 5, static_cast<int>(avg_latency));
+                sqlite3_bind_int(stmt, 6, p50_latency);
+                sqlite3_bind_int(stmt, 7, p95_latency);
+                sqlite3_bind_int(stmt, 8, p99_latency);
+                sqlite3_bind_int(stmt, 9, memory_mb);
+                sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(time(nullptr)));
+                sqlite3_step(stmt);
+                run_id = sqlite3_last_insert_rowid(db_);
+                sqlite3_finalize(stmt);
+            }
         }
 
         std::stringstream response;
