@@ -5500,25 +5500,24 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         avg_latency /= n;
 
         sqlite3_int64 run_id = 0;
-        {
-            sqlite3_stmt* stmt;
-            const char* insert_sql = "INSERT INTO model_benchmark_runs (model_id, test_files, iterations, avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-            int rc = sqlite3_prepare_v2(db_, insert_sql, -1, &stmt, nullptr);
-            if (rc == SQLITE_OK) {
-                sqlite3_bind_int(stmt, 1, model_id);
-                sqlite3_bind_text(stmt, 2, files_json_str.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int(stmt, 3, iterations);
-                sqlite3_bind_double(stmt, 4, avg_accuracy);
-                sqlite3_bind_int(stmt, 5, static_cast<int>(avg_latency));
-                sqlite3_bind_int(stmt, 6, p50_latency);
-                sqlite3_bind_int(stmt, 7, p95_latency);
-                sqlite3_bind_int(stmt, 8, p99_latency);
-                sqlite3_bind_int(stmt, 9, memory_mb);
-                sqlite3_bind_int64(stmt, 10, static_cast<sqlite3_int64>(time(nullptr)));
-                sqlite3_step(stmt);
-                run_id = sqlite3_last_insert_rowid(db_);
-                sqlite3_finalize(stmt);
+        sqlite3_stmt* ins_stmt;
+        const char* insert_sql = "INSERT INTO model_benchmark_runs (model_id, test_files, iterations, avg_accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms, memory_mb, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id";
+        int ins_rc = sqlite3_prepare_v2(db_, insert_sql, -1, &ins_stmt, nullptr);
+        if (ins_rc == SQLITE_OK) {
+            sqlite3_bind_int(ins_stmt, 1, model_id);
+            sqlite3_bind_text(ins_stmt, 2, files_json_str.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(ins_stmt, 3, iterations);
+            sqlite3_bind_double(ins_stmt, 4, avg_accuracy);
+            sqlite3_bind_int(ins_stmt, 5, static_cast<int>(avg_latency));
+            sqlite3_bind_int(ins_stmt, 6, p50_latency);
+            sqlite3_bind_int(ins_stmt, 7, p95_latency);
+            sqlite3_bind_int(ins_stmt, 8, p99_latency);
+            sqlite3_bind_int(ins_stmt, 9, memory_mb);
+            sqlite3_bind_int64(ins_stmt, 10, static_cast<sqlite3_int64>(time(nullptr)));
+            if (sqlite3_step(ins_stmt) == SQLITE_ROW) {
+                run_id = sqlite3_column_int64(ins_stmt, 0);
             }
+            sqlite3_finalize(ins_stmt);
         }
 
         std::stringstream response;
