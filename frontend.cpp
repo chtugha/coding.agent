@@ -1069,6 +1069,8 @@ private:
                 handle_whisper_accuracy_results(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models")) == 0) {
                 handle_models_get(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/benchmarks")) == 0) {
+                handle_models_benchmarks_get(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/add")) == 0) {
                 handle_models_add(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/benchmark")) == 0) {
@@ -1191,6 +1193,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <span class="nav-icon">&#x1F9EA;</span>Tests<span class="nav-badge" id="testsBadge">0</span></a>
 <a class="wt-nav-item" data-page="beta-testing" onclick="showPage('beta-testing')">
 <span class="nav-icon">&#x1F3AF;</span>Beta Testing</a>
+<a class="wt-nav-item" data-page="models" onclick="showPage('models')">
+<span class="nav-icon">&#x1F916;</span>Models</a>
 </div>
 <div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Services</p>
@@ -1613,6 +1617,115 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 
 </div></div>
+
+<!-- ===== MODELS PAGE ===== -->
+<div class="wt-page" id="page-models">
+<div class="wt-content">
+<h2 class="wt-page-title">Models & Benchmarking</h2>
+
+<!-- Tab selector -->
+<div style="display:flex;gap:8px;margin-bottom:16px">
+  <button class="wt-btn wt-btn-primary" id="tabWhisper" onclick="switchModelTab('whisper')">Whisper Models</button>
+  <button class="wt-btn wt-btn-secondary" id="tabLlama" onclick="switchModelTab('llama')">LLaMA Models</button>
+  <button class="wt-btn wt-btn-secondary" id="tabCompare" onclick="switchModelTab('compare')">Comparison</button>
+</div>
+
+<!-- Whisper Models Panel -->
+<div id="modelTabWhisper">
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Registered Whisper Models</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
+</div>
+<div id="whisperModelsTable"><em>Loading...</em></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Add Whisper Model</span></div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+  <input class="wt-input" id="addModelName" placeholder="Name (e.g. large-v3-turbo-q5)">
+  <input class="wt-input" id="addModelPath" placeholder="Full path to .bin file">
+  <select class="wt-select" id="addModelBackend">
+    <option value="coreml">CoreML (Apple Silicon)</option>
+    <option value="metal">Metal GPU</option>
+    <option value="cpu">CPU only</option>
+  </select>
+</div>
+<button class="wt-btn wt-btn-primary" onclick="addWhisperModel()">+ Register Model</button>
+<div id="addModelStatus" style="margin-top:8px;font-size:12px"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Run Benchmark</span></div>
+<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end;margin-bottom:8px">
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Model</label>
+    <select class="wt-select" id="benchmarkModelId"><option value="">-- select model --</option></select>
+  </div>
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Iterations (per file)</label>
+    <select class="wt-select" id="benchmarkIterations">
+      <option value="1">1 pass</option>
+      <option value="2">2 passes</option>
+      <option value="3">3 passes</option>
+    </select>
+  </div>
+  <button class="wt-btn wt-btn-primary" onclick="runBenchmark()" id="benchmarkRunBtn">&#x25B6; Run Benchmark</button>
+</div>
+<div style="font-size:12px;color:var(--wt-text-muted);margin-bottom:8px">
+  Prerequisites: SIP Client, IAP, VAD, Whisper must be running with an active call via test_sip_provider.
+  All Testfiles with ground truth will be used.
+</div>
+<div id="benchmarkStatus"></div>
+<div id="benchmarkResults" style="margin-top:12px"></div>
+</div>
+
+</div><!-- end modelTabWhisper -->
+
+<!-- LLaMA Models Panel -->
+<div id="modelTabLlama" style="display:none">
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Registered LLaMA Models</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
+</div>
+<div id="llamaModelsTable"><em>Loading...</em></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Add LLaMA Model</span></div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+  <input class="wt-input" id="addLlamaModelName" placeholder="Name (e.g. Llama-3.2-1B-Q8)">
+  <input class="wt-input" id="addLlamaModelPath" placeholder="Full path to .gguf file">
+  <select class="wt-select" id="addLlamaModelBackend">
+    <option value="metal">Metal GPU</option>
+    <option value="cpu">CPU only</option>
+  </select>
+</div>
+<button class="wt-btn wt-btn-primary" onclick="addLlamaModel()">+ Register Model</button>
+<div id="addLlamaModelStatus" style="margin-top:8px;font-size:12px"></div>
+</div>
+</div><!-- end modelTabLlama -->
+
+<!-- Comparison Panel -->
+<div id="modelTabCompare" style="display:none">
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Model Benchmark Comparison</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModelComparison()">&#x21BB; Refresh</button>
+</div>
+<div id="comparisonTable"><em>No benchmark runs yet. Run benchmarks on models to compare them.</em></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Latency Comparison Chart</span></div>
+<canvas id="modelComparisonChart" style="max-height:300px"></canvas>
+</div>
+</div><!-- end modelTabCompare -->
+
+</div></div><!-- end page-models -->
+
 )PG";
     }
 
@@ -1634,6 +1747,7 @@ function showPage(p){
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){refreshTestFiles();loadVadConfig();}
+  if(p==='models'){loadModels();loadModelComparison();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
 }
@@ -1995,6 +2109,7 @@ function escapeHtml(s){
 
 function refreshTestFiles(){
   fetch('/api/testfiles').then(r=>r.json()).then(d=>{
+    window._testFiles=d.files||[];
     var c=document.getElementById('testFilesContainer');
     if(!d.files||d.files.length===0){
       c.innerHTML='<p style="color:var(--wt-text-secondary);font-size:13px">No test files found in Testfiles/ directory</p>';
@@ -2490,6 +2605,277 @@ function updateVadWindowDisplay(val){
 function updateVadThresholdDisplay(val){
   document.getElementById('vadThresholdValue').textContent=parseFloat(val).toFixed(1);
 }
+
+// ===== MODELS PAGE =====
+
+var modelCompChart=null;
+
+function switchModelTab(tab){
+  ['whisper','llama','compare'].forEach(t=>{
+    document.getElementById('modelTab'+t.charAt(0).toUpperCase()+t.slice(1)).style.display=(t===tab)?'':'none';
+    var btn=document.getElementById('tab'+t.charAt(0).toUpperCase()+t.slice(1));
+    if(btn){btn.className='wt-btn '+(t===tab?'wt-btn-primary':'wt-btn-secondary');}
+  });
+  if(tab==='compare') loadModelComparison();
+}
+
+function loadModels(){
+  fetch('/api/models').then(r=>r.json()).then(data=>{
+    renderModelsTable('whisperModelsTable','whisper',data.whisper||[]);
+    renderModelsTable('llamaModelsTable','llama',data.llama||[]);
+    populateBenchmarkModelSelect(data.whisper||[]);
+  }).catch(e=>{ console.error('loadModels error',e); });
+}
+
+function renderModelsTable(containerId, service, models){
+  var el=document.getElementById(containerId);
+  if(!models.length){el.innerHTML='<em>No '+service+' models registered yet.</em>';return;}
+  var html='<table class="wt-table"><thead><tr>'
+    +'<th>Name</th><th>Path</th><th>Backend</th><th>Size (MB)</th><th>Added</th><th>Action</th>'
+    +'</tr></thead><tbody>';
+  models.forEach(m=>{
+    var added=new Date(m.added_timestamp*1000).toLocaleString();
+    html+='<tr>'
+      +'<td><strong>'+escapeHtml(m.name)+'</strong></td>'
+      +'<td style="font-size:11px;word-break:break-all">'+escapeHtml(m.path)+'</td>'
+      +'<td>'+escapeHtml(m.backend)+'</td>'
+      +'<td>'+m.size_mb+'</td>'
+      +'<td style="font-size:11px">'+added+'</td>'
+      +'<td><button class="wt-btn wt-btn-sm wt-btn-primary" onclick="selectModelForBenchmark('+m.id+',\''+escapeHtml(m.name)+'\')">Benchmark</button></td>'
+      +'</tr>';
+  });
+  html+='</tbody></table>';
+  el.innerHTML=html;
+}
+
+function populateBenchmarkModelSelect(whisperModels){
+  var sel=document.getElementById('benchmarkModelId');
+  var current=sel.value;
+  sel.innerHTML='<option value="">-- select model --</option>';
+  whisperModels.forEach(m=>{
+    var opt=document.createElement('option');
+    opt.value=m.id;
+    opt.textContent=m.name+' ('+m.size_mb+'MB, '+m.backend+')';
+    sel.appendChild(opt);
+  });
+  if(current) sel.value=current;
+}
+
+function selectModelForBenchmark(id,name){
+  switchModelTab('whisper');
+  var sel=document.getElementById('benchmarkModelId');
+  sel.value=id;
+  if(!sel.value){
+    // model not in list yet, reload first
+    loadModels();
+    setTimeout(()=>{sel.value=id;},500);
+  }
+  document.getElementById('benchmarkResults').innerHTML='';
+  document.getElementById('benchmarkStatus').innerHTML=
+    '<span style="color:var(--wt-accent)">Selected: '+escapeHtml(name)+'</span>';
+}
+
+function addWhisperModel(){
+  var name=document.getElementById('addModelName').value.trim();
+  var path=document.getElementById('addModelPath').value.trim();
+  var backend=document.getElementById('addModelBackend').value;
+  var status=document.getElementById('addModelStatus');
+  if(!name||!path){status.innerHTML='<span style="color:var(--wt-danger)">Name and path are required.</span>';return;}
+  status.innerHTML='Adding...';
+  fetch('/api/models/add',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:'whisper',name,path,backend,config:''})})
+  .then(r=>r.json()).then(d=>{
+    if(d.success){
+      status.innerHTML='<span style="color:var(--wt-success)">Registered (id='+d.model_id+')</span>';
+      document.getElementById('addModelName').value='';
+      document.getElementById('addModelPath').value='';
+      loadModels();
+    } else {
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error||'unknown')+'</span>';
+    }
+  }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Request failed: '+e+'</span>';});
+}
+
+function addLlamaModel(){
+  var name=document.getElementById('addLlamaModelName').value.trim();
+  var path=document.getElementById('addLlamaModelPath').value.trim();
+  var backend=document.getElementById('addLlamaModelBackend').value;
+  var status=document.getElementById('addLlamaModelStatus');
+  if(!name||!path){status.innerHTML='<span style="color:var(--wt-danger)">Name and path are required.</span>';return;}
+  status.innerHTML='Adding...';
+  fetch('/api/models/add',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:'llama',name,path,backend,config:''})})
+  .then(r=>r.json()).then(d=>{
+    if(d.success){
+      status.innerHTML='<span style="color:var(--wt-success)">Registered (id='+d.model_id+')</span>';
+      document.getElementById('addLlamaModelName').value='';
+      document.getElementById('addLlamaModelPath').value='';
+      loadModels();
+    } else {
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error||'unknown')+'</span>';
+    }
+  }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Request failed: '+e+'</span>';});
+}
+
+var benchmarkPollInterval=null;
+
+function runBenchmark(){
+  var modelId=document.getElementById('benchmarkModelId').value;
+  var iterations=parseInt(document.getElementById('benchmarkIterations').value)||1;
+  if(!modelId){alert('Please select a model first.');return;}
+
+  // Load test files first if not yet cached, then proceed
+  if(!window._testFiles){
+    document.getElementById('benchmarkStatus').innerHTML='<span style="color:var(--wt-accent)">Loading test files...</span>';
+    fetch('/api/testfiles').then(r=>r.json()).then(d=>{
+      window._testFiles=d.files||[];
+      runBenchmark();
+    });
+    return;
+  }
+
+  // Collect all test files with ground truth
+  var testFiles=[];
+  window._testFiles.forEach(f=>{if(f.ground_truth&&f.ground_truth.length>0) testFiles.push(f.name);});
+  if(!testFiles.length){
+    document.getElementById('benchmarkStatus').innerHTML=
+      '<span style="color:var(--wt-danger)">No test files with ground truth found. Check the Beta Testing page.</span>';
+    return;
+  }
+
+  var btn=document.getElementById('benchmarkRunBtn');
+  btn.disabled=true;
+  btn.textContent='Running...';
+  document.getElementById('benchmarkStatus').innerHTML='<span style="color:var(--wt-accent)">Starting benchmark...</span>';
+  document.getElementById('benchmarkResults').innerHTML='';
+
+  fetch('/api/whisper/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model_id:parseInt(modelId),test_files:testFiles,iterations})})
+  .then(r=>{
+    if(r.status===202) return r.json();
+    return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
+  }).then(d=>{
+    document.getElementById('benchmarkStatus').innerHTML=
+      '<span style="color:var(--wt-accent)">Benchmark running (task '+d.task_id+', '+testFiles.length+' files × '+iterations+' iterations)...</span>';
+    benchmarkPollInterval=setInterval(()=>pollBenchmarkTask(d.task_id),2000);
+  }).catch(e=>{
+    btn.disabled=false;btn.textContent='▶ Run Benchmark';
+    document.getElementById('benchmarkStatus').innerHTML=
+      '<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+  });
+}
+
+function pollBenchmarkTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(r=>r.json()).then(d=>{
+    if(d.status==='running') return;
+    clearInterval(benchmarkPollInterval);
+    var btn=document.getElementById('benchmarkRunBtn');
+    btn.disabled=false;btn.textContent='▶ Run Benchmark';
+    if(d.error){
+      document.getElementById('benchmarkStatus').innerHTML=
+        '<span style="color:var(--wt-danger)">Benchmark failed: '+escapeHtml(d.error)+'</span>';
+      return;
+    }
+    document.getElementById('benchmarkStatus').innerHTML=
+      '<span style="color:var(--wt-success)">&#x2713; Benchmark complete</span>';
+    renderBenchmarkResults(d);
+    loadModelComparison();
+  }).catch(e=>console.error('pollBenchmarkTask',e));
+}
+
+function renderBenchmarkResults(r){
+  var passColor=r.pass_count>0?'var(--wt-success)':'var(--wt-text-muted)';
+  var failColor=r.fail_count>0?'var(--wt-danger)':'var(--wt-text-muted)';
+  var html='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">'
+    +'<div class="wt-card" style="padding:12px;text-align:center">'
+    +'<div style="font-size:24px;font-weight:700">'+r.avg_accuracy.toFixed(1)+'%</div>'
+    +'<div style="font-size:11px;color:var(--wt-text-muted)">Avg Accuracy</div></div>'
+    +'<div class="wt-card" style="padding:12px;text-align:center">'
+    +'<div style="font-size:24px;font-weight:700">'+r.avg_latency_ms.toFixed(0)+'ms</div>'
+    +'<div style="font-size:11px;color:var(--wt-text-muted)">Avg Latency</div></div>'
+    +'<div class="wt-card" style="padding:12px;text-align:center">'
+    +'<div style="font-size:24px;font-weight:700;color:'+passColor+'">'+r.pass_count+'</div>'
+    +'<div style="font-size:11px;color:var(--wt-text-muted)">PASS (≥95%)</div></div>'
+    +'<div class="wt-card" style="padding:12px;text-align:center">'
+    +'<div style="font-size:24px;font-weight:700;color:'+failColor+'">'+r.fail_count+'</div>'
+    +'<div style="font-size:11px;color:var(--wt-text-muted)">FAIL (<95%)</div></div>'
+    +'</div>'
+    +'<div style="font-size:12px;color:var(--wt-text-muted);margin-top:8px">'
+    +'P50: '+r.p50_latency_ms+'ms &nbsp; P95: '+r.p95_latency_ms+'ms &nbsp; P99: '+r.p99_latency_ms+'ms'
+    +' &nbsp;|&nbsp; Memory: '+r.memory_mb+'MB &nbsp;|&nbsp; Files: '+r.files_tested
+    +'</div>';
+  document.getElementById('benchmarkResults').innerHTML=html;
+}
+
+function loadModelComparison(){
+  fetch('/api/models/benchmarks').then(r=>r.json()).then(data=>{
+    renderComparisonTable(data.runs||[]);
+    renderComparisonChart(data.runs||[]);
+  }).catch(e=>console.error('loadModelComparison',e));
+}
+
+function renderComparisonTable(runs){
+  var el=document.getElementById('comparisonTable');
+  if(!runs.length){el.innerHTML='<em>No benchmark runs yet.</em>';return;}
+  var html='<table class="wt-table"><thead><tr>'
+    +'<th>Model</th><th>Backend</th><th>Accuracy %</th>'
+    +'<th>Avg Latency</th><th>P50</th><th>P95</th><th>P99</th><th>Memory</th><th>Date</th>'
+    +'</tr></thead><tbody>';
+  runs.forEach(r=>{
+    var accColor=r.avg_accuracy>=95?'var(--wt-success)':r.avg_accuracy>=80?'var(--wt-warning)':'var(--wt-danger)';
+    var date=new Date(r.timestamp*1000).toLocaleString();
+    html+='<tr>'
+      +'<td><strong>'+escapeHtml(r.model_name)+'</strong></td>'
+      +'<td>'+escapeHtml(r.backend)+'</td>'
+      +'<td style="color:'+accColor+';font-weight:700">'+r.avg_accuracy.toFixed(1)+'%</td>'
+      +'<td>'+r.avg_latency_ms+'ms</td>'
+      +'<td>'+r.p50_latency_ms+'ms</td>'
+      +'<td>'+r.p95_latency_ms+'ms</td>'
+      +'<td>'+r.p99_latency_ms+'ms</td>'
+      +'<td>'+r.memory_mb+'MB</td>'
+      +'<td style="font-size:11px">'+date+'</td>'
+      +'</tr>';
+  });
+  html+='</tbody></table>';
+  el.innerHTML=html;
+}
+
+function renderComparisonChart(runs){
+  var canvas=document.getElementById('modelComparisonChart');
+  if(!canvas||!runs.length) return;
+  if(modelCompChart){modelCompChart.destroy();modelCompChart=null;}
+  // Group: keep latest run per model
+  var byModel={};
+  runs.forEach(r=>{if(!byModel[r.model_name]) byModel[r.model_name]=r;});
+  var labels=Object.keys(byModel);
+  var p50=labels.map(n=>byModel[n].p50_latency_ms);
+  var p95=labels.map(n=>byModel[n].p95_latency_ms);
+  var p99=labels.map(n=>byModel[n].p99_latency_ms);
+  var acc=labels.map(n=>byModel[n].avg_accuracy);
+  modelCompChart=new Chart(canvas,{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        {label:'P50 Latency (ms)',data:p50,backgroundColor:'rgba(59,130,246,0.7)',yAxisID:'y'},
+        {label:'P95 Latency (ms)',data:p95,backgroundColor:'rgba(251,146,60,0.7)',yAxisID:'y'},
+        {label:'P99 Latency (ms)',data:p99,backgroundColor:'rgba(239,68,68,0.7)',yAxisID:'y'},
+        {label:'Accuracy %',data:acc,type:'line',borderColor:'rgba(34,197,94,1)',
+         backgroundColor:'rgba(34,197,94,0.15)',yAxisID:'y2',tension:0.3}
+      ]
+    },
+    options:{
+      responsive:true,
+      scales:{
+        y:{title:{display:true,text:'Latency (ms)'},beginAtZero:true},
+        y2:{position:'right',title:{display:true,text:'Accuracy (%)'},min:0,max:100,
+            grid:{drawOnChartArea:false}}
+      }
+    }
+  });
+}
+
+// ===== END MODELS PAGE =====
 
 function loadVadConfig(){
   fetch('/api/whisper/vad_config').then(r=>r.json()).then(d=>{
@@ -4791,6 +5177,62 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
     
+    // Returns all model benchmark runs joined with model info, ordered by timestamp descending.
+    // Used by the Model Comparison view to render the side-by-side table and Chart.js bar chart.
+    // Response: { "runs": [ { run_id, model_id, model_name, service, backend, avg_accuracy,
+    //             avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
+    //             memory_mb, timestamp }, ... ] }
+    void handle_models_benchmarks_get(struct mg_connection *c) {
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
+            return;
+        }
+
+        const char* query =
+            "SELECT r.id, r.model_id, m.name, m.service, m.backend, "
+            "r.avg_accuracy, r.avg_latency_ms, r.p50_latency_ms, r.p95_latency_ms, "
+            "r.p99_latency_ms, r.memory_mb, r.timestamp "
+            "FROM model_benchmark_runs r "
+            "JOIN models m ON m.id = r.model_id "
+            "ORDER BY r.timestamp DESC LIMIT 100";
+
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_, query, -1, &stmt, nullptr) != SQLITE_OK) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database query failed\"}");
+            return;
+        }
+
+        std::stringstream json;
+        json << "{\"runs\":[";
+        bool first = true;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (!first) json << ",";
+            first = false;
+            auto col_str = [&](int col) -> std::string {
+                const unsigned char* t = sqlite3_column_text(stmt, col);
+                return t ? reinterpret_cast<const char*>(t) : "";
+            };
+            json << "{"
+                 << "\"run_id\":" << sqlite3_column_int(stmt, 0)
+                 << ",\"model_id\":" << sqlite3_column_int(stmt, 1)
+                 << ",\"model_name\":\"" << escape_json(col_str(2)) << "\""
+                 << ",\"service\":\"" << escape_json(col_str(3)) << "\""
+                 << ",\"backend\":\"" << escape_json(col_str(4)) << "\""
+                 << ",\"avg_accuracy\":" << sqlite3_column_double(stmt, 5)
+                 << ",\"avg_latency_ms\":" << sqlite3_column_int(stmt, 6)
+                 << ",\"p50_latency_ms\":" << sqlite3_column_int(stmt, 7)
+                 << ",\"p95_latency_ms\":" << sqlite3_column_int(stmt, 8)
+                 << ",\"p99_latency_ms\":" << sqlite3_column_int(stmt, 9)
+                 << ",\"memory_mb\":" << sqlite3_column_int(stmt, 10)
+                 << ",\"timestamp\":" << sqlite3_column_int64(stmt, 11)
+                 << "}";
+        }
+        sqlite3_finalize(stmt);
+        json << "]}";
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
     void handle_models_add(struct mg_connection *c, struct mg_http_message *hm) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
