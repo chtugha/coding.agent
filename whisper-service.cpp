@@ -364,7 +364,18 @@ private:
         while (!t.empty() && t.front() == ' ') t.erase(t.begin());
         while (!t.empty() && t.back() == ' ') t.pop_back();
         if (t.size() < 3) return true;
-        // Whisper often produces these German hallucination patterns on silence:
+
+        // Strip trailing punctuation for pattern matching so "Vielen Dank." matches.
+        std::string core = t;
+        while (!core.empty() && (core.back() == '.' || core.back() == '!' ||
+               core.back() == '?' || core.back() == ',')) {
+            core.pop_back();
+        }
+        while (!core.empty() && core.back() == ' ') core.pop_back();
+
+        // Only match when the ENTIRE transcription is a hallucination pattern.
+        // Previously used find() which caused false positives when patterns
+        // appeared as part of legitimate speech (e.g. "Vielen Dank" in a sentence).
         static const char* patterns[] = {
             "Untertitel",
             "Vielen Dank",
@@ -376,10 +387,23 @@ private:
             "Amara.org",
             "Danke fürs Zuschauen",
             "Ich habe mich nicht mehr",
+            "Und ich habe mich nicht mehr",
+            "Ich habe es mir nicht mehr",
+            "es mir nicht mehr",
+            "Danke für",
+            "Bis bald",
+            "Auf Wiedersehen",
+            "Guten Tag",
+            "Herzlich willkommen",
+            "Musik",
+            "Applaus",
+            "[Musik]",
+            "[Applaus]",
+            "MwSt",
             nullptr
         };
         for (int i = 0; patterns[i]; ++i) {
-            if (t.find(patterns[i]) != std::string::npos) return true;
+            if (core == patterns[i]) return true;
         }
         // Detect repetitive text (same short phrase repeated)
         if (t.size() > 20) {
@@ -404,6 +428,16 @@ private:
         float rms = 0.0f;
         for (size_t i = 0; i < audio.size(); ++i) rms += audio[i] * audio[i];
         rms = std::sqrt(rms / audio.size());
+
+        float peak = 0.0f;
+        for (auto s : audio) peak = std::max(peak, std::abs(s));
+
+        if (vad_logging_enabled_) {
+            log_fwd_.forward("DEBUG", call_id,
+                "Audio chunk: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
+                audio.size(), audio.size() / 16.0, rms, peak);
+        }
+
         if (rms < 0.005f) {
             if (vad_logging_enabled_) {
                 log_fwd_.forward("DEBUG", call_id,
@@ -412,54 +446,34 @@ private:
             return;
         }
 
-        std::vector<float> normalized(audio.size());
-        float peak = 0.0f;
-        for (auto s : audio) peak = std::max(peak, std::abs(s));
-        if (peak > 0.0001f) {
-            float gain = 0.9f / peak;
-            for (size_t i = 0; i < audio.size(); ++i)
-                normalized[i] = audio[i] * gain;
-        } else {
-            normalized = audio;
-        }
+        // No normalization — whisper-cli doesn't normalize and produces correct
+        // transcriptions on G.711 round-tripped audio. Normalization changes the
+        // signal characteristics and confuses the model.
 
-        // Greedy decoding: ~3-5x faster than beam search on short segments.
-        // temperature=0 for deterministic output; temperature_inc=0.2 enables
-        // one retry at higher temperature if decoding produces garbage.
         whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wparams.language = language_.c_str();
         wparams.n_threads = 4;
         wparams.no_timestamps = true;
-        wparams.single_segment = true;
-        wparams.no_context = false;
+        wparams.single_segment = false;
         wparams.greedy.best_of = 1;
         wparams.temperature = 0.0f;
         wparams.temperature_inc = 0.2f;
+        wparams.entropy_thold = 2.4f;
+        wparams.logprob_thold = -1.0f;
+        wparams.no_speech_thold = 0.6f;
 
-        // Limit audio_ctx to actual audio length in 10ms Whisper frames.
-        // Whisper's encoder processes 30s (1500 frames) by default — clamping this
-        // to the actual content length avoids ~75% wasted encoder compute on 4s chunks.
-        int audio_frames = static_cast<int>(audio.size() / 160);
-        wparams.audio_ctx = std::min(1500, audio_frames + 16);
+        // Use full encoder context (audio_ctx=0 means use all 1500 frames).
+        // Restricting audio_ctx to the actual audio length degraded transcription
+        // quality — Whisper's encoder attention mechanism works better with full context
+        // even when most frames are silence, matching whisper-cli default behavior.
+        wparams.audio_ctx = 0;
 
-        // Context carry-over: use previous chunk's transcription as initial_prompt
-        // so Whisper maintains language/style coherence across chunk boundaries.
-        // Skip carry-over if previous was a hallucination.
-        std::string prompt;
-        {
-            std::lock_guard<std::mutex> clk(calls_mutex_);
-            auto it = calls_.find(call_id);
-            if (it != calls_.end() && !it->second->last_transcription.empty()) {
-                if (!is_hallucination(it->second->last_transcription)) {
-                    prompt = it->second->last_transcription;
-                }
-            }
-        }
-        wparams.initial_prompt = prompt.empty() ? nullptr : prompt.c_str();
+        wparams.no_context = true;
+        wparams.initial_prompt = nullptr;
 
         auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);
-        int result = whisper_full(ctx_, wparams, normalized.data(), normalized.size());
+        int result = whisper_full(ctx_, wparams, audio.data(), audio.size());
 
         {
             std::lock_guard<std::mutex> clk(calls_mutex_);

@@ -3482,15 +3482,16 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     // Decode an 8-bit G.711 mu-law byte to a float32 sample in [-1.0, 1.0].
     // Reverses the encoding: extract sign, exponent, mantissa from the
     // inverted byte, reconstruct the linear sample, and normalize to float.
-    // This is the same algorithm used by inbound-audio-processor.cpp (ulaw_table).
+    // ITU-T G.711 μ-law decode. Same algorithm as inbound-audio-processor.cpp (ulaw_table).
+    // Reconstructs linear magnitude: ((quantization * 2 + 33) << segment) - 33
     static float ulaw_to_float(uint8_t byte) {
         int mu = ~byte;
-        int sign = (mu & 0x80);
-        int exponent = (mu & 0x70) >> 4;
-        int mantissa = mu & 0x0F;
-        int sample = (mantissa << (exponent + 3)) + (1 << (exponent + 2)) - 33;
-        if (exponent > 0) sample += (0x21 << exponent);
-        return (sign ? -sample : sample) / 32768.0f;
+        int sign = mu & 0x80;
+        int segment = (mu >> 4) & 0x07;
+        int quantization = mu & 0x0F;
+        int magnitude = ((quantization << 1) + 33) << segment;
+        magnitude -= 33;
+        return (sign ? -magnitude : magnitude) / 32768.0f;
     }
 
     // Resample int16 audio using linear interpolation.
@@ -3947,8 +3948,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
 
             if (found_new) {
-                // Reset settle timer — wait 2s after last transcription for more chunks
-                settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                // Reset settle timer — wait 4s after last transcription for more chunks.
+                // VAD silence detection (400ms) + Whisper inference (~500ms) + inter-chunk gap
+                // means chunks can arrive 1-2s apart; 4s provides enough margin.
+                settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
                 if (settle_deadline > deadline) settle_deadline = deadline;
             } else if (!found_any && std::chrono::steady_clock::now() >= deadline) {
                 break;

@@ -59,15 +59,20 @@ public:
     }
 
 private:
+    // ITU-T G.711 μ-law decode table. For each companded byte value (0-255):
+    //   1. Complement the byte (μ-law stores inverted)
+    //   2. Extract sign (bit 7), segment/exponent (bits 6-4), quantization (bits 3-0)
+    //   3. Reconstruct linear magnitude: ((quantization * 2 + 33) << segment) - 33
+    //   4. Apply sign and normalize to [-1.0, 1.0]
     void init_g711_tables() {
         for (int i = 0; i < 256; ++i) {
             int mu = ~i;
-            int sign = (mu & 0x80);
-            int exponent = (mu & 0x70) >> 4;
-            int mantissa = mu & 0x0F;
-            int sample = (mantissa << (exponent + 3)) + (1 << (exponent + 2)) - 33;
-            if (exponent > 0) sample += (0x21 << exponent);
-            ulaw_table[i] = (sign ? -sample : sample) / 32768.0f;
+            int sign = mu & 0x80;
+            int segment = (mu >> 4) & 0x07;
+            int quantization = mu & 0x0F;
+            int magnitude = ((quantization << 1) + 33) << segment;
+            magnitude -= 33;
+            ulaw_table[i] = (sign ? -magnitude : magnitude) / 32768.0f;
         }
     }
 
@@ -90,15 +95,39 @@ private:
             size_t payload_len = pkt.payload_size - rtp_header_size;
             const uint8_t* rtp_payload = pkt.payload.data() + rtp_header_size;
 
-            // Decode G.711 μ-law → float32 and upsample 8kHz → 16kHz in one pass.
+            // Decode G.711 μ-law → float32 and upsample 8kHz → 16kHz with anti-alias filter.
             // Each RTP packet is 160 μ-law bytes (20ms @ 8kHz) → 320 float32 samples (20ms @ 16kHz).
-            // Forward immediately without buffering — Whisper's VAD handles segmentation.
-            std::vector<float> pcm(payload_len * 2);
+            //
+            // Step 1: Decode μ-law to float32 at 8kHz.
+            // Step 2: Zero-stuff (insert 0 between each sample) to get 16kHz.
+            // Step 3: Apply half-band FIR low-pass filter (cutoff ~3.8kHz) to remove
+            //         spectral copies above 4kHz that would otherwise alias and confuse
+            //         Whisper's feature extraction. The 15-tap Hamming-windowed sinc filter
+            //         provides ~40dB stopband attenuation with minimal group delay (~0.5ms).
+            static const float hb_filter[] = {
+                -0.0076f, 0.0000f, 0.0527f, 0.0000f, -0.1681f, 0.0000f, 0.6230f,
+                 1.0000f,
+                 0.6230f, 0.0000f, -0.1681f, 0.0000f, 0.0527f, 0.0000f, -0.0076f
+            };
+            static constexpr int HB_LEN = 15;
+            static constexpr int HB_CENTER = 7;
+
+            std::vector<float> decoded(payload_len);
             for (size_t i = 0; i < payload_len; ++i) {
-                float s = ulaw_table[rtp_payload[i]];
-                pcm[i*2] = s;
-                float next = (i+1 < payload_len) ? ulaw_table[rtp_payload[i+1]] : s;
-                pcm[i*2 + 1] = 0.5f * (s + next);
+                decoded[i] = ulaw_table[rtp_payload[i]];
+            }
+
+            std::vector<float> pcm(payload_len * 2);
+            for (size_t n = 0; n < payload_len * 2; ++n) {
+                float sum = 0.0f;
+                for (int k = 0; k < HB_LEN; ++k) {
+                    int src_idx_2x = (int)n - k + HB_CENTER;
+                    if (src_idx_2x < 0 || src_idx_2x >= (int)(payload_len * 2)) continue;
+                    if (src_idx_2x & 1) continue;
+                    int orig = src_idx_2x / 2;
+                    sum += decoded[orig] * hb_filter[k];
+                }
+                pcm[n] = sum * 2.0f;
             }
 
             whispertalk::Packet out_pkt(pkt.call_id, pcm.data(), pcm.size() * sizeof(float));

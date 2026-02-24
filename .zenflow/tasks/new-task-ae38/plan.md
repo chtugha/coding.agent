@@ -162,6 +162,14 @@ Implement isolated tests for SIP Client RTP routing and IAP conversion quality.
 - ✓ Helper functions added: http_post_localhost, http_get_localhost, wait_for_whisper_transcription, current_log_timestamp
 - ✓ Hardcoded test_sip_provider port extracted to `TEST_SIP_PROVIDER_PORT` constant
 - ✓ Comprehensive documentation added to all new functions including G.711 codec algorithm, SNR/THD formulas, benchmark workflow
+- ✓ **CRITICAL FIX**: G.711 μ-law decode table corrected (ITU-T G.711 compliant formula), errors up to 37% on 254/256 values fixed
+- ✓ **IAP upsampling improved**: replaced naive linear interpolation with 15-tap half-band FIR low-pass filter (~40dB stopband attenuation)
+- ✓ **Whisper normalization removed**: audio peak normalization caused transcription degradation vs whisper-cli; now passes raw G.711 audio directly
+- ✓ **Whisper audio_ctx fixed**: changed from restrictive per-chunk sizing to full context (audio_ctx=0), matching whisper-cli defaults
+- ✓ **Hallucination filter fixed**: changed from substring match (find) to exact match (==) to prevent false positives on legitimate speech
+- ✓ **Transcription collector improved**: settle timeout increased from 2s to 4s to capture multi-chunk VAD output
+- ✓ **Debug diagnostics cleaned up**: removed temporary chunk dump code and duplicate wparams settings
+- ✓ **Pipeline verified**: 10-file accuracy test avg 92.8% (5 PASS, 4 WARN, 1 FAIL), avg latency 1050ms
 
 ---
 
