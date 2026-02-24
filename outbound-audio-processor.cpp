@@ -9,6 +9,10 @@
 #include <chrono>
 #include <cstring>
 #include <cmath>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <unistd.h>
 #include "interconnect.h"
 
 static constexpr int AA_FILTER_TAPS = 15;
@@ -77,14 +81,24 @@ public:
     void run() {
         std::thread receiver_thread(&OutboundAudioProcessor::receiver_loop, this);
         std::thread scheduler_thread(&OutboundAudioProcessor::scheduler_loop, this);
+        std::thread cmd_thread(&OutboundAudioProcessor::command_listener_loop, this);
         
         while (running_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         
+        if (cmd_sock_ >= 0) ::close(cmd_sock_);
+        cmd_sock_ = -1;
         receiver_thread.join();
         scheduler_thread.join();
+        cmd_thread.join();
         interconnect_.shutdown();
+    }
+
+    void stop() {
+        running_ = false;
+        if (cmd_sock_ >= 0) ::close(cmd_sock_);
+        cmd_sock_ = -1;
     }
 
 private:
@@ -101,6 +115,119 @@ private:
         for (int exp_mask = 0x4000; (pcm & exp_mask) == 0 && exponent > 0; exp_mask >>= 1) exponent--;
         int mantissa = (pcm >> (exponent + 3)) & 0x0F;
         return ~(sign | (exponent << 4) | mantissa);
+    }
+
+    void command_listener_loop() {
+        uint16_t port = whispertalk::service_cmd_port(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+        cmd_sock_ = socket(AF_INET, SOCK_STREAM, 0);
+        if (cmd_sock_ < 0) return;
+        int opt = 1;
+        setsockopt(cmd_sock_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(port);
+        if (bind(cmd_sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            std::cerr << "OAP cmd: bind port " << port << " failed" << std::endl;
+            return;
+        }
+        listen(cmd_sock_, 4);
+        std::cout << "OAP command listener on port " << port << std::endl;
+        while (running_) {
+            struct pollfd pfd{cmd_sock_, POLLIN, 0};
+            int r = poll(&pfd, 1, 200);
+            if (r <= 0) continue;
+            int csock = accept(cmd_sock_, nullptr, nullptr);
+            if (csock < 0) continue;
+            struct timeval tv{10, 0};
+            setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(csock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            char buf[4096];
+            int n = (int)recv(csock, buf, sizeof(buf) - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string cmd(buf);
+                while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r'))
+                    cmd.pop_back();
+                std::string response = handle_command(cmd);
+                send(csock, response.c_str(), response.size(), 0);
+            }
+            ::close(csock);
+        }
+    }
+
+    std::string handle_command(const std::string& cmd) {
+        if (cmd == "PING") return "PONG\n";
+        if (cmd == "STATUS") {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            std::string result = "ACTIVE_CALLS:" + std::to_string(calls_.size());
+            result += ":DOWNSTREAM:" + std::string(
+                interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected");
+            result += ":UPSTREAM:" + std::string(
+                interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected");
+            result += "\n";
+            return result;
+        }
+        if (cmd.rfind("TEST_ENCODE:", 0) == 0) {
+            int freq = 400;
+            int dur_ms = 500;
+            size_t sep = cmd.find('|', 12);
+            if (sep != std::string::npos) {
+                freq = std::max(100, std::min(4000, std::atoi(cmd.substr(12, sep - 12).c_str())));
+                dur_ms = std::max(100, std::min(5000, std::atoi(cmd.substr(sep + 1).c_str())));
+            } else if (cmd.size() > 12) {
+                freq = std::max(100, std::min(4000, std::atoi(cmd.substr(12).c_str())));
+            }
+
+            int in_rate = 24000;
+            size_t in_samples = (size_t)(in_rate * dur_ms / 1000);
+            std::vector<float> input(in_samples);
+            for (size_t i = 0; i < in_samples; i++) {
+                input[i] = 0.8f * std::sin(2.0 * M_PI * freq * i / in_rate);
+            }
+
+            auto t0 = std::chrono::steady_clock::now();
+
+            const double* coeffs = get_aa_coeffs();
+            size_t out_len = in_samples / 3;
+            std::vector<uint8_t> ulaw(out_len);
+            for (size_t i = 0; i < out_len; i++) {
+                size_t src_pos = i * 3;
+                double filtered = 0;
+                for (int t = 0; t < AA_FILTER_TAPS; t++) {
+                    int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
+                    if (idx >= 0 && idx < static_cast<int>(in_samples))
+                        filtered += input[idx] * coeffs[t];
+                }
+                int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
+                ulaw[i] = linear_to_ulaw(s16);
+            }
+
+            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+
+            double ulaw_rms = 0;
+            for (auto v : ulaw) {
+                int16_t decoded = ulaw_to_linear(v);
+                ulaw_rms += (double)decoded * decoded;
+            }
+            ulaw_rms = std::sqrt(ulaw_rms / out_len) / 32768.0;
+
+            return "ENCODE_RESULT:" + std::to_string(elapsed) + "us:"
+                + std::to_string(in_samples) + "->" + std::to_string(out_len) + ":"
+                + std::to_string(freq) + "Hz:" + std::to_string(dur_ms) + "ms:"
+                + "rms=" + std::to_string(ulaw_rms) + "\n";
+        }
+        return "ERROR:Unknown command\n";
+    }
+
+    int16_t ulaw_to_linear(uint8_t u) {
+        u = ~u;
+        int sign = (u & 0x80) ? -1 : 1;
+        int exponent = (u >> 4) & 0x07;
+        int mantissa = u & 0x0F;
+        int16_t sample = (mantissa << (exponent + 3)) + (1 << (exponent + 3)) - 128 + 4;
+        return static_cast<int16_t>(sign * sample);
     }
 
     void receiver_loop() {
@@ -203,6 +330,7 @@ private:
     }
 
     std::atomic<bool> running_;
+    int cmd_sock_ = -1;
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<CallState>> calls_;
     whispertalk::InterconnectNode interconnect_;
