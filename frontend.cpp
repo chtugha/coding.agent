@@ -6122,13 +6122,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
         struct mg_str body = hm->body;
-        int lines = 4, duration_s = 10;
-        int vlen = 0; int64_t v = 0;
-        int vofs = mg_json_get(body, "$.lines", &vlen);
-        if (vofs >= 0) lines = (int)mg_json_get_long(body, "$.lines", 4);
-        vofs = mg_json_get(body, "$.duration_s", &vlen);
-        if (vofs >= 0) duration_s = (int)mg_json_get_long(body, "$.duration_s", 10);
-        (void)v;
+        int lines = (int)mg_json_get_long(body, "$.lines", 4);
+        int duration_s = (int)mg_json_get_long(body, "$.duration_s", 10);
         if (lines < 1) lines = 1;
         if (lines > 32) lines = 32;
         if (duration_s < 1) duration_s = 1;
@@ -6150,6 +6145,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             whispertalk::ServiceType type;
         };
         const ServicePing services[] = {
+            {"sip",    whispertalk::ServiceType::SIP_CLIENT},
             {"iap",    whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR},
             {"vad",    whispertalk::ServiceType::VAD_SERVICE},
             {"whisper",whispertalk::ServiceType::WHISPER_SERVICE},
@@ -6157,7 +6153,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             {"kokoro", whispertalk::ServiceType::KOKORO_SERVICE},
             {"oap",    whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
         };
-        constexpr int NSVC = 6;
+        constexpr int NSVC = 7;
 
         struct ServiceStats {
             std::atomic<long> ok{0};

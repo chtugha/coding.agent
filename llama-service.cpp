@@ -447,6 +447,13 @@ private:
         if (cmd == "PING") {
             return "PONG\n";
         }
+        if (cmd == "STATUS") {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            return "ACTIVE_CALLS:" + std::to_string(calls_.size())
+                + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + "\n";
+        }
         return "ERROR:Unknown command\n";
     }
 

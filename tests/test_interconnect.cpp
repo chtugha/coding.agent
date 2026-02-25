@@ -849,7 +849,6 @@ TEST(StressTest, BurstFlood_TenSenders_5000Packets) {
     constexpr int TOTAL = SENDERS * PKTS_EACH;
 
     std::atomic<int> recv_count{0};
-    std::atomic<bool> recv_done{false};
 
     std::thread receiver([&]() {
         while (recv_count.load() < TOTAL) {
@@ -860,7 +859,6 @@ TEST(StressTest, BurstFlood_TenSenders_5000Packets) {
                 break;
             }
         }
-        recv_done = true;
     });
 
     std::vector<std::thread> senders;

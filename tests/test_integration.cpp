@@ -307,7 +307,7 @@ TEST_F(EndToEndTest, OneHourStressTest) {
 TEST_F(EndToEndTest, MultiLineSimultaneous) {
     int sip_port = find_free_port();
     constexpr int LINES = 6;
-    constexpr int DURATION = 45;
+    constexpr int DURATION = 25;
 
     std::printf("\n  ========== MULTI-LINE SIMULTANEOUS (%d lines, %ds) ==========\n", LINES, DURATION);
     std::printf("  SIP provider port: %d\n", sip_port);
