@@ -2613,14 +2613,16 @@ function pollTtsRoundtripTask(taskId){
     if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
     var s=d.summary;
     status.innerHTML='<span style="color:var(--wt-success)">Round-trip test complete — '+s.pass+'/'+s.total+' passed (avg similarity: '+s.avg_similarity.toFixed(1)+'%)</span>';
-    var html='<table class="wt-table"><tr><th>Original Phrase</th><th>Transcription</th><th>Similarity</th><th>Synth</th><th>E2E</th><th>Status</th></tr>';
+    var html='<table class="wt-table"><tr><th>Original Phrase</th><th>Transcription</th><th>Similarity</th><th>Synth</th><th>RTF</th><th>E2E</th><th>Status</th></tr>';
     d.results.forEach(function(r){
       var color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
+      var rtfColor=r.synth_rtf<0.5?'var(--wt-success)':r.synth_rtf<1.0?'var(--wt-warning)':'var(--wt-danger)';
       html+='<tr>';
       html+='<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.phrase)+'</td>';
       html+='<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.transcription)+'</td>';
       html+='<td style="color:'+color+';font-weight:bold">'+r.similarity.toFixed(1)+'%</td>';
       html+='<td>'+r.synth_ms+'ms</td>';
+      html+='<td style="color:'+rtfColor+';font-weight:bold">'+(r.synth_rtf||0).toFixed(2)+'</td>';
       html+='<td>'+r.e2e_ms+'ms</td>';
       html+='<td style="color:'+color+'">'+r.status+'</td>';
       html+='</tr>';
@@ -5725,22 +5727,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
-        std::string ping_err;
-        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"Kokoro service not reachable\"}");
-            return;
-        }
-
-        std::string status_err;
-        std::string status_resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", status_err);
-        if (!status_err.empty() || status_resp.find("\"call_active\":true") == std::string::npos) {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"No active call on test_sip_provider — start a call first\"}");
-            return;
-        }
-
         struct mg_str json_body = hm->body;
         std::vector<std::string> phrases;
         int plen = 0;
@@ -5779,6 +5765,19 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     void run_tts_roundtrip_async(int64_t task_id, std::vector<std::string> phrases) {
         uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
 
+        std::string ping_err;
+        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+            finish_async_task(task_id, "{\"error\":\"Kokoro service not reachable\"}");
+            return;
+        }
+
+        std::string status_err;
+        std::string status_resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", status_err);
+        if (!status_err.empty() || status_resp.find("\"call_active\":true") == std::string::npos) {
+            finish_async_task(task_id, "{\"error\":\"No active call on test_sip_provider — start a call first\"}");
+            return;
+        }
+
         std::stringstream json;
         json << "{\"results\":[";
         bool first = true;
@@ -5801,16 +5800,21 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             bool synth_ok = (synth_resp.rfind("WAV_RESULT:", 0) == 0);
 
             if (synth_ok) {
-                size_t p = 11;
-                size_t ms_end = synth_resp.find("ms:", p);
-                if (ms_end != std::string::npos) {
-                    synth_ms = std::stod(synth_resp.substr(p, ms_end - p));
-                }
-                size_t rtf_pos = synth_resp.find("rtf=");
-                if (rtf_pos != std::string::npos) {
-                    size_t rtf_end = synth_resp.find(':', rtf_pos + 4);
-                    synth_rtf = std::stod(synth_resp.substr(rtf_pos + 4,
-                        rtf_end == std::string::npos ? std::string::npos : rtf_end - rtf_pos - 4));
+                try {
+                    size_t p = 11;
+                    size_t ms_end = synth_resp.find("ms:", p);
+                    if (ms_end != std::string::npos) {
+                        synth_ms = std::stod(synth_resp.substr(p, ms_end - p));
+                    }
+                    size_t rtf_pos = synth_resp.find("rtf=");
+                    if (rtf_pos != std::string::npos) {
+                        size_t rtf_end = synth_resp.find(':', rtf_pos + 4);
+                        synth_rtf = std::stod(synth_resp.substr(rtf_pos + 4,
+                            rtf_end == std::string::npos ? std::string::npos : rtf_end - rtf_pos - 4));
+                    }
+                } catch (const std::exception&) {
+                    synth_ms = 0;
+                    synth_rtf = 0;
                 }
             }
 

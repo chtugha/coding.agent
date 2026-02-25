@@ -942,6 +942,8 @@ private:
             std::string path = rest.substr(0, sep);
             std::string text = rest.substr(sep + 1);
             if (path.empty() || text.empty()) return "ERROR:empty path or text\n";
+            if (path.find("..") != std::string::npos || path[0] == '/')
+                return "ERROR:invalid path (no traversal or absolute paths)\n";
 
             std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
@@ -984,6 +986,12 @@ private:
             for (float s : samples) {
                 int16_t pcm = static_cast<int16_t>(std::max(-1.0f, std::min(1.0f, s)) * 32767.0f);
                 out.write(reinterpret_cast<char*>(&pcm), 2);
+            }
+            out.flush();
+            if (!out.good()) {
+                out.close();
+                std::remove(path.c_str());
+                return "ERROR:write failed (disk full?)\n";
             }
             out.close();
 
