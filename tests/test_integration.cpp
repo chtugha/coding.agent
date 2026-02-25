@@ -304,6 +304,40 @@ TEST_F(EndToEndTest, OneHourStressTest) {
     EXPECT_FALSE(any_crashed) << "Service crashed during stress test";
 }
 
+TEST_F(EndToEndTest, MultiLineSimultaneous) {
+    int sip_port = find_free_port();
+    constexpr int LINES = 6;
+    constexpr int DURATION = 45;
+
+    std::printf("\n  ========== MULTI-LINE SIMULTANEOUS (%d lines, %ds) ==========\n", LINES, DURATION);
+    std::printf("  SIP provider port: %d\n", sip_port);
+    std::printf("  %d simultaneous lines, injected audio\n", LINES);
+
+    ASSERT_TRUE(pipeline.launch_provider(sip_port, DURATION, true));
+    ASSERT_TRUE(pipeline.launch_services(LINES, "multiline", "127.0.0.1", sip_port));
+
+    std::this_thread::sleep_for(std::chrono::seconds(12));
+    ASSERT_TRUE(pipeline.all_alive()) << "Services crashed during startup";
+
+    std::printf("  All services alive. %d simultaneous calls in progress.\n", LINES);
+
+    bool any_crashed = false;
+    for (int i = 0; i < DURATION; i++) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!pipeline.all_alive()) {
+            any_crashed = true;
+            std::printf("  SERVICE CRASH at t=%ds\n", i + 1);
+            break;
+        }
+        if ((i + 1) % 15 == 0) {
+            std::printf("  t=%ds - all services alive with %d concurrent lines\n", i + 1, LINES);
+        }
+    }
+
+    EXPECT_FALSE(any_crashed) << "Service crashed during multi-line simultaneous test";
+    std::printf("  ============================================================\n\n");
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 

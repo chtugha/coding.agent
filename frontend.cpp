@@ -1170,6 +1170,8 @@ private:
                 handle_tts_roundtrip(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/pipeline/health")) == 0) {
                 handle_pipeline_health(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/multiline_stress")) == 0) {
+                handle_multiline_stress(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
                 handle_async_status(c, hm);
             } else {
@@ -1743,6 +1745,21 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 <div id="pipelineHealthStatus" style="font-size:12px;margin-bottom:8px"></div>
 <div id="pipelineHealthResults"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Test 8: Multi-Line Command Stress Test</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Floods all 6 pipeline service command ports concurrently with PING requests from multiple simulated lines.
+  Measures response success rate and latency under concurrent load.
+</p>
+<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+  <label style="font-size:13px">Lines: <input id="stressLines" type="number" min="1" max="32" value="4" style="width:60px;margin-left:4px" class="wt-input"></label>
+  <label style="font-size:13px">Duration (s): <input id="stressDuration" type="number" min="1" max="120" value="10" style="width:60px;margin-left:4px" class="wt-input"></label>
+  <button class="wt-btn wt-btn-primary" id="stressRunBtn" onclick="runMultilineStress()">&#x25B6; Run Stress Test</button>
+</div>
+<div id="stressStatus" style="font-size:12px;margin-bottom:8px"></div>
+<div id="stressResults"></div>
 </div>
 
 <div class="wt-card">
@@ -2630,6 +2647,57 @@ function stopPipelineHealthAutoRefresh(){
   if(pipelineHealthInterval){clearInterval(pipelineHealthInterval);pipelineHealthInterval=null;}
   var btn=document.getElementById('pipelineHealthAutoBtn');
   if(btn){btn.textContent='Auto-Refresh (10s)';btn.onclick=startPipelineHealthAutoRefresh;}
+}
+
+var stressPollInterval=null;
+function runMultilineStress(){
+  if(stressPollInterval){clearInterval(stressPollInterval);stressPollInterval=null;}
+  var btn=document.getElementById('stressRunBtn');
+  var status=document.getElementById('stressStatus');
+  var results=document.getElementById('stressResults');
+  var lines=parseInt(document.getElementById('stressLines').value)||4;
+  var dur=parseInt(document.getElementById('stressDuration').value)||10;
+  btn.disabled=true;
+  status.innerHTML='<span style="color:var(--wt-accent)">Starting stress test ('+lines+' lines, '+dur+'s)...</span>';
+  results.innerHTML='';
+  fetch('/api/multiline_stress',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({lines:lines,duration_s:dur})})
+  .then(function(r){return r.json();}).then(function(d){
+    if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';btn.disabled=false;return;}
+    var task_id=d.task_id;
+    status.innerHTML='<span style="color:var(--wt-accent)">Running... (task '+task_id+')</span>';
+    stressPollInterval=setInterval(function(){
+      fetch('/api/async/status?task_id='+task_id).then(function(r){return r.json();}).then(function(r){
+        if(r.status==='running'){
+          status.innerHTML='<span style="color:var(--wt-accent)">&#x23F3; Stress test in progress...</span>';
+          return;
+        }
+        clearInterval(stressPollInterval);stressPollInterval=null;
+        btn.disabled=false;
+        if(r.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(r.error)+'</span>';return;}
+        var overall_ok=(r.overall_success_pct||0)>=95;
+        var col=overall_ok?'var(--wt-success)':r.overall_success_pct>=75?'var(--wt-warning)':'var(--wt-danger)';
+        status.innerHTML='<span style="color:'+col+';font-weight:bold">'+r.overall_success_pct+'% success</span>'
+          +' &nbsp;('+r.total_ok+'/'+r.total_pings+' pings OK, '+r.lines+' lines, '+r.duration_s+'s)';
+        var html='<table class="wt-table"><tr><th>Service</th><th>OK</th><th>Fail</th><th>Success%</th><th>Avg latency</th></tr>';
+        (r.services||[]).forEach(function(s){
+          var c=s.success_pct>=95?'var(--wt-success)':s.success_pct>=75?'var(--wt-warning)':'var(--wt-danger)';
+          html+='<tr><td>'+escapeHtml(s.name)+'</td><td>'+s.ok+'</td><td>'+s.fail+'</td>'
+               +'<td style="color:'+c+';font-weight:bold">'+s.success_pct+'%</td>'
+               +'<td>'+s.avg_ms+'ms</td></tr>';
+        });
+        html+='</table>';
+        results.innerHTML=html;
+      }).catch(function(e){
+        clearInterval(stressPollInterval);stressPollInterval=null;
+        btn.disabled=false;
+        status.innerHTML='<span style="color:var(--wt-danger)">Poll error: '+escapeHtml(String(e))+'</span>';
+      });
+    },2000);
+  }).catch(function(e){
+    btn.disabled=false;
+    status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+  });
 }
 
 var ttsRoundtripPoll=null;
@@ -6045,6 +6113,125 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
              << ",\"total\":" << (int)phrases.size()
              << "}}";
 
+        finish_async_task(task_id, json.str());
+    }
+
+    void handle_multiline_stress(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        struct mg_str body = hm->body;
+        int lines = 4, duration_s = 10;
+        int vlen = 0; int64_t v = 0;
+        int vofs = mg_json_get(body, "$.lines", &vlen);
+        if (vofs >= 0) lines = (int)mg_json_get_long(body, "$.lines", 4);
+        vofs = mg_json_get(body, "$.duration_s", &vlen);
+        if (vofs >= 0) duration_s = (int)mg_json_get_long(body, "$.duration_s", 10);
+        (void)v;
+        if (lines < 1) lines = 1;
+        if (lines > 32) lines = 32;
+        if (duration_s < 1) duration_s = 1;
+        if (duration_s > 120) duration_s = 120;
+
+        int64_t task_id = create_async_task("multiline_stress");
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_multiline_stress_async, this,
+                task_id, lines, duration_s);
+        }
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_multiline_stress_async(int64_t task_id, int lines, int duration_s) {
+        struct ServicePing {
+            const char* name;
+            whispertalk::ServiceType type;
+        };
+        const ServicePing services[] = {
+            {"iap",    whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR},
+            {"vad",    whispertalk::ServiceType::VAD_SERVICE},
+            {"whisper",whispertalk::ServiceType::WHISPER_SERVICE},
+            {"llama",  whispertalk::ServiceType::LLAMA_SERVICE},
+            {"kokoro", whispertalk::ServiceType::KOKORO_SERVICE},
+            {"oap",    whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
+        };
+        constexpr int NSVC = 6;
+
+        struct ServiceStats {
+            std::atomic<long> ok{0};
+            std::atomic<long> fail{0};
+            std::atomic<long> total_ms{0};
+        };
+        std::vector<ServiceStats> stats(NSVC);
+
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(duration_s);
+
+        std::vector<std::thread> workers;
+        for (int line = 0; line < lines; ++line) {
+            workers.emplace_back([&, line]() {
+                (void)line;
+                while (std::chrono::steady_clock::now() < deadline) {
+                    for (int s = 0; s < NSVC; ++s) {
+                        uint16_t port = whispertalk::service_cmd_port(services[s].type);
+                        auto t0 = std::chrono::steady_clock::now();
+                        int sock = socket(AF_INET, SOCK_STREAM, 0);
+                        if (sock < 0) { stats[s].fail++; continue; }
+                        struct timeval tv{1, 0};
+                        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+                        struct sockaddr_in addr{};
+                        addr.sin_family = AF_INET;
+                        addr.sin_port = htons(port);
+                        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                            ::close(sock);
+                            stats[s].fail++;
+                            continue;
+                        }
+                        send(sock, "PING", 4, 0);
+                        char buf[16] = {};
+                        ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+                        ::close(sock);
+                        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+                        if (n > 0 && std::string(buf, n).find("PONG") != std::string::npos) {
+                            stats[s].ok++;
+                            stats[s].total_ms += ms;
+                        } else {
+                            stats[s].fail++;
+                        }
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
+
+        std::stringstream json;
+        json << "{\"lines\":" << lines
+             << ",\"duration_s\":" << duration_s
+             << ",\"services\":[";
+        long grand_ok = 0, grand_fail = 0;
+        for (int s = 0; s < NSVC; ++s) {
+            long ok = stats[s].ok.load(), fail = stats[s].fail.load();
+            long total = ok + fail;
+            double avg_ms = (ok > 0) ? (double)stats[s].total_ms.load() / ok : 0;
+            if (s > 0) json << ",";
+            json << "{\"name\":\"" << services[s].name << "\""
+                 << ",\"ok\":" << ok
+                 << ",\"fail\":" << fail
+                 << ",\"success_pct\":" << (total > 0 ? (int)(100.0 * ok / total) : 0)
+                 << ",\"avg_ms\":" << (int)avg_ms << "}";
+            grand_ok += ok; grand_fail += fail;
+        }
+        long grand_total = grand_ok + grand_fail;
+        json << "],\"total_pings\":" << grand_total
+             << ",\"total_ok\":" << grand_ok
+             << ",\"total_fail\":" << grand_fail
+             << ",\"overall_success_pct\":" << (grand_total > 0 ? (int)(100.0 * grand_ok / grand_total) : 0)
+             << "}";
         finish_async_task(task_id, json.str());
     }
 

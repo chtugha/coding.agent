@@ -762,3 +762,231 @@ TEST(FrontendNodeTest, FrontendInitializesWithoutPorts) {
     EXPECT_TRUE(frontend.initialize());
     frontend.shutdown();
 }
+
+TEST(StressTest, ConcurrentCallIDs_NoMixup) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+
+    EXPECT_TRUE(upstream.initialize());
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(upstream.downstream_state(), ConnectionState::CONNECTED);
+
+    constexpr int LINES = 8;
+    constexpr int PKTS_PER_LINE = 50;
+    constexpr int TOTAL = LINES * PKTS_PER_LINE;
+
+    std::atomic<int> sent_count{0};
+    std::atomic<int> recv_count{0};
+    std::atomic<bool> wrong_cid{false};
+
+    std::map<uint32_t, int> cid_to_line;
+    std::mutex cid_map_mutex;
+    std::vector<uint32_t> cids(LINES);
+    for (int i = 0; i < LINES; ++i) {
+        cids[i] = upstream.reserve_call_id(100 + i);
+        std::lock_guard<std::mutex> lock(cid_map_mutex);
+        cid_to_line[cids[i]] = i;
+    }
+
+    std::thread receiver([&]() {
+        std::map<uint32_t, int> per_cid_count;
+        for (int i = 0; i < TOTAL; ++i) {
+            Packet pkt;
+            if (!downstream.recv_from_upstream(pkt, 10000)) {
+                wrong_cid = true;
+                break;
+            }
+            recv_count++;
+            per_cid_count[pkt.call_id]++;
+        }
+        for (auto& [cid, count] : per_cid_count) {
+            if (count != PKTS_PER_LINE) wrong_cid = true;
+        }
+        if ((int)per_cid_count.size() != LINES) wrong_cid = true;
+    });
+
+    std::vector<std::thread> senders;
+    for (int i = 0; i < LINES; ++i) {
+        senders.emplace_back([&, i]() {
+            uint32_t cid = cids[i];
+            for (int j = 0; j < PKTS_PER_LINE; ++j) {
+                std::string data = "line" + std::to_string(i) + "_pkt" + std::to_string(j);
+                Packet pkt(cid, data.c_str(), data.size());
+                upstream.send_to_downstream(pkt);
+                sent_count++;
+            }
+        });
+    }
+
+    for (auto& t : senders) t.join();
+    receiver.join();
+
+    EXPECT_EQ(sent_count.load(), TOTAL);
+    EXPECT_EQ(recv_count.load(), TOTAL);
+    EXPECT_FALSE(wrong_cid.load()) << "Call ID distribution was incorrect";
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(StressTest, BurstFlood_TenSenders_5000Packets) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+
+    EXPECT_TRUE(upstream.initialize());
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    constexpr int SENDERS = 10;
+    constexpr int PKTS_EACH = 500;
+    constexpr int TOTAL = SENDERS * PKTS_EACH;
+
+    std::atomic<int> recv_count{0};
+    std::atomic<bool> recv_done{false};
+
+    std::thread receiver([&]() {
+        while (recv_count.load() < TOTAL) {
+            Packet pkt;
+            if (downstream.recv_from_upstream(pkt, 15000)) {
+                recv_count++;
+            } else {
+                break;
+            }
+        }
+        recv_done = true;
+    });
+
+    std::vector<std::thread> senders;
+    for (int i = 0; i < SENDERS; ++i) {
+        senders.emplace_back([&, i]() {
+            uint32_t cid = (uint32_t)(i + 1);
+            for (int j = 0; j < PKTS_EACH; ++j) {
+                std::string data = "s" + std::to_string(i) + "p" + std::to_string(j);
+                Packet pkt(cid, data.c_str(), data.size());
+                upstream.send_to_downstream(pkt);
+            }
+        });
+    }
+
+    for (auto& t : senders) t.join();
+    receiver.join();
+
+    EXPECT_EQ(recv_count.load(), TOTAL) << "Expected " << TOTAL << " packets, got " << recv_count.load();
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(StressTest, SimultaneousCallEnd_MultipleLines) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+
+    EXPECT_TRUE(upstream.initialize());
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    constexpr int LINES = 10;
+    std::atomic<int> end_count{0};
+
+    downstream.register_call_end_handler([&](uint32_t) {
+        end_count++;
+    });
+
+    std::vector<uint32_t> cids;
+    for (int i = 0; i < LINES; ++i) {
+        cids.push_back(upstream.reserve_call_id(200 + i));
+    }
+
+    std::vector<std::thread> enders;
+    for (int i = 0; i < LINES; ++i) {
+        enders.emplace_back([&, i]() {
+            upstream.broadcast_call_end(cids[i]);
+        });
+    }
+    for (auto& t : enders) t.join();
+
+    for (int i = 0; i < 100 && end_count.load() < LINES; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    EXPECT_EQ(end_count.load(), LINES) << "Expected " << LINES << " CALL_END signals, got " << end_count.load();
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(StressTest, ThreeHopPipeline_ConcurrentMultiLine) {
+    InterconnectNode sip(ServiceType::SIP_CLIENT);
+    InterconnectNode iap(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    InterconnectNode vad(ServiceType::VAD_SERVICE);
+
+    EXPECT_TRUE(sip.initialize());
+    EXPECT_TRUE(iap.initialize());
+    EXPECT_TRUE(vad.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(sip.connect_to_downstream());
+    EXPECT_TRUE(iap.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    EXPECT_EQ(sip.downstream_state(), ConnectionState::CONNECTED);
+    EXPECT_EQ(iap.downstream_state(), ConnectionState::CONNECTED);
+
+    constexpr int LINES = 4;
+    constexpr int PKTS_PER_LINE = 25;
+    constexpr int TOTAL = LINES * PKTS_PER_LINE;
+
+    std::atomic<int> sip_to_iap_recv{0};
+    std::atomic<int> iap_to_vad_recv{0};
+
+    std::thread iap_relay([&]() {
+        for (int i = 0; i < TOTAL; ++i) {
+            Packet pkt;
+            if (!iap.recv_from_upstream(pkt, 10000)) break;
+            sip_to_iap_recv++;
+            Packet fwd(pkt.call_id, pkt.payload.data(), pkt.payload.size());
+            iap.send_to_downstream(fwd);
+        }
+    });
+
+    std::thread vad_receiver([&]() {
+        for (int i = 0; i < TOTAL; ++i) {
+            Packet pkt;
+            if (!vad.recv_from_upstream(pkt, 10000)) break;
+            iap_to_vad_recv++;
+        }
+    });
+
+    std::vector<std::thread> senders;
+    for (int i = 0; i < LINES; ++i) {
+        senders.emplace_back([&, i]() {
+            uint32_t cid = (uint32_t)(i + 1);
+            for (int j = 0; j < PKTS_PER_LINE; ++j) {
+                std::string data = "hop3_line" + std::to_string(i) + "_p" + std::to_string(j);
+                Packet pkt(cid, data.c_str(), data.size());
+                sip.send_to_downstream(pkt);
+            }
+        });
+    }
+
+    for (auto& t : senders) t.join();
+    iap_relay.join();
+    vad_receiver.join();
+
+    EXPECT_EQ(sip_to_iap_recv.load(), TOTAL);
+    EXPECT_EQ(iap_to_vad_recv.load(), TOTAL);
+
+    vad.shutdown();
+    iap.shutdown();
+    sip.shutdown();
+}
