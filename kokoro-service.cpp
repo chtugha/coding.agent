@@ -792,15 +792,15 @@ public:
 
         shutdown_all_calls();
 
-        if (cmd_sock_ >= 0) ::close(cmd_sock_);
-        cmd_sock_ = -1;
+        int s1 = cmd_sock_.exchange(-1);
+        if (s1 >= 0) ::close(s1);
         if (cmd_thread.joinable()) cmd_thread.join();
     }
 
     void shutdown() {
         running_ = false;
-        if (cmd_sock_ >= 0) ::close(cmd_sock_);
-        cmd_sock_ = -1;
+        int s2 = cmd_sock_.exchange(-1);
+        if (s2 >= 0) ::close(s2);
         shutdown_all_calls();
         node_.shutdown();
     }
@@ -808,30 +808,32 @@ public:
 private:
     void command_listener_loop() {
         uint16_t port = whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE);
-        cmd_sock_ = socket(AF_INET, SOCK_STREAM, 0);
-        if (cmd_sock_ < 0) return;
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return;
 
         int opt = 1;
-        setsockopt(cmd_sock_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = htons(port);
 
-        if (bind(cmd_sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
             std::fprintf(stderr, "Kokoro cmd: bind port %d failed\n", port);
+            ::close(sock);
             return;
         }
-        listen(cmd_sock_, 4);
+        listen(sock, 4);
+        cmd_sock_.store(sock);
         std::printf("Kokoro command listener on port %d\n", port);
 
         while (running_) {
-            struct pollfd pfd{cmd_sock_, POLLIN, 0};
+            struct pollfd pfd{sock, POLLIN, 0};
             int r = poll(&pfd, 1, 200);
             if (r <= 0) continue;
 
-            int csock = accept(cmd_sock_, nullptr, nullptr);
+            int csock = accept(sock, nullptr, nullptr);
             if (csock < 0) continue;
 
             struct timeval tv{10, 0};
@@ -1062,7 +1064,7 @@ private:
     KokoroPipeline pipeline_;
     std::mutex pipeline_mutex_;
     std::atomic<bool> running_{true};
-    int cmd_sock_ = -1;
+    std::atomic<int> cmd_sock_{-1};
     std::map<uint32_t, std::shared_ptr<CallContext>> calls_;
     std::mutex calls_mutex_;
 };
