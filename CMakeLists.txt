@@ -353,5 +353,7 @@ if(BUILD_TESTS)
     gtest_discover_tests(test_sanity)
     gtest_discover_tests(test_interconnect)
     gtest_discover_tests(test_sip_provider_unit)
-    gtest_discover_tests(test_integration)
+    gtest_discover_tests(test_integration
+        PROPERTIES ENVIRONMENT "WHISPERTALK_BIN_DIR=${CMAKE_SOURCE_DIR}/bin;WHISPERTALK_MODELS_DIR=${CMAKE_SOURCE_DIR}/bin/models"
+    )
 endif()
