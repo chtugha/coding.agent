@@ -1166,6 +1166,8 @@ private:
                 handle_kokoro_quality_test(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/kokoro/benchmark")) == 0) {
                 handle_kokoro_benchmark(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/tts_roundtrip")) == 0) {
+                handle_tts_roundtrip(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
                 handle_async_status(c, hm);
             } else {
@@ -1708,6 +1710,23 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div id="kokoroTestStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="kokoroTestResults" style="margin-top:12px"></div>
 <div id="kokoroBenchResult" style="margin-top:8px"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Test 6: TTS Round-Trip Validation</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Full pipeline round-trip: Text &#x2192; Kokoro TTS &#x2192; WAV &#x2192; SIP inject &#x2192; IAP &#x2192; VAD &#x2192; Whisper &#x2192; compare transcription with original.
+  Requires: All services running + active call on test_sip_provider.
+</p>
+<div class="wt-field">
+<label>Custom Phrases (optional, comma-separated)</label>
+<input class="wt-input" id="ttsRoundtripPhrases" placeholder="e.g. Hallo Welt, Guten Morgen">
+</div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button class="wt-btn wt-btn-primary" id="ttsRoundtripBtn" onclick="runTtsRoundtrip()">&#x25B6; Run Round-Trip Test</button>
+</div>
+<div id="ttsRoundtripStatus" style="margin-top:8px;font-size:12px"></div>
+<div id="ttsRoundtripResults" style="margin-top:12px"></div>
 </div>
 
 <div class="wt-card">
@@ -2554,6 +2573,68 @@ function pollKokoroBenchTask(taskId){
     html+='</div>';
     result.innerHTML=html;
   }).catch(e=>console.error('pollKokoroBenchTask',e));
+}
+
+var ttsRoundtripPoll=null;
+function runTtsRoundtrip(){
+  if(ttsRoundtripPoll){clearInterval(ttsRoundtripPoll);ttsRoundtripPoll=null;}
+  var status=document.getElementById('ttsRoundtripStatus');
+  var results=document.getElementById('ttsRoundtripResults');
+  var btn=document.getElementById('ttsRoundtripBtn');
+  var customStr=document.getElementById('ttsRoundtripPhrases').value.trim();
+  var body={};
+  if(customStr){
+    body.phrases=customStr.split(',').map(function(s){return s.trim();}).filter(function(s){return s.length>0;});
+  }
+  btn.disabled=true;
+  status.innerHTML='<span style="color:var(--wt-accent)">Starting TTS round-trip test...</span>';
+  results.innerHTML='';
+  fetch('/api/tts_roundtrip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){
+      if(r.status===202) return r.json();
+      return r.json().then(function(d){throw new Error(d.error||'HTTP '+r.status);});
+    }).then(function(d){
+      status.innerHTML='<span style="color:var(--wt-accent)">Round-trip test running (task '+d.task_id+')... This may take several minutes.</span>';
+      ttsRoundtripPoll=setInterval(function(){pollTtsRoundtripTask(d.task_id);},3000);
+    }).catch(function(e){
+      btn.disabled=false;
+      if(ttsRoundtripPoll){clearInterval(ttsRoundtripPoll);ttsRoundtripPoll=null;}
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+    });
+}
+
+function pollTtsRoundtripTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(function(r){return r.json();}).then(function(d){
+    if(d.status==='running') return;
+    clearInterval(ttsRoundtripPoll);ttsRoundtripPoll=null;
+    document.getElementById('ttsRoundtripBtn').disabled=false;
+    var status=document.getElementById('ttsRoundtripStatus');
+    var results=document.getElementById('ttsRoundtripResults');
+    if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
+    var s=d.summary;
+    status.innerHTML='<span style="color:var(--wt-success)">Round-trip test complete — '+s.pass+'/'+s.total+' passed (avg similarity: '+s.avg_similarity.toFixed(1)+'%)</span>';
+    var html='<table class="wt-table"><tr><th>Original Phrase</th><th>Transcription</th><th>Similarity</th><th>Synth</th><th>E2E</th><th>Status</th></tr>';
+    d.results.forEach(function(r){
+      var color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
+      html+='<tr>';
+      html+='<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.phrase)+'</td>';
+      html+='<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.transcription)+'</td>';
+      html+='<td style="color:'+color+';font-weight:bold">'+r.similarity.toFixed(1)+'%</td>';
+      html+='<td>'+r.synth_ms+'ms</td>';
+      html+='<td>'+r.e2e_ms+'ms</td>';
+      html+='<td style="color:'+color+'">'+r.status+'</td>';
+      html+='</tr>';
+    });
+    html+='</table>';
+    if(s){
+      html+='<div style="margin-top:10px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px">';
+      html+='<strong>Summary:</strong> Avg Similarity: '+s.avg_similarity.toFixed(1)+'%';
+      html+=' | Avg Synth: '+s.avg_synth_ms+'ms | Avg E2E: '+s.avg_e2e_ms+'ms';
+      html+=' | Pass: '+s.pass+' | Warn: '+s.warn+' | Fail: '+s.fail;
+      html+='</div>';
+    }
+    results.innerHTML=html;
+  }).catch(function(e){console.error('pollTtsRoundtripTask',e);});
 }
 
 function checkSipProvider(){
@@ -5636,6 +5717,204 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             + ",\"rtf\":" + std::to_string(rtf)
             + ",\"phrase\":\"" + escape_json(phrase) + "\"}";
         finish_async_task(task_id, result);
+    }
+
+    void handle_tts_roundtrip(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+        std::string ping_err;
+        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"Kokoro service not reachable\"}");
+            return;
+        }
+
+        std::string status_err;
+        std::string status_resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", status_err);
+        if (!status_err.empty() || status_resp.find("\"call_active\":true") == std::string::npos) {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"No active call on test_sip_provider — start a call first\"}");
+            return;
+        }
+
+        struct mg_str json_body = hm->body;
+        std::vector<std::string> phrases;
+        int plen = 0;
+        int pofs = mg_json_get(json_body, "$.phrases", &plen);
+        if (pofs >= 0) {
+            struct mg_str arr = mg_str_n(json_body.buf + pofs, (size_t)plen);
+            size_t ofs = 0;
+            struct mg_str key, val;
+            while ((ofs = mg_json_next(arr, ofs, &key, &val)) > 0) {
+                if (val.len >= 2 && val.buf[0] == '"') {
+                    char buf[1024];
+                    if (mg_json_unescape(mg_str_n(val.buf + 1, val.len - 2), buf, sizeof(buf)))
+                        phrases.push_back(buf);
+                }
+            }
+        }
+
+        if (phrases.empty()) {
+            phrases = {
+                "Hallo, wie kann ich Ihnen helfen?",
+                "Die Hauptstadt von Deutschland ist Berlin.",
+                "Guten Morgen, ich bin Ihr Sprachassistent."
+            };
+        }
+
+        int64_t task_id = create_async_task("tts_roundtrip");
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_tts_roundtrip_async, this,
+                task_id, std::move(phrases));
+        }
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_tts_roundtrip_async(int64_t task_id, std::vector<std::string> phrases) {
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+
+        std::stringstream json;
+        json << "{\"results\":[";
+        bool first = true;
+        int pass_count = 0, warn_count = 0, fail_count = 0;
+        double total_similarity = 0.0;
+        double total_synth_ms = 0.0;
+        double total_e2e_ms = 0.0;
+        int processed = 0;
+
+        for (const auto& phrase : phrases) {
+            std::string tmp_filename = "_tts_roundtrip_" + std::to_string(task_id) + "_" + std::to_string(processed) + ".wav";
+            std::string tmp_path = "Testfiles/" + tmp_filename;
+
+            std::string synth_err;
+            std::string synth_cmd = "SYNTH_WAV:" + tmp_path + "|" + phrase;
+            std::string synth_resp = tcp_command(kokoro_cmd_port, synth_cmd, synth_err, 30);
+
+            double synth_ms = 0;
+            double synth_rtf = 0;
+            bool synth_ok = (synth_resp.rfind("WAV_RESULT:", 0) == 0);
+
+            if (synth_ok) {
+                size_t p = 11;
+                size_t ms_end = synth_resp.find("ms:", p);
+                if (ms_end != std::string::npos) {
+                    synth_ms = std::stod(synth_resp.substr(p, ms_end - p));
+                }
+                size_t rtf_pos = synth_resp.find("rtf=");
+                if (rtf_pos != std::string::npos) {
+                    size_t rtf_end = synth_resp.find(':', rtf_pos + 4);
+                    synth_rtf = std::stod(synth_resp.substr(rtf_pos + 4,
+                        rtf_end == std::string::npos ? std::string::npos : rtf_end - rtf_pos - 4));
+                }
+            }
+
+            if (!synth_ok) {
+                if (!first) json << ",";
+                json << "{\"phrase\":\"" << escape_json(phrase) << "\""
+                     << ",\"synth_ms\":0,\"synth_rtf\":0"
+                     << ",\"transcription\":\"[synthesis failed]\""
+                     << ",\"similarity\":0,\"e2e_ms\":0"
+                     << ",\"status\":\"FAIL\""
+                     << ",\"error\":\"" << escape_json(synth_err.empty() ? synth_resp : synth_err) << "\"}";
+                first = false;
+                fail_count++;
+                continue;
+            }
+
+            uint64_t seq_before = current_log_seq();
+            auto e2e_start = std::chrono::steady_clock::now();
+
+            std::string inject_body = "{\"file\":\"" + escape_json(tmp_filename) + "\",\"leg\":\"a\"}";
+            std::string inject_err;
+            std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
+
+            if (!inject_err.empty() || inject_resp.find("\"success\":true") == std::string::npos) {
+                std::remove(tmp_path.c_str());
+                if (!first) json << ",";
+                json << "{\"phrase\":\"" << escape_json(phrase) << "\""
+                     << ",\"synth_ms\":" << (int)synth_ms << ",\"synth_rtf\":" << synth_rtf
+                     << ",\"transcription\":\"[injection failed]\""
+                     << ",\"similarity\":0,\"e2e_ms\":0"
+                     << ",\"status\":\"FAIL\""
+                     << ",\"error\":\"" << escape_json(inject_err.empty() ? inject_resp : inject_err) << "\"}";
+                first = false;
+                fail_count++;
+                continue;
+            }
+
+            TranscriptionResult tr = wait_for_whisper_transcription(seq_before, 30000);
+
+            auto e2e_end = std::chrono::steady_clock::now();
+            double e2e_ms = std::chrono::duration_cast<std::chrono::milliseconds>(e2e_end - e2e_start).count();
+
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+
+            std::string transcription = tr.found ? tr.text : "[no transcription received]";
+            double similarity = calculate_levenshtein_similarity(phrase, transcription);
+
+            std::string status_str;
+            if (similarity >= 70.0) { status_str = "PASS"; pass_count++; }
+            else if (similarity >= 40.0) { status_str = "WARN"; warn_count++; }
+            else { status_str = "FAIL"; fail_count++; }
+
+            total_similarity += similarity;
+            total_synth_ms += synth_ms;
+            total_e2e_ms += e2e_ms;
+            processed++;
+
+            if (db_) {
+                const char* sql = "INSERT INTO test_results (test_name,service,status,details,timestamp) "
+                    "VALUES ('tts_roundtrip',?1,?2,?3,strftime('%s','now'))";
+                sqlite3_stmt* stmt = nullptr;
+                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(stmt, 1, "kokoro+whisper", -1, SQLITE_STATIC);
+                    sqlite3_bind_text(stmt, 2, status_str.c_str(), -1, SQLITE_TRANSIENT);
+                    std::string details = phrase + " -> " + transcription
+                        + " (sim=" + std::to_string((int)similarity) + "%, synth=" + std::to_string((int)synth_ms)
+                        + "ms, e2e=" + std::to_string((int)e2e_ms) + "ms)";
+                    sqlite3_bind_text(stmt, 3, details.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
+            }
+
+            if (!first) json << ",";
+            json << "{\"phrase\":\"" << escape_json(phrase) << "\""
+                 << ",\"transcription\":\"" << escape_json(transcription) << "\""
+                 << ",\"similarity\":" << similarity
+                 << ",\"synth_ms\":" << (int)synth_ms
+                 << ",\"synth_rtf\":" << synth_rtf
+                 << ",\"e2e_ms\":" << (int)e2e_ms
+                 << ",\"whisper_ms\":" << (int)tr.whisper_latency_ms
+                 << ",\"status\":\"" << status_str << "\"}";
+            first = false;
+
+            std::remove(tmp_path.c_str());
+        }
+
+        json << "]";
+
+        double avg_similarity = processed > 0 ? total_similarity / processed : 0;
+        double avg_synth = processed > 0 ? total_synth_ms / processed : 0;
+        double avg_e2e = processed > 0 ? total_e2e_ms / processed : 0;
+
+        json << ",\"summary\":{"
+             << "\"avg_similarity\":" << avg_similarity
+             << ",\"avg_synth_ms\":" << (int)avg_synth
+             << ",\"avg_e2e_ms\":" << (int)avg_e2e
+             << ",\"pass\":" << pass_count
+             << ",\"warn\":" << warn_count
+             << ",\"fail\":" << fail_count
+             << ",\"total\":" << (int)phrases.size()
+             << "}}";
+
+        finish_async_task(task_id, json.str());
     }
 
     void handle_async_status(struct mg_connection *c, struct mg_http_message *hm) {

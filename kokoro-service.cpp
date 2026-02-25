@@ -935,6 +935,66 @@ private:
                 + std::to_string(last_samples) + "@" + std::to_string(KOKORO_SAMPLE_RATE) + ":"
                 + "rtf=" + std::to_string(rtf_avg) + "\n";
         }
+        if (cmd.rfind("SYNTH_WAV:", 0) == 0) {
+            std::string rest = cmd.substr(10);
+            size_t sep = rest.find('|');
+            if (sep == std::string::npos) return "ERROR:format SYNTH_WAV:<path>|<text>\n";
+            std::string path = rest.substr(0, sep);
+            std::string text = rest.substr(sep + 1);
+            if (path.empty() || text.empty()) return "ERROR:empty path or text\n";
+
+            std::vector<float> samples;
+            auto start = std::chrono::steady_clock::now();
+            {
+                std::lock_guard<std::mutex> lock(pipeline_mutex_);
+                samples = pipeline_.synthesize(text);
+            }
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+
+            if (samples.empty()) return "ERROR:synthesis failed\n";
+
+            std::ofstream out(path, std::ios::binary);
+            if (!out.is_open()) return "ERROR:cannot open " + path + "\n";
+
+            uint32_t data_size = (uint32_t)(samples.size() * sizeof(int16_t));
+            uint32_t file_size = 36 + data_size;
+            int32_t sr = KOKORO_SAMPLE_RATE;
+            int16_t channels = 1;
+            int16_t bits = 16;
+            int32_t byte_rate = sr * channels * bits / 8;
+            int16_t block_align = channels * bits / 8;
+
+            out.write("RIFF", 4);
+            out.write(reinterpret_cast<char*>(&file_size), 4);
+            out.write("WAVE", 4);
+            out.write("fmt ", 4);
+            int32_t fmt_size = 16;
+            out.write(reinterpret_cast<char*>(&fmt_size), 4);
+            int16_t fmt_tag = 1;
+            out.write(reinterpret_cast<char*>(&fmt_tag), 2);
+            out.write(reinterpret_cast<char*>(&channels), 2);
+            out.write(reinterpret_cast<char*>(&sr), 4);
+            out.write(reinterpret_cast<char*>(&byte_rate), 4);
+            out.write(reinterpret_cast<char*>(&block_align), 2);
+            out.write(reinterpret_cast<char*>(&bits), 2);
+            out.write("data", 4);
+            out.write(reinterpret_cast<char*>(&data_size), 4);
+
+            for (float s : samples) {
+                int16_t pcm = static_cast<int16_t>(std::max(-1.0f, std::min(1.0f, s)) * 32767.0f);
+                out.write(reinterpret_cast<char*>(&pcm), 2);
+            }
+            out.close();
+
+            double duration_s = (double)samples.size() / KOKORO_SAMPLE_RATE;
+            double rtf = (elapsed / 1000.0) / duration_s;
+
+            return "WAV_RESULT:" + std::to_string(elapsed) + "ms:"
+                + std::to_string(samples.size()) + ":" + std::to_string(KOKORO_SAMPLE_RATE) + ":"
+                + std::to_string(duration_s) + "s:rtf=" + std::to_string(rtf)
+                + ":path=" + path + "\n";
+        }
         if (cmd == "PING") {
             return "PONG\n";
         }
