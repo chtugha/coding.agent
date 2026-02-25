@@ -1168,6 +1168,8 @@ private:
                 handle_kokoro_benchmark(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tts_roundtrip")) == 0) {
                 handle_tts_roundtrip(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/pipeline/health")) == 0) {
+                handle_pipeline_health(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
                 handle_async_status(c, hm);
             } else {
@@ -1727,6 +1729,20 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 <div id="ttsRoundtripStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="ttsRoundtripResults" style="margin-top:12px"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Test 7: Pipeline Resilience Health Check</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Pings all 7 pipeline services via their command ports and reports interconnect status.
+  Use this to verify all services are running and interconnected correctly.
+</p>
+<div style="display:flex;gap:8px;margin-bottom:8px">
+<button class="wt-btn wt-btn-primary" onclick="checkPipelineHealth(false)">&#x25B6; Check Now</button>
+<button class="wt-btn wt-btn-secondary" id="pipelineHealthAutoBtn" onclick="startPipelineHealthAutoRefresh()">Auto-Refresh (10s)</button>
+</div>
+<div id="pipelineHealthStatus" style="font-size:12px;margin-bottom:8px"></div>
+<div id="pipelineHealthResults"></div>
 </div>
 
 <div class="wt-card">
@@ -2573,6 +2589,47 @@ function pollKokoroBenchTask(taskId){
     html+='</div>';
     result.innerHTML=html;
   }).catch(e=>console.error('pollKokoroBenchTask',e));
+}
+
+var pipelineHealthInterval=null;
+function checkPipelineHealth(auto_refresh){
+  var status=document.getElementById('pipelineHealthStatus');
+  var results=document.getElementById('pipelineHealthResults');
+  if(status) status.innerHTML='<span style="color:var(--wt-accent)">Checking services...</span>';
+  fetch('/api/pipeline/health').then(function(r){return r.json();}).then(function(d){
+    var total=d.total||0,online=d.online||0;
+    var allOk=online===total;
+    var color=allOk?'var(--wt-success)':online===0?'var(--wt-danger)':'var(--wt-warning)';
+    if(status) status.innerHTML='<span style="color:'+color+'">'+online+'/'+total+' services online</span>'
+      +(auto_refresh?'<span style="color:var(--wt-text-secondary);font-size:11px"> &nbsp;(auto-refresh 10s)</span>':'');
+    var html='<table class="wt-table"><tr><th>Service</th><th>Status</th><th>Details</th></tr>';
+    (d.services||[]).forEach(function(s){
+      var c=s.reachable?'var(--wt-success)':'var(--wt-danger)';
+      var dot=s.reachable?'&#x25CF;':'&#x25CB;';
+      html+='<tr><td>'+escapeHtml(s.name)+'</td>'
+           +'<td style="color:'+c+';font-weight:bold">'+dot+' '+(s.reachable?'online':'offline')+'</td>'
+           +'<td style="font-size:11px;color:var(--wt-text-secondary)">'+escapeHtml(s.details)+'</td></tr>';
+    });
+    html+='</table>';
+    if(results) results.innerHTML=html;
+  }).catch(function(e){
+    if(status) status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+  });
+}
+
+function startPipelineHealthAutoRefresh(){
+  if(pipelineHealthInterval){clearInterval(pipelineHealthInterval);pipelineHealthInterval=null;}
+  checkPipelineHealth(true);
+  pipelineHealthInterval=setInterval(function(){checkPipelineHealth(true);},10000);
+  var btn=document.getElementById('pipelineHealthAutoBtn');
+  if(btn) btn.textContent='Stop Auto-Refresh';
+  btn.onclick=stopPipelineHealthAutoRefresh;
+}
+
+function stopPipelineHealthAutoRefresh(){
+  if(pipelineHealthInterval){clearInterval(pipelineHealthInterval);pipelineHealthInterval=null;}
+  var btn=document.getElementById('pipelineHealthAutoBtn');
+  if(btn){btn.textContent='Auto-Refresh (10s)';btn.onclick=startPipelineHealthAutoRefresh;}
 }
 
 var ttsRoundtripPoll=null;
@@ -5719,6 +5776,76 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             + ",\"rtf\":" + std::to_string(rtf)
             + ",\"phrase\":\"" + escape_json(phrase) + "\"}";
         finish_async_task(task_id, result);
+    }
+
+    void handle_pipeline_health(struct mg_connection *c, struct mg_http_message *hm) {
+        (void)hm;
+
+        struct ServiceDef {
+            const char* name;
+            whispertalk::ServiceType type;
+        };
+        const ServiceDef defs[] = {
+            {"sip-client",                whispertalk::ServiceType::SIP_CLIENT},
+            {"inbound-audio-processor",   whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR},
+            {"vad-service",               whispertalk::ServiceType::VAD_SERVICE},
+            {"whisper-service",           whispertalk::ServiceType::WHISPER_SERVICE},
+            {"llama-service",             whispertalk::ServiceType::LLAMA_SERVICE},
+            {"kokoro-service",            whispertalk::ServiceType::KOKORO_SERVICE},
+            {"outbound-audio-processor",  whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
+        };
+        constexpr int N = 7;
+
+        struct Result { bool reachable; std::string details; };
+        std::vector<Result> results(N);
+
+        std::vector<std::thread> threads;
+        for (int i = 0; i < N; ++i) {
+            threads.emplace_back([i, &results, &defs]() {
+                std::string err;
+                uint16_t port = whispertalk::service_cmd_port(defs[i].type);
+                int sock = socket(AF_INET, SOCK_STREAM, 0);
+                if (sock < 0) { results[i] = {false, "socket error"}; return; }
+                struct timeval tv{1, 0};
+                setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+                struct sockaddr_in addr{};
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(port);
+                addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                    ::close(sock);
+                    results[i] = {false, "not reachable"};
+                    return;
+                }
+                const char* cmd = "STATUS";
+                send(sock, cmd, strlen(cmd), 0);
+                char buf[1024] = {};
+                ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
+                ::close(sock);
+                if (n > 0) {
+                    std::string resp(buf, n);
+                    while (!resp.empty() && (resp.back() == '\n' || resp.back() == '\r')) resp.pop_back();
+                    results[i] = {true, resp};
+                } else {
+                    results[i] = {true, "connected (no status)"};
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+
+        std::stringstream json;
+        json << "{\"services\":[";
+        for (int i = 0; i < N; ++i) {
+            if (i > 0) json << ",";
+            json << "{\"name\":\"" << defs[i].name << "\""
+                 << ",\"reachable\":" << (results[i].reachable ? "true" : "false")
+                 << ",\"details\":\"" << escape_json(results[i].details) << "\"}";
+        }
+        int online = 0;
+        for (auto& r : results) if (r.reachable) online++;
+        json << "],\"online\":" << online << ",\"total\":" << N << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
     void handle_tts_roundtrip(struct mg_connection *c, struct mg_http_message *hm) {

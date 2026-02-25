@@ -605,6 +605,132 @@ TEST(TCPKeepaliveTest, DeadPeerDetectedQuickly) {
     upstream.shutdown();
 }
 
+TEST(ReconnectionTest, DataFlowsAfterMidCallReconnect) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(upstream.initialize());
+
+    {
+        InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+        EXPECT_TRUE(downstream.initialize());
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        EXPECT_TRUE(upstream.connect_to_downstream());
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        EXPECT_EQ(upstream.downstream_state(), ConnectionState::CONNECTED);
+
+        const char* pre = "pre_disconnect";
+        Packet pre_pkt(1, pre, strlen(pre));
+        EXPECT_TRUE(upstream.send_to_downstream(pre_pkt));
+
+        Packet recv;
+        EXPECT_TRUE(downstream.recv_from_upstream(recv, 1000));
+        EXPECT_EQ(recv.call_id, 1u);
+    }
+
+    for (int i = 0; i < 20; ++i) {
+        if (upstream.downstream_state() != ConnectionState::CONNECTED) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    EXPECT_NE(upstream.downstream_state(), ConnectionState::CONNECTED);
+
+    InterconnectNode downstream2(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream2.initialize());
+
+    for (int i = 0; i < 40; ++i) {
+        if (upstream.downstream_state() == ConnectionState::CONNECTED) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    EXPECT_EQ(upstream.downstream_state(), ConnectionState::CONNECTED);
+
+    const char* post = "post_reconnect";
+    Packet post_pkt(2, post, strlen(post));
+    EXPECT_TRUE(upstream.send_to_downstream(post_pkt));
+
+    Packet recv2;
+    EXPECT_TRUE(downstream2.recv_from_upstream(recv2, 2000));
+    EXPECT_EQ(recv2.call_id, 2u);
+    EXPECT_EQ(std::string(recv2.payload.begin(), recv2.payload.end()), std::string(post));
+
+    downstream2.shutdown();
+    upstream.shutdown();
+}
+
+TEST(ReconnectionTest, MiddleNodeRestartInThreeHopPipeline) {
+    InterconnectNode sip(ServiceType::SIP_CLIENT);
+    InterconnectNode vad(ServiceType::VAD_SERVICE);
+
+    EXPECT_TRUE(sip.initialize());
+    EXPECT_TRUE(vad.initialize());
+
+    {
+        InterconnectNode iap(ServiceType::INBOUND_AUDIO_PROCESSOR);
+        EXPECT_TRUE(iap.initialize());
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        EXPECT_TRUE(sip.connect_to_downstream());
+        EXPECT_TRUE(iap.connect_to_downstream());
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+        EXPECT_EQ(sip.downstream_state(), ConnectionState::CONNECTED);
+        EXPECT_EQ(iap.downstream_state(), ConnectionState::CONNECTED);
+
+        const char* data = "through_iap";
+        Packet pkt(1, data, strlen(data));
+        EXPECT_TRUE(sip.send_to_downstream(pkt));
+
+        Packet iap_recv;
+        EXPECT_TRUE(iap.recv_from_upstream(iap_recv, 1000));
+        EXPECT_EQ(iap_recv.call_id, 1u);
+
+        Packet fwd(1, data, strlen(data));
+        EXPECT_TRUE(iap.send_to_downstream(fwd));
+
+        Packet vad_recv;
+        EXPECT_TRUE(vad.recv_from_upstream(vad_recv, 1000));
+        EXPECT_EQ(vad_recv.call_id, 1u);
+    }
+
+    for (int i = 0; i < 20; ++i) {
+        if (sip.downstream_state() != ConnectionState::CONNECTED) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    EXPECT_NE(sip.downstream_state(), ConnectionState::CONNECTED);
+
+    InterconnectNode iap2(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(iap2.initialize());
+
+    for (int i = 0; i < 40; ++i) {
+        if (sip.downstream_state() == ConnectionState::CONNECTED) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    EXPECT_EQ(sip.downstream_state(), ConnectionState::CONNECTED);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(iap2.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    EXPECT_EQ(iap2.downstream_state(), ConnectionState::CONNECTED);
+
+    const char* data2 = "after_iap_restart";
+    Packet pkt2(3, data2, strlen(data2));
+    EXPECT_TRUE(sip.send_to_downstream(pkt2));
+
+    Packet iap2_recv;
+    EXPECT_TRUE(iap2.recv_from_upstream(iap2_recv, 1000));
+    EXPECT_EQ(iap2_recv.call_id, 3u);
+
+    Packet fwd2(3, data2, strlen(data2));
+    EXPECT_TRUE(iap2.send_to_downstream(fwd2));
+
+    Packet vad2_recv;
+    EXPECT_TRUE(vad.recv_from_upstream(vad2_recv, 1000));
+    EXPECT_EQ(vad2_recv.call_id, 3u);
+    EXPECT_EQ(std::string(vad2_recv.payload.begin(), vad2_recv.payload.end()), std::string(data2));
+
+    iap2.shutdown();
+    vad.shutdown();
+    sip.shutdown();
+}
+
 TEST(PacketTraceTest, HopTracking) {
     PacketTrace trace;
     EXPECT_EQ(trace.hop_count, 0);

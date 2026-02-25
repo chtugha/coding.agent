@@ -108,3 +108,4 @@ tests/data/
 # Backup files
 *.old.json
 whisper-cpp/test_wavs/
+whisper-cpp/

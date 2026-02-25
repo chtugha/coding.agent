@@ -77,17 +77,73 @@ public:
 
     void run() {
         std::thread receiver_thread(&WhisperService::receiver_loop, this);
-        
+        std::thread cmd_thread(&WhisperService::command_listener_loop, this);
+
         while (running_ && g_running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         running_ = false;
-        
+
+        int sock = cmd_sock_.exchange(-1);
+        if (sock >= 0) ::close(sock);
         receiver_thread.join();
+        cmd_thread.join();
         interconnect_.shutdown();
     }
 
 private:
+    void command_listener_loop() {
+        uint16_t port = whispertalk::service_cmd_port(whispertalk::ServiceType::WHISPER_SERVICE);
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return;
+        int opt = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(port);
+        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            std::cerr << "Whisper cmd: bind port " << port << " failed" << std::endl;
+            ::close(sock);
+            return;
+        }
+        listen(sock, 4);
+        cmd_sock_.store(sock);
+        std::cout << "Whisper command listener on port " << port << std::endl;
+        while (running_ && g_running) {
+            struct pollfd pfd{sock, POLLIN, 0};
+            if (poll(&pfd, 1, 200) <= 0) continue;
+            int csock = accept(sock, nullptr, nullptr);
+            if (csock < 0) continue;
+            struct timeval tv{10, 0};
+            setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            char buf[4096];
+            int n = (int)recv(csock, buf, sizeof(buf) - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string cmd(buf);
+                while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r')) cmd.pop_back();
+                std::string response = handle_whisper_command(cmd);
+                send(csock, response.c_str(), response.size(), 0);
+            }
+            ::close(csock);
+        }
+    }
+
+    std::string handle_whisper_command(const std::string& cmd) {
+        if (cmd == "PING") return "PONG\n";
+        if (cmd == "STATUS") {
+            std::string model_file = model_path_;
+            size_t slash = model_file.rfind('/');
+            if (slash != std::string::npos) model_file = model_file.substr(slash + 1);
+            return "MODEL:" + model_file
+                + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + "\n";
+        }
+        return "ERROR:Unknown command\n";
+    }
+
     // Receives pre-segmented audio chunks from VAD and transcribes each immediately.
     // Each packet from VAD is a complete speech segment ready for transcription.
     void receiver_loop() {
@@ -277,6 +333,7 @@ private:
     }
 
     std::atomic<bool> running_;
+    std::atomic<int> cmd_sock_{-1};
     std::string model_path_;
     std::string language_;
     struct whisper_context* ctx_ = nullptr;

@@ -53,18 +53,73 @@ public:
 
     void run() {
         std::thread processor_thread(&InboundAudioProcessor::processing_loop, this);
-        
+        std::thread cmd_thread(&InboundAudioProcessor::command_listener_loop, this);
+
         while (running_ && g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             cleanup_inactive_calls();
         }
         running_ = false;
-        
+
+        int sock = cmd_sock_.exchange(-1);
+        if (sock >= 0) ::close(sock);
         processor_thread.join();
+        cmd_thread.join();
         interconnect_.shutdown();
     }
 
 private:
+    void command_listener_loop() {
+        uint16_t port = whispertalk::service_cmd_port(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR);
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return;
+        int opt = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(port);
+        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            std::cerr << "IAP cmd: bind port " << port << " failed" << std::endl;
+            ::close(sock);
+            return;
+        }
+        listen(sock, 4);
+        cmd_sock_.store(sock);
+        std::cout << "IAP command listener on port " << port << std::endl;
+        while (running_ && g_running) {
+            struct pollfd pfd{sock, POLLIN, 0};
+            if (poll(&pfd, 1, 200) <= 0) continue;
+            int csock = accept(sock, nullptr, nullptr);
+            if (csock < 0) continue;
+            struct timeval tv{10, 0};
+            setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            char buf[4096];
+            int n = (int)recv(csock, buf, sizeof(buf) - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                std::string cmd(buf);
+                while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r')) cmd.pop_back();
+                std::string response = handle_iap_command(cmd);
+                send(csock, response.c_str(), response.size(), 0);
+            }
+            ::close(csock);
+        }
+    }
+
+    std::string handle_iap_command(const std::string& cmd) {
+        if (cmd == "PING") return "PONG\n";
+        if (cmd == "STATUS") {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            return "ACTIVE_CALLS:" + std::to_string(calls_.size())
+                + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + "\n";
+        }
+        return "ERROR:Unknown command\n";
+    }
+
+
     // ITU-T G.711 μ-law decode table. For each companded byte value (0-255):
     //   1. Complement the byte (μ-law stores inverted)
     //   2. Extract sign (bit 7), segment/exponent (bits 6-4), quantization (bits 3-0)
@@ -206,6 +261,7 @@ private:
     }
 
     std::atomic<bool> running_;
+    std::atomic<int> cmd_sock_{-1};
     float ulaw_table[256];
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<CallState>> calls_;
