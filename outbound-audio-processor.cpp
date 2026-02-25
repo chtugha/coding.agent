@@ -234,8 +234,14 @@ private:
             ulaw[i] = linear_to_ulaw(s16);
         }
 
-        if (history && in_samples >= (size_t)AA_HALF_TAPS) {
-            std::memcpy(history, input + in_samples - AA_HALF_TAPS, AA_HALF_TAPS * sizeof(float));
+        if (history) {
+            if (in_samples >= (size_t)AA_HALF_TAPS) {
+                std::memcpy(history, input + in_samples - AA_HALF_TAPS, AA_HALF_TAPS * sizeof(float));
+            } else {
+                size_t keep = AA_HALF_TAPS - in_samples;
+                std::memmove(history, history + in_samples, keep * sizeof(float));
+                std::memcpy(history + keep, input, in_samples * sizeof(float));
+            }
         }
 
         return ulaw;
@@ -263,12 +269,12 @@ private:
 
             pkt.trace.record(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, 0);
             auto state = get_or_create_call(pkt.call_id);
-            state->last_activity = std::chrono::steady_clock::now();
 
             size_t sample_count = pkt.payload_size / sizeof(float);
             const float* pcm_buf = reinterpret_cast<const float*>(pkt.payload.data());
 
             std::lock_guard<std::mutex> lock(state->mutex);
+            state->last_activity = std::chrono::steady_clock::now();
             std::vector<uint8_t> ulaw = downsample_and_encode(pcm_buf, sample_count, state->fir_history);
             state->buffer.insert(state->buffer.end(), ulaw.begin(), ulaw.end());
         }
@@ -276,7 +282,25 @@ private:
 
     void scheduler_loop() {
         auto next = std::chrono::steady_clock::now();
+        auto last_cleanup = std::chrono::steady_clock::now();
         while (running_) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_cleanup > std::chrono::seconds(10)) {
+                last_cleanup = now;
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                for (auto it = calls_.begin(); it != calls_.end(); ) {
+                    std::lock_guard<std::mutex> sl(it->second->mutex);
+                    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count();
+                    if (age > 60) {
+                        std::cout << "Stale call " << it->first << " (" << age << "s idle), removing" << std::endl;
+                        log_fwd_.forward("WARN", it->first, "Stale call removed after %lds idle", age);
+                        it = calls_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+
             std::vector<std::shared_ptr<CallState>> active;
             {
                 std::lock_guard<std::mutex> lock(calls_mutex_);
