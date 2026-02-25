@@ -87,8 +87,8 @@ public:
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         
-        if (cmd_sock_ >= 0) ::close(cmd_sock_);
-        cmd_sock_ = -1;
+        int sock = cmd_sock_.exchange(-1);
+        if (sock >= 0) ::close(sock);
         receiver_thread.join();
         scheduler_thread.join();
         cmd_thread.join();
@@ -97,8 +97,8 @@ public:
 
     void stop() {
         running_ = false;
-        if (cmd_sock_ >= 0) ::close(cmd_sock_);
-        cmd_sock_ = -1;
+        int sock = cmd_sock_.exchange(-1);
+        if (sock >= 0) ::close(sock);
     }
 
 private:
@@ -119,29 +119,29 @@ private:
 
     void command_listener_loop() {
         uint16_t port = whispertalk::service_cmd_port(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
-        cmd_sock_ = socket(AF_INET, SOCK_STREAM, 0);
-        if (cmd_sock_ < 0) return;
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return;
+        cmd_sock_.store(sock);
         int opt = 1;
-        setsockopt(cmd_sock_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = htons(port);
-        if (bind(cmd_sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
             std::cerr << "OAP cmd: bind port " << port << " failed" << std::endl;
             return;
         }
-        listen(cmd_sock_, 4);
+        listen(sock, 4);
         std::cout << "OAP command listener on port " << port << std::endl;
         while (running_) {
-            struct pollfd pfd{cmd_sock_, POLLIN, 0};
+            struct pollfd pfd{sock, POLLIN, 0};
             int r = poll(&pfd, 1, 200);
             if (r <= 0) continue;
-            int csock = accept(cmd_sock_, nullptr, nullptr);
+            int csock = accept(sock, nullptr, nullptr);
             if (csock < 0) continue;
             struct timeval tv{10, 0};
             setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(csock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             char buf[4096];
             int n = (int)recv(csock, buf, sizeof(buf) - 1, 0);
             if (n > 0) {
@@ -187,22 +187,8 @@ private:
             }
 
             auto t0 = std::chrono::steady_clock::now();
-
-            const double* coeffs = get_aa_coeffs();
-            size_t out_len = in_samples / 3;
-            std::vector<uint8_t> ulaw(out_len);
-            for (size_t i = 0; i < out_len; i++) {
-                size_t src_pos = i * 3;
-                double filtered = 0;
-                for (int t = 0; t < AA_FILTER_TAPS; t++) {
-                    int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
-                    if (idx >= 0 && idx < static_cast<int>(in_samples))
-                        filtered += input[idx] * coeffs[t];
-                }
-                int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
-                ulaw[i] = linear_to_ulaw(s16);
-            }
-
+            std::vector<uint8_t> ulaw = downsample_and_encode(input.data(), in_samples);
+            size_t out_len = ulaw.size();
             auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t0).count();
 
@@ -219,6 +205,24 @@ private:
                 + "rms=" + std::to_string(ulaw_rms) + "\n";
         }
         return "ERROR:Unknown command\n";
+    }
+
+    std::vector<uint8_t> downsample_and_encode(const float* input, size_t in_samples, int downsample_ratio = 3) {
+        const double* coeffs = get_aa_coeffs();
+        size_t out_len = in_samples / downsample_ratio;
+        std::vector<uint8_t> ulaw(out_len);
+        for (size_t i = 0; i < out_len; i++) {
+            size_t src_pos = i * downsample_ratio;
+            double filtered = 0;
+            for (int t = 0; t < AA_FILTER_TAPS; t++) {
+                int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
+                if (idx >= 0 && idx < static_cast<int>(in_samples))
+                    filtered += input[idx] * coeffs[t];
+            }
+            int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
+            ulaw[i] = linear_to_ulaw(s16);
+        }
+        return ulaw;
     }
 
     int16_t ulaw_to_linear(uint8_t u) {
@@ -247,23 +251,7 @@ private:
 
             size_t sample_count = pkt.payload_size / sizeof(float);
             const float* pcm_buf = reinterpret_cast<const float*>(pkt.payload.data());
-
-            const double* coeffs = get_aa_coeffs();
-            size_t out_len = sample_count / 3;
-            std::vector<uint8_t> ulaw;
-            ulaw.reserve(out_len);
-            for (size_t i = 0; i < out_len; i++) {
-                size_t src_pos = i * 3;
-                double filtered = 0;
-                for (int t = 0; t < AA_FILTER_TAPS; t++) {
-                    int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
-                    if (idx >= 0 && idx < static_cast<int>(sample_count)) {
-                        filtered += pcm_buf[idx] * coeffs[t];
-                    }
-                }
-                int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
-                ulaw.push_back(linear_to_ulaw(s16));
-            }
+            std::vector<uint8_t> ulaw = downsample_and_encode(pcm_buf, sample_count);
 
             std::lock_guard<std::mutex> lock(state->mutex);
             state->buffer.insert(state->buffer.end(), ulaw.begin(), ulaw.end());
@@ -330,7 +318,7 @@ private:
     }
 
     std::atomic<bool> running_;
-    int cmd_sock_ = -1;
+    std::atomic<int> cmd_sock_{-1};
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<CallState>> calls_;
     whispertalk::InterconnectNode interconnect_;

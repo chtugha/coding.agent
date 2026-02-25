@@ -836,7 +836,6 @@ private:
 
             struct timeval tv{10, 0};
             setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(csock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
             char buf[4096];
             int n = (int)recv(csock, buf, sizeof(buf) - 1, 0);
@@ -855,8 +854,12 @@ private:
     std::string handle_command(const std::string& cmd) {
         if (cmd.rfind("TEST_SYNTH:", 0) == 0) {
             std::string text = cmd.substr(11);
+            std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
-            auto samples = pipeline_.synthesize(text);
+            {
+                std::lock_guard<std::mutex> lock(pipeline_mutex_);
+                samples = pipeline_.synthesize(text);
+            }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
@@ -890,16 +893,23 @@ private:
                 text = text.substr(0, sep);
             }
 
+            std::vector<double> rtfs;
             std::vector<double> latencies;
-            size_t total_samples = 0;
+            size_t last_samples = 0;
             for (int i = 0; i < iterations; i++) {
+                std::vector<float> samples;
                 auto t0 = std::chrono::steady_clock::now();
-                auto samples = pipeline_.synthesize(text);
+                {
+                    std::lock_guard<std::mutex> lock(pipeline_mutex_);
+                    samples = pipeline_.synthesize(text);
+                }
                 auto ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
                 if (!samples.empty()) {
                     latencies.push_back(ms);
-                    total_samples = samples.size();
+                    last_samples = samples.size();
+                    double dur = (double)samples.size() / KOKORO_SAMPLE_RATE;
+                    rtfs.push_back((ms / 1000.0) / dur);
                 }
             }
 
@@ -913,13 +923,14 @@ private:
             double avg = sum / latencies.size();
             double p50 = latencies[latencies.size() / 2];
             double p95 = latencies[std::min(latencies.size() - 1, (size_t)(latencies.size() * 0.95))];
-            double duration_s = (double)total_samples / KOKORO_SAMPLE_RATE;
-            double rtf_avg = (avg / 1000.0) / duration_s;
+            double rtf_sum = 0;
+            for (double v : rtfs) rtf_sum += v;
+            double rtf_avg = rtf_sum / rtfs.size();
 
             return "BENCH_RESULT:" + std::to_string((int)avg) + "ms:"
                 + std::to_string((int)p50) + "ms:" + std::to_string((int)p95) + "ms:"
                 + std::to_string((int)latencies.size()) + "/" + std::to_string(iterations) + ":"
-                + std::to_string(total_samples) + "@" + std::to_string(KOKORO_SAMPLE_RATE) + ":"
+                + std::to_string(last_samples) + "@" + std::to_string(KOKORO_SAMPLE_RATE) + ":"
                 + "rtf=" + std::to_string(rtf_avg) + "\n";
         }
         if (cmd == "PING") {
@@ -966,8 +977,12 @@ private:
 
             std::printf("Synthesizing for call %u: %s\n", ctx->call_id, text.c_str());
 
+            std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
-            auto samples = pipeline_.synthesize(text);
+            {
+                std::lock_guard<std::mutex> lock(pipeline_mutex_);
+                samples = pipeline_.synthesize(text);
+            }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
@@ -1045,6 +1060,7 @@ private:
     InterconnectNode node_;
     LogForwarder log_fwd_;
     KokoroPipeline pipeline_;
+    std::mutex pipeline_mutex_;
     std::atomic<bool> running_{true};
     int cmd_sock_ = -1;
     std::map<uint32_t, std::shared_ptr<CallContext>> calls_;
