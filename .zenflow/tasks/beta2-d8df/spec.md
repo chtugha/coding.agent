@@ -109,7 +109,7 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
 
 **Storage security**: Credentials are stored as plaintext in the SQLite `settings` table on disk. This is an **accepted tradeoff** for a local single-machine development/testing tool. Credentials MUST NOT be:
 - Logged by any service (LogForwarder or stdout/stderr)
-- Echoed in API responses (the `/api/settings` GET response must mask credential values, returning e.g. `"***"` for keys matching `*_token`)
+- Echoed in API responses (the `/api/settings` GET response must mask credential values for the explicit allow-list `hf_token`, `github_token` only — returning `"***"` for those keys; all other settings are returned normally)
 - Included in SSE log streams
 
 **API changes**: Reuse existing `/api/settings` (GET/POST). No new endpoints needed. Settings API already supports arbitrary key-value pairs. Credentials will be masked by:
@@ -238,7 +238,7 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
 - Review VAD logic, tune parameters for long files
 - Test SPEECH_ACTIVE/SPEECH_IDLE signal propagation
 - Add `--vad-max-chunk-ms` CLI flag if needed
-- **Verification**: VAD correctly segments all 20 files; signals propagate downstream. Stage 3 pass gate is confirmed by Stage 4 Whisper accuracy: VAD-split chunks must produce ≥ 90% Whisper accuracy individually (no garbled partial-word transcriptions). If Stage 4 reveals VAD-induced accuracy drops on split files, return to Stage 3 to re-tune parameters.
+- **Verification**: VAD correctly segments all 20 files; signals propagate downstream. Stage 3 pass gate is confirmed by Stage 4 Whisper accuracy: VAD-split chunks must produce ≥ 90% Whisper accuracy individually (no garbled partial-word transcriptions). If Stage 4 reveals VAD-induced accuracy drops on split files, return to Stage 3 to re-tune parameters. **Threshold interaction with Stage 4**: Stage 4 requires ≥ 95% *average* accuracy across all 20 files, while Stage 3 requires ≥ 90% on each *individual split chunk*. Both thresholds must be satisfied simultaneously — if the average hits 95% but specific split chunks fall below 90%, VAD parameters must be re-tuned until both gates pass.
 
 ### Phase 4: Whisper Accuracy (Stage 4)
 - Start full pipeline up to Whisper (+ VAD + IAP + SIP Client)
@@ -286,7 +286,7 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
 - Send test file through full pipeline
 - Compare LLaMA text vs Line 2 Whisper transcription
 - Target WER ≤ 10%
-- **WER calculation method**: Case-insensitive, punctuation stripped (remove `.,!?;:"-`), then word-level Levenshtein distance: `WER = (substitutions + insertions + deletions) / reference_word_count * 100`. Reference = LLaMA's original text; hypothesis = Line 2 Whisper transcription. This matches the approach used by the existing `calculate_levenshtein_similarity()` function in `frontend.cpp` (character-level), but adapted to word-level for WER.
+- **WER calculation method**: Case-insensitive, punctuation stripped (remove `.,!?;:"-`), then word-level Levenshtein distance: `WER = (substitutions + insertions + deletions) / reference_word_count * 100`. Reference = LLaMA's original text; hypothesis = Line 2 Whisper transcription. Note: the existing `calculate_levenshtein_similarity()` in `frontend.cpp` operates at **character-level** and cannot be reused directly. A **new** `calculate_word_error_rate()` function must be implemented that tokenizes both strings by whitespace and computes the Levenshtein edit distance on the resulting word arrays.
 - **Verification**: Full loop test passes with WER ≤ 10%, both texts logged side-by-side for manual inspection
 
 ### Phase 12: Stress Test (Stage 12)
