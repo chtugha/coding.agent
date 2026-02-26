@@ -99,7 +99,7 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
 ### 3.1 New: Credentials UI Section (Stage 5)
 
 **Frontend changes** (`frontend.cpp`):
-- Add new sidebar nav item `<a class="wt-nav-item" data-page="credentials">` under "System" section (after Database link, line ~1299)
+- Add new sidebar nav item `<a class="wt-nav-item" data-page="credentials">` in the "System" sidebar section, after the Database nav item
 - Add new page `<div class="wt-page" id="page-credentials">` with:
   - HuggingFace section: access token field (`input type="password"`), save button
   - GitHub section: access token field (`input type="password"`), save button
@@ -107,8 +107,14 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
 - Storage keys in `settings` table: `hf_token`, `github_token`
 - Add `showPage('credentials')` handler to load credentials on page visit
 
+**Storage security**: Credentials are stored as plaintext in the SQLite `settings` table on disk. This is an **accepted tradeoff** for a local single-machine development/testing tool. Credentials MUST NOT be:
+- Logged by any service (LogForwarder or stdout/stderr)
+- Echoed in API responses (the `/api/settings` GET response must mask credential values, returning e.g. `"***"` for keys matching `*_token`)
+- Included in SSE log streams
+
 **API changes**: Reuse existing `/api/settings` (GET/POST). No new endpoints needed. Settings API already supports arbitrary key-value pairs. Credentials will be masked by:
 - Using `input type="password"` in UI
+- Masking credential values in GET `/api/settings` responses (return `"***"` instead of actual value for `hf_token`, `github_token`)
 - Never including credential values in SSE log streams
 - Never logging credential values in service logs
 
@@ -123,8 +129,10 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
   - New API endpoint: `POST /api/models/search` (uses HF API `https://huggingface.co/api/models`)
   - Search filters: task type (ASR/text-generation), language (de), format (gguf/ggml)
   - Use stored `hf_token` from settings for authenticated API access
+  - **Token-missing handling**: If `hf_token` is empty or not set, the search endpoint must still work (unauthenticated HF API), but display a warning in the UI: "No HuggingFace token configured. Search results may be limited by rate limiting (100 req/hr). Set a token in the Credentials page." If the HF API returns HTTP 401 (expired token) or 429 (rate limited), the error must be surfaced in the UI with a clear message and a link to the Credentials page.
   - Results displayed in a searchable list with download button
 - Add model download: `POST /api/models/download` (streams from HF, saves to `models/`)
+  - **Auth requirement**: Model download requires a valid `hf_token` for gated models. If the token is missing or invalid, return a clear error: "HuggingFace token required for this model. Set it in Credentials page."
 
 **Database**: Existing `models` and `model_benchmark_runs` tables are sufficient.
 
@@ -176,7 +184,7 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
 1. Configure SIP Client with 2 lines via frontend Pipeline Services page
 2. Line 1: normal pipeline (audio → IAP → VAD → Whisper → LLaMA → Kokoro → OAP → Line 2)
 3. Line 2: receives synthesized audio, feeds back into pipeline for Whisper re-transcription
-4. Compare LLaMA's original text vs Line 2's Whisper transcription
+4. Compare LLaMA's original text vs Line 2's Whisper transcription using word-level WER (case-insensitive, punctuation stripped)
 5. WER threshold: ≤ 10%
 
 **Frontend changes**: Add full-loop test button to Beta Testing page or reuse existing test flow.
@@ -230,7 +238,7 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
 - Review VAD logic, tune parameters for long files
 - Test SPEECH_ACTIVE/SPEECH_IDLE signal propagation
 - Add `--vad-max-chunk-ms` CLI flag if needed
-- **Verification**: VAD correctly segments all 20 files, no mid-word splits, signals propagate downstream
+- **Verification**: VAD correctly segments all 20 files; signals propagate downstream. Stage 3 pass gate is confirmed by Stage 4 Whisper accuracy: VAD-split chunks must produce ≥ 90% Whisper accuracy individually (no garbled partial-word transcriptions). If Stage 4 reveals VAD-induced accuracy drops on split files, return to Stage 3 to re-tune parameters.
 
 ### Phase 4: Whisper Accuracy (Stage 4)
 - Start full pipeline up to Whisper (+ VAD + IAP + SIP Client)
@@ -278,7 +286,8 @@ Misc: `/api/status`, `/api/testfiles`, `/api/testfiles/scan`, `/api/test_results
 - Send test file through full pipeline
 - Compare LLaMA text vs Line 2 Whisper transcription
 - Target WER ≤ 10%
-- **Verification**: Full loop test passes with WER ≤ 10%, both texts logged side-by-side
+- **WER calculation method**: Case-insensitive, punctuation stripped (remove `.,!?;:"-`), then word-level Levenshtein distance: `WER = (substitutions + insertions + deletions) / reference_word_count * 100`. Reference = LLaMA's original text; hypothesis = Line 2 Whisper transcription. This matches the approach used by the existing `calculate_levenshtein_similarity()` function in `frontend.cpp` (character-level), but adapted to word-level for WER.
+- **Verification**: Full loop test passes with WER ≤ 10%, both texts logged side-by-side for manual inspection
 
 ### Phase 12: Stress Test (Stage 12)
 - Run full pipeline for 2 minutes continuous
@@ -308,7 +317,7 @@ All testing is performed via Playwright browser automation:
 |-------|---------------|-----------|
 | 1 | RTP forward/discard toggling | IAP up → forwarded; IAP down → discarded |
 | 2 | IAP codec quality | SNR ≥ 3dB, THD ≤ 80%, latency ≤ 50ms |
-| 3 | VAD segmentation | No mid-word splits, correct speech boundaries |
+| 3 | VAD segmentation | Split chunks produce ≥ 90% Whisper accuracy individually; SPEECH_ACTIVE/IDLE signals propagate (confirmed in Stage 4) |
 | 4 | Whisper accuracy | ≥ 95% average similarity across 20 files |
 | 5 | Credentials | Token save/load works, values masked |
 | 6 | Model comparison | Charts render, benchmarks stored |
