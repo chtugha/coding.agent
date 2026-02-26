@@ -14,9 +14,9 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - **Format**: 16-bit PCM, mono, 44100 Hz (resampled to 8kHz G.711 u-law by `test_sip_provider` before RTP injection via its `resample_to_8khz()` function)
 - **Language**: German
 - **Duration breakdown**:
-  - Samples 01-10: 3.1-4.6 seconds (fit within VAD's 4s max chunk)
+  - Samples 01-10: 3.1-4.6 seconds (samples <=4.0s fit in one VAD chunk; samples 05, 09, 10 at 4.2-4.6s will also be split at the 4s limit)
   - Samples 11-20: 6.2-7.2 seconds (exceed VAD's 4s `vad_max_speech_samples_`, will be split into multiple chunks)
-- **VAD chunking impact**: Files exceeding 4s will be segmented by VAD into multiple chunks at micro-pause boundaries. If the utterance has no natural pause within 4s, VAD will force-split at the 4s limit. This may affect transcription accuracy for samples 11-20 and must be specifically tested and optimized in Stages 3-4.
+- **VAD chunking impact**: Any file exceeding 4s will be segmented by VAD into multiple chunks at micro-pause boundaries. If the utterance has no natural pause within 4s, VAD will force-split at the 4s limit. This affects samples 05, 09, 10 (marginally over 4s) and all of samples 11-20. Must be specifically tested and optimized in Stages 3-4.
 - **Additional**: `llama_prompts.json` with 10 German prompts for LLaMA quality testing, each with per-prompt `max_words` (15-30) and `expected_keywords` for scoring
 
 ### 2.2 Frontend as Test Conductor
@@ -76,7 +76,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Review interconnection between VAD, IAP, Whisper, and LLaMA (shut-up mechanism: SPEECH_ACTIVE/SPEECH_IDLE signals)
 - Optimize for performance and speed
 - Current parameters: 50ms analysis frames, 2.0x threshold multiplier, 400ms silence timeout, 4s max chunks
-- **Long-file handling**: Test files 11-20 (6.2-7.2s) exceed the 4s max chunk. VAD must correctly split these at natural pause boundaries. If force-splitting mid-utterance degrades Whisper accuracy, consider tuning `vad_max_speech_samples_` or improving the split heuristic. This is a critical optimization target for Stage 3-4 interaction.
+- **Long-file handling**: Test files 11-20 (6.2-7.2s) and samples 05, 09, 10 (4.2-4.6s) exceed the 4s max chunk. VAD must correctly split these at natural pause boundaries. If force-splitting mid-utterance degrades Whisper accuracy, the 4s limit (`vad_max_speech_samples_` in `vad-service.cpp`) is a hardcoded private member with **no CLI flag** — changing it requires a source code modification and recompile, not a runtime parameter tweak. This is a critical optimization target for Stage 3-4 interaction.
 
 ### Stage 4: Whisper Service Accuracy Testing
 **Objective**: Achieve excellent transcription accuracy with lightning-fast processing.
@@ -232,7 +232,7 @@ All ports are TCP on 127.0.0.1. Mgmt/Data ports are for inter-service pipeline c
 | VAD | 13115 | 13115 | 13116 | 13117 | No |
 | Whisper | 13120 | 13120 | 13121 | 13122 | No |
 | LLaMA | 13130 | 13130 | 13131 | 13132 | Yes (TEST_PROMPT, PING) |
-| Kokoro | 13140 | 13140 | 13141 | 13142 | Yes (TTS_SYNTHESIZE) |
+| Kokoro | 13140 | 13140 | 13141 | 13142 | Yes (TEST_SYNTH:\<text\>) |
 | OAP | 13150 | 13150 | 13151 | 13152 | No |
 | Frontend | 13160 | 13160 | 13161 | - | N/A |
 
