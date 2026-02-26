@@ -120,19 +120,14 @@ private:
     }
 
 
-    // ITU-T G.711 μ-law decode table. For each companded byte value (0-255):
-    //   1. Complement the byte (μ-law stores inverted)
-    //   2. Extract sign (bit 7), segment/exponent (bits 6-4), quantization (bits 3-0)
-    //   3. Reconstruct linear magnitude: ((quantization * 2 + 33) << segment) - 33
-    //   4. Apply sign and normalize to [-1.0, 1.0]
     void init_g711_tables() {
         for (int i = 0; i < 256; ++i) {
             int mu = ~i;
             int sign = mu & 0x80;
             int segment = (mu >> 4) & 0x07;
             int quantization = mu & 0x0F;
-            int magnitude = ((quantization << 1) + 33) << segment;
-            magnitude -= 33;
+            int magnitude = ((quantization << 1) + 33) << (segment + 2);
+            magnitude -= 132;
             ulaw_table[i] = (sign ? -magnitude : magnitude) / 32768.0f;
         }
     }

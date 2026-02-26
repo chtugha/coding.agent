@@ -252,7 +252,7 @@ private:
         int sign = (u & 0x80) ? -1 : 1;
         int exponent = (u >> 4) & 0x07;
         int mantissa = u & 0x0F;
-        int16_t sample = (mantissa << (exponent + 3)) + (1 << (exponent + 3)) - 128 + 4;
+        int16_t sample = static_cast<int16_t>(((mantissa << 1) + 33) << (exponent + 2)) - 132;
         return static_cast<int16_t>(sign * sample);
     }
 

@@ -5955,17 +5955,18 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     results[i] = {false, "not reachable"};
                     return;
                 }
-                const char* cmd = "STATUS";
+                const char* cmd = "PING";
                 send(sock, cmd, strlen(cmd), 0);
-                char buf[1024] = {};
+                char buf[64] = {};
                 ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
                 ::close(sock);
                 if (n > 0) {
                     std::string resp(buf, n);
                     while (!resp.empty() && (resp.back() == '\n' || resp.back() == '\r')) resp.pop_back();
-                    results[i] = {true, resp};
+                    bool pong = (resp.find("PONG") != std::string::npos);
+                    results[i] = {pong, pong ? "online" : resp};
                 } else {
-                    results[i] = {true, "connected (no status)"};
+                    results[i] = {false, "connected but no response"};
                 }
             });
         }

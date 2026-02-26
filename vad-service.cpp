@@ -242,7 +242,7 @@ private:
                         energy /= static_cast<float>(vad_frame_size_);
 
                         call->frame_count++;
-                        if (!call->in_speech) {
+                        if (!call->in_speech && call->onset_count == 0) {
                             float nf = call->noise_floor * 0.95f + energy * 0.05f;
                             call->noise_floor = std::max(nf, 0.000005f);
                         }
