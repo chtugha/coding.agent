@@ -11,10 +11,13 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 ### 2.1 Test Files
 - **Location**: `Testfiles/` directory in project root
 - **Contents**: 20 WAV files (`sample_01.wav` through `sample_20.wav`) with matching `.txt` ground-truth files
-- **Format**: 16-bit PCM, mono, 44100 Hz
+- **Format**: 16-bit PCM, mono, 44100 Hz (resampled to 8kHz G.711 u-law by `test_sip_provider` before RTP injection via its `resample_to_8khz()` function)
 - **Language**: German
-- **Duration range**: ~3-7 seconds per file
-- **Additional**: `llama_prompts.json` with 10 German prompts for LLaMA quality testing
+- **Duration breakdown**:
+  - Samples 01-10: 3.1-4.6 seconds (fit within VAD's 4s max chunk)
+  - Samples 11-20: 6.2-7.2 seconds (exceed VAD's 4s `vad_max_speech_samples_`, will be split into multiple chunks)
+- **VAD chunking impact**: Files exceeding 4s will be segmented by VAD into multiple chunks at micro-pause boundaries. If the utterance has no natural pause within 4s, VAD will force-split at the 4s limit. This may affect transcription accuracy for samples 11-20 and must be specifically tested and optimized in Stages 3-4.
+- **Additional**: `llama_prompts.json` with 10 German prompts for LLaMA quality testing, each with per-prompt `max_words` (15-30) and `expected_keywords` for scoring
 
 ### 2.2 Frontend as Test Conductor
 - All tests MUST be initiated, monitored, and evaluated through the frontend web UI at `http://localhost:8080`
@@ -29,11 +32,11 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Logging must be crash-proof: log infrastructure failures must not crash services
 - Log spam must be avoided through configurable depth
 
-### 2.4 Test SIP Provider
-- `test_sip_provider` binary acts as the SIP server/proxy for testing
+### 2.4 Test SIP Provider (existing binary)
+- `test_sip_provider` is an **already-implemented** binary (`tests/test_sip_provider.cpp`, ~1000 lines) that acts as the SIP server/proxy for testing
 - Handles SIP registration, call setup (INVITE/BYE), RTP relay between lines
-- Supports audio injection: can inject WAV files into active calls as RTP streams
-- Frontend communicates with test_sip_provider via its HTTP API (port 22011)
+- Supports audio injection: loads WAV files at any sample rate, resamples to 8kHz via `resample_to_8khz()`, encodes to G.711 u-law via `linear_to_ulaw()`, and injects as 20ms RTP packets (160 bytes each)
+- Frontend communicates with test_sip_provider via its Mongoose HTTP API (port 22011)
 
 ## 3. Stage Requirements
 
@@ -51,7 +54,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
   - Master/Slave port management correctness
 - All verification via frontend UI: RTP packet metrics table, TCP connection status indicator
 
-**Existing UI**: Beta Testing page has "Test 1: SIP Client RTP Routing" card with start/stop buttons, RTP metrics table (Call ID, Line, RX/TX/Forwarded/Discarded packets, Duration), and TCP connection status
+**Existing UI** (verified in `frontend.cpp` lines 1492-1530): Beta Testing page has "Test 1: SIP Client RTP Routing" card with start/stop buttons, RTP metrics table (Call ID, Line, RX/TX/Forwarded/Discarded packets, Duration), and TCP connection status
 
 ### Stage 2: IAP Optimization
 **Objective**: Optimize IAP audio processing for speed and quality.
@@ -61,9 +64,9 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Target latency: 5-15ms per packet (max 50ms), no large buffers
 - Investigate audio enhancement (filtering, equalizing) for better speech recognition, only if fast enough
 - Measure: latency, SNR, THD for codec quality
-- Pass criteria: SNR >= 3dB, THD <= 80%, Latency <= 50ms
+- **Minimum sanity thresholds** (from existing code): SNR >= 3dB, THD <= 80%, Latency <= 50ms. These are intentionally loose pass/fail gates because G.711 is an inherently lossy 8-bit codec. Expected typical values: SNR ~5-6dB, THD ~50-55% (dominated by u-law 8-bit quantization noise). The goal is to verify the conversion is functioning correctly and within expected codec limitations, not to achieve high-fidelity audio.
 
-**Existing UI**: Beta Testing page has "Test 2: IAP Codec Quality" card with offline codec testing (no IAP service required), file selection, SNR/THD/latency metrics table
+**Existing UI** (verified in `frontend.cpp` lines 1532-1569): Beta Testing page has "Test 2: IAP Codec Quality" card with offline codec testing (no IAP service required), file selection, SNR/THD/latency metrics table, and Chart.js visualization
 
 ### Stage 3: VAD Service Optimization
 **Objective**: Optimize VAD for smooth, fast operation and correct interconnection behavior.
@@ -73,6 +76,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Review interconnection between VAD, IAP, Whisper, and LLaMA (shut-up mechanism: SPEECH_ACTIVE/SPEECH_IDLE signals)
 - Optimize for performance and speed
 - Current parameters: 50ms analysis frames, 2.0x threshold multiplier, 400ms silence timeout, 4s max chunks
+- **Long-file handling**: Test files 11-20 (6.2-7.2s) exceed the 4s max chunk. VAD must correctly split these at natural pause boundaries. If force-splitting mid-utterance degrades Whisper accuracy, consider tuning `vad_max_speech_samples_` or improving the split heuristic. This is a critical optimization target for Stage 3-4 interaction.
 
 ### Stage 4: Whisper Service Accuracy Testing
 **Objective**: Achieve excellent transcription accuracy with lightning-fast processing.
@@ -85,7 +89,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Measure per-file: accuracy (%), latency (ms), word error rate
 - Aggregate metrics: average accuracy, pass/warn/fail counts
 
-**Existing UI**: Beta Testing page has "Whisper Accuracy Test" card with multi-file selection, VAD parameter sliders (Window 50-300ms, Threshold 1.0-4.0), accuracy results table, summary stats
+**Existing UI** (verified in `frontend.cpp` lines 1611-1663): Beta Testing page has "Whisper Accuracy Test" card with multi-file selection, VAD parameter sliders (Window 50-300ms, Threshold 1.0-4.0), accuracy results table, summary stats
 
 ### Stage 5: Credentials UI
 **Objective**: Add a new "Credentials" section to the frontend.
@@ -95,7 +99,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Sub-sections for:
   - HuggingFace: access token, login data entry and storage
   - GitHub: access token entry and storage
-- Credentials stored securely in the SQLite database (frontend.db)
+- Credentials stored in the SQLite database (`frontend.db`), in the existing `settings` table (key-value). **Security note**: SQLite stores values as plaintext on disk. This is an accepted tradeoff for a local single-machine development/testing tool. Credentials MUST NOT be logged, echoed in API responses, or included in SSE streams. The UI should mask token fields (input type="password").
 - Credentials used for model downloads in Stages 6 and 8
 
 ### Stage 6: Whisper Model Search & Benchmarking
@@ -110,7 +114,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
   - Chart.js-based visualization (already loaded in frontend)
   - Easy side-by-side comparison
 
-**Existing UI**: Models page has Whisper Models tab with model registration, benchmark runner (iterations per file), and Comparison tab with latency chart
+**Existing UI** (verified in `frontend.cpp` lines 1760-1823): Models page has Whisper Models tab with model registration, benchmark runner (iterations per file), and Comparison tab with latency chart
 
 ### Stage 7: LLaMA Service Testing
 **Objective**: Test LLaMA TCP interconnection and optimize for short, clear responses.
@@ -118,11 +122,11 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 **Requirements**:
 - Test TCP connection handling with Whisper (upstream) and Kokoro (downstream)
 - Test response generation using llama_prompts.json test prompts
-- Optimize for short, clear German responses
-- Measure: response latency, word count, keyword matching, German language compliance
+- Optimize for short, clear German responses per prompt-specific limits defined in `llama_prompts.json` (`max_words` ranges from 15-30 per prompt, `expected_keywords` per prompt for scoring)
+- Measure: response latency, word count, keyword matching, German language compliance (evaluated via `score_llama_response()` in frontend: 40% keyword match + 30% brevity + 30% German detection)
 - Current model: Llama-3.2-1B-Instruct Q8_0
 
-**Existing UI**: Beta Testing page has "Test 4: LLaMA Response Quality" card with prompt selection, custom prompt input, quality test and shut-up test buttons
+**Existing UI** (verified in `frontend.cpp` lines 1665-1687): Beta Testing page has "Test 4: LLaMA Response Quality" card with prompt selection, custom prompt input, quality test and shut-up test buttons
 
 ### Stage 8: LLaMA Model Search & Benchmarking
 **Objective**: Find better LLaMA models and compare performance.
@@ -133,7 +137,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Add benchmark results to the Models page alongside Whisper benchmarks
 - Performance comparison diagrams (latency, quality score, tokens/sec)
 
-**Existing UI**: Models page has LLaMA Models tab with model registration, benchmark runner, and shared Comparison tab
+**Existing UI** (verified in `frontend.cpp` lines 1826-1891): Models page has LLaMA Models tab with model registration, benchmark runner, and shared Comparison tab
 
 ### Stage 9: Shut-Up Mechanism Testing
 **Objective**: Validate interrupt/barge-in functionality.
@@ -144,7 +148,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Verify: SPEECH_ACTIVE signal stops Kokoro playback, LLaMA cancels current generation
 - Measure: interrupt latency (time from speech detection to TTS stop)
 
-**Existing UI**: Beta Testing page has "Shut-up Test" button in LLaMA test card
+**Existing UI** (verified in `frontend.cpp` line 1682): Beta Testing page has "Shut-up Test" button in LLaMA test card
 
 ### Stage 10: Kokoro TTS Testing
 **Objective**: Test Kokoro for interconnection, quality, and speed.
@@ -155,7 +159,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Measure: synthesis latency, real-time factor (RTF), audio quality
 - Current setup: PyTorch/CoreML, espeak-ng phonemization, 24kHz output
 
-**Existing UI**: Beta Testing page has "Test 5: Kokoro TTS Quality" card with custom phrase input, quality test, benchmark (3/5/10 iterations)
+**Existing UI** (verified in `frontend.cpp` lines 1689-1711): Beta Testing page has "Test 5: Kokoro TTS Quality" card with custom phrase input, quality test, benchmark (3/5/10 iterations)
 
 ### Stage 11: OAP & Full Loop Testing
 **Objective**: Test outbound audio processing and validate full-loop audio fidelity.
@@ -169,7 +173,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
   3. Kokoro synthesizes response audio
   4. OAP encodes to RTP, sends through SIP Client to line 2
   5. Line 2 receives audio, which gets transcribed by Whisper
-  6. Compare: LLaMA's original text response == Whisper's transcription of line 2 audio
+  6. Compare: LLaMA's original text response vs. Whisper's transcription of line 2 audio. Due to G.711 encoding degradation and Whisper's probabilistic nature, an exact string match is not realistic. Use Word Error Rate (WER) with a target of **WER <= 10%** (allowing minor word substitutions/insertions from the lossy audio round-trip). Log both texts side-by-side for manual inspection.
 - This validates the entire pipeline end-to-end
 
 ### Stage 12: Full Pipeline Stress Test
@@ -198,7 +202,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - IAP: 5-15ms per packet (max 50ms)
 - VAD: micro-pause detection ~400ms, chunk size 1.5-4s
 - Whisper: near-real-time transcription of 2-4s chunks
-- LLaMA: short responses (<25 words typical), fast token generation via Metal
+- LLaMA: short responses (per-prompt `max_words` from `llama_prompts.json`, 15-30 words), fast token generation via Metal
 - Kokoro: RTF < 1.0 (faster than real-time), natural German speech
 - Full pipeline: end-to-end latency suitable for real-time conversation
 
@@ -219,16 +223,18 @@ Each stage includes TCP interconnection testing:
 ## 5. Existing Architecture Summary
 
 ### 5.1 Services & Ports
-| Service | Base Port | Mgmt | Data | Cmd |
-|---------|-----------|------|------|-----|
-| SIP Client | 13100 | 13100 | 13101 | 13102 |
-| IAP | 13110 | 13110 | 13111 | 13112 |
-| VAD | 13115 | 13115 | 13116 | 13117 |
-| Whisper | 13120 | 13120 | 13121 | 13122 |
-| LLaMA | 13130 | 13130 | 13131 | 13132 |
-| Kokoro | 13140 | 13140 | 13141 | 13142 |
-| OAP | 13150 | 13150 | 13151 | 13152 |
-| Frontend | 13160 | 13160 | 13161 | - |
+All ports are TCP on 127.0.0.1. Mgmt/Data ports are for inter-service pipeline communication (upstream listens, downstream connects). Cmd port (base+2) is for out-of-band frontend commands. Frontend log receiver uses UDP port 22022.
+
+| Service | Base Port | Mgmt | Data | Cmd (base+2) | Cmd used? |
+|---------|-----------|------|------|--------------|-----------|
+| SIP Client | 13100 | 13100 | 13101 | 13102 | Yes (ADD_LINE, GET_STATS) |
+| IAP | 13110 | 13110 | 13111 | 13112 | No |
+| VAD | 13115 | 13115 | 13116 | 13117 | No |
+| Whisper | 13120 | 13120 | 13121 | 13122 | No |
+| LLaMA | 13130 | 13130 | 13131 | 13132 | Yes (TEST_PROMPT, PING) |
+| Kokoro | 13140 | 13140 | 13141 | 13142 | Yes (TTS_SYNTHESIZE) |
+| OAP | 13150 | 13150 | 13151 | 13152 | No |
+| Frontend | 13160 | 13160 | 13161 | - | N/A |
 
 ### 5.2 Frontend
 - Single C++ file (`frontend.cpp`, ~6900 lines) embedding HTML/CSS/JS
@@ -238,12 +244,12 @@ Each stage includes TCP interconnection testing:
 - Chart.js for performance visualization
 - Bootstrap 5 for styling
 
-### 5.3 Test SIP Provider
-- Standalone binary (`test_sip_provider`, ~1000 lines)
-- SIP registration, INVITE/BYE handling
-- RTP relay between lines
-- Audio injection from WAV files (converts to G.711 u-law RTP)
-- HTTP API on port 22011
+### 5.3 Test SIP Provider (already implemented)
+- Standalone binary built from `tests/test_sip_provider.cpp` (~1025 lines)
+- SIP registration, INVITE/BYE handling via raw UDP sockets
+- RTP relay between lines with per-leg packet counters
+- Audio injection from WAV files: `load_wav_file()` reads any PCM WAV, `resample_to_8khz()` handles arbitrary input rates (including 44.1kHz test files), `linear_to_ulaw()` encodes to G.711
+- Mongoose HTTP API on port 22011 for call management and audio injection
 
 ### 5.4 Interconnect
 - `interconnect.h` (~1200 lines) provides peer-to-peer TCP communication
@@ -258,5 +264,7 @@ Each stage includes TCP interconnection testing:
 - **German language focus**: All test files and optimization targets are for German speech
 - **One line for stages 1-10**: Only line 1 is used; line 2 is connected in Stage 11
 - **Sequential stages**: Each stage completes before the next begins
-- **Credentials storage**: Will use SQLite `settings` table (key-value) with appropriate security considerations (values should not be logged)
+- **Credentials storage**: SQLite `settings` table (key-value), plaintext on disk. Accepted tradeoff for local single-machine tool. Values must not be logged or echoed in API/SSE.
 - **Model search**: HuggingFace API will be used for model discovery; models must be GGML/GGUF format compatible with whisper.cpp and llama.cpp
+- **Stage 11 fidelity**: Full-loop text comparison uses WER (Word Error Rate) <= 10%, not exact string match, due to inherent G.711 lossy encoding and Whisper probabilistic transcription
+- **VAD chunking for long files**: Samples 11-20 (6.2-7.2s) will be split by VAD at 4s max or at micro-pause boundaries. Accuracy impact is a primary optimization target in Stages 3-4.
