@@ -832,16 +832,18 @@ private:
                     if (!recv_exact(sock, &net_cid, 4, 500)) { mark_failed = true; break; }
                     uint32_t cid = ntohl(net_cid);
                     bool active = (msg_type == MgmtMsgType::SPEECH_ACTIVE);
+                    bool changed = false;
                     {
                         std::lock_guard<std::mutex> lock(speech_mutex_);
-                        if (active) speech_active_calls_.insert(cid);
-                        else speech_active_calls_.erase(cid);
+                        if (active) changed = speech_active_calls_.insert(cid).second;
+                        else changed = speech_active_calls_.erase(cid) > 0;
                     }
-                    if (speech_signal_handler_) {
-                        speech_signal_handler_(cid, active);
+                    if (changed) {
+                        if (speech_signal_handler_) {
+                            speech_signal_handler_(cid, active);
+                        }
+                        send_mgmt_to_downstream(msg_type, cid);
                     }
-                    // Forward downstream
-                    send_mgmt_to_downstream(msg_type, cid);
                     break;
                 }
                 case MgmtMsgType::PING: {
@@ -896,12 +898,12 @@ private:
             active_call_ids_.erase(call_id);
         }
 
-        if (!already_ended && call_end_handler_) {
-            call_end_handler_(call_id);
+        if (!already_ended) {
+            if (call_end_handler_) {
+                call_end_handler_(call_id);
+            }
+            send_mgmt_to_downstream(MgmtMsgType::CALL_END, call_id);
         }
-
-        // Forward call_end downstream
-        send_mgmt_to_downstream(MgmtMsgType::CALL_END, call_id);
     }
 
     // Send a management message (type + 4-byte call_id) to downstream mgmt channel.

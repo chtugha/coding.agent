@@ -38,10 +38,12 @@ struct VadCall {
     bool in_speech = false;
     bool speech_signaled = false;
     int silence_count = 0;
+    int onset_count = 0;
     float noise_floor = 0.00005f;
     int frame_count = 0;
     size_t vad_pos = 0;
     size_t speech_start = 0;
+    size_t tentative_speech_start = 0;
     std::chrono::steady_clock::time_point last_activity;
     std::chrono::steady_clock::time_point speech_signal_time;
     size_t last_buffer_size = 0;
@@ -68,6 +70,7 @@ class VadService {
     // vad_min_speech_samples_: 0.5s minimum — don't transcribe noise bursts or clicks.
     size_t vad_min_speech_samples_ = 16000 / 2;
     int vad_context_frames_ = 4;
+    int vad_onset_frames_ = 3;
     int speech_signal_timeout_s_ = 10;
     int vad_inactivity_flush_ms_ = 1000;
     bool vad_logging_enabled_ = true;
@@ -247,24 +250,33 @@ private:
 
                         if (energy > threshold) {
                             if (!call->in_speech) {
-                                call->in_speech = true;
-                                size_t context = vad_frame_size_ * vad_context_frames_;
-                                call->speech_start = (pos > context) ? pos - context : 0;
-                                if (vad_logging_enabled_) {
-                                    log_fwd_.forward("DEBUG", call->id,
-                                        "VAD speech_start at sample %zu (energy=%.6f threshold=%.6f noise_floor=%.6f)",
-                                        pos, energy, threshold, call->noise_floor);
+                                call->onset_count++;
+                                if (call->onset_count == 1) {
+                                    size_t context = vad_frame_size_ * vad_context_frames_;
+                                    call->tentative_speech_start = (pos > context) ? pos - context : 0;
                                 }
-                                if (!call->speech_signaled) {
-                                    call->speech_signaled = true;
-                                    call->speech_signal_time = std::chrono::steady_clock::now();
-                                    interconnect_.broadcast_speech_signal(call->id, true);
-                                    std::cout << "[" << call->id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
+                                if (call->onset_count >= vad_onset_frames_) {
+                                    call->in_speech = true;
+                                    call->speech_start = call->tentative_speech_start;
+                                    if (vad_logging_enabled_) {
+                                        log_fwd_.forward("DEBUG", call->id,
+                                            "VAD speech_start at sample %zu (energy=%.6f threshold=%.6f noise_floor=%.6f onset=%d)",
+                                            pos, energy, threshold, call->noise_floor, call->onset_count);
+                                    }
+                                    if (!call->speech_signaled) {
+                                        call->speech_signaled = true;
+                                        call->speech_signal_time = std::chrono::steady_clock::now();
+                                        interconnect_.broadcast_speech_signal(call->id, true);
+                                        std::cout << "[" << call->id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
+                                    }
                                 }
                             }
                             call->silence_count = 0;
-                        } else if (call->in_speech) {
-                            call->silence_count++;
+                        } else {
+                            call->onset_count = 0;
+                            if (call->in_speech) {
+                                call->silence_count++;
+                            }
                         }
 
                         pos += vad_frame_size_;
@@ -284,6 +296,7 @@ private:
                             pos = 0;
                             call->in_speech = false;
                             call->silence_count = 0;
+                            call->onset_count = 0;
                             call->speech_start = 0;
                             call->noise_floor = 0.00005f;
                             if (call->speech_signaled) {
@@ -309,6 +322,7 @@ private:
                             pos = 0;
                             call->in_speech = false;
                             call->silence_count = 0;
+                            call->onset_count = 0;
                             call->speech_start = 0;
                             call->noise_floor = 0.00005f;
                             if (call->speech_signaled) {
@@ -339,6 +353,7 @@ private:
                                 call->vad_pos = 0;
                                 call->in_speech = false;
                                 call->silence_count = 0;
+                                call->onset_count = 0;
                                 call->speech_start = 0;
                                 call->last_buffer_size = 0;
                                 call->noise_floor = 0.00005f;
@@ -379,6 +394,7 @@ private:
                                 call->vad_pos = 0;
                                 call->in_speech = false;
                                 call->silence_count = 0;
+                                call->onset_count = 0;
                                 call->speech_start = 0;
                                 call->last_buffer_size = 0;
                                 std::cout << "[" << call->id

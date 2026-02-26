@@ -690,8 +690,8 @@ private:
             std::string use_args = args_override.empty() ? svc.default_args : args_override;
 
             if (name == "VAD_SERVICE" && args_override.empty()) {
-                std::string vad_w = get_setting("whisper_vad_window_ms", "");
-                std::string vad_t = get_setting("whisper_vad_threshold", "");
+                std::string vad_w = get_setting("vad_window_ms", "");
+                std::string vad_t = get_setting("vad_threshold", "");
                 if (!vad_w.empty()) use_args += " --vad-window-ms " + vad_w;
                 if (!vad_t.empty()) use_args += " --vad-threshold " + vad_t;
             }
@@ -1142,8 +1142,8 @@ private:
                 handle_test_results(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_test")) == 0) {
                 handle_whisper_accuracy_test(c, hm);
-            } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/vad_config")) == 0) {
-                handle_whisper_vad_config(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/vad/config")) == 0) {
+                handle_vad_config(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_results")) == 0) {
                 handle_whisper_accuracy_results(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models")) == 0) {
@@ -1626,7 +1626,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <input class="wt-input" id="accuracyModel" value="current" readonly>
 </div>
 <div style="padding:10px;background:var(--wt-card-hover);border-radius:6px;margin-top:8px;border-left:3px solid var(--wt-primary)">
-<div style="font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:6px">&#x2699; Current VAD Settings (will be used on next Whisper start)</div>
+<div style="font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:6px">&#x2699; VAD Service Settings (applied on next VAD restart)</div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
 <div><strong>Window:</strong> <span id="currentVadWindow" style="color:var(--wt-primary)">100</span> ms</div>
 <div><strong>Threshold:</strong> <span id="currentVadThreshold" style="color:var(--wt-primary)">2.0</span></div>
@@ -1717,9 +1717,10 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 6: TTS Round-Trip Validation</span></div>
+<div class="wt-card-header"><span class="wt-card-title">Test 6: Full Pipeline Round-Trip</span></div>
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
-  Full pipeline round-trip: Text &#x2192; Kokoro TTS &#x2192; WAV &#x2192; SIP inject &#x2192; IAP &#x2192; VAD &#x2192; Whisper &#x2192; compare transcription with original.
+  Full pipeline loop: Phrase &#x2192; Kokoro WAV &#x2192; inject &#x2192; SIP(L1) &#x2192; IAP &#x2192; VAD &#x2192; Whisper &#x2192; LLaMA &#x2192; Kokoro &#x2192; OAP &#x2192; SIP &#x2192; relay &#x2192; SIP(L2) &#x2192; IAP &#x2192; VAD &#x2192; Whisper.
+  Verifies transcription of injected phrase (Line 1) and LLaMA response (Line 2).
   Requires: All services running + active call on test_sip_provider.
 </p>
 <div class="wt-field">
@@ -1750,7 +1751,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Test 8: Multi-Line Command Stress Test</span></div>
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
-  Floods all 6 pipeline service command ports concurrently with PING requests from multiple simulated lines.
+  Floods all 7 pipeline service command ports concurrently with PING requests from multiple simulated lines.
   Measures response success rate and latency under concurrent load.
 </p>
 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
@@ -2221,14 +2222,25 @@ function clearSvcLog(){document.getElementById('svcDetailLog').textContent='';}
 
 function connectSvcSSE(name){
   if(svcLogSSE){svcLogSSE.close();}
+  var el=document.getElementById('svcDetailLog');
+  el.innerHTML='';
+  fetch('/api/logs/recent').then(function(r){return r.json();}).then(function(d){
+    if(!d.logs||!d.logs.length)return;
+    d.logs.slice().reverse().forEach(function(e){
+      if(e.service!==name)return;
+      var lc=/^[A-Z]+$/.test(e.level)?e.level:'INFO';
+      el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(e.timestamp)+'</span> '
+        +'<span class="log-lvl-'+lc+'">'+escapeHtml(e.level)+'</span> '+escapeHtml(e.message)+'</div>';
+    });
+    el.scrollTop=el.scrollHeight;
+  }).catch(function(){});
   svcLogSSE=new EventSource('/api/logs/stream?service='+encodeURIComponent(name));
   svcLogSSE.onmessage=function(e){
     try{
       var d=JSON.parse(e.data);
-      var el=document.getElementById('svcDetailLog');
-      var lvlClass=/^[A-Z]+$/.test(d.level)?d.level:'INFO';
+      var lc=/^[A-Z]+$/.test(d.level)?d.level:'INFO';
       el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(d.timestamp)+'</span> '
-        +'<span class="log-lvl-'+lvlClass+'">'+escapeHtml(d.level)+'</span> '+escapeHtml(d.message)+'</div>';
+        +'<span class="log-lvl-'+lc+'">'+escapeHtml(d.level)+'</span> '+escapeHtml(d.message)+'</div>';
       el.scrollTop=el.scrollHeight;
     }catch(x){}
   };
@@ -2241,19 +2253,34 @@ function connectSvcSSE(name){
 function reconnectLogSSE(){
   if(logSSE){logSSE.close();}
   var svc=document.getElementById('logServiceFilter').value;
+  var lvl=document.getElementById('logLevelFilter').value;
+  var el=document.getElementById('liveLogView');
+  if(!el.children.length){
+    fetch('/api/logs/recent').then(function(r){return r.json();}).then(function(d){
+      if(!d.logs||!d.logs.length)return;
+      var logs=d.logs.slice().reverse();
+      logs.forEach(function(e){
+        if(svc&&e.service!==svc)return;
+        if(lvl&&e.level!==lvl)return;
+        var lc=/^[A-Z]+$/.test(e.level)?e.level:'INFO';
+        el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(e.timestamp)+'</span> '
+          +'<span class="log-svc">'+escapeHtml(e.service)+'</span> '
+          +'<span class="log-lvl-'+lc+'">'+escapeHtml(e.level)+'</span> '+escapeHtml(e.message)+'</div>';
+      });
+      if(document.getElementById('autoScrollToggle').classList.contains('on')){el.scrollTop=el.scrollHeight;}
+    }).catch(function(){});
+  }
   var url='/api/logs/stream';
   if(svc)url+='?service='+encodeURIComponent(svc);
   logSSE=new EventSource(url);
   logSSE.onmessage=function(e){
     try{
       var d=JSON.parse(e.data);
-      var lvl=document.getElementById('logLevelFilter').value;
       if(lvl&&d.level!==lvl)return;
-      var el=document.getElementById('liveLogView');
-      var lvlClass=/^[A-Z]+$/.test(d.level)?d.level:'INFO';
+      var lc=/^[A-Z]+$/.test(d.level)?d.level:'INFO';
       el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(d.timestamp)+'</span> '
         +'<span class="log-svc">'+escapeHtml(d.service)+'</span> '
-        +'<span class="log-lvl-'+lvlClass+'">'+escapeHtml(d.level)+'</span> '+escapeHtml(d.message)+'</div>';
+        +'<span class="log-lvl-'+lc+'">'+escapeHtml(d.level)+'</span> '+escapeHtml(d.message)+'</div>';
       if(el.children.length>2000){el.removeChild(el.firstChild);}
       if(document.getElementById('autoScrollToggle').classList.contains('on')){el.scrollTop=el.scrollHeight;}
     }catch(x){}
@@ -2737,26 +2764,29 @@ function pollTtsRoundtripTask(taskId){
     var results=document.getElementById('ttsRoundtripResults');
     if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
     var s=d.summary;
-    status.innerHTML='<span style="color:var(--wt-success)">Round-trip test complete — '+s.pass+'/'+s.total+' passed (avg similarity: '+s.avg_similarity.toFixed(1)+'%)</span>';
-    var html='<table class="wt-table"><tr><th>Original Phrase</th><th>Transcription</th><th>Similarity</th><th>Synth</th><th>RTF</th><th>E2E</th><th>Status</th></tr>';
+    status.innerHTML='<span style="color:var(--wt-success)">Round-trip complete — '+s.pass+'/'+s.total+' passed (L1 avg: '+s.avg_similarity_in.toFixed(1)+'%, L2 avg: '+s.avg_similarity_out.toFixed(1)+'%)</span>';
+    var html='<table class="wt-table"><tr><th>Injected Phrase</th><th>Whisper L1</th><th>L1 Sim%</th><th>LLaMA Response</th><th>Whisper L2 (Kokoro)</th><th>L2 Sim%</th><th>E2E</th><th>Status</th></tr>';
     d.results.forEach(function(r){
       var color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
-      var rtfColor=r.synth_rtf<0.5?'var(--wt-success)':r.synth_rtf<1.0?'var(--wt-warning)':'var(--wt-danger)';
+      var inColor=r.similarity_in>=60?'var(--wt-success)':r.similarity_in>=40?'var(--wt-warning)':'var(--wt-danger)';
+      var outColor=r.similarity_out>=50?'var(--wt-success)':r.similarity_out>=30?'var(--wt-warning)':'var(--wt-danger)';
       html+='<tr>';
-      html+='<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.phrase)+'</td>';
-      html+='<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.transcription)+'</td>';
-      html+='<td style="color:'+color+';font-weight:bold">'+r.similarity.toFixed(1)+'%</td>';
-      html+='<td>'+r.synth_ms+'ms</td>';
-      html+='<td style="color:'+rtfColor+';font-weight:bold">'+(r.synth_rtf||0).toFixed(2)+'</td>';
-      html+='<td>'+r.e2e_ms+'ms</td>';
+      html+='<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.phrase)+'</td>';
+      html+='<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.transcription_in||'')+'</td>';
+      html+='<td style="color:'+inColor+';font-weight:bold">'+(r.similarity_in||0).toFixed(1)+'%</td>';
+      html+='<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.llama_response||'')+'</td>';
+      html+='<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.transcription_out||'')+'</td>';
+      html+='<td style="color:'+outColor+';font-weight:bold">'+(r.similarity_out||0).toFixed(1)+'%</td>';
+      html+='<td>'+(r.e2e_ms/1000).toFixed(1)+'s</td>';
       html+='<td style="color:'+color+'">'+r.status+'</td>';
       html+='</tr>';
     });
     html+='</table>';
     if(s){
       html+='<div style="margin-top:10px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px">';
-      html+='<strong>Summary:</strong> Avg Similarity: '+s.avg_similarity.toFixed(1)+'%';
-      html+=' | Avg Synth: '+s.avg_synth_ms+'ms | Avg E2E: '+s.avg_e2e_ms+'ms';
+      html+='<strong>Summary:</strong> L1 Avg Sim: '+s.avg_similarity_in.toFixed(1)+'%';
+      html+=' | L2 Avg Sim (Kokoro quality): '+s.avg_similarity_out.toFixed(1)+'%';
+      html+=' | Avg E2E: '+(s.avg_e2e_ms/1000).toFixed(1)+'s';
       html+=' | Pass: '+s.pass+' | Warn: '+s.warn+' | Fail: '+s.fail;
       html+='</div>';
     }
@@ -3558,7 +3588,7 @@ function renderLlamaBenchmarkResults(r){
 // ===== END MODELS PAGE =====
 
 function loadVadConfig(){
-  fetch('/api/whisper/vad_config').then(r=>r.json()).then(d=>{
+  fetch('/api/vad/config').then(r=>r.json()).then(d=>{
     document.getElementById('vadWindowSlider').value=d.window_ms;
     document.getElementById('vadThresholdSlider').value=d.threshold;
     updateVadWindowDisplay(d.window_ms);
@@ -3573,7 +3603,7 @@ function saveVadConfig(){
   var window_ms=document.getElementById('vadWindowSlider').value;
   var threshold=document.getElementById('vadThresholdSlider').value;
   
-  fetch('/api/whisper/vad_config',{
+  fetch('/api/vad/config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({window_ms:window_ms,threshold:threshold})
@@ -5087,6 +5117,51 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return log_seq_.load();
     }
 
+    struct LlamaResponseResult {
+        std::string text;
+        double gen_ms = 0.0;
+        bool found = false;
+    };
+
+    LlamaResponseResult wait_for_llama_response(uint64_t after_seq, int timeout_ms = 30000) {
+        LlamaResponseResult result;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard<std::mutex> lock(logs_mutex_);
+                for (const auto& entry : recent_logs_) {
+                    if (entry.seq <= after_seq) continue;
+                    if (entry.service != ServiceType::LLAMA_SERVICE) continue;
+                    if (entry.level != "INFO") continue;
+
+                    const std::string& msg = entry.message;
+                    size_t rpos = msg.find("Response (");
+                    if (rpos == std::string::npos) continue;
+
+                    size_t ms_start = rpos + 10;
+                    size_t ms_end = msg.find("ms)", ms_start);
+                    if (ms_end == std::string::npos) continue;
+
+                    try {
+                        result.gen_ms = std::stod(msg.substr(ms_start, ms_end - ms_start));
+                    } catch (...) {}
+
+                    size_t text_start = ms_end + 5;
+                    if (text_start < msg.size()) {
+                        result.text = msg.substr(text_start);
+                        while (!result.text.empty() && (result.text.back() == ' ' || result.text.back() == '\n'))
+                            result.text.pop_back();
+                    }
+                    result.found = true;
+                    return result;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        return result;
+    }
+
     // Helper function to check if a service is currently running.
     // Returns true if the service exists in services_ list and has a valid PID.
     bool is_service_running(const std::string& service_name) {
@@ -5230,15 +5305,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
-        std::string ping_err;
-        std::string ping_resp = tcp_command(llama_cmd_port, "PING", ping_err, 3);
-        if (ping_resp != "PONG") {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"LLaMA service not reachable (port %d): %s\"}", llama_cmd_port, ping_err.c_str());
-            return;
-        }
-
         int64_t task_id = create_async_task("llama_quality_test");
         {
             std::lock_guard<std::mutex> lock(async_mutex_);
@@ -5251,6 +5317,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
     void run_llama_quality_test_async(int64_t task_id, std::vector<QualityPrompt> prompts) {
         uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+
+        std::string ping_err;
+        if (tcp_command(llama_cmd_port, "PING", ping_err, 3) != "PONG") {
+            finish_async_task(task_id, "{\"error\":\"LLaMA service not reachable (port "
+                + std::to_string(llama_cmd_port) + "): " + escape_json(ping_err) + "\"}");
+            return;
+        }
 
         std::string results_json = "[";
         double total_score = 0, total_latency = 0;
@@ -5318,15 +5391,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     void handle_llama_shutup_test(struct mg_connection *c, struct mg_http_message *hm) {
-        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
-
-        std::string ping_err;
-        if (tcp_command(llama_cmd_port, "PING", ping_err, 3) != "PONG") {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"LLaMA service not reachable: %s\"}", ping_err.c_str());
-            return;
-        }
-
         struct mg_str json_body = hm->body;
         int plen = 0;
         int pofs = mg_json_get(json_body, "$.prompt", &plen);
@@ -5349,6 +5413,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
     void run_llama_shutup_test_async(int64_t task_id, std::string prompt) {
         uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+
+        std::string ping_err;
+        if (tcp_command(llama_cmd_port, "PING", ping_err, 3) != "PONG") {
+            finish_async_task(task_id, "{\"error\":\"LLaMA service not reachable\"}");
+            return;
+        }
+
         std::string err;
         std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt, err, 15);
 
@@ -5593,22 +5664,14 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     void handle_kokoro_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
-        std::string ping_err;
-        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"Kokoro service not reachable (port %d): %s\"}", kokoro_cmd_port, ping_err.c_str());
-            return;
-        }
-
         struct mg_str json_body = hm->body;
-        struct mg_str key, val;
         std::vector<std::string> phrases;
         int plen = 0;
         int pofs = mg_json_get(json_body, "$.phrases", &plen);
         if (pofs >= 0) {
             struct mg_str arr = mg_str_n(json_body.buf + pofs, (size_t)plen);
             size_t ofs = 0;
+            struct mg_str key, val;
             while ((ofs = mg_json_next(arr, ofs, &key, &val)) > 0) {
                 if (val.len >= 2 && val.buf[0] == '"') {
                     char buf[1024];
@@ -5640,6 +5703,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
     void run_kokoro_quality_test_async(int64_t task_id, std::vector<std::string> phrases) {
         uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+
+        std::string ping_err;
+        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+            finish_async_task(task_id, "{\"error\":\"Kokoro service not reachable (port "
+                + std::to_string(kokoro_cmd_port) + "): " + escape_json(ping_err) + "\"}");
+            return;
+        }
 
         std::string results_json = "[";
         double total_latency = 0;
@@ -5741,14 +5811,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     void handle_kokoro_benchmark(struct mg_connection *c, struct mg_http_message *hm) {
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
-        std::string ping_err;
-        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"Kokoro service not reachable (port %d): %s\"}", kokoro_cmd_port, ping_err.c_str());
-            return;
-        }
-
         struct mg_str json_body = hm->body;
         int iterations = (int)mg_json_get_long(json_body, "$.iterations", 5);
         if (iterations < 1) iterations = 1;
@@ -5775,6 +5837,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
     void run_kokoro_benchmark_async(int64_t task_id, std::string phrase, int iterations) {
         uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+
+        std::string ping_err;
+        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+            finish_async_task(task_id, "{\"error\":\"Kokoro service not reachable (port "
+                + std::to_string(kokoro_cmd_port) + "): " + escape_json(ping_err) + "\"}");
+            return;
+        }
 
         std::string bench_cmd = "BENCHMARK:" + phrase + "|" + std::to_string(iterations);
         std::string err;
@@ -5977,8 +6046,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         json << "{\"results\":[";
         bool first = true;
         int pass_count = 0, warn_count = 0, fail_count = 0;
-        double total_similarity = 0.0;
-        double total_synth_ms = 0.0;
+        double total_in_sim = 0.0;
+        double total_out_sim = 0.0;
         double total_e2e_ms = 0.0;
         int processed = 0;
 
@@ -5990,36 +6059,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::string synth_cmd = "SYNTH_WAV:" + tmp_path + "|" + phrase;
             std::string synth_resp = tcp_command(kokoro_cmd_port, synth_cmd, synth_err, 30);
 
-            double synth_ms = 0;
-            double synth_rtf = 0;
             bool synth_ok = (synth_resp.rfind("WAV_RESULT:", 0) == 0);
-
-            if (synth_ok) {
-                try {
-                    size_t p = 11;
-                    size_t ms_end = synth_resp.find("ms:", p);
-                    if (ms_end != std::string::npos) {
-                        synth_ms = std::stod(synth_resp.substr(p, ms_end - p));
-                    }
-                    size_t rtf_pos = synth_resp.find("rtf=");
-                    if (rtf_pos != std::string::npos) {
-                        size_t rtf_end = synth_resp.find(':', rtf_pos + 4);
-                        synth_rtf = std::stod(synth_resp.substr(rtf_pos + 4,
-                            rtf_end == std::string::npos ? std::string::npos : rtf_end - rtf_pos - 4));
-                    }
-                } catch (const std::exception&) {
-                    synth_ms = 0;
-                    synth_rtf = 0;
-                }
-            }
-
             if (!synth_ok) {
                 if (!first) json << ",";
                 json << "{\"phrase\":\"" << escape_json(phrase) << "\""
-                     << ",\"synth_ms\":0,\"synth_rtf\":0"
-                     << ",\"transcription\":\"[synthesis failed]\""
-                     << ",\"similarity\":0,\"e2e_ms\":0"
-                     << ",\"status\":\"FAIL\""
+                     << ",\"transcription_in\":\"\",\"similarity_in\":0"
+                     << ",\"llama_response\":\"\",\"transcription_out\":\"\",\"similarity_out\":0"
+                     << ",\"e2e_ms\":0,\"status\":\"FAIL\""
                      << ",\"error\":\"" << escape_json(synth_err.empty() ? synth_resp : synth_err) << "\"}";
                 first = false;
                 fail_count++;
@@ -6029,7 +6075,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             uint64_t seq_before = current_log_seq();
             auto e2e_start = std::chrono::steady_clock::now();
 
-            std::string inject_body = "{\"file\":\"" + escape_json(tmp_filename) + "\",\"leg\":\"a\"}";
+            std::string inject_body = "{\"file\":\"" + escape_json(tmp_filename) + "\",\"leg\":\"a\",\"no_silence\":true}";
             std::string inject_err;
             std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
@@ -6037,33 +6083,51 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 std::remove(tmp_path.c_str());
                 if (!first) json << ",";
                 json << "{\"phrase\":\"" << escape_json(phrase) << "\""
-                     << ",\"synth_ms\":" << (int)synth_ms << ",\"synth_rtf\":" << synth_rtf
-                     << ",\"transcription\":\"[injection failed]\""
-                     << ",\"similarity\":0,\"e2e_ms\":0"
-                     << ",\"status\":\"FAIL\""
+                     << ",\"transcription_in\":\"\",\"similarity_in\":0"
+                     << ",\"llama_response\":\"\",\"transcription_out\":\"\",\"similarity_out\":0"
+                     << ",\"e2e_ms\":0,\"status\":\"FAIL\""
                      << ",\"error\":\"" << escape_json(inject_err.empty() ? inject_resp : inject_err) << "\"}";
                 first = false;
                 fail_count++;
                 continue;
             }
 
-            TranscriptionResult tr = wait_for_whisper_transcription(seq_before, 30000);
+            TranscriptionResult tr1 = wait_for_whisper_transcription(seq_before, 30000);
+            std::string transcription_in = tr1.found ? tr1.text : "";
+            double similarity_in = tr1.found ? calculate_levenshtein_similarity(phrase, transcription_in) : 0;
+
+            uint64_t seq_after_l1 = current_log_seq();
+
+            LlamaResponseResult llama_res = wait_for_llama_response(seq_before, 30000);
+            std::string llama_text = llama_res.found ? llama_res.text : "";
+
+            TranscriptionResult tr2 = wait_for_whisper_transcription(seq_after_l1, 60000);
 
             auto e2e_end = std::chrono::steady_clock::now();
             double e2e_ms = std::chrono::duration_cast<std::chrono::milliseconds>(e2e_end - e2e_start).count();
 
-            std::this_thread::sleep_for(std::chrono::seconds(3));
-
-            std::string transcription = tr.found ? tr.text : "[no transcription received]";
-            double similarity = calculate_levenshtein_similarity(phrase, transcription);
+            std::string transcription_out = tr2.found ? tr2.text : "";
+            double similarity_out = 0;
+            if (!llama_text.empty() && !transcription_out.empty()) {
+                similarity_out = calculate_levenshtein_similarity(llama_text, transcription_out);
+            }
 
             std::string status_str;
-            if (similarity >= 70.0) { status_str = "PASS"; pass_count++; }
-            else if (similarity >= 40.0) { status_str = "WARN"; warn_count++; }
-            else { status_str = "FAIL"; fail_count++; }
+            bool in_ok = tr1.found && similarity_in >= 40.0;
+            bool llama_ok = llama_res.found && !llama_text.empty();
+            bool out_ok = tr2.found && !transcription_out.empty();
+            bool kokoro_ok = similarity_out >= 30.0;
 
-            total_similarity += similarity;
-            total_synth_ms += synth_ms;
+            if (in_ok && llama_ok && out_ok && kokoro_ok && similarity_in >= 60.0) {
+                status_str = "PASS"; pass_count++;
+            } else if (in_ok && llama_ok && out_ok) {
+                status_str = "WARN"; warn_count++;
+            } else {
+                status_str = "FAIL"; fail_count++;
+            }
+
+            total_in_sim += similarity_in;
+            total_out_sim += similarity_out;
             total_e2e_ms += e2e_ms;
             processed++;
 
@@ -6072,11 +6136,14 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     "VALUES ('tts_roundtrip',?1,?2,?3,strftime('%s','now'))";
                 sqlite3_stmt* stmt = nullptr;
                 if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_text(stmt, 1, "kokoro+whisper", -1, SQLITE_STATIC);
+                    sqlite3_bind_text(stmt, 1, "full_pipeline", -1, SQLITE_STATIC);
                     sqlite3_bind_text(stmt, 2, status_str.c_str(), -1, SQLITE_TRANSIENT);
-                    std::string details = phrase + " -> " + transcription
-                        + " (sim=" + std::to_string((int)similarity) + "%, synth=" + std::to_string((int)synth_ms)
-                        + "ms, e2e=" + std::to_string((int)e2e_ms) + "ms)";
+                    std::string details = phrase + " -> L1:" + transcription_in
+                        + " (in_sim=" + std::to_string((int)similarity_in) + "%)"
+                        + " -> LLaMA:" + llama_text
+                        + " -> L2:" + transcription_out
+                        + " (out_sim=" + std::to_string((int)similarity_out) + "%)"
+                        + " e2e=" + std::to_string((int)e2e_ms) + "ms";
                     sqlite3_bind_text(stmt, 3, details.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_step(stmt);
                     sqlite3_finalize(stmt);
@@ -6085,27 +6152,32 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
             if (!first) json << ",";
             json << "{\"phrase\":\"" << escape_json(phrase) << "\""
-                 << ",\"transcription\":\"" << escape_json(transcription) << "\""
-                 << ",\"similarity\":" << similarity
-                 << ",\"synth_ms\":" << (int)synth_ms
-                 << ",\"synth_rtf\":" << synth_rtf
+                 << ",\"transcription_in\":\"" << escape_json(transcription_in) << "\""
+                 << ",\"similarity_in\":" << similarity_in
+                 << ",\"llama_response\":\"" << escape_json(llama_text) << "\""
+                 << ",\"transcription_out\":\"" << escape_json(transcription_out) << "\""
+                 << ",\"similarity_out\":" << similarity_out
+                 << ",\"llama_ms\":" << (int)llama_res.gen_ms
                  << ",\"e2e_ms\":" << (int)e2e_ms
-                 << ",\"whisper_ms\":" << (int)tr.whisper_latency_ms
                  << ",\"status\":\"" << status_str << "\"}";
             first = false;
 
             std::remove(tmp_path.c_str());
+
+            if (&phrase != &phrases.back()) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+            }
         }
 
         json << "]";
 
-        double avg_similarity = processed > 0 ? total_similarity / processed : 0;
-        double avg_synth = processed > 0 ? total_synth_ms / processed : 0;
+        double avg_in_sim = processed > 0 ? total_in_sim / processed : 0;
+        double avg_out_sim = processed > 0 ? total_out_sim / processed : 0;
         double avg_e2e = processed > 0 ? total_e2e_ms / processed : 0;
 
         json << ",\"summary\":{"
-             << "\"avg_similarity\":" << avg_similarity
-             << ",\"avg_synth_ms\":" << (int)avg_synth
+             << "\"avg_similarity_in\":" << avg_in_sim
+             << ",\"avg_similarity_out\":" << avg_out_sim
              << ",\"avg_e2e_ms\":" << (int)avg_e2e
              << ",\"pass\":" << pass_count
              << ",\"warn\":" << warn_count
@@ -6284,26 +6356,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        std::string pipeline_err = validate_pipeline_services();
-        if (!pipeline_err.empty()) {
-            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
-                "{\"error\":\"%s\"}", pipeline_err.c_str());
-            return;
-        }
-
-        std::string err;
-        std::string status_body = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", err);
-        if (!err.empty()) {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"test_sip_provider not reachable: %s\"}", err.c_str());
-            return;
-        }
-        if (status_body.find("\"call_active\":true") == std::string::npos) {
-            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
-                "{\"error\":\"No active call in test_sip_provider. Start SIP client and establish a call first.\"}");
-            return;
-        }
-
         int64_t task_id = create_async_task("accuracy_test");
 
         {
@@ -6317,6 +6369,23 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     void run_accuracy_test_async(int64_t task_id, std::vector<std::string> test_files) {
+        std::string pipeline_err = validate_pipeline_services();
+        if (!pipeline_err.empty()) {
+            finish_async_task(task_id, "{\"error\":\"" + escape_json(pipeline_err) + "\"}");
+            return;
+        }
+
+        std::string sip_err;
+        std::string status_body = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", sip_err);
+        if (!sip_err.empty()) {
+            finish_async_task(task_id, "{\"error\":\"test_sip_provider not reachable: " + escape_json(sip_err) + "\"}");
+            return;
+        }
+        if (status_body.find("\"call_active\":true") == std::string::npos) {
+            finish_async_task(task_id, "{\"error\":\"No active call in test_sip_provider. Start SIP client and establish a call first.\"}");
+            return;
+        }
+
         int64_t test_run_id = time(nullptr);
         std::stringstream json;
         json << "{\"status\":\"done\",\"success\":true,\"test_run_id\":" << test_run_id << ",\"results\":[";
@@ -6449,7 +6518,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, json.str());
     }
 
-    void handle_whisper_vad_config(struct mg_connection *c, struct mg_http_message *hm) {
+    void handle_vad_config(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
             std::string body(hm->body.buf, hm->body.len);
             
@@ -6457,10 +6526,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::string threshold_str = extract_json_string(body, "threshold");
             
             if (!window_ms_str.empty()) {
-                set_setting("whisper_vad_window_ms", window_ms_str);
+                set_setting("vad_window_ms", window_ms_str);
             }
             if (!threshold_str.empty()) {
-                set_setting("whisper_vad_threshold", threshold_str);
+                set_setting("vad_threshold", threshold_str);
             }
             
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
@@ -6468,8 +6537,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 window_ms_str.empty() ? "100" : window_ms_str.c_str(),
                 threshold_str.empty() ? "2.0" : threshold_str.c_str());
         } else {
-            std::string window_ms = get_setting("whisper_vad_window_ms", "100");
-            std::string threshold = get_setting("whisper_vad_threshold", "2.0");
+            std::string window_ms = get_setting("vad_window_ms", "100");
+            std::string threshold = get_setting("vad_threshold", "2.0");
             
             std::stringstream json;
             json << "{"
@@ -7175,28 +7244,6 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             files_json << "\"" << escape_json(test_files[i]) << "\"";
         }
         files_json << "]";
-        
-        // Validate all pipeline services are running before benchmarking
-        std::string pipeline_err = validate_pipeline_services();
-        if (!pipeline_err.empty()) {
-            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
-                "{\"error\":\"%s\"}", pipeline_err.c_str());
-            return;
-        }
-        
-        // Verify the full pipeline is running before benchmarking.
-        std::string sip_err;
-        std::string sip_status = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", sip_err);
-        if (!sip_err.empty()) {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"test_sip_provider not reachable: %s\"}", sip_err.c_str());
-            return;
-        }
-        if (sip_status.find("\"call_active\":true") == std::string::npos) {
-            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
-                "{\"error\":\"No active call. Start SIP client + IAP + VAD + Whisper and establish a call first.\"}");
-            return;
-        }
 
         int memory_mb = get_service_memory_mb("WHISPER_SERVICE");
         if (memory_mb == 0) {
@@ -7223,6 +7270,23 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     void run_benchmark_async(int64_t task_id, std::vector<std::string> test_files,
             int iterations, int model_id, std::string model_name, std::string model_backend,
             std::string files_json_str, int memory_mb) {
+        std::string pipeline_err = validate_pipeline_services();
+        if (!pipeline_err.empty()) {
+            finish_async_task(task_id, "{\"error\":\"" + escape_json(pipeline_err) + "\"}");
+            return;
+        }
+
+        std::string sip_err;
+        std::string sip_status = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", sip_err);
+        if (!sip_err.empty()) {
+            finish_async_task(task_id, "{\"error\":\"test_sip_provider not reachable: " + escape_json(sip_err) + "\"}");
+            return;
+        }
+        if (sip_status.find("\"call_active\":true") == std::string::npos) {
+            finish_async_task(task_id, "{\"error\":\"No active call. Start SIP client + IAP + VAD + Whisper and establish a call first.\"}");
+            return;
+        }
+
         std::vector<double> latencies;
         std::vector<double> accuracies;
         int pass_count = 0;

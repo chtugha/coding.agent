@@ -92,6 +92,7 @@ public:
         });
 
         interconnect_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
+            std::cout << "[" << call_id << "] Speech signal: " << (active ? "ACTIVE" : "IDLE") << std::endl;
             if (active) {
                 std::lock_guard<std::mutex> lock(calls_mutex_);
                 auto it = calls_.find(call_id);

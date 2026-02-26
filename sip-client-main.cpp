@@ -565,7 +565,18 @@ private:
         else if (msg == "GET_STATS") {
             return get_stats();
         }
-        return "";
+        else if (msg == "PING") {
+            return "PONG\n";
+        }
+        else if (msg == "STATUS") {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            std::lock_guard<std::mutex> llock(lines_mutex_);
+            return "ACTIVE_CALLS:" + std::to_string(calls_.size())
+                + ":LINES:" + std::to_string(lines_.size())
+                + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + "\n";
+        }
+        return "ERROR:Unknown command\n";
     }
 
     std::atomic<bool> running_;

@@ -339,6 +339,8 @@ private:
             handle_files(c);
         } else if (mg_strcmp(hm->uri, mg_str("/inject")) == 0) {
             handle_inject(c, hm);
+        } else if (mg_strcmp(hm->uri, mg_str("/stop_inject")) == 0) {
+            handle_stop_inject(c);
         } else if (mg_strcmp(hm->uri, mg_str("/status")) == 0) {
             handle_status(c);
         } else if (mg_strcmp(hm->uri, mg_str("/calls")) == 0) {
@@ -414,7 +416,10 @@ private:
             return;
         }
 
-        std::string err = inject_file(full_path, leg);
+        bool no_silence = false;
+        mg_json_get_bool(hm->body, "$.no_silence", &no_silence);
+
+        std::string err = inject_file(full_path, leg, no_silence);
         if (!err.empty()) {
             mg_http_reply(c, 500, CORS_HEADERS, "{\"error\":\"%s\"}", err.c_str());
             return;
@@ -422,6 +427,15 @@ private:
 
         call_->injecting_file = file;
         mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"injecting\":\"%s\",\"leg\":\"%s\"}", file.c_str(), leg.c_str());
+    }
+
+    void handle_stop_inject(struct mg_connection* c) {
+        if (!call_ || !call_->injecting) {
+            mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"was_injecting\":false}");
+            return;
+        }
+        cancel_injection();
+        mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"was_injecting\":true}");
     }
 
     void handle_status(struct mg_connection* c) {
@@ -463,7 +477,7 @@ private:
         mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
     }
 
-    std::string inject_file(const std::string& path, const std::string& leg) {
+    std::string inject_file(const std::string& path, const std::string& leg, bool no_silence = false) {
         WavData wav = load_wav_file(path);
         if (!wav.error.empty()) return wav.error;
         if (wav.samples.empty()) return "WAV file contains no samples";
@@ -477,7 +491,7 @@ private:
         cancel_injection();
 
         call_->injecting = true;
-        call_->inject_thread = std::thread(&TestSipProvider::inject_rtp_stream, this, call_, leg, std::move(ulaw));
+        call_->inject_thread = std::thread(&TestSipProvider::inject_rtp_stream, this, call_, leg, std::move(ulaw), no_silence);
         return "";
     }
 
@@ -489,7 +503,7 @@ private:
         }
     }
 
-    void inject_rtp_stream(std::shared_ptr<ActiveCall> call, std::string leg, std::vector<uint8_t> ulaw_samples) {
+    void inject_rtp_stream(std::shared_ptr<ActiveCall> call, std::string leg, std::vector<uint8_t> ulaw_samples, bool no_silence) {
         static constexpr int PKT_SAMPLES = 160;
 
         CallLeg* target = (leg == "a") ? &call->leg_a : &call->leg_b;
@@ -505,8 +519,9 @@ private:
         uint32_t ts = 0;
 
         size_t total_pkts = ulaw_samples.size() / PKT_SAMPLES;
-        std::printf("Injecting %zu RTP packets (%.1fs) into leg %s (%s)\n",
-                    total_pkts, ulaw_samples.size() / 8000.0, leg.c_str(), target->user.c_str());
+        std::printf("Injecting %zu RTP packets (%.1fs) into leg %s (%s)%s\n",
+                    total_pkts, ulaw_samples.size() / 8000.0, leg.c_str(), target->user.c_str(),
+                    no_silence ? " [no-silence]" : "");
 
         for (size_t offset = 0; offset + PKT_SAMPLES <= ulaw_samples.size() && call->active && call->injecting && g_running; offset += PKT_SAMPLES) {
             uint8_t rtp[12 + PKT_SAMPLES];
@@ -527,24 +542,45 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
-        std::printf("Audio done, sending silence until next injection or call end\n");
-        while (call->active && call->injecting && g_running) {
-            uint8_t rtp[12 + PKT_SAMPLES];
-            rtp[0] = 0x80;
-            rtp[1] = 0x00;
-            uint16_t seq_n = htons(seq++);
-            std::memcpy(rtp + 2, &seq_n, 2);
-            uint32_t ts_n = htonl(ts);
-            ts += PKT_SAMPLES;
-            std::memcpy(rtp + 4, &ts_n, 4);
-            uint32_t ssrc_n = htonl(ssrc);
-            std::memcpy(rtp + 8, &ssrc_n, 4);
-            // G.711 μ-law silence: 0x7F decodes to 0 (true digital silence).
-            // NOT 0xFF which decodes to -29 and triggers VAD false positives.
-            std::memset(rtp + 12, 0x7F, PKT_SAMPLES);
-            sendto(target->relay_sock, rtp, sizeof(rtp), 0,
-                   (struct sockaddr*)&dest, sizeof(dest));
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (no_silence) {
+            static constexpr int SILENCE_TAIL_MS = 1000;
+            static constexpr int SILENCE_TAIL_PKTS = SILENCE_TAIL_MS / 20;
+            std::printf("Audio done, sending %dms silence tail then stopping\n", SILENCE_TAIL_MS);
+            for (int i = 0; i < SILENCE_TAIL_PKTS && call->active && call->injecting && g_running; i++) {
+                uint8_t rtp[12 + PKT_SAMPLES];
+                rtp[0] = 0x80;
+                rtp[1] = 0x00;
+                uint16_t seq_n = htons(seq++);
+                std::memcpy(rtp + 2, &seq_n, 2);
+                uint32_t ts_n = htonl(ts);
+                ts += PKT_SAMPLES;
+                std::memcpy(rtp + 4, &ts_n, 4);
+                uint32_t ssrc_n = htonl(ssrc);
+                std::memcpy(rtp + 8, &ssrc_n, 4);
+                std::memset(rtp + 12, 0x7F, PKT_SAMPLES);
+                sendto(target->relay_sock, rtp, sizeof(rtp), 0,
+                       (struct sockaddr*)&dest, sizeof(dest));
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            call->injecting = false;
+        } else {
+            std::printf("Audio done, sending silence until next injection or call end\n");
+            while (call->active && call->injecting && g_running) {
+                uint8_t rtp[12 + PKT_SAMPLES];
+                rtp[0] = 0x80;
+                rtp[1] = 0x00;
+                uint16_t seq_n = htons(seq++);
+                std::memcpy(rtp + 2, &seq_n, 2);
+                uint32_t ts_n = htonl(ts);
+                ts += PKT_SAMPLES;
+                std::memcpy(rtp + 4, &ts_n, 4);
+                uint32_t ssrc_n = htonl(ssrc);
+                std::memcpy(rtp + 8, &ssrc_n, 4);
+                std::memset(rtp + 12, 0x7F, PKT_SAMPLES);
+                sendto(target->relay_sock, rtp, sizeof(rtp), 0,
+                       (struct sockaddr*)&dest, sizeof(dest));
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
         }
 
         call->injecting_file.clear();
