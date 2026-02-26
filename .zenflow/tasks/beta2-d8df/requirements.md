@@ -14,9 +14,11 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - **Format**: 16-bit PCM, mono, 44100 Hz (resampled to 8kHz G.711 u-law by `test_sip_provider` before RTP injection via its `resample_to_8khz()` function)
 - **Language**: German
 - **Duration breakdown**:
-  - Samples 01-10: 3.1-4.6 seconds (samples <=4.0s fit in one VAD chunk; samples 05, 09, 10 at 4.2-4.6s will also be split at the 4s limit)
-  - Samples 11-20: 6.2-7.2 seconds (exceed VAD's 4s `vad_max_speech_samples_`, will be split into multiple chunks)
-- **VAD chunking impact**: Any file exceeding 4s will be segmented by VAD into multiple chunks at micro-pause boundaries. If the utterance has no natural pause within 4s, VAD will force-split at the 4s limit. This affects samples 05, 09, 10 (marginally over 4s) and all of samples 11-20. Must be specifically tested and optimized in Stages 3-4.
+  - Samples 01-10: 3.1-5.2 seconds
+    - Fit within 4s: samples 02 (3.58s), 03 (3.97s), 04 (3.07s), 07 (3.14s), 08 (3.71s)
+    - Will be split by VAD: samples 01 (4.23s), 05 (5.18s), 06 (4.88s), 09 (4.54s), 10 (4.55s)
+  - Samples 11-20: 6.2-7.2 seconds (all will be split into multiple chunks)
+- **VAD chunking impact**: Any file exceeding 4s will be segmented by VAD into multiple chunks at micro-pause boundaries. If the utterance has no natural pause within 4s, VAD will force-split at the 4s limit. This affects 5 of the first 10 samples (01, 05, 06, 09, 10) and all of samples 11-20 — meaning 15 of 20 test files will exercise VAD chunking. Must be specifically tested and optimized in Stages 3-4.
 - **Additional**: `llama_prompts.json` with 10 German prompts for LLaMA quality testing, each with per-prompt `max_words` (15-30) and `expected_keywords` for scoring
 
 ### 2.2 Frontend as Test Conductor
@@ -76,7 +78,7 @@ This PRD defines the requirements for **beta-stage testing and optimization** ac
 - Review interconnection between VAD, IAP, Whisper, and LLaMA (shut-up mechanism: SPEECH_ACTIVE/SPEECH_IDLE signals)
 - Optimize for performance and speed
 - Current parameters: 50ms analysis frames, 2.0x threshold multiplier, 400ms silence timeout, 4s max chunks
-- **Long-file handling**: Test files 11-20 (6.2-7.2s) and samples 05, 09, 10 (4.2-4.6s) exceed the 4s max chunk. VAD must correctly split these at natural pause boundaries. If force-splitting mid-utterance degrades Whisper accuracy, the 4s limit (`vad_max_speech_samples_` in `vad-service.cpp`) is a hardcoded private member with **no CLI flag** — changing it requires a source code modification and recompile, not a runtime parameter tweak. This is a critical optimization target for Stage 3-4 interaction.
+- **Long-file handling**: Samples 01, 05, 06, 09, 10 (4.2-5.2s) and all of samples 11-20 (6.2-7.2s) exceed the 4s max chunk. VAD must correctly split these at natural pause boundaries. If force-splitting mid-utterance degrades Whisper accuracy, the 4s limit (`vad_max_speech_samples_` in `vad-service.cpp`) is a hardcoded private member with **no CLI flag** — changing it requires a source code modification and recompile, not a runtime parameter tweak. This is a critical optimization target for Stage 3-4 interaction.
 
 ### Stage 4: Whisper Service Accuracy Testing
 **Objective**: Achieve excellent transcription accuracy with lightning-fast processing.
@@ -267,4 +269,4 @@ All ports are TCP on 127.0.0.1. Mgmt/Data ports are for inter-service pipeline c
 - **Credentials storage**: SQLite `settings` table (key-value), plaintext on disk. Accepted tradeoff for local single-machine tool. Values must not be logged or echoed in API/SSE.
 - **Model search**: HuggingFace API will be used for model discovery; models must be GGML/GGUF format compatible with whisper.cpp and llama.cpp
 - **Stage 11 fidelity**: Full-loop text comparison uses WER (Word Error Rate) <= 10%, not exact string match, due to inherent G.711 lossy encoding and Whisper probabilistic transcription
-- **VAD chunking for long files**: Samples 11-20 (6.2-7.2s) will be split by VAD at 4s max or at micro-pause boundaries. Accuracy impact is a primary optimization target in Stages 3-4.
+- **VAD chunking for long files**: 15 of 20 test files exceed 4s (samples 01, 05, 06, 09, 10 at 4.2-5.2s; samples 11-20 at 6.2-7.2s) and will be split by VAD at 4s max or at micro-pause boundaries. Accuracy impact is a primary optimization target in Stages 3-4.
