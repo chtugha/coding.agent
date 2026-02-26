@@ -18,6 +18,8 @@
 #include <getopt.h>
 #include "interconnect.h"
 
+static constexpr int RTP_PORT_BASE = 10000;
+
 struct CallSession {
     int id;
     int line_index;
@@ -93,20 +95,20 @@ public:
         });
 
         cmd_port_ = whispertalk::service_cmd_port(whispertalk::ServiceType::SIP_CLIENT);
-        cmd_sock_ = socket(AF_INET, SOCK_STREAM, 0);
-        if (cmd_sock_ >= 0) {
+        int csock = socket(AF_INET, SOCK_STREAM, 0);
+        if (csock >= 0) {
             int opt = 1;
-            setsockopt(cmd_sock_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            setsockopt(csock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
             struct sockaddr_in addr{};
             addr.sin_family = AF_INET;
             addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             addr.sin_port = htons(cmd_port_);
-            if (bind(cmd_sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
-                listen(cmd_sock_, 4) < 0) {
-                close(cmd_sock_);
-                cmd_sock_ = -1;
+            if (bind(csock, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
+                listen(csock, 4) < 0) {
+                ::close(csock);
                 std::cerr << "Failed to bind command port " << cmd_port_ << std::endl;
             } else {
+                cmd_sock_.store(csock);
                 std::cout << "Command port listening on " << cmd_port_ << std::endl;
             }
         }
@@ -233,29 +235,29 @@ public:
             if (line->reg_thread.joinable()) line->reg_thread.join();
         }
         out_thread.join();
-        if (cmd_sock_ >= 0) { close(cmd_sock_); cmd_sock_ = -1; }
+        int sock = cmd_sock_.exchange(-1);
+        if (sock >= 0) ::close(sock);
         cmd_thread.join();
         interconnect_.shutdown();
     }
 
 private:
-    int cmd_sock_ = -1;
+    std::atomic<int> cmd_sock_{-1};
     uint16_t cmd_port_ = 0;
 
     void command_listener_loop() {
         while (running_) {
-            if (cmd_sock_ < 0) {
+            int lsock = cmd_sock_.load();
+            if (lsock < 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
-            struct pollfd pfd = {cmd_sock_, POLLIN, 0};
+            struct pollfd pfd = {lsock, POLLIN, 0};
             int ret = poll(&pfd, 1, 200);
             if (ret <= 0) continue;
             if (!(pfd.revents & POLLIN)) continue;
 
-            struct sockaddr_in client_addr{};
-            socklen_t clen = sizeof(client_addr);
-            int csock = accept(cmd_sock_, (struct sockaddr*)&client_addr, &clen);
+            int csock = accept(lsock, nullptr, nullptr);
             if (csock < 0) continue;
 
             struct timeval tv{2, 0};
@@ -359,7 +361,7 @@ private:
             session->remote_ip = inet_ntoa(sender.sin_addr);
         }
 
-        session->local_rtp_port = 10000 + cid;
+        session->local_rtp_port = RTP_PORT_BASE + cid;
         session->rtp_sock = socket(AF_INET, SOCK_DGRAM, 0);
         struct sockaddr_in raddr{};
         raddr.sin_family = AF_INET;

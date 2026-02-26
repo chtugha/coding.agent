@@ -32,9 +32,12 @@
 static std::atomic<bool> g_running{true};
 static void sig_handler(int) { g_running = false; }
 
+static constexpr int WSP_SAMPLE_RATE = 16000;
+static constexpr int WSP_SAMPLES_PER_MS = WSP_SAMPLE_RATE / 1000;
+
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
-    size_t min_speech_samples_ = 16000 / 2;
+    size_t min_speech_samples_ = WSP_SAMPLE_RATE / 2;
 
 public:
     WhisperService(const std::string& model_path, const std::string& language = "de") 
@@ -159,9 +162,7 @@ private:
 
             size_t sample_count = pkt.payload_size / sizeof(float);
             const float* samples = reinterpret_cast<const float*>(pkt.payload.data());
-
-            std::vector<float> audio(samples, samples + sample_count);
-            transcribe_and_send(pkt.call_id, audio);
+            transcribe_and_send(pkt.call_id, samples, sample_count);
         }
     }
 
@@ -226,28 +227,28 @@ private:
     // Uses GREEDY decoding for speed — on short chunks the accuracy difference vs beam search
     // is negligible, but inference is 3-5x faster. audio_ctx=0 uses full encoder context
     // matching whisper-cli default behavior.
-    void transcribe_and_send(uint32_t call_id, const std::vector<float>& audio) {
-        if (audio.size() < min_speech_samples_) {
+    void transcribe_and_send(uint32_t call_id, const float* audio, size_t audio_len) {
+        if (audio_len < min_speech_samples_) {
             log_fwd_.forward("DEBUG", call_id,
                 "Skipping chunk: %zu samples (%.0fms) below minimum %zu",
-                audio.size(), audio.size() / 16.0, min_speech_samples_);
+                audio_len, audio_len / (double)WSP_SAMPLES_PER_MS, min_speech_samples_);
             return;
         }
 
         float rms = 0.0f;
-        for (size_t i = 0; i < audio.size(); ++i) rms += audio[i] * audio[i];
-        rms = std::sqrt(rms / audio.size());
+        for (size_t i = 0; i < audio_len; ++i) rms += audio[i] * audio[i];
+        rms = std::sqrt(rms / audio_len);
 
         float peak = 0.0f;
-        for (auto s : audio) peak = std::max(peak, std::abs(s));
+        for (size_t i = 0; i < audio_len; ++i) peak = std::max(peak, std::abs(audio[i]));
 
         log_fwd_.forward("DEBUG", call_id,
             "Audio chunk: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
-            audio.size(), audio.size() / 16.0, rms, peak);
+            audio_len, audio_len / (double)WSP_SAMPLES_PER_MS, rms, peak);
 
         if (rms < 0.005f) {
             log_fwd_.forward("DEBUG", call_id,
-                "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / 16.0);
+                "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio_len / (double)WSP_SAMPLES_PER_MS);
             return;
         }
 
@@ -271,7 +272,7 @@ private:
 
         auto t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(whisper_mutex_);
-        int result = whisper_full(ctx_, wparams, audio.data(), audio.size());
+        int result = whisper_full(ctx_, wparams, audio, (int)audio_len);
 
         if (result == 0) {
             auto t1 = std::chrono::steady_clock::now();
@@ -288,7 +289,7 @@ private:
                     return;
                 }
 
-                double audio_dur_ms = audio.size() / 16.0;
+                double audio_dur_ms = audio_len / (double)WSP_SAMPLES_PER_MS;
                 double rtf = whisper_ms / audio_dur_ms;
                 std::cout << "[" << call_id << "] Transcription (" << whisper_ms << "ms, RTF=" 
                           << std::fixed << std::setprecision(2) << rtf << "): " << text << std::endl;

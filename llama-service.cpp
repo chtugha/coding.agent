@@ -126,7 +126,8 @@ public:
         work_cv_.notify_all();
         if (receiver_thread.joinable()) receiver_thread.join();
         if (worker_thread.joinable()) worker_thread.join();
-        if (cmd_sock_ >= 0) { close(cmd_sock_); cmd_sock_ = -1; }
+        int sock = cmd_sock_.exchange(-1);
+        if (sock >= 0) ::close(sock);
         if (cmd_thread.joinable()) cmd_thread.join();
         interconnect_.shutdown();
     }
@@ -246,6 +247,7 @@ private:
         auto gen_start = std::chrono::steady_clock::now();
         std::string response;
         llama_token id;
+        llama_batch single_batch = llama_batch_init(1, 0, 1);
         for (int i = 0; i < MAX_TOKENS; ++i) {
             if (!call->generating) {
                 std::cout << "⚠️  [" << cid << "] Generation interrupted" << std::endl;
@@ -263,21 +265,19 @@ private:
                 if (last == '.' || last == '?' || last == '!') break;
             }
 
-            llama_batch b = llama_batch_init(1, 0, 1);
-            b.n_tokens = 1;
-            b.token[0] = id;
-            b.pos[0] = call->n_past;
-            b.n_seq_id[0] = 1;
-            b.seq_id[0][0] = call->seq_id;
-            b.logits[0] = true;
+            single_batch.n_tokens = 1;
+            single_batch.token[0] = id;
+            single_batch.pos[0] = call->n_past;
+            single_batch.n_seq_id[0] = 1;
+            single_batch.seq_id[0][0] = call->seq_id;
+            single_batch.logits[0] = true;
             
-            if (llama_decode(ctx_, b) != 0) {
-                llama_batch_free(b);
+            if (llama_decode(ctx_, single_batch) != 0) {
                 break;
             }
             call->n_past++;
-            llama_batch_free(b);
         }
+        llama_batch_free(single_batch);
 
         call->generating = false;
         auto gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -348,11 +348,11 @@ private:
         addr.sin_port = htons(cmd_port);
         if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
             listen(server_fd, 4) < 0) {
-            close(server_fd);
+            ::close(server_fd);
             std::cerr << "Failed to bind command port " << cmd_port << std::endl;
             return;
         }
-        cmd_sock_ = server_fd;
+        cmd_sock_.store(server_fd);
         std::cout << "Command listener on port " << cmd_port << std::endl;
 
         while (running_) {
@@ -360,9 +360,7 @@ private:
             if (poll(&pfd, 1, 200) <= 0) continue;
             if (!(pfd.revents & POLLIN)) continue;
 
-            struct sockaddr_in client_addr{};
-            socklen_t clen = sizeof(client_addr);
-            int csock = accept(server_fd, (struct sockaddr*)&client_addr, &clen);
+            int csock = accept(server_fd, nullptr, nullptr);
             if (csock < 0) continue;
 
             struct timeval tv{10, 0};
@@ -374,13 +372,12 @@ private:
             if (n > 0) {
                 buf[n] = '\0';
                 std::string cmd(buf);
+                while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r')) cmd.pop_back();
                 std::string response = handle_command(cmd);
                 send(csock, response.c_str(), response.size(), 0);
             }
-            close(csock);
+            ::close(csock);
         }
-        close(server_fd);
-        cmd_sock_ = -1;
     }
 
     std::string handle_command(const std::string& cmd) {
@@ -459,7 +456,7 @@ private:
     }
 
     std::atomic<bool> running_;
-    int cmd_sock_ = -1;
+    std::atomic<int> cmd_sock_{-1};
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;

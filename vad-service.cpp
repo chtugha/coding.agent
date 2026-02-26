@@ -28,6 +28,9 @@
 #include <getopt.h>
 #include "interconnect.h"
 
+static constexpr int VAD_SAMPLE_RATE = 16000;
+static constexpr int VAD_SAMPLES_PER_MS = VAD_SAMPLE_RATE / 1000;
+
 static std::atomic<bool> g_running{true};
 static void sig_handler(int) { g_running = false; }
 
@@ -66,9 +69,8 @@ class VadService {
     int vad_silence_frames_ = 8;
     // vad_max_speech_samples_: 4s max chunk — keeps Whisper inference under ~500ms.
     //   Whisper's attention is O(n²) on audio length; 4s vs 10s is ~6x faster.
-    size_t vad_max_speech_samples_ = 16000 * 4;
-    // vad_min_speech_samples_: 0.5s minimum — don't transcribe noise bursts or clicks.
-    size_t vad_min_speech_samples_ = 16000 / 2;
+    size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 4;
+    size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;
     int vad_context_frames_ = 4;
     int vad_onset_frames_ = 3;
     int speech_signal_timeout_s_ = 10;
@@ -82,21 +84,21 @@ public:
 
     void set_vad_params(int window_ms, float threshold_mult, int silence_ms = -1) {
         if (window_ms >= 10 && window_ms <= 500) {
-            vad_frame_size_ = static_cast<size_t>(16 * window_ms);
+            vad_frame_size_ = static_cast<size_t>(VAD_SAMPLES_PER_MS * window_ms);
         }
         if (threshold_mult >= 0.5f && threshold_mult <= 10.0f) {
             vad_threshold_mult_ = threshold_mult;
         }
         if (silence_ms > 0) {
-            vad_silence_frames_ = silence_ms / std::max(1, (int)(vad_frame_size_ / 16));
+            vad_silence_frames_ = silence_ms / std::max(1, (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS));
         }
-        int window_actual = (int)(vad_frame_size_ / 16);
+        int window_actual = (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS);
         int silence_actual = vad_silence_frames_ * window_actual;
         std::cout << "VAD config: window=" << window_actual << "ms"
                   << " threshold=" << vad_threshold_mult_
                   << " silence=" << silence_actual << "ms"
-                  << " max_chunk=" << (vad_max_speech_samples_ / 16000) << "s"
-                  << " min_chunk=" << (vad_min_speech_samples_ * 1000 / 16000) << "ms"
+                  << " max_chunk=" << (vad_max_speech_samples_ / VAD_SAMPLE_RATE) << "s"
+                  << " min_chunk=" << (vad_min_speech_samples_ * 1000 / VAD_SAMPLE_RATE) << "ms"
                   << std::endl;
     }
 
@@ -286,7 +288,7 @@ private:
                                 call->audio_buffer.begin() + call->speech_start,
                                 call->audio_buffer.begin() + pos);
                             if (vad_logging_enabled_) {
-                                double dur_ms = to_send.size() / 16.0;
+                                double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                 log_fwd_.forward("DEBUG", call->id,
                                     "VAD speech_end (silence) — %zu samples (%.0fms) queued for transcription",
                                     to_send.size(), dur_ms);
@@ -312,7 +314,7 @@ private:
                                 call->audio_buffer.begin() + call->speech_start,
                                 call->audio_buffer.begin() + pos);
                             if (vad_logging_enabled_) {
-                                double dur_ms = to_send.size() / 16.0;
+                                double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                 log_fwd_.forward("DEBUG", call->id,
                                     "VAD speech_end (max_length) — %zu samples (%.0fms) queued for transcription",
                                     to_send.size(), dur_ms);
@@ -362,7 +364,7 @@ private:
                                     interconnect_.broadcast_speech_signal(call->id, false);
                                 }
                                 if (vad_logging_enabled_) {
-                                    double dur_ms = to_send.size() / 16.0;
+                                    double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                     log_fwd_.forward("DEBUG", call->id,
                                         "VAD speech_end (inactivity %dms) — %zu samples (%.0fms) queued",
                                         vad_inactivity_flush_ms_, to_send.size(), dur_ms);
@@ -420,7 +422,7 @@ private:
             if (vad_logging_enabled_) {
                 log_fwd_.forward("DEBUG", call_id,
                     "Skipping chunk: %zu samples (%.0fms) below minimum %zu",
-                    audio.size(), audio.size() / 16.0, vad_min_speech_samples_);
+                    audio.size(), audio.size() / (double)VAD_SAMPLES_PER_MS, vad_min_speech_samples_);
             }
             return;
         }
@@ -434,7 +436,7 @@ private:
         if (rms < 0.005f) {
             if (vad_logging_enabled_) {
                 log_fwd_.forward("DEBUG", call_id,
-                    "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / 16.0);
+                    "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / (double)VAD_SAMPLES_PER_MS);
             }
             return;
         }
@@ -444,7 +446,7 @@ private:
             for (auto s : audio) peak = std::max(peak, std::abs(s));
             log_fwd_.forward("INFO", call_id,
                 "VAD chunk -> Whisper: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
-                audio.size(), audio.size() / 16.0, rms, peak);
+                audio.size(), audio.size() / (double)VAD_SAMPLES_PER_MS, rms, peak);
         }
 
         whispertalk::Packet pkt(call_id, audio.data(), audio.size() * sizeof(float));

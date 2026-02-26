@@ -539,6 +539,11 @@ public:
             }
             ended_call_ids_.insert(call_id);
             active_call_ids_.erase(call_id);
+            if (ended_call_ids_.size() > 1000) {
+                auto it = ended_call_ids_.begin();
+                std::advance(it, ended_call_ids_.size() / 2);
+                ended_call_ids_.erase(ended_call_ids_.begin(), it);
+            }
         }
 
         if (!already_ended && call_end_handler_) {
@@ -896,6 +901,11 @@ private:
             if (ended_call_ids_.count(call_id) > 0) already_ended = true;
             ended_call_ids_.insert(call_id);
             active_call_ids_.erase(call_id);
+            if (ended_call_ids_.size() > 1000) {
+                auto it = ended_call_ids_.begin();
+                std::advance(it, ended_call_ids_.size() / 2);
+                ended_call_ids_.erase(ended_call_ids_.begin(), it);
+            }
         }
 
         if (!already_ended) {

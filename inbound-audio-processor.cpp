@@ -13,15 +13,18 @@
 static std::atomic<bool> g_running{true};
 static void sig_handler(int) { g_running = false; }
 
+static constexpr size_t RTP_HEADER_SIZE = 12;
+static constexpr size_t ULAW_FRAME_SIZE = 160;
+static constexpr int HB_LEN = 15;
+static constexpr int HB_CENTER = 7;
+
 struct CallState {
     int id;
     std::chrono::steady_clock::time_point last_activity;
-    // Tail of the previous packet's decoded samples used as history for the half-band
-    // FIR low-pass filter. Without this, samples at the start of every 20ms packet
-    // are computed with zero-padded boundaries instead of real prior audio, causing
-    // audible artifacts 50 times per second. Length matches HB_CENTER (7 taps).
-    static constexpr int FIR_HISTORY_LEN = 7;
-    float fir_history[FIR_HISTORY_LEN] = {};
+    float fir_history[HB_CENTER] = {};
+    float decoded[ULAW_FRAME_SIZE];
+    float ext[HB_CENTER + ULAW_FRAME_SIZE];
+    float pcm[ULAW_FRAME_SIZE * 2];
 };
 
 class InboundAudioProcessor {
@@ -133,13 +136,19 @@ private:
     }
 
     void processing_loop() {
+        static const float hb_filter[HB_LEN] = {
+            -0.0076f, 0.0000f, 0.0527f, 0.0000f, -0.1681f, 0.0000f, 0.6230f,
+             1.0000f,
+             0.6230f, 0.0000f, -0.1681f, 0.0000f, 0.0527f, 0.0000f, -0.0076f
+        };
+
         while (running_ && g_running) {
             whispertalk::Packet pkt;
             if (!interconnect_.recv_from_upstream(pkt, 100)) {
                 continue;
             }
 
-            if (!pkt.is_valid() || pkt.payload_size < 12) {
+            if (!pkt.is_valid() || pkt.payload_size < RTP_HEADER_SIZE) {
                 continue;
             }
 
@@ -147,70 +156,42 @@ private:
             auto state = get_or_create_call(pkt.call_id);
             state->last_activity = std::chrono::steady_clock::now();
 
-            size_t rtp_header_size = 12;
-            size_t payload_len = pkt.payload_size - rtp_header_size;
-            const uint8_t* rtp_payload = pkt.payload.data() + rtp_header_size;
+            size_t payload_len = pkt.payload_size - RTP_HEADER_SIZE;
+            if (payload_len > ULAW_FRAME_SIZE) payload_len = ULAW_FRAME_SIZE;
+            const uint8_t* rtp_payload = pkt.payload.data() + RTP_HEADER_SIZE;
 
-            // Decode G.711 μ-law → float32 and upsample 8kHz → 16kHz with anti-alias filter.
-            // Each RTP packet is 160 μ-law bytes (20ms @ 8kHz) → 320 float32 samples (20ms @ 16kHz).
-            //
-            // Step 1: Decode μ-law to float32 at 8kHz.
-            // Step 2: Zero-stuff (insert 0 between each sample) to get 16kHz.
-            // Step 3: Apply half-band FIR low-pass filter (cutoff ~3.8kHz) to remove
-            //         spectral copies above 4kHz that would otherwise alias and confuse
-            //         Whisper's feature extraction. The 15-tap Hamming-windowed sinc filter
-            //         provides ~40dB stopband attenuation with minimal group delay (~0.5ms).
-            static const float hb_filter[] = {
-                -0.0076f, 0.0000f, 0.0527f, 0.0000f, -0.1681f, 0.0000f, 0.6230f,
-                 1.0000f,
-                 0.6230f, 0.0000f, -0.1681f, 0.0000f, 0.0527f, 0.0000f, -0.0076f
-            };
-            static constexpr int HB_LEN = 15;
-            static constexpr int HB_CENTER = 7;
-
-            std::vector<float> decoded(payload_len);
             for (size_t i = 0; i < payload_len; ++i) {
-                decoded[i] = ulaw_table[rtp_payload[i]];
+                state->decoded[i] = ulaw_table[rtp_payload[i]];
             }
 
-            // Build extended source: [history(HB_CENTER samples) | current packet(payload_len samples)].
-            // The history contains the last HB_CENTER 8kHz decoded samples from the previous packet,
-            // allowing the FIR to compute correct values at packet boundaries instead of zero-padding.
-            // Without this, output samples 0..HB_CENTER-1 each reference 1-7 zeros instead of real
-            // prior audio — causing audible artifacts at every 20ms packet boundary (50x per second).
-            std::vector<float> ext(HB_CENTER + payload_len);
-            for (int i = 0; i < HB_CENTER; ++i) ext[i] = state->fir_history[i];
-            for (size_t i = 0; i < payload_len; ++i) ext[HB_CENTER + i] = decoded[i];
+            for (int i = 0; i < HB_CENTER; ++i) state->ext[i] = state->fir_history[i];
+            for (size_t i = 0; i < payload_len; ++i) state->ext[HB_CENTER + i] = state->decoded[i];
+            int ext_len = HB_CENTER + (int)payload_len;
 
-            std::vector<float> pcm(payload_len * 2);
-            for (size_t n = 0; n < payload_len * 2; ++n) {
+            size_t out_len = payload_len * 2;
+            for (size_t n = 0; n < out_len; ++n) {
                 float sum = 0.0f;
                 for (int k = 0; k < HB_LEN; ++k) {
-                    // src_idx_2x: position in the 2x zero-stuffed domain relative to current packet start.
-                    // Negative values index into the (zero-stuffed) history region.
                     int src_idx_2x = (int)n - k + HB_CENTER;
-                    if (src_idx_2x & 1) continue; // zero-stuffed sample — contributes 0
-                    int decoded_idx = src_idx_2x / 2; // index in 8kHz domain (may be negative = history)
-                    int ext_idx = decoded_idx + HB_CENTER; // shift into ext[] where history starts at 0
-                    if (ext_idx < 0 || ext_idx >= (int)ext.size()) continue;
-                    sum += ext[ext_idx] * hb_filter[k];
+                    if (src_idx_2x & 1) continue;
+                    int ext_idx = src_idx_2x / 2 + HB_CENTER;
+                    if (ext_idx < 0 || ext_idx >= ext_len) continue;
+                    sum += state->ext[ext_idx] * hb_filter[k];
                 }
-                pcm[n] = sum * 2.0f;
+                state->pcm[n] = sum * 2.0f;
             }
 
-            // Save the tail of this packet as history for the next packet's FIR computation.
             if (payload_len >= (size_t)HB_CENTER) {
                 for (int i = 0; i < HB_CENTER; ++i) {
-                    state->fir_history[i] = decoded[payload_len - HB_CENTER + i];
+                    state->fir_history[i] = state->decoded[payload_len - HB_CENTER + i];
                 }
             } else {
-                // Short packet: shift old history left, append new samples
                 int shift = (int)payload_len;
                 for (int i = 0; i < HB_CENTER - shift; ++i) state->fir_history[i] = state->fir_history[i + shift];
-                for (int i = 0; i < shift; ++i) state->fir_history[HB_CENTER - shift + i] = decoded[i];
+                for (int i = 0; i < shift; ++i) state->fir_history[HB_CENTER - shift + i] = state->decoded[i];
             }
 
-            whispertalk::Packet out_pkt(pkt.call_id, pcm.data(), pcm.size() * sizeof(float));
+            whispertalk::Packet out_pkt(pkt.call_id, state->pcm, out_len * sizeof(float));
             out_pkt.trace = pkt.trace;
             out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
             if (!interconnect_.send_to_downstream(out_pkt)) {

@@ -18,6 +18,9 @@
 static constexpr int AA_FILTER_TAPS = 15;
 static constexpr int AA_HALF_TAPS = AA_FILTER_TAPS / 2;
 static constexpr double AA_CUTOFF = 3400.0 / 12000.0;
+static constexpr int DOWNSAMPLE_RATIO = 3;
+static constexpr size_t ULAW_FRAME_SIZE = 160;
+static constexpr uint8_t ULAW_SILENCE = 0xFF;
 
 static const double* get_aa_coeffs() {
     static double coeffs[AA_FILTER_TAPS];
@@ -37,6 +40,8 @@ static const double* get_aa_coeffs() {
     return coeffs;
 }
 
+static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 24000;
+
 struct CallState {
     uint32_t id;
     std::mutex mutex;
@@ -44,6 +49,8 @@ struct CallState {
     size_t read_pos = 0;
     std::chrono::steady_clock::time_point last_activity;
     float fir_history[AA_HALF_TAPS] = {};
+    float ext[AA_HALF_TAPS + OAP_MAX_PREALLOC_SAMPLES];
+    uint8_t ulaw_buf[OAP_MAX_PREALLOC_SAMPLES / DOWNSAMPLE_RATIO];
 
     void compact() {
         if (read_pos > 4096 && read_pos > buffer.size() / 2) {
@@ -181,7 +188,7 @@ private:
                 freq = std::max(100, std::min(4000, std::atoi(cmd.substr(12).c_str())));
             }
 
-            int in_rate = 24000;
+            static constexpr int in_rate = 24000;
             size_t in_samples = (size_t)(in_rate * dur_ms / 1000);
             std::vector<float> input(in_samples);
             for (size_t i = 0; i < in_samples; i++) {
@@ -209,21 +216,34 @@ private:
         return "ERROR:Unknown command\n";
     }
 
-    std::vector<uint8_t> downsample_and_encode(const float* input, size_t in_samples,
-                                               float* history = nullptr, int downsample_ratio = 3) {
+    void downsample_and_encode_into(const float* input, size_t in_samples,
+                                    CallState& state, std::vector<uint8_t>& out_ulaw) {
         const double* coeffs = get_aa_coeffs();
-        size_t out_len = in_samples / downsample_ratio;
+        size_t out_len = in_samples / DOWNSAMPLE_RATIO;
 
         size_t ext_len = AA_HALF_TAPS + in_samples;
-        std::vector<float> ext(ext_len);
-        if (history) {
-            std::memcpy(ext.data(), history, AA_HALF_TAPS * sizeof(float));
+        float* ext;
+        std::vector<float> ext_heap;
+        if (in_samples <= OAP_MAX_PREALLOC_SAMPLES) {
+            ext = state.ext;
+        } else {
+            ext_heap.resize(ext_len);
+            ext = ext_heap.data();
         }
-        std::memcpy(ext.data() + AA_HALF_TAPS, input, in_samples * sizeof(float));
+        std::memcpy(ext, state.fir_history, AA_HALF_TAPS * sizeof(float));
+        std::memcpy(ext + AA_HALF_TAPS, input, in_samples * sizeof(float));
 
-        std::vector<uint8_t> ulaw(out_len);
+        uint8_t* ulaw;
+        std::vector<uint8_t> ulaw_heap;
+        if (in_samples <= OAP_MAX_PREALLOC_SAMPLES) {
+            ulaw = state.ulaw_buf;
+        } else {
+            ulaw_heap.resize(out_len);
+            ulaw = ulaw_heap.data();
+        }
+
         for (size_t i = 0; i < out_len; i++) {
-            size_t src_pos = i * downsample_ratio + AA_HALF_TAPS;
+            size_t src_pos = i * DOWNSAMPLE_RATIO + AA_HALF_TAPS;
             double filtered = 0;
             for (int t = 0; t < AA_FILTER_TAPS; t++) {
                 int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
@@ -234,16 +254,37 @@ private:
             ulaw[i] = linear_to_ulaw(s16);
         }
 
-        if (history) {
-            if (in_samples >= (size_t)AA_HALF_TAPS) {
-                std::memcpy(history, input + in_samples - AA_HALF_TAPS, AA_HALF_TAPS * sizeof(float));
-            } else {
-                size_t keep = AA_HALF_TAPS - in_samples;
-                std::memmove(history, history + in_samples, keep * sizeof(float));
-                std::memcpy(history + keep, input, in_samples * sizeof(float));
-            }
+        if (in_samples >= (size_t)AA_HALF_TAPS) {
+            std::memcpy(state.fir_history, input + in_samples - AA_HALF_TAPS, AA_HALF_TAPS * sizeof(float));
+        } else {
+            size_t keep = AA_HALF_TAPS - in_samples;
+            std::memmove(state.fir_history, state.fir_history + in_samples, keep * sizeof(float));
+            std::memcpy(state.fir_history + keep, input, in_samples * sizeof(float));
         }
 
+        out_ulaw.insert(out_ulaw.end(), ulaw, ulaw + out_len);
+    }
+
+    std::vector<uint8_t> downsample_and_encode(const float* input, size_t in_samples) {
+        const double* coeffs = get_aa_coeffs();
+        size_t out_len = in_samples / DOWNSAMPLE_RATIO;
+
+        std::vector<float> ext(AA_HALF_TAPS + in_samples, 0.0f);
+        std::memcpy(ext.data() + AA_HALF_TAPS, input, in_samples * sizeof(float));
+
+        std::vector<uint8_t> ulaw(out_len);
+        size_t ext_len = ext.size();
+        for (size_t i = 0; i < out_len; i++) {
+            size_t src_pos = i * DOWNSAMPLE_RATIO + AA_HALF_TAPS;
+            double filtered = 0;
+            for (int t = 0; t < AA_FILTER_TAPS; t++) {
+                int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
+                if (idx >= 0 && idx < static_cast<int>(ext_len))
+                    filtered += ext[idx] * coeffs[t];
+            }
+            int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
+            ulaw[i] = linear_to_ulaw(s16);
+        }
         return ulaw;
     }
 
@@ -263,20 +304,21 @@ private:
                 continue;
             }
 
-            if (!pkt.is_valid() || pkt.payload_size == 0 || (pkt.payload_size % sizeof(float)) != 0) {
+            if (!pkt.is_valid() || pkt.payload_size <= sizeof(int32_t)) {
                 continue;
             }
 
             pkt.trace.record(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, 0);
             auto state = get_or_create_call(pkt.call_id);
 
-            size_t sample_count = pkt.payload_size / sizeof(float);
-            const float* pcm_buf = reinterpret_cast<const float*>(pkt.payload.data());
+            size_t audio_bytes = pkt.payload_size - sizeof(int32_t);
+            if (audio_bytes == 0 || (audio_bytes % sizeof(float)) != 0) continue;
+            size_t sample_count = audio_bytes / sizeof(float);
+            const float* pcm_buf = reinterpret_cast<const float*>(pkt.payload.data() + sizeof(int32_t));
 
             std::lock_guard<std::mutex> lock(state->mutex);
             state->last_activity = std::chrono::steady_clock::now();
-            std::vector<uint8_t> ulaw = downsample_and_encode(pcm_buf, sample_count, state->fir_history);
-            state->buffer.insert(state->buffer.end(), ulaw.begin(), ulaw.end());
+            downsample_and_encode_into(pcm_buf, sample_count, *state, state->buffer);
         }
     }
 
@@ -308,20 +350,20 @@ private:
             }
 
             for (auto& state : active) {
-                uint8_t frame[160];
+                uint8_t frame[ULAW_FRAME_SIZE];
                 {
                     std::lock_guard<std::mutex> lock(state->mutex);
                     size_t avail = state->buffer.size() - state->read_pos;
-                    if (avail >= 160) {
-                        memcpy(frame, state->buffer.data() + state->read_pos, 160);
-                        state->read_pos += 160;
+                    if (avail >= ULAW_FRAME_SIZE) {
+                        memcpy(frame, state->buffer.data() + state->read_pos, ULAW_FRAME_SIZE);
+                        state->read_pos += ULAW_FRAME_SIZE;
                         state->compact();
                     } else {
-                        memset(frame, 0xFF, 160);
+                        memset(frame, ULAW_SILENCE, ULAW_FRAME_SIZE);
                     }
                 }
 
-                whispertalk::Packet pkt(state->id, frame, 160);
+                whispertalk::Packet pkt(state->id, frame, ULAW_FRAME_SIZE);
                 pkt.trace.record(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, 1);
                 if (!interconnect_.send_to_downstream(pkt)) {
                     if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
