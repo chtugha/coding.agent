@@ -93,9 +93,9 @@ Optimize IAP audio processing for speed and quality.
    - Navigate to Beta Testing → Test 2: IAP Codec Quality
    - Select each test file (or all 20), run quality test
    - Read results: SNR, THD, latency per file
-2. **Profile per-packet latency**:
-   - If latency > 15ms, investigate bottlenecks in G.711 decode and FIR upsample
-   - Verify 15-tap half-band FIR filter runs within 5-15ms target
+2. **Profile per-packet latency** (total target: 5-15ms per packet, max 50ms):
+   - If total latency > 15ms, investigate bottlenecks in G.711 decode and FIR upsample
+   - The 15-tap FIR on 160 samples should be sub-millisecond on Apple Silicon; focus on overall pipeline latency
    - Ensure FIR history persists across packet boundaries (`CallState::fir_history`)
 3. **Audio enhancement investigation**:
    - Evaluate adding pre-emphasis filter (6dB/octave high-pass) for speech clarity
@@ -120,7 +120,7 @@ Optimize VAD for smooth, fast operation and correct interconnection.
    - 15 of 20 test files exceed 4s and will be force-split
    - Add `--vad-max-chunk-ms` CLI flag to make max chunk configurable
    - Consider increasing to 5-6s or adding smart-split (energy dip detection near boundary)
-   - Expose via `/api/whisper/vad_config` and add slider to Beta Testing UI
+   - Expose via `/api/whisper/vad_config` (note: this endpoint lives on the frontend for historical reasons, not on the VAD service itself) and add slider to Beta Testing UI
 3. **Test interconnection**:
    - Start pipeline: SIP Client + IAP + VAD (via Pipeline Services page)
    - Inject audio, verify VAD segments arrive downstream
@@ -188,13 +188,13 @@ Add Credentials page to frontend for HuggingFace and GitHub tokens.
 
 Search HuggingFace for better Whisper models and compare performance.
 
-1. **Add HuggingFace model search API**:
+1. **Implement HuggingFace model search API** (new endpoint, does not exist yet):
    - New endpoint `POST /api/models/search` in `frontend.cpp`
    - Calls HuggingFace API (`https://huggingface.co/api/models`) with filters: task=automatic-speech-recognition, language=de
    - Uses stored `hf_token` from settings if available (unauthenticated fallback with warning)
    - Returns model list with name, downloads, likes, tags
-2. **Add model download API**:
-   - New endpoint `POST /api/models/download`
+2. **Implement model download API** (new endpoint, does not exist yet):
+   - New endpoint `POST /api/models/download` in `frontend.cpp`
    - Streams model file from HuggingFace to `models/` directory
    - Requires `hf_token` for gated models (clear error if missing)
    - Progress tracking via async task
@@ -239,10 +239,9 @@ Test LLaMA TCP interconnection and optimize for short, clear German responses.
 
 Search HuggingFace for better LLaMA models and compare performance.
 
-1. **Extend model search for LLaMA**:
+1. **Extend model search for LLaMA** (reuses `/api/models/search` and `/api/models/download` endpoints built in Stage 6):
    - Add task filter `text-generation` to `/api/models/search`
    - Filter for GGUF format, German-capable models
-   - Reuse download infrastructure from Stage 6
 2. **Benchmark LLaMA models**:
    - Register alternative models via Models page → LLaMA Models tab
    - Run benchmarks via existing LLaMA benchmark runner
@@ -258,7 +257,7 @@ Search HuggingFace for better LLaMA models and compare performance.
 
 Validate interrupt/barge-in functionality.
 
-1. **Start full pipeline** up to Kokoro: SIP Client + IAP + VAD + Whisper + LLaMA + Kokoro (via Pipeline Services)
+1. **Start full pipeline** up to OAP: SIP Client + IAP + VAD + Whisper + LLaMA + Kokoro + OAP (via Pipeline Services) — OAP is needed for Kokoro audio to reach the SIP Client and actually stop playback
 2. **Test interrupt flow** via Beta Testing page:
    - Click "Shut-up Test" button in LLaMA test card
    - This injects speech to trigger LLaMA response, then injects interrupting speech mid-generation
@@ -346,8 +345,8 @@ Test outbound audio processing and validate full-loop audio fidelity with 2 line
    - Check for memory leaks (growing RSS over time)
    - Check for packet loss or buffer overflows
    - Optimize any service exceeding latency targets
-4. **Final code cleanup**:
-   - Remove dead code across all services
+4. **Final code cleanup sweep** (note: each prior stage should clean code incrementally; this is a final pass):
+   - Remove any remaining dead code across all services
    - Ensure all services log correctly to frontend
    - Verify crash-proof logging throughout
 5. **Verification**: 2 minutes stable operation. No crashes. No memory leaks. Acceptable latency. All metrics visible in frontend.
