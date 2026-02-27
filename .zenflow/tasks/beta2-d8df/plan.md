@@ -57,7 +57,7 @@ Important: unit tests must be part of each implementation task, not separate tas
 
 Save to `{@artifacts_path}/plan.md`.
 
-### [ ] Step: Stage 1 — SIP Client RTP Routing Test
+### [x] Step: Stage 1 — SIP Client RTP Routing Test
 <!-- chat-id: dd3b8e11-af65-4135-b0c4-675af6070b75 -->
 
 Test SIP Client RTP routing and TCP connection handling with IAP.

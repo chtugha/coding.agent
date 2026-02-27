@@ -498,7 +498,7 @@ private:
 
         const char* seed = R"(
             INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
-                ('SIP_CLIENT', 'bin/sip-client', '--lines 2 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
+                ('SIP_CLIENT', 'bin/sip-client', '--lines 1 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
                 ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
                 ('VAD_SERVICE', 'bin/vad-service', '', 'Voice Activity Detection + speech segmentation'),
                 ('WHISPER_SERVICE', 'bin/whisper-service', '--language de models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (CoreML/Metal)'),
@@ -1474,20 +1474,12 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </select>
 </div>
 <div class="wt-field">
-<label>Target Call/Line</label>
-<select class="wt-select" id="injectTargetCall" style="width:100%;padding:8px">
-<option value="1">Line 1</option>
-<option value="2">Line 2</option>
-<option value="3">Line 3</option>
-<option value="4">Line 4</option>
-</select>
-</div>
-<div class="wt-field">
-<label>Inject To</label>
+<label>Inject into Leg (username)</label>
 <select class="wt-select" id="injectLeg" style="width:100%;padding:8px">
-<option value="a">Leg A</option>
-<option value="b">Leg B</option>
+<option value="a">Leg A (first)</option>
+<option value="b">Leg B (second)</option>
 </select>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshInjectLegs()" style="margin-top:4px">&#x21BB; Refresh Legs</button>
 </div>
 <div style="display:flex;gap:8px">
 <button class="wt-btn wt-btn-primary" onclick="injectAudio()">&#x25B6; Inject Audio</button>
@@ -1575,43 +1567,33 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">SIP Lines Management</span></div>
-<div style="margin-bottom:16px">
-<div style="display:flex;gap:8px;margin-bottom:12px">
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="applyPreset(1)">1 Line</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="applyPreset(2)">2 Lines</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="applyPreset(4)">4 Lines</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="applyPreset(6)">6 Lines</button>
-<button class="wt-btn wt-btn-sm wt-btn-primary" onclick="refreshLines()" style="margin-left:auto">&#x21BB; Refresh</button>
-</div>
-</div>
-<div class="wt-field">
-<label>Add New Line</label>
-<div style="display:flex;gap:8px;margin-bottom:8px">
-<input class="wt-input" id="newLineUser" placeholder="Username (e.g., alice)" style="flex:1">
-<input class="wt-input" id="newLineServer" placeholder="Server IP (default: 127.0.0.1)" style="flex:1">
-</div>
+<div class="wt-card-header">
+<span class="wt-card-title">SIP Lines Management</span>
 <div style="display:flex;gap:8px">
-<input class="wt-input" id="newLinePassword" placeholder="Password (optional)" style="flex:1" type="password">
-<button class="wt-btn wt-btn-primary" onclick="addLine()">&#x2795; Add Line</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshSipPanel()">&#x21BB; Refresh</button>
 </div>
 </div>
-<div id="sipLinesStatus" style="margin-top:12px;font-size:13px"></div>
-<div id="sipLinesTable" style="margin-top:16px">
-<table class="wt-table" id="linesTable" style="width:100%">
-<thead>
-<tr>
-<th>Index</th>
-<th>Username</th>
-<th>Status</th>
-<th>Actions</th>
-</tr>
-</thead>
-<tbody id="linesTableBody">
-<tr><td colspan="4" style="text-align:center;color:var(--wt-text-secondary)">No lines configured. Click "Refresh" to load lines.</td></tr>
-</tbody>
-</table>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:12px">
+  Enable lines (check-field 1) to register them with the SIP provider. Connect lines (check-field 2) to start a conference call between selected lines. Up to 20 lines supported.
+</p>
+<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(1)">1 Line</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(2)">2 Lines</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(4)">4 Lines</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(6)">6 Lines</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(10)">10 Lines</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(20)">20 Lines</button>
 </div>
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;margin-bottom:12px" id="sipLinesGrid"></div>
+<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+<button class="wt-btn wt-btn-primary" onclick="applyEnabledLines()">&#x2705; Apply Enabled</button>
+<button class="wt-btn wt-btn-success" onclick="startConference()">&#x260E; Start Conference</button>
+<button class="wt-btn wt-btn-danger" onclick="hangupConference()">&#x1F4F5; Hangup</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="selectAllConnect()">Connect All</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="deselectAllConnect()">Disconnect All</button>
+</div>
+<div id="sipLinesStatus" style="margin-top:8px;font-size:13px"></div>
+<div id="sipProviderUsers" style="margin-top:12px;font-size:12px;color:var(--wt-text-secondary)"></div>
 </div>
 
 <div class="wt-card">
@@ -1964,7 +1946,7 @@ function showPage(p){
   currentPage=p;
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
-  if(p==='beta-testing'){refreshTestFiles();loadVadConfig();loadLlamaPrompts();}
+  if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();}
   if(p==='models'){loadModels();loadModelComparison();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
@@ -2403,6 +2385,19 @@ function saveAllLogLevels(){
   Promise.all(promises).then(()=>alert('Log levels saved successfully!')).catch(e=>alert('Error saving log levels: '+e));
 }
 
+function refreshInjectLegs(){
+  fetch('http://localhost:'+TSP_PORT+'/calls').then(r=>r.json()).then(d=>{
+    var sel=document.getElementById('injectLeg');
+    sel.innerHTML='<option value="a">Leg A (first)</option><option value="b">Leg B (second)</option>';
+    if(d.calls&&d.calls.length>0&&d.calls[0].legs){
+      sel.innerHTML='';
+      d.calls[0].legs.forEach(function(l){
+        sel.innerHTML+='<option value="'+escapeHtml(l.user)+'">'+escapeHtml(l.user)+(l.answered?' (connected)':' (pending)')+'</option>';
+      });
+    }
+  }).catch(function(){});
+}
+
 function injectAudio(){
   var file=document.getElementById('injectFileSelect').value;
   var leg=document.getElementById('injectLeg').value;
@@ -2413,12 +2408,12 @@ function injectAudio(){
     body:JSON.stringify({file:file,leg:leg})})
     .then(r=>r.json()).then(d=>{
       if(d.success||d.injecting){
-        status.innerHTML='<span style="color:var(--wt-success)">✓ Injecting: '+escapeHtml(d.injecting||file)+' to leg '+escapeHtml(d.leg||leg)+'</span>';
+        status.innerHTML='<span style="color:var(--wt-success)">Injecting: '+escapeHtml(d.injecting||file)+' to leg '+escapeHtml(d.leg||leg)+'</span>';
       }else{
-        status.innerHTML='<span style="color:var(--wt-danger)">✗ Injection failed: '+escapeHtml(d.error||'Unknown error')+'</span>';
+        status.innerHTML='<span style="color:var(--wt-danger)">Injection failed: '+escapeHtml(d.error||'Unknown error')+'</span>';
       }
     }).catch(e=>{
-      status.innerHTML='<span style="color:var(--wt-danger)">✗ Error: Test SIP Provider not reachable (is it running on port '+TSP_PORT+'?)</span>';
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: Test SIP Provider not reachable (is it running on port '+TSP_PORT+'?)</span>';
     });
 }
 
@@ -2798,13 +2793,15 @@ function checkSipProvider(){
   var status=document.getElementById('sipProviderStatus');
   status.innerHTML='<p style="color:var(--wt-accent)">Checking...</p>';
   fetch('http://localhost:'+TSP_PORT+'/status').then(r=>r.json()).then(d=>{
-    var html='<p style="color:var(--wt-success)">✓ Test SIP Provider is running</p>';
-    html+='<p style="font-size:12px;color:var(--wt-text-secondary)">Call active: '+(d.call_active?'Yes':'No')+'</p>';
-    if(d.relay_stats){html+='<p style="font-size:12px;color:var(--wt-text-secondary)">Pkts A→B: '+d.relay_stats.pkts_a_to_b+', B→A: '+d.relay_stats.pkts_b_to_a+'</p>';}
+    var html='<p style="color:var(--wt-success)">Test SIP Provider is running</p>';
+    html+='<p style="font-size:12px;color:var(--wt-text-secondary)">Call active: '+(d.call_active?'Yes':'No');
+    if(d.legs) html+=', Legs: '+d.legs;
+    html+='</p>';
+    if(d.relay_stats){html+='<p style="font-size:12px;color:var(--wt-text-secondary)">Total pkts: '+d.relay_stats.total_pkts+'</p>';}
     status.innerHTML=html;
   }).catch(e=>{
-    status.innerHTML='<p style="color:var(--wt-danger)">✗ Test SIP Provider is NOT running</p>'+
-      '<p style="font-size:12px;color:var(--wt-text-secondary)">Start it from the Tests page</p>';
+    status.innerHTML='<p style="color:var(--wt-danger)">Test SIP Provider is NOT running</p>'+
+      '<p style="font-size:12px;color:var(--wt-text-secondary)">Start it from the Services page</p>';
   });
 }
 
@@ -2947,108 +2944,155 @@ document.getElementById('sqlQuery').addEventListener('keydown',function(e){
   if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();runQuery();}
 });
 
-function refreshLines(){
+var sipLineNames=['alice','bob','charlie','david','eve','frank','george','helen','ivan','julia',
+  'karl','laura','max','nina','oscar','petra','quinn','rosa','sam','tina'];
+
+function buildSipLinesGrid(){
+  var grid=document.getElementById('sipLinesGrid');
+  if(!grid) return;
+  var html='';
+  html+='<div style="grid-column:1/-1;display:grid;grid-template-columns:60px 60px 1fr;gap:4px;font-size:11px;font-weight:600;color:var(--wt-text-secondary);padding:0 4px">';
+  html+='<div>Enable</div><div>Connect</div><div>Line</div></div>';
+  for(var i=0;i<20;i++){
+    var name=sipLineNames[i];
+    var num=i+1;
+    html+='<div style="display:grid;grid-template-columns:60px 60px 1fr;gap:4px;align-items:center;padding:4px 4px;border-radius:4px;background:var(--wt-card-hover)" id="sipLine_'+i+'">';
+    html+='<div style="text-align:center"><input type="checkbox" id="sipEnable_'+i+'" onchange="onEnableChange('+i+')" title="Enable line '+num+'"></div>';
+    html+='<div style="text-align:center"><input type="checkbox" id="sipConnect_'+i+'" disabled title="Connect line '+num+' to conference"></div>';
+    html+='<div style="font-size:12px"><span id="sipLineName_'+i+'">'+escapeHtml(name)+'</span> <span id="sipLineStatus_'+i+'" style="color:var(--wt-text-secondary);font-size:10px"></span></div>';
+    html+='</div>';
+  }
+  grid.innerHTML=html;
+}
+
+function onEnableChange(idx){
+  var en=document.getElementById('sipEnable_'+idx);
+  var cn=document.getElementById('sipConnect_'+idx);
+  if(en.checked){cn.disabled=false;}else{cn.checked=false;cn.disabled=true;}
+}
+
+function enableLinesPreset(count){
+  for(var i=0;i<20;i++){
+    var en=document.getElementById('sipEnable_'+i);
+    var cn=document.getElementById('sipConnect_'+i);
+    if(i<count){en.checked=true;cn.disabled=false;}else{en.checked=false;cn.checked=false;cn.disabled=true;}
+  }
+  applyEnabledLines();
+}
+
+function selectAllConnect(){
+  for(var i=0;i<20;i++){
+    var en=document.getElementById('sipEnable_'+i);
+    var cn=document.getElementById('sipConnect_'+i);
+    if(en.checked){cn.checked=true;}
+  }
+}
+
+function deselectAllConnect(){
+  for(var i=0;i<20;i++){
+    document.getElementById('sipConnect_'+i).checked=false;
+  }
+}
+
+function applyEnabledLines(){
   var statusDiv=document.getElementById('sipLinesStatus');
-  statusDiv.innerHTML='<span style="color:var(--wt-warning)">&#x23F3; Loading lines...</span>';
+  var enabledNames=[];
+  for(var i=0;i<20;i++){
+    if(document.getElementById('sipEnable_'+i).checked){
+      enabledNames.push(sipLineNames[i]);
+    }
+  }
+  statusDiv.innerHTML='<span style="color:var(--wt-warning)">Configuring '+enabledNames.length+' line(s)...</span>';
   fetch('/api/sip/lines').then(r=>r.json()).then(d=>{
-    if(d.error){
-      statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+d.error+'</span>';
-      return;
-    }
-    var tbody=document.getElementById('linesTableBody');
-    if(d.lines.length===0){
-      tbody.innerHTML='<tr><td colspan="4" style="text-align:center;color:var(--wt-text-secondary)">No lines configured</td></tr>';
-      statusDiv.innerHTML='<span style="color:var(--wt-text-secondary)">No lines configured</span>';
-    }else{
-      var html='';
-      d.lines.forEach(function(line){
-        var statusBadge=line.registered?'<span style="color:var(--wt-success)">&#x2713; Registered</span>':'<span style="color:var(--wt-text-secondary)">&#x25CB; Unregistered</span>';
-        html+='<tr>';
-        html+='<td>'+line.index+'</td>';
-        html+='<td>'+line.user+'</td>';
-        html+='<td>'+statusBadge+'</td>';
-        html+='<td><button class="wt-btn wt-btn-sm wt-btn-danger" onclick="removeLine('+line.index+')">&#x2716; Remove</button></td>';
-        html+='</tr>';
-      });
-      tbody.innerHTML=html;
-      statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Loaded '+d.lines.length+' line(s)</span>';
-    }
-  }).catch(e=>{
-    statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+e+'</span>';
-  });
-}
-
-function addLine(){
-  var user=document.getElementById('newLineUser').value.trim();
-  var server=document.getElementById('newLineServer').value.trim();
-  var password=document.getElementById('newLinePassword').value;
-  if(!user){alert('Please enter a username');return;}
-  var statusDiv=document.getElementById('sipLinesStatus');
-  statusDiv.innerHTML='<span style="color:var(--wt-warning)">&#x23F3; Adding line '+user+'...</span>';
-  fetch('/api/sip/add-line',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({user:user,server:server||'127.0.0.1',password:password})
-  }).then(r=>r.json()).then(d=>{
-    if(d.success){
-      statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Line added: '+user+'</span>';
-      document.getElementById('newLineUser').value='';
-      document.getElementById('newLineServer').value='';
-      document.getElementById('newLinePassword').value='';
-      setTimeout(refreshLines,500);
-    }else{
-      statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+(d.error||'Failed to add line')+'</span>';
-    }
-  }).catch(e=>{
-    statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+e+'</span>';
-  });
-}
-
-function removeLine(index){
-  if(!confirm('Remove line '+index+'?'))return;
-  var statusDiv=document.getElementById('sipLinesStatus');
-  statusDiv.innerHTML='<span style="color:var(--wt-warning)">&#x23F3; Removing line '+index+'...</span>';
-  fetch('/api/sip/remove-line',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({index:index.toString()})
-  }).then(r=>r.json()).then(d=>{
-    if(d.success){
-      statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Line removed</span>';
-      setTimeout(refreshLines,500);
-    }else{
-      statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+(d.error||'Failed to remove line')+'</span>';
-    }
-  }).catch(e=>{
-    statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+e+'</span>';
-  });
-}
-
-function applyPreset(count){
-  if(!confirm('Configure '+count+' line(s)? This will use usernames alice, bob, charlie, etc.'))return;
-  var statusDiv=document.getElementById('sipLinesStatus');
-  statusDiv.innerHTML='<span style="color:var(--wt-warning)">&#x23F3; Configuring '+count+' line(s)...</span>';
-  var names=['alice','bob','charlie','david','eve','frank'];
-  var added=0;
-  var addNext=function(i){
-    if(i>=count){
-      statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Configured '+added+'/'+count+' line(s)</span>';
-      setTimeout(refreshLines,1000);
-      return;
-    }
-    fetch('/api/sip/add-line',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({user:names[i]||'user'+i,server:'127.0.0.1',password:''})
-    }).then(r=>r.json()).then(d=>{
-      if(d.success)added++;
-      setTimeout(function(){addNext(i+1);},300);
-    }).catch(e=>{
-      console.error('Failed to add line:',e);
-      setTimeout(function(){addNext(i+1);},300);
+    var currentUsers=(d.lines||[]).map(function(l){return l.user;});
+    var toAdd=enabledNames.filter(function(n){return currentUsers.indexOf(n)<0;});
+    var toRemove=(d.lines||[]).filter(function(l){return enabledNames.indexOf(l.user)<0;});
+    var ops=[];
+    toRemove.forEach(function(l){
+      ops.push(fetch('/api/sip/remove-line',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:l.index.toString()})}));
     });
-  };
-  addNext(0);
+    Promise.all(ops).then(function(){
+      var addNext=function(i){
+        if(i>=toAdd.length){
+          statusDiv.innerHTML='<span style="color:var(--wt-success)">Applied '+enabledNames.length+' line(s)</span>';
+          setTimeout(refreshSipPanel,1000);
+          return;
+        }
+        fetch('/api/sip/add-line',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({user:toAdd[i],server:'127.0.0.1',password:''})
+        }).then(function(){setTimeout(function(){addNext(i+1);},200);}).catch(function(){setTimeout(function(){addNext(i+1);},200);});
+      };
+      addNext(0);
+    });
+  }).catch(function(e){
+    statusDiv.innerHTML='<span style="color:var(--wt-danger)">Error: '+e+'</span>';
+  });
+}
+
+function refreshSipPanel(){
+  var statusDiv=document.getElementById('sipLinesStatus');
+  fetch('/api/sip/lines').then(r=>r.json()).then(d=>{
+    var lines=d.lines||[];
+    var lineUsers=lines.map(function(l){return l.user;});
+    var regMap={};
+    lines.forEach(function(l){regMap[l.user]=l.registered;});
+    for(var i=0;i<20;i++){
+      var name=sipLineNames[i];
+      var en=document.getElementById('sipEnable_'+i);
+      var cn=document.getElementById('sipConnect_'+i);
+      var st=document.getElementById('sipLineStatus_'+i);
+      if(lineUsers.indexOf(name)>=0){
+        en.checked=true;cn.disabled=false;
+        st.innerHTML=regMap[name]?'<span style="color:var(--wt-success)">registered</span>':'<span style="color:var(--wt-warning)">pending</span>';
+      }else{
+        en.checked=false;cn.checked=false;cn.disabled=true;
+        st.innerHTML='';
+      }
+    }
+    statusDiv.innerHTML='<span style="color:var(--wt-success)">'+lines.length+' line(s) active</span>';
+  }).catch(function(e){
+    statusDiv.innerHTML='<span style="color:var(--wt-danger)">SIP Client not reachable</span>';
+  });
+  fetch('http://localhost:'+TSP_PORT+'/users').then(r=>r.json()).then(d=>{
+    var usersDiv=document.getElementById('sipProviderUsers');
+    var users=d.users||[];
+    if(users.length===0){usersDiv.innerHTML='No users registered at SIP provider';return;}
+    usersDiv.innerHTML='SIP Provider: '+users.length+'/'+d.max_lines+' registered — '+users.map(function(u){return u.username;}).join(', ');
+  }).catch(function(){
+    document.getElementById('sipProviderUsers').innerHTML='SIP provider not reachable';
+  });
+}
+
+function startConference(){
+  var statusDiv=document.getElementById('sipLinesStatus');
+  var users=[];
+  for(var i=0;i<20;i++){
+    if(document.getElementById('sipConnect_'+i).checked){
+      users.push(sipLineNames[i]);
+    }
+  }
+  if(users.length<2){statusDiv.innerHTML='<span style="color:var(--wt-danger)">Select at least 2 lines to connect</span>';return;}
+  statusDiv.innerHTML='<span style="color:var(--wt-warning)">Starting conference with '+users.length+' lines...</span>';
+  fetch('http://localhost:'+TSP_PORT+'/conference',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({users:users})
+  }).then(r=>r.json()).then(d=>{
+    if(d.success){
+      statusDiv.innerHTML='<span style="color:var(--wt-success)">Conference started with '+d.legs+' legs</span>';
+    }else{
+      statusDiv.innerHTML='<span style="color:var(--wt-danger)">Error: '+(d.error||'Failed')+'</span>';
+    }
+  }).catch(function(e){
+    statusDiv.innerHTML='<span style="color:var(--wt-danger)">SIP provider not reachable</span>';
+  });
+}
+
+function hangupConference(){
+  var statusDiv=document.getElementById('sipLinesStatus');
+  fetch('http://localhost:'+TSP_PORT+'/hangup',{method:'POST'}).then(r=>r.json()).then(d=>{
+    statusDiv.innerHTML='<span style="color:var(--wt-success)">'+(d.message||'Call ended')+'</span>';
+  }).catch(function(e){
+    statusDiv.innerHTML='<span style="color:var(--wt-danger)">SIP provider not reachable</span>';
+  });
 }
 
 var sipRtpTestInterval=null;
@@ -3783,7 +3827,7 @@ function loadAccuracyTrendChart(){
   }).catch(e=>console.error('Failed to load accuracy trend:',e));
 }
 
-if(currentPage==='beta-testing'){refreshTestFiles();loadVadConfig();}
+if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();}
 )JS";
         return js;
     }
@@ -4413,6 +4457,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // Parses GET_STATS response from SIP Client (see sip-client-main.cpp get_stats()).
+    // Wire format: "STATS <n_calls> DS:<0|1> <id>:<line>:<rx>:<tx>:<rx_bytes>:<tx_bytes>:<duration>:<fwd>:<discard> ..."
     void handle_sip_stats(struct mg_connection *c) {
         std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "GET_STATS");
         if (resp.empty()) {
@@ -4434,10 +4480,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         int count;
         iss >> count;
         
+        static constexpr size_t DS_PREFIX_LEN = 3; // "DS:" prefix length
         bool ds_connected = false;
         bool first = true;
         while (iss >> token) {
-            if (token.substr(0, 3) == "DS:") {
+            if (token.size() >= DS_PREFIX_LEN && token.substr(0, DS_PREFIX_LEN) == "DS:") {
                 ds_connected = (token == "DS:1");
                 continue;
             }

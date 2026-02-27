@@ -185,6 +185,11 @@ public:
         return out.str();
     }
 
+    // Returns stats wire format:
+    //   "STATS <n_calls> DS:<0|1> <id>:<line>:<rx>:<tx>:<rx_bytes>:<tx_bytes>:<duration>:<fwd>:<discard> ..."
+    // DS:1 = downstream (IAP) TCP connection active, DS:0 = disconnected.
+    // Per-call fields: id=call_id, line=line_index, rx/tx=RTP packet counts,
+    // rx_bytes/tx_bytes=total bytes, duration=seconds, fwd=forwarded to IAP, discard=discarded (IAP offline).
     std::string get_stats() {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         auto ds = interconnect_.downstream_state();

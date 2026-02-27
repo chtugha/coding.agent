@@ -1,4 +1,4 @@
-#include <vector>
+
 #include <string>
 #include <thread>
 #include <mutex>
@@ -25,6 +25,8 @@ static std::atomic<bool> g_running{true};
 
 void sig_handler(int) { g_running = false; }
 
+static constexpr int MAX_LINES = 20;
+
 struct RegisteredUser {
     std::string username;
     std::string ip;
@@ -40,24 +42,23 @@ struct CallLeg {
     int client_rtp_port;
     int relay_port;
     int relay_sock;
+    int inject_sock;
     bool answered;
 };
 
 struct ActiveCall {
     int id;
-    CallLeg leg_a;
-    CallLeg leg_b;
-    std::thread relay_a_to_b;
-    std::thread relay_b_to_a;
+    std::vector<CallLeg> legs;
+    std::vector<std::thread> relay_threads;
     std::thread inject_thread;
     std::atomic<bool> active{true};
     std::atomic<bool> relay_started{false};
     std::atomic<bool> injecting{false};
+    std::mutex inject_meta_mutex;
     std::string injecting_file;
-    std::atomic<uint64_t> pkts_a_to_b{0};
-    std::atomic<uint64_t> pkts_b_to_a{0};
-    std::atomic<uint64_t> bytes_a_to_b{0};
-    std::atomic<uint64_t> bytes_b_to_a{0};
+    std::atomic<int> injecting_leg_idx{-1};
+    std::atomic<uint64_t> total_pkts{0};
+    std::atomic<uint64_t> total_bytes{0};
     std::chrono::steady_clock::time_point started_at;
 };
 
@@ -243,6 +244,17 @@ static std::vector<int16_t> resample_to_8khz(const std::vector<int16_t>& samples
 
 static const char* CORS_HEADERS = "Content-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
 
+// TestSipProvider: a SIP B2BUA test provider supporting up to 20 lines.
+//
+// Lines register via SIP REGISTER. Calls are NOT auto-initiated.
+// The frontend controls which lines participate in a call via:
+//   - POST /conference {"users":["alice1","bob2",...]} — start conference between selected users
+//   - POST /hangup — end current call
+//   - GET  /users — list registered users
+//   - POST /inject {"file":"sample.wav","leg":"alice1"} — inject audio into a specific leg
+//   - GET  /status — call status and relay stats
+//   - GET  /files — list WAV files in Testfiles directory
+//   - GET  /calls — list active calls with per-leg detail
 class TestSipProvider {
 public:
     bool init(int sip_port, const std::string& local_ip, const std::string& testfiles_dir, int http_port) {
@@ -282,13 +294,13 @@ public:
             return false;
         }
 
-        std::printf("Test SIP Provider listening on %s:%d (HTTP: %d, Testfiles: %s)\n",
-                    local_ip.c_str(), sip_port, http_port, testfiles_dir.c_str());
+        std::printf("Test SIP Provider listening on %s:%d (HTTP: %d, Testfiles: %s, Max lines: %d)\n",
+                    local_ip.c_str(), sip_port, http_port, testfiles_dir.c_str(), MAX_LINES);
         return true;
     }
 
     void run() {
-        std::printf("Waiting for SIP clients to register...\n");
+        std::printf("Waiting for SIP clients to register (no auto-call — use /conference to start)...\n");
 
         while (g_running) {
             mg_mgr_poll(&mgr_, 1);
@@ -305,13 +317,6 @@ public:
                 buf[n] = '\0';
                 std::string msg(buf, n);
                 handle_sip_message(msg, sender);
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(users_mutex_);
-                if (users_.size() >= 2 && !call_initiated_) {
-                    initiate_call();
-                }
             }
         }
 
@@ -345,6 +350,12 @@ private:
             handle_status(c);
         } else if (mg_strcmp(hm->uri, mg_str("/calls")) == 0) {
             handle_calls(c);
+        } else if (mg_strcmp(hm->uri, mg_str("/users")) == 0) {
+            handle_users(c);
+        } else if (mg_strcmp(hm->uri, mg_str("/conference")) == 0) {
+            handle_conference(c, hm);
+        } else if (mg_strcmp(hm->uri, mg_str("/hangup")) == 0) {
+            handle_hangup(c);
         } else {
             mg_http_reply(c, 404, CORS_HEADERS, "{\"error\":\"Not found\"}");
         }
@@ -378,6 +389,106 @@ private:
         mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
     }
 
+    // GET /users — list all registered SIP users
+    void handle_users(struct mg_connection* c) {
+        std::lock_guard<std::mutex> lock(users_mutex_);
+        std::ostringstream json;
+        json << "{\"users\":[";
+        bool first = true;
+        for (const auto& kv : users_) {
+            if (!first) json << ",";
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - kv.second.registered_at).count();
+            json << "{\"username\":\"" << kv.second.username
+                 << "\",\"ip\":\"" << kv.second.ip
+                 << "\",\"port\":" << kv.second.sip_port
+                 << ",\"registered_sec\":" << elapsed << "}";
+            first = false;
+        }
+        json << "],\"max_lines\":" << MAX_LINES << "}";
+        mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
+    }
+
+    // POST /conference {"users":["alice1","bob2",...]}
+    // Starts a conference call between the specified registered users (2-20).
+    void handle_conference(struct mg_connection* c, struct mg_http_message* hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"POST required\"}");
+            return;
+        }
+
+        if (call_ && call_->active) {
+            mg_http_reply(c, 409, CORS_HEADERS, "{\"error\":\"A call is already active. Use /hangup first.\"}");
+            return;
+        }
+
+        std::string body(hm->body.buf, hm->body.len);
+        std::vector<std::string> requested_users;
+
+        int idx = 0;
+        while (true) {
+            std::string path = "$[" + std::to_string(idx) + "]";
+            char* val = mg_json_get_str(hm->body, path.c_str());
+            if (!val) break;
+            requested_users.push_back(val);
+            free(val);
+            idx++;
+        }
+
+        if (requested_users.empty()) {
+            int toklen = 0;
+            int arr_offset = mg_json_get(hm->body, "$.users", &toklen);
+            if (arr_offset >= 0 && toklen > 0) {
+                struct mg_str arr_str = mg_str_n(hm->body.buf + arr_offset, toklen);
+                int i = 0;
+                while (true) {
+                    std::string p = "$[" + std::to_string(i) + "]";
+                    char* v = mg_json_get_str(arr_str, p.c_str());
+                    if (!v) break;
+                    requested_users.push_back(v);
+                    free(v);
+                    i++;
+                }
+            }
+        }
+
+        if (requested_users.size() < 2) {
+            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"Need at least 2 users for a conference\"}");
+            return;
+        }
+        if (requested_users.size() > MAX_LINES) {
+            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"Maximum %d users in a conference\"}", MAX_LINES);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(users_mutex_);
+        std::vector<RegisteredUser> participants;
+        for (const auto& uname : requested_users) {
+            auto it = users_.find(uname);
+            if (it == users_.end()) {
+                mg_http_reply(c, 404, CORS_HEADERS, "{\"error\":\"User '%s' not registered\"}", uname.c_str());
+                return;
+            }
+            participants.push_back(it->second);
+        }
+
+        initiate_conference(participants);
+        mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"legs\":%d}", (int)participants.size());
+    }
+
+    // POST /hangup — end the current call
+    void handle_hangup(struct mg_connection* c) {
+        if (!call_ || !call_->active) {
+            mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"message\":\"No active call\"}");
+            return;
+        }
+        shutdown_call();
+        call_.reset();
+        mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"message\":\"Call ended\"}");
+    }
+
+    // POST /inject {"file":"sample.wav","leg":"alice1"}
+    // The "leg" field is the username of the leg to inject into.
     void handle_inject(struct mg_connection* c, struct mg_http_message* hm) {
         if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
             mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"POST required\"}");
@@ -399,13 +510,24 @@ private:
         free(file_str);
         free(leg_str);
 
-        if (leg != "a" && leg != "b") {
-            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"Invalid leg '%s', must be 'a' or 'b'\"}", leg.c_str());
+        if (!call_ || !call_->active || !call_->relay_started) {
+            mg_http_reply(c, 409, CORS_HEADERS, "{\"error\":\"No active call to inject into\"}");
             return;
         }
 
-        if (!call_ || !call_->active || !call_->relay_started) {
-            mg_http_reply(c, 409, CORS_HEADERS, "{\"error\":\"No active call to inject into\"}");
+        int leg_idx = -1;
+        for (size_t i = 0; i < call_->legs.size(); i++) {
+            if (call_->legs[i].user == leg) {
+                leg_idx = static_cast<int>(i);
+                break;
+            }
+        }
+
+        if (leg == "a" && call_->legs.size() >= 1) leg_idx = 0;
+        else if (leg == "b" && call_->legs.size() >= 2) leg_idx = 1;
+
+        if (leg_idx < 0) {
+            mg_http_reply(c, 404, CORS_HEADERS, "{\"error\":\"Leg '%s' not found in active call\"}", leg.c_str());
             return;
         }
 
@@ -419,14 +541,19 @@ private:
         bool no_silence = false;
         mg_json_get_bool(hm->body, "$.no_silence", &no_silence);
 
-        std::string err = inject_file(full_path, leg, no_silence);
+        std::string err = inject_file(full_path, leg_idx, no_silence);
         if (!err.empty()) {
             mg_http_reply(c, 500, CORS_HEADERS, "{\"error\":\"%s\"}", err.c_str());
             return;
         }
 
-        call_->injecting_file = file;
-        mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"injecting\":\"%s\",\"leg\":\"%s\"}", file.c_str(), leg.c_str());
+        {
+            std::lock_guard<std::mutex> lk(call_->inject_meta_mutex);
+            call_->injecting_file = file;
+        }
+        call_->injecting_leg_idx.store(leg_idx);
+        mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true,\"injecting\":\"%s\",\"leg\":\"%s\"}",
+                      file.c_str(), call_->legs[leg_idx].user.c_str());
     }
 
     void handle_stop_inject(struct mg_connection* c) {
@@ -442,14 +569,17 @@ private:
         std::ostringstream json;
         json << "{\"call_active\":" << (call_ && call_->active ? "true" : "false");
         if (call_) {
+            json << ",\"legs\":" << call_->legs.size();
             json << ",\"relay_stats\":{";
-            json << "\"pkts_a_to_b\":" << call_->pkts_a_to_b.load();
-            json << ",\"pkts_b_to_a\":" << call_->pkts_b_to_a.load();
-            json << ",\"bytes_a_to_b\":" << call_->bytes_a_to_b.load();
-            json << ",\"bytes_b_to_a\":" << call_->bytes_b_to_a.load();
+            json << "\"total_pkts\":" << call_->total_pkts.load();
+            json << ",\"total_bytes\":" << call_->total_bytes.load();
             json << "}";
             if (call_->injecting) {
+                std::lock_guard<std::mutex> lk(call_->inject_meta_mutex);
+                int idx = call_->injecting_leg_idx.load();
                 json << ",\"injecting\":\"" << call_->injecting_file << "\"";
+                json << ",\"injecting_leg\":\"" << (idx >= 0 && idx < (int)call_->legs.size()
+                    ? call_->legs[idx].user : "unknown") << "\"";
             } else {
                 json << ",\"injecting\":null";
             }
@@ -463,8 +593,15 @@ private:
         json << "{\"calls\":[";
         if (call_ && call_->active) {
             json << "{\"id\":" << call_->id;
-            json << ",\"leg_a\":{\"user\":\"" << call_->leg_a.user << "\",\"answered\":" << (call_->leg_a.answered ? "true" : "false") << "}";
-            json << ",\"leg_b\":{\"user\":\"" << call_->leg_b.user << "\",\"answered\":" << (call_->leg_b.answered ? "true" : "false") << "}";
+            json << ",\"legs\":[";
+            for (size_t i = 0; i < call_->legs.size(); i++) {
+                if (i > 0) json << ",";
+                json << "{\"user\":\"" << call_->legs[i].user
+                     << "\",\"answered\":" << (call_->legs[i].answered ? "true" : "false")
+                     << ",\"rtp_port\":" << call_->legs[i].client_rtp_port
+                     << ",\"relay_port\":" << call_->legs[i].relay_port << "}";
+            }
+            json << "]";
             json << ",\"relay_started\":" << (call_->relay_started ? "true" : "false");
             json << ",\"injecting\":" << (call_->injecting ? "true" : "false");
             auto now = std::chrono::steady_clock::now();
@@ -472,12 +609,16 @@ private:
             json << ",\"duration\":" << duration;
             json << "}";
         }
-        json << "],\"users\":" << users_.size();
+        json << "]";
+        {
+            std::lock_guard<std::mutex> lock(users_mutex_);
+            json << ",\"users\":" << users_.size();
+        }
         json << "}";
         mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
     }
 
-    std::string inject_file(const std::string& path, const std::string& leg, bool no_silence = false) {
+    std::string inject_file(const std::string& path, int leg_idx, bool no_silence = false) {
         WavData wav = load_wav_file(path);
         if (!wav.error.empty()) return wav.error;
         if (wav.samples.empty()) return "WAV file contains no samples";
@@ -491,7 +632,7 @@ private:
         cancel_injection();
 
         call_->injecting = true;
-        call_->inject_thread = std::thread(&TestSipProvider::inject_rtp_stream, this, call_, leg, std::move(ulaw), no_silence);
+        call_->inject_thread = std::thread(&TestSipProvider::inject_rtp_stream, this, call_, leg_idx, std::move(ulaw), no_silence);
         return "";
     }
 
@@ -503,10 +644,19 @@ private:
         }
     }
 
-    void inject_rtp_stream(std::shared_ptr<ActiveCall> call, std::string leg, std::vector<uint8_t> ulaw_samples, bool no_silence) {
+    // Injects RTP audio into the specified leg of the active call.
+    // Uses the dedicated inject_sock (separate from relay_sock) to avoid data races.
+    // If no_silence is true, sends a 1s silence tail then stops; otherwise sends silence indefinitely.
+    void inject_rtp_stream(std::shared_ptr<ActiveCall> call, int leg_idx, std::vector<uint8_t> ulaw_samples, bool no_silence) {
         static constexpr int PKT_SAMPLES = 160;
 
-        CallLeg* target = (leg == "a") ? &call->leg_a : &call->leg_b;
+        if (leg_idx < 0 || leg_idx >= (int)call->legs.size()) {
+            std::fprintf(stderr, "Invalid leg index %d for injection\n", leg_idx);
+            call->injecting = false;
+            return;
+        }
+
+        CallLeg* target = &call->legs[leg_idx];
 
         struct sockaddr_in dest{};
         dest.sin_family = AF_INET;
@@ -519,8 +669,8 @@ private:
         uint32_t ts = 0;
 
         size_t total_pkts = ulaw_samples.size() / PKT_SAMPLES;
-        std::printf("Injecting %zu RTP packets (%.1fs) into leg %s (%s)%s\n",
-                    total_pkts, ulaw_samples.size() / 8000.0, leg.c_str(), target->user.c_str(),
+        std::printf("Injecting %zu RTP packets (%.1fs) into leg %s%s\n",
+                    total_pkts, ulaw_samples.size() / 8000.0, target->user.c_str(),
                     no_silence ? " [no-silence]" : "");
 
         for (size_t offset = 0; offset + PKT_SAMPLES <= ulaw_samples.size() && call->active && call->injecting && g_running; offset += PKT_SAMPLES) {
@@ -536,7 +686,7 @@ private:
             std::memcpy(rtp + 8, &ssrc_n, 4);
             std::memcpy(rtp + 12, ulaw_samples.data() + offset, PKT_SAMPLES);
 
-            sendto(target->relay_sock, rtp, sizeof(rtp), 0,
+            sendto(target->inject_sock, rtp, sizeof(rtp), 0,
                    (struct sockaddr*)&dest, sizeof(dest));
 
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -558,7 +708,7 @@ private:
                 uint32_t ssrc_n = htonl(ssrc);
                 std::memcpy(rtp + 8, &ssrc_n, 4);
                 std::memset(rtp + 12, 0x7F, PKT_SAMPLES);
-                sendto(target->relay_sock, rtp, sizeof(rtp), 0,
+                sendto(target->inject_sock, rtp, sizeof(rtp), 0,
                        (struct sockaddr*)&dest, sizeof(dest));
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
@@ -577,13 +727,17 @@ private:
                 uint32_t ssrc_n = htonl(ssrc);
                 std::memcpy(rtp + 8, &ssrc_n, 4);
                 std::memset(rtp + 12, 0x7F, PKT_SAMPLES);
-                sendto(target->relay_sock, rtp, sizeof(rtp), 0,
+                sendto(target->inject_sock, rtp, sizeof(rtp), 0,
                        (struct sockaddr*)&dest, sizeof(dest));
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
         }
 
-        call->injecting_file.clear();
+        {
+            std::lock_guard<std::mutex> lk(call->inject_meta_mutex);
+            call->injecting_file.clear();
+        }
+        call->injecting_leg_idx.store(-1);
         std::printf("RTP stream stopped\n");
     }
 
@@ -653,6 +807,17 @@ private:
             return;
         }
 
+        {
+            std::lock_guard<std::mutex> lock(users_mutex_);
+            if (users_.size() >= MAX_LINES && users_.find(username) == users_.end()) {
+                std::fprintf(stderr, "REGISTER: max %d users reached, rejecting %s\n", MAX_LINES, username.c_str());
+                std::string resp = "SIP/2.0 503 Service Unavailable\r\nFrom: " + from +
+                                   "\r\nCall-ID: " + call_id + "\r\nCSeq: 1 REGISTER\r\n\r\n";
+                sendto(sip_sock_, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
+                return;
+            }
+        }
+
         std::string sender_ip = inet_ntoa(sender.sin_addr);
         int sender_port = ntohs(sender.sin_port);
 
@@ -706,48 +871,49 @@ private:
         return sock;
     }
 
-    void initiate_call() {
-        call_initiated_ = true;
-
-        auto it = users_.begin();
-        auto& ua = it->second; ++it;
-        auto& ub = it->second;
-
+    // Starts a conference call between the given participants.
+    // For each participant, creates a leg with a relay socket and sends SIP INVITE.
+    // When all legs answer, starts relay threads that forward RTP between all legs (conference bridge).
+    void initiate_conference(const std::vector<RegisteredUser>& participants) {
         call_ = std::make_shared<ActiveCall>();
-        call_->id = 1;
+        call_->id = ++next_call_id_;
         call_->started_at = std::chrono::steady_clock::now();
 
-        call_->leg_a.user = ua.username;
-        call_->leg_a.sip_call_id = "call-" + std::to_string(call_->id) + "-a";
-        call_->leg_a.ip = ua.ip;
-        call_->leg_a.sip_port = ua.sip_port;
-        call_->leg_a.answered = false;
-        call_->leg_a.client_rtp_port = 0;
-        call_->leg_a.relay_sock = create_relay_socket(call_->leg_a.relay_port);
+        for (size_t i = 0; i < participants.size(); i++) {
+            CallLeg leg;
+            leg.user = participants[i].username;
+            leg.sip_call_id = "conf-" + std::to_string(call_->id) + "-" + std::to_string(i);
+            leg.ip = participants[i].ip;
+            leg.sip_port = participants[i].sip_port;
+            leg.answered = false;
+            leg.client_rtp_port = 0;
+            leg.relay_sock = create_relay_socket(leg.relay_port);
 
-        call_->leg_b.user = ub.username;
-        call_->leg_b.sip_call_id = "call-" + std::to_string(call_->id) + "-b";
-        call_->leg_b.ip = ub.ip;
-        call_->leg_b.sip_port = ub.sip_port;
-        call_->leg_b.answered = false;
-        call_->leg_b.client_rtp_port = 0;
-        call_->leg_b.relay_sock = create_relay_socket(call_->leg_b.relay_port);
+            if (leg.relay_sock < 0) {
+                std::fprintf(stderr, "Failed to create relay socket for %s — aborting conference\n", leg.user.c_str());
+                call_->active = false;
+                return;
+            }
 
-        if (call_->leg_a.relay_sock < 0 || call_->leg_b.relay_sock < 0) {
-            std::fprintf(stderr, "Failed to create relay sockets — aborting call\n");
-            call_->active = false;
-            return;
+            leg.inject_sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (leg.inject_sock < 0) {
+                std::fprintf(stderr, "Failed to create inject socket for %s\n", leg.user.c_str());
+                close(leg.relay_sock);
+                call_->active = false;
+                return;
+            }
+
+            call_->legs.push_back(std::move(leg));
         }
 
-        send_invite(call_->leg_a, ub.username);
-        send_invite(call_->leg_b, ua.username);
+        for (auto& leg : call_->legs) {
+            send_invite(leg);
+        }
 
-        std::printf("INVITE sent to %s (relay %d) and %s (relay %d)\n",
-                    ua.username.c_str(), call_->leg_a.relay_port,
-                    ub.username.c_str(), call_->leg_b.relay_port);
+        std::printf("INVITE sent to %zu participants for conference %d\n", participants.size(), call_->id);
     }
 
-    void send_invite(CallLeg& leg, const std::string& caller) {
+    void send_invite(CallLeg& leg) {
         std::ostringstream sdp;
         sdp << "v=0\r\no=provider 1 1 IN IP4 " << local_ip_ << "\r\n";
         sdp << "s=WhisperTalk Test\r\nc=IN IP4 " << local_ip_ << "\r\nt=0 0\r\n";
@@ -758,7 +924,7 @@ private:
         std::ostringstream inv;
         inv << "INVITE sip:" << leg.user << "@" << leg.ip << " SIP/2.0\r\n";
         inv << "Via: SIP/2.0/UDP " << local_ip_ << ":" << sip_port_ << "\r\n";
-        inv << "From: <sip:" << caller << "@" << local_ip_ << ">;tag=prov" << leg.sip_call_id << "\r\n";
+        inv << "From: <sip:provider@" << local_ip_ << ">;tag=prov" << leg.sip_call_id << "\r\n";
         inv << "To: <sip:" << leg.user << "@" << leg.ip << ">\r\n";
         inv << "Call-ID: " << leg.sip_call_id << "\r\n";
         inv << "CSeq: 1 INVITE\r\n";
@@ -803,8 +969,9 @@ private:
 
         std::lock_guard<std::mutex> lock(call_mutex_);
         CallLeg* leg = nullptr;
-        if (call_->leg_a.sip_call_id == call_id) leg = &call_->leg_a;
-        else if (call_->leg_b.sip_call_id == call_id) leg = &call_->leg_b;
+        for (auto& l : call_->legs) {
+            if (l.sip_call_id == call_id) { leg = &l; break; }
+        }
         if (!leg || leg->answered) return;
 
         int rtp_port = get_sdp_media_port(msg);
@@ -828,44 +995,40 @@ private:
         std::printf("200 OK from %s (RTP %s:%d) — ACK sent\n",
                     leg->user.c_str(), leg->ip.c_str(), leg->client_rtp_port);
 
-        if (call_->leg_a.answered && call_->leg_b.answered && !call_->relay_started) {
+        bool all_answered = true;
+        for (const auto& l : call_->legs) {
+            if (!l.answered) { all_answered = false; break; }
+        }
+
+        if (all_answered && !call_->relay_started) {
             call_->relay_started = true;
             start_relay();
         }
     }
 
+    // Conference bridge relay: for each leg, receives RTP and forwards to all other legs.
     void start_relay() {
-        std::printf("\n=== Both legs answered — starting RTP relay ===\n");
-        std::printf("  Leg A: %s RTP %s:%d <-> relay %d\n",
-                    call_->leg_a.user.c_str(), call_->leg_a.ip.c_str(),
-                    call_->leg_a.client_rtp_port, call_->leg_a.relay_port);
-        std::printf("  Leg B: %s RTP %s:%d <-> relay %d\n",
-                    call_->leg_b.user.c_str(), call_->leg_b.ip.c_str(),
-                    call_->leg_b.client_rtp_port, call_->leg_b.relay_port);
+        std::printf("\n=== All %zu legs answered — starting conference relay ===\n", call_->legs.size());
+        for (size_t i = 0; i < call_->legs.size(); i++) {
+            std::printf("  Leg %zu: %s RTP %s:%d <-> relay %d\n", i,
+                        call_->legs[i].user.c_str(), call_->legs[i].ip.c_str(),
+                        call_->legs[i].client_rtp_port, call_->legs[i].relay_port);
+        }
 
-        call_->relay_a_to_b = std::thread(&TestSipProvider::relay_thread, this,
-            call_, &call_->leg_a, &call_->leg_b, &call_->pkts_a_to_b, &call_->bytes_a_to_b);
-        call_->relay_b_to_a = std::thread(&TestSipProvider::relay_thread, this,
-            call_, &call_->leg_b, &call_->leg_a, &call_->pkts_b_to_a, &call_->bytes_b_to_a);
+        for (size_t i = 0; i < call_->legs.size(); i++) {
+            call_->relay_threads.emplace_back(&TestSipProvider::conference_relay_thread, this, call_, i);
+        }
 
         stats_thread_ = std::thread(&TestSipProvider::stats_loop, this, call_);
     }
 
-    void relay_thread(std::shared_ptr<ActiveCall> call,
-                      CallLeg* from_leg, CallLeg* to_leg,
-                      std::atomic<uint64_t>* pkt_count,
-                      std::atomic<uint64_t>* byte_count) {
+    // Each relay thread: receive from one leg's relay socket, forward to all other legs' client RTP ports.
+    void conference_relay_thread(std::shared_ptr<ActiveCall> call, size_t from_idx) {
         char buf[2048];
         struct sockaddr_in sender{};
         socklen_t slen;
 
-        struct sockaddr_in dest{};
-        dest.sin_family = AF_INET;
-        dest.sin_port = htons(to_leg->client_rtp_port);
-        dest.sin_addr.s_addr = inet_addr(to_leg->ip.c_str());
-
-        int from_sock = from_leg->relay_sock;
-        int to_sock = to_leg->relay_sock;
+        int from_sock = call->legs[from_idx].relay_sock;
 
         while (call->active && g_running) {
             slen = sizeof(sender);
@@ -874,12 +1037,19 @@ private:
 
             ssize_t n = recvfrom(from_sock, buf, sizeof(buf), 0,
                                  (struct sockaddr*)&sender, &slen);
-            if (n > 0) {
-                sendto(to_sock, buf, n, 0,
+            if (n <= 0) continue;
+
+            for (size_t i = 0; i < call->legs.size(); i++) {
+                if (i == from_idx) continue;
+                struct sockaddr_in dest{};
+                dest.sin_family = AF_INET;
+                dest.sin_port = htons(call->legs[i].client_rtp_port);
+                dest.sin_addr.s_addr = inet_addr(call->legs[i].ip.c_str());
+                sendto(call->legs[i].relay_sock, buf, n, 0,
                        (struct sockaddr*)&dest, sizeof(dest));
-                (*pkt_count)++;
-                (*byte_count) += n;
             }
+            call->total_pkts++;
+            call->total_bytes += n;
         }
     }
 
@@ -890,10 +1060,9 @@ private:
             if (!call->active || !g_running) break;
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start).count();
-            std::printf("[%llds] Relay: A->B %llu pkts (%llu KB) | B->A %llu pkts (%llu KB)\n",
+            std::printf("[%llds] Conference relay: %llu pkts (%llu KB)\n",
                         elapsed,
-                        call->pkts_a_to_b.load(), call->bytes_a_to_b.load() / 1024,
-                        call->pkts_b_to_a.load(), call->bytes_b_to_a.load() / 1024);
+                        call->total_pkts.load(), call->total_bytes.load() / 1024);
         }
     }
 
@@ -937,32 +1106,26 @@ private:
 
         std::printf("\n");
         std::printf("=========================================\n");
-        std::printf("   Test SIP Provider — Call Results\n");
+        std::printf("   Test SIP Provider — Conference Results\n");
         std::printf("=========================================\n");
         std::printf("  Duration:     %llds\n", elapsed);
-        std::printf("  Leg A:        %s (RTP %s:%d)\n",
-                    call_->leg_a.user.c_str(), call_->leg_a.ip.c_str(),
-                    call_->leg_a.client_rtp_port);
-        std::printf("  Leg B:        %s (RTP %s:%d)\n",
-                    call_->leg_b.user.c_str(), call_->leg_b.ip.c_str(),
-                    call_->leg_b.client_rtp_port);
-        std::printf("-----------------------------------------\n");
-        std::printf("  A -> B:       %llu packets  (%llu KB)\n",
-                    call_->pkts_a_to_b.load(), call_->bytes_a_to_b.load() / 1024);
-        std::printf("  B -> A:       %llu packets  (%llu KB)\n",
-                    call_->pkts_b_to_a.load(), call_->bytes_b_to_a.load() / 1024);
-        std::printf("-----------------------------------------\n");
-
-        bool a_to_b_ok = call_->pkts_a_to_b > 0;
-        bool b_to_a_ok = call_->pkts_b_to_a > 0;
-
-        if (a_to_b_ok && b_to_a_ok) {
-            std::printf("  Result:       PASS (bidirectional audio)\n");
-        } else if (a_to_b_ok || b_to_a_ok) {
-            std::printf("  Result:       PARTIAL (unidirectional only)\n");
-        } else {
-            std::printf("  Result:       FAIL (no audio flow)\n");
+        std::printf("  Legs:         %zu\n", call_->legs.size());
+        for (size_t i = 0; i < call_->legs.size(); i++) {
+            std::printf("  Leg %zu:       %s (RTP %s:%d, answered=%s)\n", i,
+                        call_->legs[i].user.c_str(), call_->legs[i].ip.c_str(),
+                        call_->legs[i].client_rtp_port,
+                        call_->legs[i].answered ? "yes" : "no");
         }
+        std::printf("-----------------------------------------\n");
+        std::printf("  Total relay:  %llu packets  (%llu KB)\n",
+                    call_->total_pkts.load(), call_->total_bytes.load() / 1024);
+        std::printf("-----------------------------------------\n");
+
+        bool all_answered = true;
+        for (const auto& l : call_->legs) {
+            if (!l.answered) { all_answered = false; break; }
+        }
+        std::printf("  Result:       %s\n", all_answered ? "PASS" : "INCOMPLETE");
         std::printf("=========================================\n\n");
     }
 
@@ -972,17 +1135,21 @@ private:
         cancel_injection();
 
         if (call_->active) {
-            send_bye_to_leg(call_->leg_a);
-            send_bye_to_leg(call_->leg_b);
+            for (auto& leg : call_->legs) {
+                send_bye_to_leg(leg);
+            }
             call_->active = false;
         }
 
-        if (call_->relay_a_to_b.joinable()) call_->relay_a_to_b.join();
-        if (call_->relay_b_to_a.joinable()) call_->relay_b_to_a.join();
+        for (auto& t : call_->relay_threads) {
+            if (t.joinable()) t.join();
+        }
         if (stats_thread_.joinable()) stats_thread_.join();
 
-        if (call_->leg_a.relay_sock >= 0) close(call_->leg_a.relay_sock);
-        if (call_->leg_b.relay_sock >= 0) close(call_->leg_b.relay_sock);
+        for (auto& leg : call_->legs) {
+            if (leg.relay_sock >= 0) close(leg.relay_sock);
+            if (leg.inject_sock >= 0) close(leg.inject_sock);
+        }
     }
 
     int sip_sock_ = -1;
@@ -990,7 +1157,7 @@ private:
     int http_port_ = 22011;
     std::string local_ip_;
     std::string testfiles_dir_;
-    bool call_initiated_ = false;
+    int next_call_id_ = 0;
 
     struct mg_mgr mgr_;
 
@@ -1037,19 +1204,24 @@ int main(int argc, char* argv[]) {
                 std::printf("  -t, --testfiles-dir DIR   Testfiles directory (default: Testfiles)\n");
                 std::printf("  -h, --help                Show this help\n\n");
                 std::printf("HTTP Endpoints:\n");
-                std::printf("  GET  /files    List WAV files in testfiles directory\n");
-                std::printf("  POST /inject   Inject audio: {\"file\":\"sample_01.wav\",\"leg\":\"a\"}\n");
-                std::printf("  GET  /status   Call status and relay stats\n");
-                std::printf("  GET  /calls    List active calls\n\n");
+                std::printf("  GET  /files       List WAV files in testfiles directory\n");
+                std::printf("  GET  /users       List registered SIP users\n");
+                std::printf("  POST /conference  Start conference: {\"users\":[\"alice1\",\"bob2\"]}\n");
+                std::printf("  POST /hangup      End current call\n");
+                std::printf("  POST /inject      Inject audio: {\"file\":\"sample.wav\",\"leg\":\"alice1\"}\n");
+                std::printf("  GET  /status      Call status and relay stats\n");
+                std::printf("  GET  /calls       List active calls with per-leg detail\n\n");
+                std::printf("Max lines: %d\n\n", MAX_LINES);
                 return 0;
             default: break;
         }
     }
 
-    std::printf("Test SIP Provider (B2BUA)\n");
+    std::printf("Test SIP Provider (B2BUA / Conference Bridge)\n");
     std::printf("  SIP Port:     %d\n", port);
     std::printf("  HTTP Port:    %d\n", http_port);
     std::printf("  Testfiles:    %s\n", testfiles_dir.c_str());
+    std::printf("  Max Lines:    %d\n", MAX_LINES);
     std::printf("\n");
 
     TestSipProvider provider;
