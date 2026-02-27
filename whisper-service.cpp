@@ -166,8 +166,8 @@ private:
         }
     }
 
-    // Detects common Whisper hallucination patterns on near-silence audio.
-    // Returns true if the text is likely a hallucination.
+    static const char* hallucination_patterns_[];
+
     bool is_hallucination(const std::string& text) {
         if (text.empty()) return false;
         std::string t = text;
@@ -175,7 +175,6 @@ private:
         while (!t.empty() && t.back() == ' ') t.pop_back();
         if (t.size() < 3) return true;
 
-        // Strip trailing punctuation for pattern matching so "Vielen Dank." matches.
         std::string core = t;
         while (!core.empty() && (core.back() == '.' || core.back() == '!' ||
                core.back() == '?' || core.back() == ',')) {
@@ -183,44 +182,63 @@ private:
         }
         while (!core.empty() && core.back() == ' ') core.pop_back();
 
-        // Only match when the ENTIRE transcription is a hallucination pattern.
-        // Previously used find() which caused false positives when patterns
-        // appeared as part of legitimate speech (e.g. "Vielen Dank" in a sentence).
-        static const char* patterns[] = {
-            "Untertitel",
-            "Vielen Dank",
-            "Tschüss",
-            "Bis zum nächsten Mal",
-            "Copyright",
-            "www.",
-            "SWR",
-            "Amara.org",
-            "Danke fürs Zuschauen",
-            "Ich habe mich nicht mehr",
-            "Und ich habe mich nicht mehr",
-            "Ich habe es mir nicht mehr",
-            "es mir nicht mehr",
-            "Danke für",
-            "Bis bald",
-            "Auf Wiedersehen",
-            "Guten Tag",
-            "Herzlich willkommen",
-            "Musik",
-            "Applaus",
-            "[Musik]",
-            "[Applaus]",
-            "MwSt",
-            nullptr
-        };
-        for (int i = 0; patterns[i]; ++i) {
-            if (core == patterns[i]) return true;
+        for (int i = 0; hallucination_patterns_[i]; ++i) {
+            if (core == hallucination_patterns_[i]) return true;
         }
-        // Detect repetitive text (same short phrase repeated)
         if (t.size() > 20) {
             std::string half = t.substr(0, t.size() / 2);
             if (t.find(half, half.size()) != std::string::npos) return true;
         }
         return false;
+    }
+
+    std::string strip_trailing_hallucinations(const std::string& text) {
+        std::string result = text;
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            std::string trimmed = result;
+            while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '.' ||
+                   trimmed.back() == '!' || trimmed.back() == '?'))
+                trimmed.pop_back();
+
+            for (int i = 0; hallucination_patterns_[i]; ++i) {
+                std::string pat = hallucination_patterns_[i];
+                if (trimmed.size() > pat.size() + 2) {
+                    std::string suffix = trimmed.substr(trimmed.size() - pat.size());
+                    if (suffix == pat) {
+                        result = trimmed.substr(0, trimmed.size() - pat.size());
+                        while (!result.empty() && (result.back() == ' ' || result.back() == ','))
+                            result.pop_back();
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+
+            static const char* suffix_patterns[] = {
+                "Untertitelung", "Untertitel der", "Untertitel von",
+                "des ZDF", "ZDF", "funk", "SWR", "NDR", "WDR", "ARD", "BR",
+                "Hier geht's", "Hier gehts", "Mehr dazu",
+                nullptr
+            };
+            for (int i = 0; suffix_patterns[i]; ++i) {
+                std::string pat = suffix_patterns[i];
+                if (trimmed.size() > pat.size() + 2) {
+                    std::string suffix = trimmed.substr(trimmed.size() - pat.size());
+                    if (suffix == pat) {
+                        result = trimmed.substr(0, trimmed.size() - pat.size());
+                        while (!result.empty() && (result.back() == ' ' || result.back() == ','))
+                            result.pop_back();
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        while (!result.empty() && result.back() == ' ') result.pop_back();
+        return result;
     }
 
     // Transcribes a speech chunk and sends the text downstream to LLaMA.
@@ -289,6 +307,16 @@ private:
                     return;
                 }
 
+                std::string cleaned = strip_trailing_hallucinations(text);
+                if (cleaned.empty() || cleaned.size() < 3) {
+                    log_fwd_.forward("DEBUG", call_id, "Stripped to empty: %s", text.c_str());
+                    return;
+                }
+                if (cleaned != text) {
+                    log_fwd_.forward("DEBUG", call_id, "Stripped hallucination tail: '%s' -> '%s'", text.c_str(), cleaned.c_str());
+                }
+                text = cleaned;
+
                 double audio_dur_ms = audio_len / (double)WSP_SAMPLES_PER_MS;
                 double rtf = whisper_ms / audio_dur_ms;
                 std::cout << "[" << call_id << "] Transcription (" << whisper_ms << "ms, RTF=" 
@@ -344,6 +372,33 @@ private:
     
     std::mutex buffer_mutex_;
     std::deque<whispertalk::Packet> buffered_packets_;
+};
+
+const char* WhisperService::hallucination_patterns_[] = {
+    "Untertitel",
+    "Vielen Dank",
+    "Tschüss",
+    "Bis zum nächsten Mal",
+    "Copyright",
+    "www.",
+    "SWR",
+    "Amara.org",
+    "Danke fürs Zuschauen",
+    "Ich habe mich nicht mehr",
+    "Und ich habe mich nicht mehr",
+    "Ich habe es mir nicht mehr",
+    "es mir nicht mehr",
+    "Danke für",
+    "Bis bald",
+    "Auf Wiedersehen",
+    "Guten Tag",
+    "Herzlich willkommen",
+    "Musik",
+    "Applaus",
+    "[Musik]",
+    "[Applaus]",
+    "MwSt",
+    nullptr
 };
 
 int main(int argc, char** argv) {

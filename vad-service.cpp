@@ -87,14 +87,14 @@ class VadService {
     //   instead of full sentence gaps. Short enough for fast turnaround, long enough
     //   to not split mid-word (German phonemes are typically <200ms).
     int vad_silence_frames_ = 8;
-    // vad_max_speech_samples_: 4s max chunk — keeps Whisper inference under ~500ms.
-    //   Whisper's attention is O(n²) on audio length; 4s vs 10s is ~6x faster.
-    size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 4;
+    // vad_max_speech_samples_: 8s max chunk — Whisper large-v3-turbo handles 8s
+    //   chunks in ~1s on Apple Silicon. Longer chunks preserve sentence boundaries.
+    size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 8;
     // vad_min_speech_samples_: 500ms — reject clicks and noise bursts.
     size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;
-    // vad_context_frames_: include 4 frames of pre-speech context audio so the
-    //   chunk doesn't start abruptly mid-phoneme.
-    int vad_context_frames_ = 4;
+    // vad_context_frames_: include 6 frames (300ms) of pre-speech context audio so the
+    //   chunk captures the onset of speech including initial consonants/articles.
+    int vad_context_frames_ = 6;
     // vad_onset_frames_: require 3 consecutive above-threshold frames to confirm
     //   speech onset, preventing single-frame noise spikes from triggering.
     int vad_onset_frames_ = 3;
@@ -661,7 +661,7 @@ int main(int argc, char** argv) {
     int vad_window_ms = 50;
     float vad_threshold = 2.0f;
     int vad_silence_ms = 400;
-    int vad_max_chunk_ms = 4000;
+    int vad_max_chunk_ms = 8000;
 
     static struct option long_opts[] = {
         {"vad-window-ms",    required_argument, 0, 'w'},

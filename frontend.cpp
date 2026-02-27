@@ -284,6 +284,7 @@ private:
         int64_t id;
         std::string type;
         std::atomic<bool> running{true};
+        bool result_read = false;
         std::string result_json;
         std::thread worker;
     };
@@ -313,7 +314,7 @@ private:
     void cleanup_old_async_tasks() {
         std::lock_guard<std::mutex> lock(async_mutex_);
         for (auto it = async_tasks_.begin(); it != async_tasks_.end(); ) {
-            if (!it->second->running) {
+            if (!it->second->running && it->second->result_read) {
                 if (it->second->worker.joinable()) it->second->worker.join();
                 it = async_tasks_.erase(it);
             } else {
@@ -504,12 +505,13 @@ private:
                 ('SIP_CLIENT', 'bin/sip-client', '--lines 1 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
                 ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
                 ('VAD_SERVICE', 'bin/vad-service', '', 'Voice Activity Detection + speech segmentation'),
-                ('WHISPER_SERVICE', 'bin/whisper-service', '--language de models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (CoreML/Metal)'),
+                ('WHISPER_SERVICE', 'bin/whisper-service', '--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (Metal)'),
                 ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
                 ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
                 ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP'),
                 ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'default');
+            UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
         )";
         sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
 
@@ -3699,15 +3701,15 @@ function loadVadConfig(){
     document.getElementById('vadWindowSlider').value=d.window_ms;
     document.getElementById('vadThresholdSlider').value=d.threshold;
     document.getElementById('vadSilenceSlider').value=d.silence_ms||400;
-    document.getElementById('vadMaxChunkSlider').value=d.max_chunk_ms||4000;
+    document.getElementById('vadMaxChunkSlider').value=d.max_chunk_ms||8000;
     updateVadWindowDisplay(d.window_ms);
     updateVadThresholdDisplay(d.threshold);
     document.getElementById('vadSilenceValue').textContent=d.silence_ms||400;
-    document.getElementById('vadMaxChunkValue').textContent=d.max_chunk_ms||4000;
+    document.getElementById('vadMaxChunkValue').textContent=d.max_chunk_ms||8000;
     document.getElementById('currentVadWindow').textContent=d.window_ms;
     document.getElementById('currentVadThreshold').textContent=d.threshold;
     document.getElementById('currentVadSilence').textContent=d.silence_ms||400;
-    document.getElementById('currentVadMaxChunk').textContent=d.max_chunk_ms||4000;
+    document.getElementById('currentVadMaxChunk').textContent=d.max_chunk_ms||8000;
   }).catch(e=>console.error('Failed to load VAD config:',e));
 }
 
@@ -3732,7 +3734,10 @@ function saveVadConfig(){
   }).catch(e=>console.error('Failed to save VAD config:',e));
 }
 
+var accuracyPollInterval=null;
+
 function runWhisperAccuracyTest(){
+  if(accuracyPollInterval){clearInterval(accuracyPollInterval);accuracyPollInterval=null;}
   var select=document.getElementById('accuracyTestFiles');
   var selected=Array.from(select.selectedOptions).map(o=>o.value);
   
@@ -3743,25 +3748,42 @@ function runWhisperAccuracyTest(){
   
   var resultsDiv=document.getElementById('accuracyResults');
   var summaryDiv=document.getElementById('accuracySummary');
-  resultsDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Running accuracy test on '+selected.length+' file(s)...</p>';
+  resultsDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Running accuracy test on '+selected.length+' file(s)... This may take several minutes.</p>';
   summaryDiv.style.display='none';
   
   fetch('/api/whisper/accuracy_test',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({files:selected})
-  }).then(r=>r.json()).then(d=>{
+  }).then(r=>{
+    if(r.status===202) return r.json();
+    return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
+  }).then(d=>{
+    resultsDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Accuracy test running (task '+d.task_id+', '+selected.length+' files)...</p>';
+    accuracyPollInterval=setInterval(()=>pollAccuracyTask(d.task_id),3000);
+  }).catch(e=>{
+    if(accuracyPollInterval){clearInterval(accuracyPollInterval);accuracyPollInterval=null;}
+    resultsDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; Error: '+escapeHtml(String(e))+'</p>';
+  });
+}
+
+function pollAccuracyTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(r=>r.json()).then(d=>{
+    if(d.status==='running') return;
+    clearInterval(accuracyPollInterval);accuracyPollInterval=null;
+    var resultsDiv=document.getElementById('accuracyResults');
+    var summaryDiv=document.getElementById('accuracySummary');
     if(d.error){
-      resultsDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; Error: '+d.error+'</p>';
+      resultsDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; Error: '+escapeHtml(d.error)+'</p>';
       return;
     }
     
-    document.getElementById('summaryTotal').textContent=d.summary.total;
-    document.getElementById('summaryPass').textContent=d.summary.pass;
-    document.getElementById('summaryWarn').textContent=d.summary.warn;
-    document.getElementById('summaryFail').textContent=d.summary.fail;
-    document.getElementById('summaryAccuracy').textContent=d.summary.avg_similarity.toFixed(2);
-    document.getElementById('summaryLatency').textContent=Math.round(d.summary.avg_latency_ms);
+    document.getElementById('summaryTotal').textContent=d.total||0;
+    document.getElementById('summaryPass').textContent=d.pass_count||0;
+    document.getElementById('summaryWarn').textContent=d.warn_count||0;
+    document.getElementById('summaryFail').textContent=d.fail_count||0;
+    document.getElementById('summaryAccuracy').textContent=(d.avg_accuracy||0).toFixed(2);
+    document.getElementById('summaryLatency').textContent=Math.round(d.avg_latency_ms||0);
     summaryDiv.style.display='block';
     
     var html='<div style="overflow-x:auto"><table class="wt-table" style="width:100%;font-size:12px">';
@@ -3774,7 +3796,7 @@ function runWhisperAccuracyTest(){
     html+='<th>Status</th>';
     html+='</tr></thead><tbody>';
     
-    d.results.forEach(function(r){
+    (d.results||[]).forEach(function(r){
       var statusColor='var(--wt-text)';
       if(r.status==='PASS')statusColor='var(--wt-success)';
       else if(r.status==='WARN')statusColor='var(--wt-warning)';
@@ -3794,10 +3816,7 @@ function runWhisperAccuracyTest(){
     resultsDiv.innerHTML=html;
     
     loadAccuracyTrendChart();
-    
-  }).catch(e=>{
-    resultsDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; Error: '+e+'</p>';
-  });
+  }).catch(e=>console.error('pollAccuracyTask',e));
 }
 
 function loadAccuracyTrendChart(){
@@ -4991,7 +5010,39 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
         }
 
-        // Step 3: Collapse whitespace
+        // Step 3: Normalize age patterns (e.g., "49er" → "49", "49 jaehrige" → "49 jaehrige")
+        {
+            std::string tmp;
+            for (size_t i = 0; i < s.size(); i++) {
+                if (i > 0 && std::isdigit(s[i-1]) && s[i] == 'e' && i+1 < s.size() && s[i+1] == 'r') {
+                    if (i+2 >= s.size() || s[i+2] == ' ') {
+                        i += 1;
+                        continue;
+                    }
+                }
+                tmp += s[i];
+            }
+            s = tmp;
+        }
+
+        // Step 4: Remove filler words that Whisper sometimes drops or adds
+        // (common German articles/prepositions that don't affect meaning comparison)
+        // Only strip these from the beginning of the text to handle partial recognition
+        while (s.size() > 4) {
+            bool stripped = false;
+            static const char* strip_prefixes[] = {nullptr};
+            for (int i = 0; strip_prefixes[i]; ++i) {
+                std::string pfx = strip_prefixes[i];
+                if (s.substr(0, pfx.size()) == pfx) {
+                    s = s.substr(pfx.size());
+                    stripped = true;
+                    break;
+                }
+            }
+            if (!stripped) break;
+        }
+
+        // Step 5: Collapse whitespace
         std::string result;
         bool last_space = false;
         for (char c : s) {
@@ -6456,8 +6507,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"running\"}");
         } else {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", it->second->result_json.c_str());
-            if (it->second->worker.joinable()) it->second->worker.join();
-            async_tasks_.erase(it);
+            it->second->result_read = true;
         }
     }
 
@@ -6670,7 +6720,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::string w = window_ms_str.empty() ? get_setting("vad_window_ms", "50") : window_ms_str;
             std::string t = threshold_str.empty() ? get_setting("vad_threshold", "2.0") : threshold_str;
             std::string s = silence_ms_str.empty() ? get_setting("vad_silence_ms", "400") : silence_ms_str;
-            std::string m = max_chunk_ms_str.empty() ? get_setting("vad_max_chunk_ms", "4000") : max_chunk_ms_str;
+            std::string m = max_chunk_ms_str.empty() ? get_setting("vad_max_chunk_ms", "8000") : max_chunk_ms_str;
             
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
                 "{\"success\":true,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s}",
@@ -6679,7 +6729,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::string window_ms = get_setting("vad_window_ms", "50");
             std::string threshold = get_setting("vad_threshold", "2.0");
             std::string silence_ms = get_setting("vad_silence_ms", "400");
-            std::string max_chunk_ms = get_setting("vad_max_chunk_ms", "4000");
+            std::string max_chunk_ms = get_setting("vad_max_chunk_ms", "8000");
             
             std::stringstream json;
             json << "{"
