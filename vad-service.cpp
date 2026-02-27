@@ -407,12 +407,6 @@ private:
                                     }
                                     if (!call->speech_signaled) {
                                         call->speech_signaled = true;
-                                        // speech_signal_time is set here (inside mutex) but the
-                                        // actual broadcast happens after mutex release. The 10s
-                                        // timeout clock thus starts slightly early — negligible
-                                        // at sub-ms processing latency, but worth noting if the
-                                        // timeout is ever tightened significantly.
-                                        call->speech_signal_time = std::chrono::steady_clock::now();
                                         needs_active_broadcast = true;
                                     }
                                 }
@@ -553,6 +547,10 @@ private:
                 // Broadcast speech signals outside the mutex to avoid holding the
                 // lock during a TCP send that could block/stall the receiver thread.
                 if (needs_active_broadcast) {
+                    {
+                        std::lock_guard<std::mutex> lock(call->mutex);
+                        call->speech_signal_time = std::chrono::steady_clock::now();
+                    }
                     interconnect_.broadcast_speech_signal(call_id, true);
                     std::cout << "[" << call_id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
                 }
