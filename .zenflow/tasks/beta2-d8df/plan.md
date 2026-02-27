@@ -108,7 +108,8 @@ Optimize IAP audio processing for speed and quality.
 
 **Files**: `inbound-audio-processor.cpp`, `frontend.cpp` (IAP quality test handler)
 
-### [ ] Step: Stage 3 — VAD Service Optimization
+### [x] Step: Stage 3 — VAD Service Optimization
+<!-- chat-id: 45290a4e-67e9-476e-ae4a-c5c2d405fc58 -->
 
 Optimize VAD for smooth, fast operation and correct interconnection.
 

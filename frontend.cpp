@@ -695,8 +695,12 @@ private:
             if (name == "VAD_SERVICE" && args_override.empty()) {
                 std::string vad_w = get_setting("vad_window_ms", "");
                 std::string vad_t = get_setting("vad_threshold", "");
+                std::string vad_s = get_setting("vad_silence_ms", "");
+                std::string vad_c = get_setting("vad_max_chunk_ms", "");
                 if (!vad_w.empty()) use_args += " --vad-window-ms " + vad_w;
                 if (!vad_t.empty()) use_args += " --vad-threshold " + vad_t;
+                if (!vad_s.empty()) use_args += " --vad-silence-ms " + vad_s;
+                if (!vad_c.empty()) use_args += " --vad-max-chunk-ms " + vad_c;
             }
 
             auto argv_strings = split_args(use_args);
@@ -1614,17 +1618,19 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 <div style="padding:10px;background:var(--wt-card-hover);border-radius:6px;margin-top:8px;border-left:3px solid var(--wt-primary)">
 <div style="font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:6px">&#x2699; VAD Service Settings (applied on next VAD restart)</div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
-<div><strong>Window:</strong> <span id="currentVadWindow" style="color:var(--wt-primary)">100</span> ms</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px">
+<div><strong>Window:</strong> <span id="currentVadWindow" style="color:var(--wt-primary)">50</span> ms</div>
 <div><strong>Threshold:</strong> <span id="currentVadThreshold" style="color:var(--wt-primary)">2.0</span></div>
+<div><strong>Silence:</strong> <span id="currentVadSilence" style="color:var(--wt-primary)">400</span> ms</div>
+<div><strong>Max Chunk:</strong> <span id="currentVadMaxChunk" style="color:var(--wt-primary)">4000</span> ms</div>
 </div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
 <div class="wt-field">
-<label>VAD Window (ms): <span id="vadWindowValue">100</span></label>
-<input type="range" id="vadWindowSlider" min="50" max="300" value="100" step="25" style="width:100%" oninput="updateVadWindowDisplay(this.value)">
+<label>VAD Window (ms): <span id="vadWindowValue">50</span></label>
+<input type="range" id="vadWindowSlider" min="10" max="200" value="50" step="10" style="width:100%" oninput="updateVadWindowDisplay(this.value)">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
-<span>50ms</span><span>300ms</span>
+<span>10ms</span><span>200ms</span>
 </div>
 </div>
 <div class="wt-field">
@@ -1632,6 +1638,20 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <input type="range" id="vadThresholdSlider" min="1.0" max="4.0" value="2.0" step="0.1" style="width:100%" oninput="updateVadThresholdDisplay(this.value)">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
 <span>1.0</span><span>4.0</span>
+</div>
+</div>
+<div class="wt-field">
+<label>VAD Silence (ms): <span id="vadSilenceValue">400</span></label>
+<input type="range" id="vadSilenceSlider" min="100" max="1500" value="400" step="50" style="width:100%" oninput="document.getElementById('vadSilenceValue').textContent=this.value">
+<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
+<span>100ms</span><span>1500ms</span>
+</div>
+</div>
+<div class="wt-field">
+<label>Max Chunk (ms): <span id="vadMaxChunkValue">4000</span></label>
+<input type="range" id="vadMaxChunkSlider" min="1000" max="10000" value="4000" step="500" style="width:100%" oninput="document.getElementById('vadMaxChunkValue').textContent=this.value">
+<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
+<span>1000ms</span><span>10000ms</span>
 </div>
 </div>
 </div>
@@ -3678,27 +3698,35 @@ function loadVadConfig(){
   fetch('/api/vad/config').then(r=>r.json()).then(d=>{
     document.getElementById('vadWindowSlider').value=d.window_ms;
     document.getElementById('vadThresholdSlider').value=d.threshold;
+    document.getElementById('vadSilenceSlider').value=d.silence_ms||400;
+    document.getElementById('vadMaxChunkSlider').value=d.max_chunk_ms||4000;
     updateVadWindowDisplay(d.window_ms);
     updateVadThresholdDisplay(d.threshold);
-    // Update current settings display
+    document.getElementById('vadSilenceValue').textContent=d.silence_ms||400;
+    document.getElementById('vadMaxChunkValue').textContent=d.max_chunk_ms||4000;
     document.getElementById('currentVadWindow').textContent=d.window_ms;
     document.getElementById('currentVadThreshold').textContent=d.threshold;
+    document.getElementById('currentVadSilence').textContent=d.silence_ms||400;
+    document.getElementById('currentVadMaxChunk').textContent=d.max_chunk_ms||4000;
   }).catch(e=>console.error('Failed to load VAD config:',e));
 }
 
 function saveVadConfig(){
   var window_ms=document.getElementById('vadWindowSlider').value;
   var threshold=document.getElementById('vadThresholdSlider').value;
+  var silence_ms=document.getElementById('vadSilenceSlider').value;
+  var max_chunk_ms=document.getElementById('vadMaxChunkSlider').value;
   
   fetch('/api/vad/config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({window_ms:window_ms,threshold:threshold})
+    body:JSON.stringify({window_ms:window_ms,threshold:threshold,silence_ms:silence_ms,max_chunk_ms:max_chunk_ms})
   }).then(r=>r.json()).then(d=>{
     if(d.success){
-      // Update current settings display
       document.getElementById('currentVadWindow').textContent=d.window_ms;
       document.getElementById('currentVadThreshold').textContent=d.threshold;
+      document.getElementById('currentVadSilence').textContent=d.silence_ms;
+      document.getElementById('currentVadMaxChunk').textContent=d.max_chunk_ms;
       alert('VAD configuration saved successfully!');
     }
   }).catch(e=>console.error('Failed to save VAD config:',e));
@@ -6631,26 +6659,34 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             
             std::string window_ms_str = extract_json_string(body, "window_ms");
             std::string threshold_str = extract_json_string(body, "threshold");
+            std::string silence_ms_str = extract_json_string(body, "silence_ms");
+            std::string max_chunk_ms_str = extract_json_string(body, "max_chunk_ms");
             
-            if (!window_ms_str.empty()) {
-                set_setting("vad_window_ms", window_ms_str);
-            }
-            if (!threshold_str.empty()) {
-                set_setting("vad_threshold", threshold_str);
-            }
+            if (!window_ms_str.empty()) set_setting("vad_window_ms", window_ms_str);
+            if (!threshold_str.empty()) set_setting("vad_threshold", threshold_str);
+            if (!silence_ms_str.empty()) set_setting("vad_silence_ms", silence_ms_str);
+            if (!max_chunk_ms_str.empty()) set_setting("vad_max_chunk_ms", max_chunk_ms_str);
+            
+            std::string w = window_ms_str.empty() ? get_setting("vad_window_ms", "50") : window_ms_str;
+            std::string t = threshold_str.empty() ? get_setting("vad_threshold", "2.0") : threshold_str;
+            std::string s = silence_ms_str.empty() ? get_setting("vad_silence_ms", "400") : silence_ms_str;
+            std::string m = max_chunk_ms_str.empty() ? get_setting("vad_max_chunk_ms", "4000") : max_chunk_ms_str;
             
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
-                "{\"success\":true,\"window_ms\":%s,\"threshold\":%s}",
-                window_ms_str.empty() ? "100" : window_ms_str.c_str(),
-                threshold_str.empty() ? "2.0" : threshold_str.c_str());
+                "{\"success\":true,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s}",
+                w.c_str(), t.c_str(), s.c_str(), m.c_str());
         } else {
-            std::string window_ms = get_setting("vad_window_ms", "100");
+            std::string window_ms = get_setting("vad_window_ms", "50");
             std::string threshold = get_setting("vad_threshold", "2.0");
+            std::string silence_ms = get_setting("vad_silence_ms", "400");
+            std::string max_chunk_ms = get_setting("vad_max_chunk_ms", "4000");
             
             std::stringstream json;
             json << "{"
                  << "\"window_ms\":" << window_ms << ","
-                 << "\"threshold\":" << threshold
+                 << "\"threshold\":" << threshold << ","
+                 << "\"silence_ms\":" << silence_ms << ","
+                 << "\"max_chunk_ms\":" << max_chunk_ms
                  << "}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
         }

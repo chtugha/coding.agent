@@ -12,18 +12,24 @@
 // dramatically because Whisper inference time scales ~quadratically with input length.
 // Context coherence is maintained by Whisper's initial_prompt mechanism.
 //
+// Smart-split: When max chunk length is reached during speech, the split point is placed
+// at the lowest-energy frame boundary near the end to avoid cutting mid-word.
+//
 // Speech signal management: Broadcasts SPEECH_ACTIVE/SPEECH_IDLE signals downstream
 // to coordinate with other services (e.g., Kokoro stops TTS playback on speech detect).
 #include <iostream>
 #include <vector>
+#include <deque>
 #include <string>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <map>
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 #include <signal.h>
 #include <getopt.h>
 #include "interconnect.h"
@@ -36,7 +42,7 @@ static void sig_handler(int) { g_running = false; }
 
 struct VadCall {
     uint32_t id;
-    std::vector<float> audio_buffer;
+    std::deque<float> audio_buffer;
     std::mutex mutex;
     bool in_speech = false;
     bool speech_signaled = false;
@@ -51,38 +57,29 @@ struct VadCall {
     std::chrono::steady_clock::time_point speech_signal_time;
     size_t last_buffer_size = 0;
     std::chrono::steady_clock::time_point last_buffer_growth;
+    std::vector<float> frame_energies;
 };
 
 class VadService {
-    // VAD parameters — tuned for low-latency chunked streaming.
-    // vad_frame_size_: 50ms frames (800 samples @ 16kHz) — finer granularity than 100ms
-    //   for detecting short pauses between words without cutting mid-phoneme.
-    size_t vad_frame_size_ = 800;
+    size_t vad_frame_size_ = 800;           // 50ms @ 16kHz
     float vad_threshold_mult_ = 2.0f;
-    // Minimum energy threshold to distinguish speech from G.711 codec noise floor.
-    // G.711 μ-law silence (0xFF/0x7F) decodes to ±0.000885 → energy ~0.00000078.
-    // Set min_energy well above this to prevent false VAD triggers on silence.
     float vad_min_energy_ = 0.00005f;
-    // vad_silence_frames_: 8 frames × 50ms = 400ms — triggers on word-boundary pauses
-    //   instead of full sentence gaps. Short enough for fast turnaround, long enough
-    //   to not split mid-word (German phonemes are typically <200ms).
-    int vad_silence_frames_ = 8;
-    // vad_max_speech_samples_: 4s max chunk — keeps Whisper inference under ~500ms.
-    //   Whisper's attention is O(n²) on audio length; 4s vs 10s is ~6x faster.
-    size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 4;
-    size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;
+    int vad_silence_frames_ = 8;            // 8 × 50ms = 400ms
+    size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 4;  // 4s default
+    size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;  // 500ms
     int vad_context_frames_ = 4;
     int vad_onset_frames_ = 3;
     int speech_signal_timeout_s_ = 10;
     int vad_inactivity_flush_ms_ = 1000;
     bool vad_logging_enabled_ = true;
+    size_t smart_split_window_frames_ = 6;  // look back 6 frames for energy dip
 
 public:
-    VadService() 
+    VadService()
         : running_(true),
           interconnect_(whispertalk::ServiceType::VAD_SERVICE) {}
 
-    void set_vad_params(int window_ms, float threshold_mult, int silence_ms = -1) {
+    void set_vad_params(int window_ms, float threshold_mult, int silence_ms, int max_chunk_ms) {
         if (window_ms >= 10 && window_ms <= 500) {
             vad_frame_size_ = static_cast<size_t>(VAD_SAMPLES_PER_MS * window_ms);
         }
@@ -90,14 +87,27 @@ public:
             vad_threshold_mult_ = threshold_mult;
         }
         if (silence_ms > 0) {
-            vad_silence_frames_ = silence_ms / std::max(1, (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS));
+            int frame_ms = std::max(1, (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS));
+            vad_silence_frames_ = silence_ms / frame_ms;
+            if (vad_silence_frames_ < 1) vad_silence_frames_ = 1;
         }
-        int window_actual = (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS);
-        int silence_actual = vad_silence_frames_ * window_actual;
-        std::cout << "VAD config: window=" << window_actual << "ms"
+        if (max_chunk_ms > 0) {
+            vad_max_speech_samples_ = static_cast<size_t>(VAD_SAMPLES_PER_MS) * max_chunk_ms;
+            if (vad_max_speech_samples_ < vad_min_speech_samples_ * 2) {
+                vad_max_speech_samples_ = vad_min_speech_samples_ * 2;
+            }
+        }
+        print_config();
+    }
+
+    void print_config() {
+        int frame_ms = (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS);
+        int silence_ms = vad_silence_frames_ * frame_ms;
+        int max_ms = (int)(vad_max_speech_samples_ / VAD_SAMPLES_PER_MS);
+        std::cout << "VAD config: window=" << frame_ms << "ms"
                   << " threshold=" << vad_threshold_mult_
-                  << " silence=" << silence_actual << "ms"
-                  << " max_chunk=" << (vad_max_speech_samples_ / VAD_SAMPLE_RATE) << "s"
+                  << " silence=" << silence_ms << "ms"
+                  << " max_chunk=" << max_ms << "ms"
                   << " min_chunk=" << (vad_min_speech_samples_ * 1000 / VAD_SAMPLE_RATE) << "ms"
                   << std::endl;
     }
@@ -132,6 +142,7 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         running_ = false;
+        data_cv_.notify_all();
 
         int sock = cmd_sock_.exchange(-1);
         if (sock >= 0) ::close(sock);
@@ -142,6 +153,55 @@ public:
     }
 
 private:
+    void reset_call_state(VadCall& call) {
+        call.in_speech = false;
+        call.silence_count = 0;
+        call.onset_count = 0;
+        call.speech_start = 0;
+        call.noise_floor = 0.00005f;
+        call.frame_energies.clear();
+        if (call.speech_signaled) {
+            call.speech_signaled = false;
+            interconnect_.broadcast_speech_signal(call.id, false);
+        }
+    }
+
+    void compact_buffer(VadCall& call, size_t consumed) {
+        if (consumed > 0 && consumed <= call.audio_buffer.size()) {
+            for (size_t i = 0; i < consumed; ++i) {
+                call.audio_buffer.pop_front();
+            }
+        } else if (consumed > call.audio_buffer.size()) {
+            call.audio_buffer.clear();
+        }
+        call.vad_pos = 0;
+        call.speech_start = 0;
+        call.last_buffer_size = call.audio_buffer.size();
+    }
+
+    size_t find_smart_split_point(VadCall& call, size_t max_end) {
+        if (call.frame_energies.size() < 2) return max_end;
+
+        size_t search_start = 0;
+        if (call.frame_energies.size() > smart_split_window_frames_) {
+            search_start = call.frame_energies.size() - smart_split_window_frames_;
+        }
+
+        float min_energy = call.frame_energies[search_start];
+        size_t min_idx = search_start;
+        for (size_t i = search_start + 1; i < call.frame_energies.size(); ++i) {
+            if (call.frame_energies[i] <= min_energy) {
+                min_energy = call.frame_energies[i];
+                min_idx = i;
+            }
+        }
+
+        size_t split = call.speech_start + (min_idx + 1) * vad_frame_size_;
+        if (split > call.audio_buffer.size()) split = call.audio_buffer.size();
+        if (split <= call.speech_start) split = max_end;
+        return split;
+    }
+
     void command_listener_loop() {
         uint16_t port = whispertalk::service_cmd_port(whispertalk::ServiceType::VAD_SERVICE);
         int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -189,10 +249,17 @@ private:
                 std::lock_guard<std::mutex> cl(call->mutex);
                 if (call->speech_signaled) speech_active++;
             }
+            int frame_ms = (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS);
+            int silence_ms = vad_silence_frames_ * frame_ms;
+            int max_ms = (int)(vad_max_speech_samples_ / VAD_SAMPLES_PER_MS);
             return "ACTIVE_CALLS:" + std::to_string(calls_.size())
                 + ":SPEECH_ACTIVE:" + std::to_string(speech_active)
                 + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
                 + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":WINDOW_MS:" + std::to_string(frame_ms)
+                + ":THRESHOLD:" + std::to_string(vad_threshold_mult_).substr(0, 4)
+                + ":SILENCE_MS:" + std::to_string(silence_ms)
+                + ":MAX_CHUNK_MS:" + std::to_string(max_ms)
                 + "\n";
         }
         return "ERROR:Unknown command\n";
@@ -210,23 +277,30 @@ private:
             }
 
             auto call = get_or_create_call(pkt.call_id);
-            call->last_activity = std::chrono::steady_clock::now();
 
             size_t sample_count = pkt.payload_size / sizeof(float);
             const float* samples = reinterpret_cast<const float*>(pkt.payload.data());
 
-            std::lock_guard<std::mutex> lock(call->mutex);
-            call->audio_buffer.insert(call->audio_buffer.end(), samples, samples + sample_count);
+            {
+                std::lock_guard<std::mutex> lock(call->mutex);
+                call->audio_buffer.insert(call->audio_buffer.end(), samples, samples + sample_count);
+                call->last_activity = std::chrono::steady_clock::now();
+            }
+            data_cv_.notify_one();
         }
     }
 
     void processing_loop() {
         while (running_ && g_running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            {
+                std::unique_lock<std::mutex> lk(data_mutex_);
+                data_cv_.wait_for(lk, std::chrono::milliseconds(5));
+            }
 
             std::vector<std::shared_ptr<VadCall>> active;
             {
                 std::lock_guard<std::mutex> lock(calls_mutex_);
+                active.reserve(calls_.size());
                 for (auto& p : calls_) active.push_back(p.second);
             }
 
@@ -239,7 +313,8 @@ private:
                     while (pos + vad_frame_size_ <= call->audio_buffer.size()) {
                         float energy = 0;
                         for (size_t i = 0; i < vad_frame_size_; ++i) {
-                            energy += call->audio_buffer[pos + i] * call->audio_buffer[pos + i];
+                            float s = call->audio_buffer[pos + i];
+                            energy += s * s;
                         }
                         energy /= static_cast<float>(vad_frame_size_);
 
@@ -260,6 +335,7 @@ private:
                                 if (call->onset_count >= vad_onset_frames_) {
                                     call->in_speech = true;
                                     call->speech_start = call->tentative_speech_start;
+                                    call->frame_energies.clear();
                                     if (vad_logging_enabled_) {
                                         log_fwd_.forward("DEBUG", call->id,
                                             "VAD speech_start at sample %zu (energy=%.6f threshold=%.6f noise_floor=%.6f onset=%d)",
@@ -281,6 +357,10 @@ private:
                             }
                         }
 
+                        if (call->in_speech) {
+                            call->frame_energies.push_back(energy);
+                        }
+
                         pos += vad_frame_size_;
 
                         if (call->in_speech && call->silence_count > vad_silence_frames_) {
@@ -293,43 +373,39 @@ private:
                                     "VAD speech_end (silence) — %zu samples (%.0fms) queued for transcription",
                                     to_send.size(), dur_ms);
                             }
-                            call->audio_buffer.erase(call->audio_buffer.begin(),
-                                call->audio_buffer.begin() + pos);
+                            compact_buffer(*call, pos);
                             pos = 0;
-                            call->in_speech = false;
-                            call->silence_count = 0;
-                            call->onset_count = 0;
-                            call->speech_start = 0;
-                            call->noise_floor = 0.00005f;
-                            if (call->speech_signaled) {
-                                call->speech_signaled = false;
-                                interconnect_.broadcast_speech_signal(call->id, false);
-                            }
+                            reset_call_state(*call);
                             break;
                         }
 
                         size_t speech_len = pos - call->speech_start;
                         if (call->in_speech && speech_len > vad_max_speech_samples_) {
+                            size_t split = find_smart_split_point(*call, pos);
                             to_send.assign(
                                 call->audio_buffer.begin() + call->speech_start,
-                                call->audio_buffer.begin() + pos);
+                                call->audio_buffer.begin() + split);
                             if (vad_logging_enabled_) {
                                 double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
+                                bool was_smart = (split != pos);
                                 log_fwd_.forward("DEBUG", call->id,
-                                    "VAD speech_end (max_length) — %zu samples (%.0fms) queued for transcription",
-                                    to_send.size(), dur_ms);
+                                    "VAD speech_end (max_length%s) — %zu samples (%.0fms) queued for transcription",
+                                    was_smart ? ", smart-split" : "", to_send.size(), dur_ms);
                             }
-                            call->audio_buffer.erase(call->audio_buffer.begin(),
-                                call->audio_buffer.begin() + pos);
+                            size_t leftover_start = split;
+                            bool has_leftover = (split < pos);
+
+                            compact_buffer(*call, leftover_start);
                             pos = 0;
-                            call->in_speech = false;
-                            call->silence_count = 0;
-                            call->onset_count = 0;
-                            call->speech_start = 0;
-                            call->noise_floor = 0.00005f;
-                            if (call->speech_signaled) {
-                                call->speech_signaled = false;
-                                interconnect_.broadcast_speech_signal(call->id, false);
+
+                            if (has_leftover && call->audio_buffer.size() > 0) {
+                                call->in_speech = true;
+                                call->speech_start = 0;
+                                call->silence_count = 0;
+                                call->onset_count = vad_onset_frames_;
+                                call->frame_energies.clear();
+                            } else {
+                                reset_call_state(*call);
                             }
                             break;
                         }
@@ -353,16 +429,8 @@ private:
                                     call->audio_buffer.end());
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
-                                call->in_speech = false;
-                                call->silence_count = 0;
-                                call->onset_count = 0;
-                                call->speech_start = 0;
                                 call->last_buffer_size = 0;
-                                call->noise_floor = 0.00005f;
-                                if (call->speech_signaled) {
-                                    call->speech_signaled = false;
-                                    interconnect_.broadcast_speech_signal(call->id, false);
-                                }
+                                reset_call_state(*call);
                                 if (vad_logging_enabled_) {
                                     double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                     log_fwd_.forward("DEBUG", call->id,
@@ -378,8 +446,8 @@ private:
                         size_t keep_frames = vad_context_frames_ + 2;
                         size_t keep = vad_frame_size_ * keep_frames;
                         if (call->vad_pos > keep) {
-                            call->audio_buffer.erase(call->audio_buffer.begin(),
-                                call->audio_buffer.begin() + (call->vad_pos - keep));
+                            size_t trim = call->vad_pos - keep;
+                            for (size_t i = 0; i < trim; ++i) call->audio_buffer.pop_front();
                             call->vad_pos = keep;
                         }
                     }
@@ -394,16 +462,11 @@ private:
                                     call->audio_buffer.end());
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
-                                call->in_speech = false;
-                                call->silence_count = 0;
-                                call->onset_count = 0;
-                                call->speech_start = 0;
                                 call->last_buffer_size = 0;
                                 std::cout << "[" << call->id
                                           << "] SPEECH_ACTIVE timeout (" << speech_signal_timeout_s_ << "s) — forcing SPEECH_IDLE" << std::endl;
                             }
-                            call->speech_signaled = false;
-                            interconnect_.broadcast_speech_signal(call->id, false);
+                            reset_call_state(*call);
                         }
                     }
                 }
@@ -415,8 +478,6 @@ private:
         }
     }
 
-    // Forwards a speech chunk to Whisper via interconnect.
-    // Applies minimum length and RMS energy filters to reject noise/clicks.
     void send_chunk_downstream(uint32_t call_id, const std::vector<float>& audio) {
         if (audio.size() < vad_min_speech_samples_) {
             if (vad_logging_enabled_) {
@@ -427,11 +488,15 @@ private:
             return;
         }
 
-        // RMS energy check: reject chunks that are near-silence to prevent hallucinations.
-        // G.711 codec noise floor is ~0.001 RMS; real speech is typically >0.01 RMS.
-        float rms = 0.0f;
-        for (size_t i = 0; i < audio.size(); ++i) rms += audio[i] * audio[i];
-        rms = std::sqrt(rms / audio.size());
+        float sum_sq = 0.0f;
+        float peak = 0.0f;
+        for (size_t i = 0; i < audio.size(); ++i) {
+            float s = audio[i];
+            sum_sq += s * s;
+            float a = std::abs(s);
+            if (a > peak) peak = a;
+        }
+        float rms = std::sqrt(sum_sq / audio.size());
 
         if (rms < 0.005f) {
             if (vad_logging_enabled_) {
@@ -442,8 +507,6 @@ private:
         }
 
         if (vad_logging_enabled_) {
-            float peak = 0.0f;
-            for (auto s : audio) peak = std::max(peak, std::abs(s));
             log_fwd_.forward("INFO", call_id,
                 "VAD chunk -> Whisper: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
                 audio.size(), audio.size() / (double)VAD_SAMPLES_PER_MS, rms, peak);
@@ -461,7 +524,8 @@ private:
 
     std::shared_ptr<VadCall> get_or_create_call(uint32_t cid) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(cid)) return calls_[cid];
+        auto it = calls_.find(cid);
+        if (it != calls_.end()) return it->second;
         auto call = std::make_shared<VadCall>();
         call->id = cid;
         call->last_activity = std::chrono::steady_clock::now();
@@ -474,16 +538,19 @@ private:
 
     void handle_call_end(uint32_t call_id) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(call_id)) {
+        auto it = calls_.find(call_id);
+        if (it != calls_.end()) {
             std::cout << "Call " << call_id << " ended, closing VAD session" << std::endl;
             log_fwd_.forward("INFO", call_id, "Call ended, closing VAD session");
-            calls_.erase(call_id);
+            calls_.erase(it);
         }
     }
 
     std::atomic<bool> running_;
     std::atomic<int> cmd_sock_{-1};
     std::mutex calls_mutex_;
+    std::mutex data_mutex_;
+    std::condition_variable data_cv_;
     std::map<uint32_t, std::shared_ptr<VadCall>> calls_;
     whispertalk::InterconnectNode interconnect_;
     whispertalk::LogForwarder log_fwd_;
@@ -497,20 +564,23 @@ int main(int argc, char** argv) {
     int vad_window_ms = 50;
     float vad_threshold = 2.0f;
     int vad_silence_ms = 400;
+    int vad_max_chunk_ms = 4000;
 
     static struct option long_opts[] = {
-        {"vad-window-ms", required_argument, 0, 'w'},
-        {"vad-threshold", required_argument, 0, 't'},
-        {"vad-silence-ms", required_argument, 0, 's'},
+        {"vad-window-ms",    required_argument, 0, 'w'},
+        {"vad-threshold",    required_argument, 0, 't'},
+        {"vad-silence-ms",   required_argument, 0, 's'},
+        {"vad-max-chunk-ms", required_argument, 0, 'c'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "w:t:s:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "w:t:s:c:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'w': vad_window_ms = atoi(optarg); break;
             case 't': vad_threshold = atof(optarg); break;
             case 's': vad_silence_ms = atoi(optarg); break;
+            case 'c': vad_max_chunk_ms = atoi(optarg); break;
             default: break;
         }
     }
@@ -518,7 +588,7 @@ int main(int argc, char** argv) {
     std::cout << "VAD Service starting..." << std::endl;
 
     VadService service;
-    service.set_vad_params(vad_window_ms, vad_threshold, vad_silence_ms);
+    service.set_vad_params(vad_window_ms, vad_threshold, vad_silence_ms, vad_max_chunk_ms);
     if (!service.init()) {
         return 1;
     }
