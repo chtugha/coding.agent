@@ -407,6 +407,7 @@ private:
                                     }
                                     if (!call->speech_signaled) {
                                         call->speech_signaled = true;
+                                        call->speech_signal_time = std::chrono::steady_clock::now();
                                         needs_active_broadcast = true;
                                     }
                                 }
