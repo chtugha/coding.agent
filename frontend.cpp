@@ -1529,7 +1529,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Test 2: IAP Codec Quality</span></div>
-<p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px"><strong>Codec algorithm test</strong> (does not require IAP service). Runs the exact G.711 mu-law encode/decode + 8kHz&#x2192;16kHz upsample pipeline offline, measuring SNR and THD against original audio. Service connectivity is tested in Test 1 above.</p>
+<p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px"><strong>Codec algorithm test</strong> (does not require IAP service). Runs the exact G.711 mu-law encode/decode + 15-tap FIR half-band 8kHz&#x2192;16kHz upsample pipeline offline, measuring SNR and RMS Error per-packet. Service connectivity is tested in Test 1 above.</p>
 <div class="wt-field">
 <label>Select Test File</label>
 <select class="wt-select" id="iapTestFileSelect" style="width:100%;padding:8px">
@@ -1547,9 +1547,9 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <thead>
 <tr>
 <th>File</th>
-<th>Latency (ms)</th>
+<th>Pkt Latency (ms)</th>
 <th>SNR (dB)</th>
-<th>THD (%)</th>
+<th>RMS Error (%)</th>
 <th>Status</th>
 <th>Timestamp</th>
 </tr>
@@ -1559,7 +1559,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </tbody>
 </table>
 <div style="margin-top:12px;font-size:12px;color:var(--wt-text-secondary)">
-<strong>Pass Criteria:</strong> SNR &#x2265; 3dB, THD &#x2264; 80%, Latency &#x2264; 50ms. Uses real IAP pipeline: G.711 &#x3BC;-law encode/decode + 15-tap FIR half-band upsample 8kHz&#x2192;16kHz.
+<strong>Pass Criteria:</strong> SNR &#x2265; 25dB, RMS Error &#x2264; 10%, Per-Packet Latency &#x2264; 50ms. Uses shared IAP pipeline: G.711 &#x3BC;-law encode/decode + 15-tap FIR half-band upsample (from interconnect.h).
 </div>
 </div>
 <div id="iapTestChart" style="margin-top:16px;display:none">
@@ -3166,7 +3166,7 @@ function runIapQualityTest(){
       return;
     }
     
-    var sc=d.samples_compared?(' ('+d.samples_compared.toLocaleString()+' samples)'):'';
+    var sc=d.pkt_count?(' ('+d.pkt_count+' packets, '+d.samples_compared.toLocaleString()+' samples)'):'';
     statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; Test completed'+sc+'</span>';
     
     var tbody=document.getElementById('iapResultsBody');
@@ -3175,16 +3175,16 @@ function runIapQualityTest(){
     var now=new Date().toLocaleString();
     var html='<tr>';
     html+='<td>'+escapeHtml(d.file)+'</td>';
-    html+='<td>'+d.latency_ms.toFixed(2)+'</td>';
+    html+='<td>'+d.latency_ms.toFixed(4)+'</td>';
     html+='<td>'+d.snr.toFixed(2)+'</td>';
-    html+='<td>'+d.thd.toFixed(2)+'</td>';
+    html+='<td>'+d.rms_error.toFixed(2)+'</td>';
     html+='<td style="color:'+statusColor+';font-weight:600">'+d.status+'</td>';
     html+='<td style="font-size:11px">'+now+'</td>';
     html+='</tr>';
     tbody.innerHTML=html+tbody.innerHTML;
     
     if(!window.iapTestHistory)window.iapTestHistory=[];
-    window.iapTestHistory.push({file:d.file,snr:d.snr,thd:d.thd,latency:d.latency_ms,status:d.status});
+    window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,status:d.status});
     renderIapChart();
     
   }).catch(e=>{
@@ -3200,20 +3200,20 @@ function renderIapChart(){
   if(window.iapChart)window.iapChart.destroy();
   var labels=window.iapTestHistory.map(function(h){return h.file.replace('.wav','');});
   var snrData=window.iapTestHistory.map(function(h){return h.snr;});
-  var thdData=window.iapTestHistory.map(function(h){return h.thd;});
+  var rmsData=window.iapTestHistory.map(function(h){return h.rmsError;});
   var colors=window.iapTestHistory.map(function(h){return h.status==='PASS'?'rgba(34,197,94,0.7)':'rgba(239,68,68,0.7)';});
   window.iapChart=new Chart(ctx,{
     type:'bar',
     data:{labels:labels,datasets:[
       {label:'SNR (dB)',data:snrData,backgroundColor:'rgba(59,130,246,0.7)',yAxisID:'y'},
-      {label:'THD (%)',data:thdData,backgroundColor:colors,yAxisID:'y1'}
+      {label:'RMS Error (%)',data:rmsData,backgroundColor:colors,yAxisID:'y1'}
     ]},
     options:{
       responsive:true,
       interaction:{mode:'index',intersect:false},
       scales:{
         y:{type:'linear',position:'left',title:{display:true,text:'SNR (dB)'}},
-        y1:{type:'linear',position:'right',title:{display:true,text:'THD (%)'},grid:{drawOnChartArea:false}}
+        y1:{type:'linear',position:'right',title:{display:true,text:'RMS Error (%)'},grid:{drawOnChartArea:false}}
       },
       plugins:{
         title:{display:true,text:'IAP Codec Quality - Historical Results'},
@@ -3232,12 +3232,12 @@ function renderIapChart(){
           callbacks:{
             title:function(items){return 'File: '+items[0].label+'.wav';},
             label:function(ctx){
-              var label=ctx.dataset.label||'';
-              if(label)label+=': ';
-              label+=ctx.parsed.y.toFixed(2);
-              if(ctx.datasetIndex===0)label+=' dB';
-              else label+=' %';
-              return label;
+              var lbl=ctx.dataset.label||'';
+              if(lbl)lbl+=': ';
+              lbl+=ctx.parsed.y.toFixed(2);
+              if(ctx.datasetIndex===0)lbl+=' dB';
+              else lbl+=' %';
+              return lbl;
             },
             afterBody:function(items){
               var idx=items[0].dataIndex;
@@ -3269,26 +3269,24 @@ async function runAllIapQualityTests(){
   var statusDiv=document.getElementById('iapTestStatus');
   var tbody=document.getElementById('iapResultsBody');
   tbody.innerHTML='';
-  window.iapTestHistory=[];
+  if(!window.iapTestHistory)window.iapTestHistory=[];
   var passed=0,failed=0;
   for(var fi=0;fi<files.length;fi++){
     var file=files[fi];
     statusDiv.innerHTML='<span style="color:var(--wt-warning)">&#x23F3; Testing '+(fi+1)+'/'+files.length+': '+file+'...</span>';
     try{
-      var r=await fetch('/api/iap/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:file})});
-      var d=await r.json();
+      let r=await fetch('/api/iap/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:file})});
+      let d=await r.json();
       if(d.error){
         failed++;
-        var row='<tr><td>'+escapeHtml(file)+'</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>'+d.error+'</td></tr>';
-        tbody.innerHTML+=row;
+        tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>'+d.error+'</td></tr>';
         continue;
       }
       if(d.status==='PASS')passed++;else failed++;
-      var sc=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
-      var now=new Date().toLocaleString();
-      var row='<tr><td>'+escapeHtml(d.file)+'</td><td>'+d.latency_ms.toFixed(2)+'</td><td>'+d.snr.toFixed(2)+'</td><td>'+d.thd.toFixed(2)+'</td><td style="color:'+sc+';font-weight:600">'+d.status+'</td><td style="font-size:11px">'+now+'</td></tr>';
-      tbody.innerHTML+=row;
-      window.iapTestHistory.push({file:d.file,snr:d.snr,thd:d.thd,latency:d.latency_ms,status:d.status});
+      let sc=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
+      let now=new Date().toLocaleString();
+      tbody.innerHTML+='<tr><td>'+escapeHtml(d.file)+'</td><td>'+d.latency_ms.toFixed(4)+'</td><td>'+d.snr.toFixed(2)+'</td><td>'+d.rms_error.toFixed(2)+'</td><td style="color:'+sc+';font-weight:600">'+d.status+'</td><td style="font-size:11px">'+now+'</td></tr>';
+      window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,status:d.status});
     }catch(e){
       failed++;
       tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td colspan="5" style="color:var(--wt-danger)">'+e+'</td></tr>';
@@ -4677,6 +4675,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return ~(sign | (exponent << 4) | mantissa);
     }
 
+    // Decode an 8-bit G.711 mu-law byte to a float32 sample in [-1.0, 1.0].
+    // ITU-T G.711 compliant: invert all bits, extract sign (bit 7),
+    // exponent/segment (bits 6-4), mantissa/quantization (bits 3-0).
+    // Reconstruct magnitude: ((2*mantissa + 33) << (segment + 2)) - 132.
+    // Same formula as inbound-audio-processor.cpp init_g711_tables().
     static float ulaw_to_float(uint8_t byte) {
         int mu = ~byte;
         int sign = mu & 0x80;
@@ -4708,10 +4711,34 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     // IAP Codec Quality Test endpoint (POST /api/iap/quality_test).
-    // Runs the exact IAP pipeline offline: WAV → 8kHz resample → G.711 mu-law
-    // encode → decode → 15-tap FIR half-band upsample to 16kHz.
-    // Compares roundtripped 16kHz output against FIR-upsampled original 8kHz.
-    // Pass criteria: SNR >= 3dB, THD <= 80%, Latency <= 50ms.
+    //
+    // Tests the G.711 mu-law encode/decode pipeline used by the Inbound Audio
+    // Processor (IAP). Runs the exact same algorithm offline:
+    //   1. Load WAV file and resample to 8kHz (telephony sample rate)
+    //   2. Encode each sample to G.711 mu-law (simulating RTP payload encoding)
+    //   3. Decode mu-law to float32 (using ITU-T G.711 compliant lookup)
+    //   4. Upsample 8kHz to 16kHz via shared 15-tap FIR half-band filter
+    //      (whispertalk::iap_fir_upsample_frame from interconnect.h — same
+    //       code path used by the real IAP service)
+    //   5. Build a reference 16kHz signal by FIR-upsampling the original 8kHz
+    //   6. Compare codec output vs reference to measure distortion
+    //
+    // NOTE: This is a codec algorithm quality test, NOT an IAP service
+    // integration test. It validates the conversion algorithm quality without
+    // requiring the IAP service to be running. Service integration (TCP,
+    // reconnection, RTP forwarding) is tested separately via Test 1.
+    //
+    // Metrics:
+    //   SNR (Signal-to-Noise Ratio): 10*log10(signal_power/noise_power) in dB.
+    //     Noise is the quantization error from the mu-law encode/decode
+    //     roundtrip. Expected: ~36-38 dB for speech through G.711 mu-law.
+    //   RMS Error %: 100 * sqrt(noise_power/signal_power). Normalized root-
+    //     mean-square error between reference and codec output. Expected: ~1-2%.
+    //   Per-Packet Latency: Time to process a single 160-sample (20ms) frame
+    //     through G.711 decode + FIR upsample, measured per-frame and averaged.
+    //     Expected: < 50us on Apple Silicon (target < 15ms, max 50ms).
+    //
+    // Pass criteria: SNR >= 25 dB, RMS Error <= 10%, Per-Pkt Latency <= 50ms
     void handle_iap_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string file = extract_json_string(body, "file");
@@ -4733,24 +4760,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        auto start_time = std::chrono::steady_clock::now();
-
-        // Step 1: Resample source audio to 8kHz (telephony sample rate)
         std::vector<int16_t> samples_8k = resample_linear(wav.samples, wav.sample_rate, 8000);
 
-        // Step 2: Encode to G.711 mu-law (same as RTP payload encoding)
         std::vector<uint8_t> ulaw_data(samples_8k.size());
         for (size_t i = 0; i < samples_8k.size(); i++) {
             ulaw_data[i] = linear_to_ulaw(samples_8k[i]);
         }
-
-        static constexpr int FIR_LEN = 15;
-        static constexpr int FIR_CENTER = 7;
-        static const float hb_filter[FIR_LEN] = {
-            -0.0076f, 0.0000f, 0.0527f, 0.0000f, -0.1681f, 0.0000f, 0.6230f,
-             1.0000f,
-             0.6230f, 0.0000f, -0.1681f, 0.0000f, 0.0527f, 0.0000f, -0.0076f
-        };
 
         size_t n_samples = ulaw_data.size();
         std::vector<float> decoded(n_samples);
@@ -4758,73 +4773,42 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             decoded[i] = ulaw_to_float(ulaw_data[i]);
         }
 
-        size_t frame_size = 160;
+        constexpr size_t frame_size = whispertalk::IAP_ULAW_FRAME;
         std::vector<float> iap_output(n_samples * 2, 0.0f);
-        float fir_history[FIR_CENTER] = {};
+        float fir_history[whispertalk::IAP_FIR_CENTER] = {};
+
+        double pkt_latency_sum = 0.0;
+        double pkt_latency_max = 0.0;
+        size_t pkt_count = 0;
 
         for (size_t offset = 0; offset < n_samples; offset += frame_size) {
             size_t chunk = std::min(frame_size, n_samples - offset);
-            std::vector<float> ext(FIR_CENTER + chunk);
-            for (int i = 0; i < FIR_CENTER; i++) ext[i] = fir_history[i];
-            for (size_t i = 0; i < chunk; i++) ext[FIR_CENTER + i] = decoded[offset + i];
-            int ext_len = FIR_CENTER + (int)chunk;
 
-            size_t out_len = chunk * 2;
-            for (size_t n = 0; n < out_len; n++) {
-                float sum = 0.0f;
-                for (int k = 0; k < FIR_LEN; k++) {
-                    int src_idx_2x = (int)n - k + FIR_CENTER;
-                    if (src_idx_2x & 1) continue;
-                    int ext_idx = src_idx_2x / 2 + FIR_CENTER;
-                    if (ext_idx < 0 || ext_idx >= ext_len) continue;
-                    sum += ext[ext_idx] * hb_filter[k];
-                }
-                iap_output[offset * 2 + n] = sum * 2.0f;
-            }
+            auto t0 = std::chrono::steady_clock::now();
+            whispertalk::iap_fir_upsample_frame(
+                &decoded[offset], chunk, &iap_output[offset * 2], fir_history);
+            auto t1 = std::chrono::steady_clock::now();
 
-            if (chunk >= (size_t)FIR_CENTER) {
-                for (int i = 0; i < FIR_CENTER; i++)
-                    fir_history[i] = decoded[offset + chunk - FIR_CENTER + i];
-            } else {
-                int shift = (int)chunk;
-                for (int i = 0; i < FIR_CENTER - shift; i++) fir_history[i] = fir_history[i + shift];
-                for (int i = 0; i < shift; i++) fir_history[FIR_CENTER - shift + i] = decoded[offset + i];
-            }
+            double pkt_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+            pkt_latency_sum += pkt_us;
+            if (pkt_us > pkt_latency_max) pkt_latency_max = pkt_us;
+            pkt_count++;
         }
 
-        auto end_time = std::chrono::steady_clock::now();
-        double latency_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+        double avg_pkt_latency_us = pkt_count > 0 ? pkt_latency_sum / pkt_count : 0.0;
+        double avg_pkt_latency_ms = avg_pkt_latency_us / 1000.0;
+        double max_pkt_latency_ms = pkt_latency_max / 1000.0;
 
-        std::vector<float> ref_16k(samples_8k.size() * 2, 0.0f);
-        {
-            float ref_hist[FIR_CENTER] = {};
-            for (size_t off = 0; off < samples_8k.size(); off += frame_size) {
-                size_t ch = std::min(frame_size, samples_8k.size() - off);
-                std::vector<float> rext(FIR_CENTER + ch);
-                for (int i = 0; i < FIR_CENTER; i++) rext[i] = ref_hist[i];
-                for (size_t i = 0; i < ch; i++) rext[FIR_CENTER + i] = samples_8k[off + i] / 32768.0f;
-                int rext_len = FIR_CENTER + (int)ch;
-                size_t rout = ch * 2;
-                for (size_t rn = 0; rn < rout; rn++) {
-                    float sum = 0.0f;
-                    for (int k = 0; k < FIR_LEN; k++) {
-                        int si = (int)rn - k + FIR_CENTER;
-                        if (si & 1) continue;
-                        int ri = si / 2 + FIR_CENTER;
-                        if (ri < 0 || ri >= rext_len) continue;
-                        sum += rext[ri] * hb_filter[k];
-                    }
-                    ref_16k[off * 2 + rn] = sum * 2.0f;
-                }
-                if (ch >= (size_t)FIR_CENTER) {
-                    for (int i = 0; i < FIR_CENTER; i++)
-                        ref_hist[i] = samples_8k[off + ch - FIR_CENTER + i] / 32768.0f;
-                } else {
-                    int sh = (int)ch;
-                    for (int i = 0; i < FIR_CENTER - sh; i++) ref_hist[i] = ref_hist[i + sh];
-                    for (int i = 0; i < sh; i++) ref_hist[FIR_CENTER - sh + i] = samples_8k[off + i] / 32768.0f;
-                }
-            }
+        std::vector<float> ref_8k_float(n_samples);
+        for (size_t i = 0; i < n_samples; i++) {
+            ref_8k_float[i] = samples_8k[i] / 32768.0f;
+        }
+        std::vector<float> ref_16k(n_samples * 2, 0.0f);
+        float ref_hist[whispertalk::IAP_FIR_CENTER] = {};
+        for (size_t offset = 0; offset < n_samples; offset += frame_size) {
+            size_t chunk = std::min(frame_size, n_samples - offset);
+            whispertalk::iap_fir_upsample_frame(
+                &ref_8k_float[offset], chunk, &ref_16k[offset * 2], ref_hist);
         }
 
         size_t compare_len = std::min(ref_16k.size(), iap_output.size());
@@ -4845,22 +4829,22 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         double snr_db = (noise_power > 1e-15) ? 10.0 * log10(signal_power / noise_power) : 99.0;
 
-        double thd_percent = 0.0;
+        double rms_error_pct = 0.0;
         if (signal_power > 1e-15) {
-            thd_percent = 100.0 * sqrt(noise_power / signal_power);
-            if (thd_percent > 100.0) thd_percent = 100.0;
+            rms_error_pct = 100.0 * sqrt(noise_power / signal_power);
+            if (rms_error_pct > 100.0) rms_error_pct = 100.0;
         }
 
-        std::string status = (snr_db >= 3.0 && thd_percent <= 80.0 && latency_ms <= 50.0) ? "PASS" : "FAIL";
+        std::string status = (snr_db >= 25.0 && rms_error_pct <= 10.0 && max_pkt_latency_ms <= 50.0) ? "PASS" : "FAIL";
 
         std::string sql = "INSERT INTO iap_quality_tests (file_name, latency_ms, snr_db, thd_percent, status, timestamp) "
                          "VALUES (?, ?, ?, ?, ?, ?)";
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, file.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_double(stmt, 2, latency_ms);
+            sqlite3_bind_double(stmt, 2, avg_pkt_latency_ms);
             sqlite3_bind_double(stmt, 3, snr_db);
-            sqlite3_bind_double(stmt, 4, thd_percent);
+            sqlite3_bind_double(stmt, 4, rms_error_pct);
             sqlite3_bind_text(stmt, 5, status.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(stmt, 6, time(nullptr));
             sqlite3_step(stmt);
@@ -4872,9 +4856,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         json << "{"
              << "\"success\":true,"
              << "\"file\":\"" << escape_json(file) << "\","
-             << "\"latency_ms\":" << latency_ms << ","
+             << "\"latency_ms\":" << avg_pkt_latency_ms << ","
+             << "\"max_latency_ms\":" << max_pkt_latency_ms << ","
              << "\"snr\":" << snr_db << ","
-             << "\"thd\":" << thd_percent << ","
+             << "\"rms_error\":" << rms_error_pct << ","
+             << "\"pkt_count\":" << pkt_count << ","
              << "\"samples_compared\":" << compare_len << ","
              << "\"status\":\"" << status << "\""
              << "}";

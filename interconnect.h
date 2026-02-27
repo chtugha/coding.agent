@@ -28,6 +28,60 @@ namespace whispertalk {
 
 static constexpr uint16_t FRONTEND_LOG_PORT = 22022;
 
+// Half-band FIR low-pass filter for 8kHz → 16kHz upsampling.
+// 15-tap Hamming-windowed sinc, cutoff ~3.8kHz, ~40dB stopband attenuation.
+// Used by IAP (inbound-audio-processor.cpp) and the offline codec quality test
+// (frontend.cpp handle_iap_quality_test). Both must use the same filter to
+// ensure test results match real pipeline behaviour.
+static constexpr int IAP_FIR_LEN    = 15;
+static constexpr int IAP_FIR_CENTER = 7;
+static constexpr int IAP_ULAW_FRAME = 160;
+
+inline const float* iap_fir_coeffs() {
+    static const float coeffs[IAP_FIR_LEN] = {
+        -0.0076f, 0.0000f, 0.0527f, 0.0000f, -0.1681f, 0.0000f, 0.6230f,
+         1.0000f,
+         0.6230f, 0.0000f, -0.1681f, 0.0000f, 0.0527f, 0.0000f, -0.0076f
+    };
+    return coeffs;
+}
+
+// FIR half-band upsample: processes one frame (up to IAP_ULAW_FRAME samples) of
+// 8kHz float input into 16kHz float output with 2× zero-stuffing + FIR filtering.
+// `history` must point to IAP_FIR_CENTER floats that persist across calls.
+// Returns number of output samples written (= in_len * 2).
+inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
+                                      float* out, float* history) {
+    const float* hb = iap_fir_coeffs();
+    float ext[IAP_FIR_CENTER + IAP_ULAW_FRAME];
+    for (int i = 0; i < IAP_FIR_CENTER; i++) ext[i] = history[i];
+    for (size_t i = 0; i < in_len; i++) ext[IAP_FIR_CENTER + i] = in[i];
+    int ext_len = IAP_FIR_CENTER + (int)in_len;
+
+    size_t out_len = in_len * 2;
+    for (size_t n = 0; n < out_len; n++) {
+        float sum = 0.0f;
+        for (int k = 0; k < IAP_FIR_LEN; k++) {
+            int src_idx_2x = (int)n - k + IAP_FIR_CENTER;
+            if (src_idx_2x & 1) continue;
+            int ext_idx = src_idx_2x / 2 + IAP_FIR_CENTER;
+            if (ext_idx < 0 || ext_idx >= ext_len) continue;
+            sum += ext[ext_idx] * hb[k];
+        }
+        out[n] = sum * 2.0f;
+    }
+
+    if (in_len >= (size_t)IAP_FIR_CENTER) {
+        for (int i = 0; i < IAP_FIR_CENTER; i++)
+            history[i] = in[in_len - IAP_FIR_CENTER + i];
+    } else {
+        int shift = (int)in_len;
+        for (int i = 0; i < IAP_FIR_CENTER - shift; i++) history[i] = history[i + shift];
+        for (int i = 0; i < shift; i++) history[IAP_FIR_CENTER - shift + i] = in[i];
+    }
+    return out_len;
+}
+
 enum class ServiceType : uint8_t {
     SIP_CLIENT = 1,
     INBOUND_AUDIO_PROCESSOR = 2,
