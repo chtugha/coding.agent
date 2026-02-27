@@ -166,6 +166,7 @@ Achieve excellent transcription accuracy with fast processing.
 **Files**: `whisper-service.cpp`, `vad-service.cpp`, `frontend.cpp` (accuracy test handler/UI)
 
 ### [ ] Step: Stage 5 — Credentials UI
+<!-- chat-id: e1097987-e861-43f1-80fd-466c9c5fa978 -->
 
 Add Credentials page to frontend for HuggingFace and GitHub tokens.
 
