@@ -185,12 +185,12 @@ public:
         return out.str();
     }
 
-    // Returns stats string: "STATS <n_calls> <id>:<line>:<rx>:<tx>:<rx_bytes>:<tx_bytes>:<duration>:<fwd>:<discard> ..."
-    // fwd = packets forwarded to IAP, discard = packets discarded (IAP offline)
     std::string get_stats() {
         std::lock_guard<std::mutex> lock(calls_mutex_);
+        auto ds = interconnect_.downstream_state();
+        bool ds_connected = (ds == whispertalk::ConnectionState::CONNECTED);
         std::ostringstream out;
-        out << "STATS " << calls_.size();
+        out << "STATS " << calls_.size() << " DS:" << (ds_connected ? "1" : "0");
         for (const auto& kv : id_to_call_) {
             auto session = kv.second;
             auto now = std::chrono::steady_clock::now();

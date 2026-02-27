@@ -58,6 +58,7 @@ Important: unit tests must be part of each implementation task, not separate tas
 Save to `{@artifacts_path}/plan.md`.
 
 ### [ ] Step: Stage 1 — SIP Client RTP Routing Test
+<!-- chat-id: dd3b8e11-af65-4135-b0c4-675af6070b75 -->
 
 Test SIP Client RTP routing and TCP connection handling with IAP.
 
@@ -80,7 +81,7 @@ Test SIP Client RTP routing and TCP connection handling with IAP.
    - Re-inject audio, verify packets are discarded again
    - Restart IAP, verify reconnection and forwarding resumes
    - Repeat start/stop 2-3 times to confirm reliability
-4. **Bug fixing**: Fix any issues found in SIP Client TCP handling, RTP forwarding, service management, or frontend UI. Clean dead code.
+4. **Bug fixing**: Fix any issues found in SIP Client TCP handling, RTP forwarding, service management, or frontend UI. Clean dead code. Look for stubs, simulations or Magic numbers and replace them.
 5. **Verification**: RTP metrics toggle correctly between forwarded/discarded based on IAP state. All operations driven via Playwright clicking frontend buttons.
 
 **Files**: `sip-client-main.cpp`, `inbound-audio-processor.cpp`, `interconnect.h`, `frontend.cpp`, `tests/test_sip_provider.cpp`

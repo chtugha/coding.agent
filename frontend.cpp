@@ -4434,8 +4434,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         int count;
         iss >> count;
         
+        bool ds_connected = false;
         bool first = true;
         while (iss >> token) {
+            if (token.substr(0, 3) == "DS:") {
+                ds_connected = (token == "DS:1");
+                continue;
+            }
             std::vector<std::string> parts;
             size_t pos = 0;
             while (pos < token.size()) {
@@ -4467,7 +4472,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
         }
 
-        json << "],\"downstream_connected\":" << (is_service_running("INBOUND_AUDIO_PROCESSOR") ? "true" : "false") << "}";
+        json << "],\"downstream_connected\":" << (ds_connected ? "true" : "false") << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
