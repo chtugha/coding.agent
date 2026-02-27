@@ -52,6 +52,7 @@ inline const float* iap_fir_coeffs() {
 // Returns number of output samples written (= in_len * 2).
 inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
                                       float* out, float* history) {
+    if (in_len > (size_t)IAP_ULAW_FRAME) in_len = IAP_ULAW_FRAME;
     const float* hb = iap_fir_coeffs();
     float ext[IAP_FIR_CENTER + IAP_ULAW_FRAME];
     for (int i = 0; i < IAP_FIR_CENTER; i++) ext[i] = history[i];

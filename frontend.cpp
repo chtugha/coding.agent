@@ -402,7 +402,8 @@ private:
                 file_name TEXT,
                 latency_ms REAL,
                 snr_db REAL,
-                thd_percent REAL,
+                rms_error_pct REAL,
+                max_latency_ms REAL,
                 status TEXT,
                 timestamp INTEGER
             );
@@ -490,6 +491,8 @@ private:
             "ALTER TABLE model_benchmark_runs ADD COLUMN avg_tokens REAL",
             "ALTER TABLE model_benchmark_runs ADD COLUMN interrupt_latency_ms REAL",
             "ALTER TABLE model_benchmark_runs ADD COLUMN german_pct REAL",
+            "ALTER TABLE iap_quality_tests ADD COLUMN rms_error_pct REAL",
+            "ALTER TABLE iap_quality_tests ADD COLUMN max_latency_ms REAL",
             nullptr
         };
         for (int i = 0; migrations[i]; i++) {
@@ -1547,7 +1550,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <thead>
 <tr>
 <th>File</th>
-<th>Pkt Latency (ms)</th>
+<th>Avg Pkt Latency (ms)</th>
+<th>Max Pkt Latency (ms)</th>
 <th>SNR (dB)</th>
 <th>RMS Error (%)</th>
 <th>Status</th>
@@ -1555,7 +1559,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </tr>
 </thead>
 <tbody id="iapResultsBody">
-<tr><td colspan="6" style="text-align:center;color:var(--wt-text-secondary)">No test results yet. Run a test to see results here.</td></tr>
+<tr><td colspan="7" style="text-align:center;color:var(--wt-text-secondary)">No test results yet. Run a test to see results here.</td></tr>
 </tbody>
 </table>
 <div style="margin-top:12px;font-size:12px;color:var(--wt-text-secondary)">
@@ -3176,6 +3180,7 @@ function runIapQualityTest(){
     var html='<tr>';
     html+='<td>'+escapeHtml(d.file)+'</td>';
     html+='<td>'+d.latency_ms.toFixed(4)+'</td>';
+    html+='<td>'+(d.max_latency_ms||0).toFixed(4)+'</td>';
     html+='<td>'+d.snr.toFixed(2)+'</td>';
     html+='<td>'+d.rms_error.toFixed(2)+'</td>';
     html+='<td style="color:'+statusColor+';font-weight:600">'+d.status+'</td>';
@@ -3184,7 +3189,7 @@ function runIapQualityTest(){
     tbody.innerHTML=html+tbody.innerHTML;
     
     if(!window.iapTestHistory)window.iapTestHistory=[];
-    window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,status:d.status});
+    window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,maxLatency:d.max_latency_ms||0,status:d.status});
     renderIapChart();
     
   }).catch(e=>{
@@ -3279,17 +3284,17 @@ async function runAllIapQualityTests(){
       let d=await r.json();
       if(d.error){
         failed++;
-        tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>'+d.error+'</td></tr>';
+        tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td>-</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>'+d.error+'</td></tr>';
         continue;
       }
       if(d.status==='PASS')passed++;else failed++;
       let sc=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
       let now=new Date().toLocaleString();
-      tbody.innerHTML+='<tr><td>'+escapeHtml(d.file)+'</td><td>'+d.latency_ms.toFixed(4)+'</td><td>'+d.snr.toFixed(2)+'</td><td>'+d.rms_error.toFixed(2)+'</td><td style="color:'+sc+';font-weight:600">'+d.status+'</td><td style="font-size:11px">'+now+'</td></tr>';
-      window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,status:d.status});
+      tbody.innerHTML+='<tr><td>'+escapeHtml(d.file)+'</td><td>'+d.latency_ms.toFixed(4)+'</td><td>'+(d.max_latency_ms||0).toFixed(4)+'</td><td>'+d.snr.toFixed(2)+'</td><td>'+d.rms_error.toFixed(2)+'</td><td style="color:'+sc+';font-weight:600">'+d.status+'</td><td style="font-size:11px">'+now+'</td></tr>';
+      window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,maxLatency:d.max_latency_ms||0,status:d.status});
     }catch(e){
       failed++;
-      tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td colspan="5" style="color:var(--wt-danger)">'+e+'</td></tr>';
+      tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td colspan="6" style="color:var(--wt-danger)">'+e+'</td></tr>';
     }
   }
   statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; All tests complete: '+passed+' passed, '+failed+' failed out of '+files.length+'</span>';
@@ -4837,16 +4842,17 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         std::string status = (snr_db >= 25.0 && rms_error_pct <= 10.0 && max_pkt_latency_ms <= 50.0) ? "PASS" : "FAIL";
 
-        std::string sql = "INSERT INTO iap_quality_tests (file_name, latency_ms, snr_db, thd_percent, status, timestamp) "
-                         "VALUES (?, ?, ?, ?, ?, ?)";
+        std::string sql = "INSERT INTO iap_quality_tests (file_name, latency_ms, snr_db, rms_error_pct, max_latency_ms, status, timestamp) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?)";
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, file.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_double(stmt, 2, avg_pkt_latency_ms);
             sqlite3_bind_double(stmt, 3, snr_db);
             sqlite3_bind_double(stmt, 4, rms_error_pct);
-            sqlite3_bind_text(stmt, 5, status.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(stmt, 6, time(nullptr));
+            sqlite3_bind_double(stmt, 5, max_pkt_latency_ms);
+            sqlite3_bind_text(stmt, 6, status.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(stmt, 7, time(nullptr));
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
