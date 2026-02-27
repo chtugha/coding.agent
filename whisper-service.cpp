@@ -205,9 +205,10 @@ private:
             for (int i = 0; hallucination_patterns_[i]; ++i) {
                 std::string pat = hallucination_patterns_[i];
                 if (trimmed.size() > pat.size() + 2) {
-                    std::string suffix = trimmed.substr(trimmed.size() - pat.size());
-                    if (suffix == pat) {
-                        result = trimmed.substr(0, trimmed.size() - pat.size());
+                    size_t boundary = trimmed.size() - pat.size();
+                    std::string suffix = trimmed.substr(boundary);
+                    if (suffix == pat && (boundary == 0 || trimmed[boundary - 1] == ' ')) {
+                        result = trimmed.substr(0, boundary);
                         while (!result.empty() && (result.back() == ' ' || result.back() == ','))
                             result.pop_back();
                         changed = true;
@@ -218,16 +219,17 @@ private:
 
             static const char* suffix_patterns[] = {
                 "Untertitelung", "Untertitel der", "Untertitel von",
-                "des ZDF", "ZDF", "funk", "SWR", "NDR", "WDR", "ARD", "BR",
+                "Untertitelung des ZDF", "des ZDF",
                 "Hier geht's", "Hier gehts", "Mehr dazu",
                 nullptr
             };
             for (int i = 0; suffix_patterns[i]; ++i) {
                 std::string pat = suffix_patterns[i];
                 if (trimmed.size() > pat.size() + 2) {
-                    std::string suffix = trimmed.substr(trimmed.size() - pat.size());
-                    if (suffix == pat) {
-                        result = trimmed.substr(0, trimmed.size() - pat.size());
+                    size_t boundary = trimmed.size() - pat.size();
+                    std::string suffix = trimmed.substr(boundary);
+                    if (suffix == pat && (boundary == 0 || trimmed[boundary - 1] == ' ')) {
+                        result = trimmed.substr(0, boundary);
                         while (!result.empty() && (result.back() == ' ' || result.back() == ','))
                             result.pop_back();
                         changed = true;

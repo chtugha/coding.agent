@@ -284,7 +284,7 @@ private:
         int64_t id;
         std::string type;
         std::atomic<bool> running{true};
-        bool result_read = false;
+        std::atomic<bool> result_read{false};
         std::string result_json;
         std::thread worker;
     };
@@ -3735,8 +3735,10 @@ function saveVadConfig(){
 }
 
 var accuracyPollInterval=null;
+var accuracyTestRunning=false;
 
 function runWhisperAccuracyTest(){
+  if(accuracyTestRunning) return;
   if(accuracyPollInterval){clearInterval(accuracyPollInterval);accuracyPollInterval=null;}
   var select=document.getElementById('accuracyTestFiles');
   var selected=Array.from(select.selectedOptions).map(o=>o.value);
@@ -3746,6 +3748,9 @@ function runWhisperAccuracyTest(){
     return;
   }
   
+  accuracyTestRunning=true;
+  var btn=document.querySelector('[onclick*="runWhisperAccuracyTest"]');
+  if(btn){btn.disabled=true;btn.textContent='Running...';}
   var resultsDiv=document.getElementById('accuracyResults');
   var summaryDiv=document.getElementById('accuracySummary');
   resultsDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Running accuracy test on '+selected.length+' file(s)... This may take several minutes.</p>';
@@ -3762,6 +3767,8 @@ function runWhisperAccuracyTest(){
     resultsDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Accuracy test running (task '+d.task_id+', '+selected.length+' files)...</p>';
     accuracyPollInterval=setInterval(()=>pollAccuracyTask(d.task_id),3000);
   }).catch(e=>{
+    accuracyTestRunning=false;
+    if(btn){btn.disabled=false;btn.textContent='Run Accuracy Test';}
     if(accuracyPollInterval){clearInterval(accuracyPollInterval);accuracyPollInterval=null;}
     resultsDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; Error: '+escapeHtml(String(e))+'</p>';
   });
@@ -3816,7 +3823,17 @@ function pollAccuracyTask(taskId){
     resultsDiv.innerHTML=html;
     
     loadAccuracyTrendChart();
-  }).catch(e=>console.error('pollAccuracyTask',e));
+    accuracyTestRunning=false;
+    var btn=document.querySelector('[onclick*="runWhisperAccuracyTest"]');
+    if(btn){btn.disabled=false;btn.textContent='Run Accuracy Test';}
+  }).catch(function(e){
+    clearInterval(accuracyPollInterval);accuracyPollInterval=null;
+    accuracyTestRunning=false;
+    var btn=document.querySelector('[onclick*="runWhisperAccuracyTest"]');
+    if(btn){btn.disabled=false;btn.textContent='Run Accuracy Test';}
+    var resultsDiv=document.getElementById('accuracyResults');
+    resultsDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; Poll error: '+escapeHtml(String(e))+'</p>';
+  });
 }
 
 function loadAccuracyTrendChart(){
@@ -5025,24 +5042,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             s = tmp;
         }
 
-        // Step 4: Remove filler words that Whisper sometimes drops or adds
-        // (common German articles/prepositions that don't affect meaning comparison)
-        // Only strip these from the beginning of the text to handle partial recognition
-        while (s.size() > 4) {
-            bool stripped = false;
-            static const char* strip_prefixes[] = {nullptr};
-            for (int i = 0; strip_prefixes[i]; ++i) {
-                std::string pfx = strip_prefixes[i];
-                if (s.substr(0, pfx.size()) == pfx) {
-                    s = s.substr(pfx.size());
-                    stripped = true;
-                    break;
-                }
-            }
-            if (!stripped) break;
-        }
-
-        // Step 5: Collapse whitespace
+        // Step 4: Collapse whitespace
         std::string result;
         bool last_space = false;
         for (char c : s) {
@@ -5061,23 +5061,25 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         if (n1.empty() || n2.empty()) return 0.0;
 
         size_t len1 = n1.length(), len2 = n2.length();
-        std::vector<std::vector<size_t>> dp(len1 + 1, std::vector<size_t>(len2 + 1));
+        if (len1 < len2) { std::swap(n1, n2); std::swap(len1, len2); }
+        std::vector<size_t> prev(len2 + 1), curr(len2 + 1);
 
-        for (size_t i = 0; i <= len1; i++) dp[i][0] = i;
-        for (size_t j = 0; j <= len2; j++) dp[0][j] = j;
+        for (size_t j = 0; j <= len2; j++) prev[j] = j;
 
         for (size_t i = 1; i <= len1; i++) {
+            curr[0] = i;
             for (size_t j = 1; j <= len2; j++) {
                 size_t cost = (n1[i - 1] == n2[j - 1]) ? 0 : 1;
-                dp[i][j] = std::min({
-                    dp[i - 1][j] + 1,
-                    dp[i][j - 1] + 1,
-                    dp[i - 1][j - 1] + cost
+                curr[j] = std::min({
+                    prev[j] + 1,
+                    curr[j - 1] + 1,
+                    prev[j - 1] + cost
                 });
             }
+            std::swap(prev, curr);
         }
 
-        size_t distance = dp[len1][len2];
+        size_t distance = prev[len2];
         size_t max_len = std::max(len1, len2);
         double similarity = (1.0 - (double)distance / max_len) * 100.0;
         return similarity;
