@@ -1,4 +1,5 @@
 
+#include <vector>
 #include <string>
 #include <thread>
 #include <mutex>
@@ -422,33 +423,20 @@ private:
             return;
         }
 
-        std::string body(hm->body.buf, hm->body.len);
         std::vector<std::string> requested_users;
 
-        int idx = 0;
-        while (true) {
-            std::string path = "$[" + std::to_string(idx) + "]";
-            char* val = mg_json_get_str(hm->body, path.c_str());
-            if (!val) break;
-            requested_users.push_back(val);
-            free(val);
-            idx++;
-        }
-
-        if (requested_users.empty()) {
-            int toklen = 0;
-            int arr_offset = mg_json_get(hm->body, "$.users", &toklen);
-            if (arr_offset >= 0 && toklen > 0) {
-                struct mg_str arr_str = mg_str_n(hm->body.buf + arr_offset, toklen);
-                int i = 0;
-                while (true) {
-                    std::string p = "$[" + std::to_string(i) + "]";
-                    char* v = mg_json_get_str(arr_str, p.c_str());
-                    if (!v) break;
-                    requested_users.push_back(v);
-                    free(v);
-                    i++;
-                }
+        int toklen = 0;
+        int arr_offset = mg_json_get(hm->body, "$.users", &toklen);
+        if (arr_offset >= 0 && toklen > 0) {
+            struct mg_str arr_str = mg_str_n(hm->body.buf + arr_offset, toklen);
+            int i = 0;
+            while (true) {
+                std::string p = "$[" + std::to_string(i) + "]";
+                char* v = mg_json_get_str(arr_str, p.c_str());
+                if (!v) break;
+                requested_users.push_back(v);
+                free(v);
+                i++;
             }
         }
 
@@ -523,8 +511,10 @@ private:
             }
         }
 
-        if (leg == "a" && call_->legs.size() >= 1) leg_idx = 0;
-        else if (leg == "b" && call_->legs.size() >= 2) leg_idx = 1;
+        if (leg_idx < 0) {
+            if (leg == "a" && call_->legs.size() >= 1) leg_idx = 0;
+            else if (leg == "b" && call_->legs.size() >= 2) leg_idx = 1;
+        }
 
         if (leg_idx < 0) {
             mg_http_reply(c, 404, CORS_HEADERS, "{\"error\":\"Leg '%s' not found in active call\"}", leg.c_str());
