@@ -3781,6 +3781,9 @@ function pollAccuracyTask(taskId){
     var resultsDiv=document.getElementById('accuracyResults');
     var summaryDiv=document.getElementById('accuracySummary');
     if(d.error){
+      accuracyTestRunning=false;
+      var btn=document.querySelector('[onclick*="runWhisperAccuracyTest"]');
+      if(btn){btn.disabled=false;btn.textContent='Run Accuracy Test';}
       resultsDiv.innerHTML='<p style="color:var(--wt-danger)">&#x2717; Error: '+escapeHtml(d.error)+'</p>';
       return;
     }
