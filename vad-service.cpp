@@ -362,6 +362,7 @@ private:
             for (auto& call : active) {
                 std::vector<float> to_send;
                 bool needs_idle_broadcast = false;
+                bool needs_active_broadcast = false;
                 uint32_t call_id = call->id;
                 {
                     std::lock_guard<std::mutex> lock(call->mutex);
@@ -407,11 +408,7 @@ private:
                                     if (!call->speech_signaled) {
                                         call->speech_signaled = true;
                                         call->speech_signal_time = std::chrono::steady_clock::now();
-                                        // SPEECH_ACTIVE broadcast while holding mutex is acceptable
-                                        // because it's a one-time event per speech segment and the
-                                        // TCP send is non-blocking on localhost interconnect.
-                                        interconnect_.broadcast_speech_signal(call->id, true);
-                                        std::cout << "[" << call->id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
+                                        needs_active_broadcast = true;
                                     }
                                 }
                             }
@@ -471,7 +468,7 @@ private:
                                 call->in_speech = true;
                                 call->speech_start = 0;
                                 call->silence_count = 0;
-                                call->onset_count = vad_onset_frames_;
+                                call->onset_count = 0;
                                 call->frame_energies.clear();
                                 call->energies_sample_origin = 0;
                                 // Don't broadcast IDLE — speech is still active.
@@ -548,8 +545,12 @@ private:
                     }
                 } // release call->mutex
 
-                // Broadcast SPEECH_IDLE outside the mutex to avoid holding the lock
-                // during a TCP send that could block/stall.
+                // Broadcast speech signals outside the mutex to avoid holding the
+                // lock during a TCP send that could block/stall the receiver thread.
+                if (needs_active_broadcast) {
+                    interconnect_.broadcast_speech_signal(call_id, true);
+                    std::cout << "[" << call_id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
+                }
                 if (needs_idle_broadcast) {
                     interconnect_.broadcast_speech_signal(call_id, false);
                 }
