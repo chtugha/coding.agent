@@ -407,6 +407,11 @@ private:
                                     }
                                     if (!call->speech_signaled) {
                                         call->speech_signaled = true;
+                                        // speech_signal_time is set here (inside mutex) but the
+                                        // actual broadcast happens after mutex release. The 10s
+                                        // timeout clock thus starts slightly early — negligible
+                                        // at sub-ms processing latency, but worth noting if the
+                                        // timeout is ever tightened significantly.
                                         call->speech_signal_time = std::chrono::steady_clock::now();
                                         needs_active_broadcast = true;
                                     }
