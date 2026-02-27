@@ -13,11 +13,16 @@
 // Context coherence is maintained by Whisper's initial_prompt mechanism.
 //
 // Smart-split: When max chunk length is reached during speech, the split point is placed
-// at the lowest-energy frame boundary near the end to avoid cutting mid-word.
+// at the lowest-energy frame boundary near the end to avoid cutting mid-word. The
+// frame_energies vector tracks per-frame energy starting from the onset confirmation
+// frame (onset_frame_3), and the split calculation applies an origin correction via
+// energies_sample_origin to map back to absolute buffer positions.
 //
 // Speech signal management: Broadcasts SPEECH_ACTIVE/SPEECH_IDLE signals downstream
 // to coordinate with other services (e.g., Kokoro stops TTS playback on speech detect).
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <vector>
 #include <deque>
 #include <string>
@@ -48,11 +53,20 @@ struct VadCall {
     bool speech_signaled = false;
     int silence_count = 0;
     int onset_count = 0;
+    // Adaptive noise floor estimate. Initialized above the G.711 μ-law codec noise
+    // floor: G.711 silence bytes (0xFF/0x7F) decode to ±0.000885 → energy ~0.00000078.
+    // We set min_floor at 0.000005 and init at 0.00005 to avoid false triggers while
+    // still adapting to the actual ambient noise level.
     float noise_floor = 0.00005f;
     int frame_count = 0;
     size_t vad_pos = 0;
     size_t speech_start = 0;
     size_t tentative_speech_start = 0;
+    // Absolute buffer position where frame_energies[0] begins. Set to the onset
+    // confirmation frame position so smart-split can map energy indices back to
+    // buffer positions accurately (speech_start includes pre-speech context frames
+    // which are not represented in frame_energies).
+    size_t energies_sample_origin = 0;
     std::chrono::steady_clock::time_point last_activity;
     std::chrono::steady_clock::time_point speech_signal_time;
     size_t last_buffer_size = 0;
@@ -61,18 +75,37 @@ struct VadCall {
 };
 
 class VadService {
-    size_t vad_frame_size_ = 800;           // 50ms @ 16kHz
+    // vad_frame_size_: 50ms frames (800 samples @ 16kHz) — finer granularity than 100ms
+    //   for detecting short pauses between words without cutting mid-phoneme.
+    size_t vad_frame_size_ = 800;
     float vad_threshold_mult_ = 2.0f;
+    // Minimum energy threshold to distinguish speech from G.711 codec noise floor.
+    // G.711 μ-law silence (0xFF/0x7F) decodes to ±0.000885 → energy ~0.00000078.
+    // Set min_energy well above this to prevent false VAD triggers on silence.
     float vad_min_energy_ = 0.00005f;
-    int vad_silence_frames_ = 8;            // 8 × 50ms = 400ms
-    size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 4;  // 4s default
-    size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;  // 500ms
+    // vad_silence_frames_: 8 frames × 50ms = 400ms — triggers on word-boundary pauses
+    //   instead of full sentence gaps. Short enough for fast turnaround, long enough
+    //   to not split mid-word (German phonemes are typically <200ms).
+    int vad_silence_frames_ = 8;
+    // vad_max_speech_samples_: 4s max chunk — keeps Whisper inference under ~500ms.
+    //   Whisper's attention is O(n²) on audio length; 4s vs 10s is ~6x faster.
+    size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 4;
+    // vad_min_speech_samples_: 500ms — reject clicks and noise bursts.
+    size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;
+    // vad_context_frames_: include 4 frames of pre-speech context audio so the
+    //   chunk doesn't start abruptly mid-phoneme.
     int vad_context_frames_ = 4;
+    // vad_onset_frames_: require 3 consecutive above-threshold frames to confirm
+    //   speech onset, preventing single-frame noise spikes from triggering.
     int vad_onset_frames_ = 3;
     int speech_signal_timeout_s_ = 10;
+    // vad_inactivity_flush_ms_: if no new audio arrives for 1000ms while speech is
+    //   active, flush the buffer immediately (handles end-of-stream).
     int vad_inactivity_flush_ms_ = 1000;
     bool vad_logging_enabled_ = true;
-    size_t smart_split_window_frames_ = 6;  // look back 6 frames for energy dip
+    // smart_split_window_frames_: when max chunk length is reached, search the last
+    //   6 frames for the lowest-energy point to place the split boundary.
+    size_t smart_split_window_frames_ = 6;
 
 public:
     VadService()
@@ -153,32 +186,43 @@ public:
     }
 
 private:
-    void reset_call_state(VadCall& call) {
+    // Resets VAD state for a call after a chunk has been emitted.
+    // Does NOT broadcast speech signal — the caller must do so after releasing
+    // call->mutex to avoid holding the mutex during a TCP send.
+    // Returns true if speech_signaled was set (caller should broadcast SPEECH_IDLE).
+    bool reset_call_state(VadCall& call) {
+        bool was_signaled = call.speech_signaled;
         call.in_speech = false;
         call.silence_count = 0;
         call.onset_count = 0;
         call.speech_start = 0;
+        call.energies_sample_origin = 0;
+        // Reset noise floor to init value (above G.711 codec noise floor) so
+        // adaptive tracking restarts cleanly for the next speech segment.
         call.noise_floor = 0.00005f;
         call.frame_energies.clear();
-        if (call.speech_signaled) {
-            call.speech_signaled = false;
-            interconnect_.broadcast_speech_signal(call.id, false);
-        }
+        call.speech_signaled = false;
+        return was_signaled;
     }
 
+    // Removes `consumed` samples from the front of the audio buffer.
+    // Uses deque::erase for bulk removal (lower overhead than N pop_front() calls).
     void compact_buffer(VadCall& call, size_t consumed) {
-        if (consumed > 0 && consumed <= call.audio_buffer.size()) {
-            for (size_t i = 0; i < consumed; ++i) {
-                call.audio_buffer.pop_front();
-            }
-        } else if (consumed > call.audio_buffer.size()) {
+        if (consumed >= call.audio_buffer.size()) {
             call.audio_buffer.clear();
+        } else if (consumed > 0) {
+            call.audio_buffer.erase(call.audio_buffer.begin(),
+                                    call.audio_buffer.begin() + static_cast<ptrdiff_t>(consumed));
         }
         call.vad_pos = 0;
         call.speech_start = 0;
         call.last_buffer_size = call.audio_buffer.size();
     }
 
+    // Finds the best split point near the max-chunk boundary by locating the
+    // lowest-energy frame in the last smart_split_window_frames_ frames.
+    // frame_energies tracks energy starting from energies_sample_origin (the onset
+    // confirmation frame), not from speech_start (which includes pre-speech context).
     size_t find_smart_split_point(VadCall& call, size_t max_end) {
         if (call.frame_energies.size() < 2) return max_end;
 
@@ -196,7 +240,9 @@ private:
             }
         }
 
-        size_t split = call.speech_start + (min_idx + 1) * vad_frame_size_;
+        // Map energy index back to buffer position using the recorded origin offset.
+        // energies_sample_origin is where frame_energies[0] starts in the buffer.
+        size_t split = call.energies_sample_origin + (min_idx + 1) * vad_frame_size_;
         if (split > call.audio_buffer.size()) split = call.audio_buffer.size();
         if (split <= call.speech_start) split = max_end;
         return split;
@@ -240,6 +286,12 @@ private:
         }
     }
 
+    static std::string format_threshold(float val) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << val;
+        return oss.str();
+    }
+
     std::string handle_vad_command(const std::string& cmd) {
         if (cmd == "PING") return "PONG\n";
         if (cmd == "STATUS") {
@@ -257,7 +309,7 @@ private:
                 + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
                 + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
                 + ":WINDOW_MS:" + std::to_string(frame_ms)
-                + ":THRESHOLD:" + std::to_string(vad_threshold_mult_).substr(0, 4)
+                + ":THRESHOLD:" + format_threshold(vad_threshold_mult_)
                 + ":SILENCE_MS:" + std::to_string(silence_ms)
                 + ":MAX_CHUNK_MS:" + std::to_string(max_ms)
                 + "\n";
@@ -292,6 +344,9 @@ private:
 
     void processing_loop() {
         while (running_ && g_running) {
+            // data_cv_ is used purely as an interruptible sleep mechanism — there is no
+            // shared state guarded by data_mutex_. The CV is notified by receiver_loop
+            // when new audio arrives so processing wakes immediately instead of polling.
             {
                 std::unique_lock<std::mutex> lk(data_mutex_);
                 data_cv_.wait_for(lk, std::chrono::milliseconds(5));
@@ -306,6 +361,8 @@ private:
 
             for (auto& call : active) {
                 std::vector<float> to_send;
+                bool needs_idle_broadcast = false;
+                uint32_t call_id = call->id;
                 {
                     std::lock_guard<std::mutex> lock(call->mutex);
 
@@ -319,6 +376,9 @@ private:
                         energy /= static_cast<float>(vad_frame_size_);
 
                         call->frame_count++;
+                        // Adapt noise floor only when not in speech and no onset pending.
+                        // Uses exponential moving average (alpha=0.05) with a hard minimum
+                        // of 0.000005 to stay above G.711 quantization noise.
                         if (!call->in_speech && call->onset_count == 0) {
                             float nf = call->noise_floor * 0.95f + energy * 0.05f;
                             call->noise_floor = std::max(nf, 0.000005f);
@@ -336,6 +396,9 @@ private:
                                     call->in_speech = true;
                                     call->speech_start = call->tentative_speech_start;
                                     call->frame_energies.clear();
+                                    // Record where frame_energies[0] starts (onset confirmation frame).
+                                    // This is distinct from speech_start which includes context frames.
+                                    call->energies_sample_origin = pos;
                                     if (vad_logging_enabled_) {
                                         log_fwd_.forward("DEBUG", call->id,
                                             "VAD speech_start at sample %zu (energy=%.6f threshold=%.6f noise_floor=%.6f onset=%d)",
@@ -344,6 +407,9 @@ private:
                                     if (!call->speech_signaled) {
                                         call->speech_signaled = true;
                                         call->speech_signal_time = std::chrono::steady_clock::now();
+                                        // SPEECH_ACTIVE broadcast while holding mutex is acceptable
+                                        // because it's a one-time event per speech segment and the
+                                        // TCP send is non-blocking on localhost interconnect.
                                         interconnect_.broadcast_speech_signal(call->id, true);
                                         std::cout << "[" << call->id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
                                     }
@@ -363,6 +429,7 @@ private:
 
                         pos += vad_frame_size_;
 
+                        // Silence-triggered speech end: enough consecutive silent frames detected.
                         if (call->in_speech && call->silence_count > vad_silence_frames_) {
                             to_send.assign(
                                 call->audio_buffer.begin() + call->speech_start,
@@ -375,10 +442,11 @@ private:
                             }
                             compact_buffer(*call, pos);
                             pos = 0;
-                            reset_call_state(*call);
+                            needs_idle_broadcast = reset_call_state(*call);
                             break;
                         }
 
+                        // Max-length triggered speech end with smart split.
                         size_t speech_len = pos - call->speech_start;
                         if (call->in_speech && speech_len > vad_max_speech_samples_) {
                             size_t split = find_smart_split_point(*call, pos);
@@ -399,13 +467,16 @@ private:
                             pos = 0;
 
                             if (has_leftover && call->audio_buffer.size() > 0) {
+                                // Continue speech from the leftover audio after split.
                                 call->in_speech = true;
                                 call->speech_start = 0;
                                 call->silence_count = 0;
                                 call->onset_count = vad_onset_frames_;
                                 call->frame_energies.clear();
+                                call->energies_sample_origin = 0;
+                                // Don't broadcast IDLE — speech is still active.
                             } else {
-                                reset_call_state(*call);
+                                needs_idle_broadcast = reset_call_state(*call);
                             }
                             break;
                         }
@@ -418,6 +489,8 @@ private:
                         call->last_buffer_growth = now;
                     }
 
+                    // Inactivity flush: no new audio for vad_inactivity_flush_ms_ while
+                    // speech is active — flush remaining buffer (handles end-of-stream).
                     if (call->in_speech && to_send.empty() && call->last_buffer_size > 0) {
                         auto inactivity = std::chrono::duration_cast<std::chrono::milliseconds>(
                             now - call->last_buffer_growth).count();
@@ -430,7 +503,7 @@ private:
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
                                 call->last_buffer_size = 0;
-                                reset_call_state(*call);
+                                needs_idle_broadcast = reset_call_state(*call);
                                 if (vad_logging_enabled_) {
                                     double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                     log_fwd_.forward("DEBUG", call->id,
@@ -442,16 +515,20 @@ private:
                         }
                     }
 
+                    // Trim non-speech buffer, keeping context frames for next onset detection.
                     if (!call->in_speech) {
                         size_t keep_frames = vad_context_frames_ + 2;
                         size_t keep = vad_frame_size_ * keep_frames;
                         if (call->vad_pos > keep) {
                             size_t trim = call->vad_pos - keep;
-                            for (size_t i = 0; i < trim; ++i) call->audio_buffer.pop_front();
+                            call->audio_buffer.erase(call->audio_buffer.begin(),
+                                                     call->audio_buffer.begin() + static_cast<ptrdiff_t>(trim));
                             call->vad_pos = keep;
                         }
                     }
 
+                    // Speech signal timeout: force IDLE after speech_signal_timeout_s_ to
+                    // prevent permanent SPEECH_ACTIVE state from stuck sessions.
                     if (call->speech_signaled) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                             now - call->speech_signal_time).count();
@@ -466,18 +543,29 @@ private:
                                 std::cout << "[" << call->id
                                           << "] SPEECH_ACTIVE timeout (" << speech_signal_timeout_s_ << "s) — forcing SPEECH_IDLE" << std::endl;
                             }
-                            reset_call_state(*call);
+                            needs_idle_broadcast = reset_call_state(*call);
                         }
                     }
+                } // release call->mutex
+
+                // Broadcast SPEECH_IDLE outside the mutex to avoid holding the lock
+                // during a TCP send that could block/stall.
+                if (needs_idle_broadcast) {
+                    interconnect_.broadcast_speech_signal(call_id, false);
                 }
 
                 if (!to_send.empty()) {
-                    send_chunk_downstream(call->id, to_send);
+                    send_chunk_downstream(call_id, to_send);
                 }
             }
         }
     }
 
+    // Forwards a speech chunk to Whisper via interconnect.
+    // Applies minimum length and RMS energy filters to reject noise/clicks.
+    // RMS energy check: G.711 codec noise floor is ~0.001 RMS; real speech is
+    // typically >0.01 RMS. Threshold at 0.005 rejects near-silence to prevent
+    // Whisper hallucinations on quiet segments.
     void send_chunk_downstream(uint32_t call_id, const std::vector<float>& audio) {
         if (audio.size() < vad_min_speech_samples_) {
             if (vad_logging_enabled_) {
@@ -549,6 +637,10 @@ private:
     std::atomic<bool> running_;
     std::atomic<int> cmd_sock_{-1};
     std::mutex calls_mutex_;
+    // data_mutex_ + data_cv_: lightweight sleep-interrupt mechanism for the processing
+    // loop. data_mutex_ does not guard any shared state — it exists solely to satisfy
+    // the condition_variable API. The CV is notified by receiver_loop when new audio
+    // arrives, allowing processing_loop to wake immediately instead of fixed-interval polling.
     std::mutex data_mutex_;
     std::condition_variable data_cv_;
     std::map<uint32_t, std::shared_ptr<VadCall>> calls_;
