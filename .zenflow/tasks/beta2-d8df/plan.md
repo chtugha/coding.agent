@@ -86,7 +86,8 @@ Test SIP Client RTP routing and TCP connection handling with IAP.
 
 **Files**: `sip-client-main.cpp`, `inbound-audio-processor.cpp`, `interconnect.h`, `frontend.cpp`, `tests/test_sip_provider.cpp`
 
-### [ ] Step: Stage 2 — IAP Codec Quality Optimization
+### [x] Step: Stage 2 — IAP Codec Quality Optimization
+<!-- chat-id: 38ad8d86-d009-4608-b58c-b6208c82a255 -->
 
 Optimize IAP audio processing for speed and quality.
 

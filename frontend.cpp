@@ -1538,6 +1538,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 <div style="display:flex;gap:8px;margin-bottom:12px">
 <button class="wt-btn wt-btn-primary" onclick="runIapQualityTest()">&#x25B6; Run Quality Test</button>
+<button class="wt-btn wt-btn-success" onclick="runAllIapQualityTests()">&#x25B6; Run All Files</button>
 </div>
 <div id="iapTestStatus" style="margin-bottom:12px;font-size:13px"></div>
 <div id="iapTestResults">
@@ -1558,7 +1559,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </tbody>
 </table>
 <div style="margin-top:12px;font-size:12px;color:var(--wt-text-secondary)">
-<strong>Pass Criteria:</strong> SNR ≥ 3dB (G.711 ulaw codec), THD ≤ 80%, Latency ≤ 50ms
+<strong>Pass Criteria:</strong> SNR &#x2265; 3dB, THD &#x2264; 80%, Latency &#x2264; 50ms. Uses real IAP pipeline: G.711 &#x3BC;-law encode/decode + 15-tap FIR half-band upsample 8kHz&#x2192;16kHz.
 </div>
 </div>
 <div id="iapTestChart" style="margin-top:16px;display:none">
@@ -3258,6 +3259,45 @@ function renderIapChart(){
   });
 }
 
+async function runAllIapQualityTests(){
+  var sel=document.getElementById('iapTestFileSelect');
+  var files=[];
+  for(var i=0;i<sel.options.length;i++){
+    if(sel.options[i].value)files.push(sel.options[i].value);
+  }
+  if(files.length===0){alert('No test files found');return;}
+  var statusDiv=document.getElementById('iapTestStatus');
+  var tbody=document.getElementById('iapResultsBody');
+  tbody.innerHTML='';
+  window.iapTestHistory=[];
+  var passed=0,failed=0;
+  for(var fi=0;fi<files.length;fi++){
+    var file=files[fi];
+    statusDiv.innerHTML='<span style="color:var(--wt-warning)">&#x23F3; Testing '+(fi+1)+'/'+files.length+': '+file+'...</span>';
+    try{
+      var r=await fetch('/api/iap/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:file})});
+      var d=await r.json();
+      if(d.error){
+        failed++;
+        var row='<tr><td>'+escapeHtml(file)+'</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>'+d.error+'</td></tr>';
+        tbody.innerHTML+=row;
+        continue;
+      }
+      if(d.status==='PASS')passed++;else failed++;
+      var sc=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
+      var now=new Date().toLocaleString();
+      var row='<tr><td>'+escapeHtml(d.file)+'</td><td>'+d.latency_ms.toFixed(2)+'</td><td>'+d.snr.toFixed(2)+'</td><td>'+d.thd.toFixed(2)+'</td><td style="color:'+sc+';font-weight:600">'+d.status+'</td><td style="font-size:11px">'+now+'</td></tr>';
+      tbody.innerHTML+=row;
+      window.iapTestHistory.push({file:d.file,snr:d.snr,thd:d.thd,latency:d.latency_ms,status:d.status});
+    }catch(e){
+      failed++;
+      tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td colspan="5" style="color:var(--wt-danger)">'+e+'</td></tr>';
+    }
+  }
+  statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; All tests complete: '+passed+' passed, '+failed+' failed out of '+files.length+'</span>';
+  renderIapChart();
+}
+
 function updateVadWindowDisplay(val){
   document.getElementById('vadWindowValue').textContent=val;
 }
@@ -4637,25 +4677,18 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return ~(sign | (exponent << 4) | mantissa);
     }
 
-    // Decode an 8-bit G.711 mu-law byte to a float32 sample in [-1.0, 1.0].
-    // Reverses the encoding: extract sign, exponent, mantissa from the
-    // inverted byte, reconstruct the linear sample, and normalize to float.
-    // ITU-T G.711 μ-law decode. Same algorithm as inbound-audio-processor.cpp (ulaw_table).
-    // Reconstructs linear magnitude: ((quantization * 2 + 33) << segment) - 33
     static float ulaw_to_float(uint8_t byte) {
         int mu = ~byte;
         int sign = mu & 0x80;
         int segment = (mu >> 4) & 0x07;
         int quantization = mu & 0x0F;
-        int magnitude = ((quantization << 1) + 33) << segment;
-        magnitude -= 33;
+        int magnitude = ((quantization << 1) + 33) << (segment + 2);
+        magnitude -= 132;
         return (sign ? -magnitude : magnitude) / 32768.0f;
     }
 
     // Resample int16 audio using linear interpolation.
     // Used to convert from source sample rate (e.g. 44100Hz) to target (e.g. 8000Hz).
-    // Linear interpolation introduces some smoothing but is very fast and matches
-    // the interpolation quality used in the real IAP's 8kHz→16kHz upsampling.
     static std::vector<int16_t> resample_linear(const std::vector<int16_t>& src, uint32_t src_rate, uint32_t dst_rate) {
         if (src_rate == dst_rate) return src;
         double ratio = static_cast<double>(src_rate) / dst_rate;
@@ -4675,30 +4708,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     // IAP Codec Quality Test endpoint (POST /api/iap/quality_test).
-    //
-    // This tests the G.711 mu-law encode/decode conversion pipeline used by the
-    // Inbound Audio Processor (IAP). It runs the exact same algorithm offline:
-    //   1. Load WAV file → resample to 8kHz (telephony rate)
-    //   2. Encode to G.711 mu-law (simulating RTP payload encoding)
-    //   3. Decode mu-law → float32 + upsample 8kHz→16kHz (same as real IAP)
-    //   4. Compare original vs roundtripped audio to measure codec distortion
-    //
-    // NOTE: This is a codec quality test, NOT an IAP service integration test.
-    // It validates the conversion algorithm quality without requiring the IAP
-    // service to be running. Service integration (TCP, reconnection) is tested
-    // separately via the SIP Client RTP Routing test (Test 1).
-    //
-    // Metrics computed:
-    //   - SNR (Signal-to-Noise Ratio): 10*log10(signal_power/noise_power) in dB
-    //     where noise = quantization error from mu-law encode/decode roundtrip.
-    //     Expected: ~5-6 dB for speech (G.711 is a lossy 8-bit codec).
-    //   - THD (Total Harmonic Distortion): sqrt(distortion_power/signal_power)*100%
-    //     Combines mu-law quantization distortion + linear interpolation error.
-    //     Expected: ~50-55% (dominated by mu-law's 8-bit quantization).
-    //   - Latency: wall-clock time for the full conversion pipeline in ms.
-    //
-    // Pass criteria: SNR >= 3dB, THD <= 80%, Latency <= 50ms
-    // (conservative thresholds appropriate for G.711 mu-law codec)
+    // Runs the exact IAP pipeline offline: WAV → 8kHz resample → G.711 mu-law
+    // encode → decode → 15-tap FIR half-band upsample to 16kHz.
+    // Compares roundtripped 16kHz output against FIR-upsampled original 8kHz.
+    // Pass criteria: SNR >= 3dB, THD <= 80%, Latency <= 50ms.
     void handle_iap_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string file = extract_json_string(body, "file");
@@ -4731,61 +4744,110 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             ulaw_data[i] = linear_to_ulaw(samples_8k[i]);
         }
 
-        // Step 3: Decode mu-law → float32 and upsample 8kHz→16kHz via linear
-        // interpolation (exact same algorithm as inbound-audio-processor.cpp:96-101)
-        std::vector<float> iap_output(ulaw_data.size() * 2);
-        for (size_t i = 0; i < ulaw_data.size(); i++) {
-            float s = ulaw_to_float(ulaw_data[i]);
-            iap_output[i * 2] = s;                    // Even samples: direct decode
-            float next = (i + 1 < ulaw_data.size()) ? ulaw_to_float(ulaw_data[i + 1]) : s;
-            iap_output[i * 2 + 1] = 0.5f * (s + next); // Odd samples: midpoint interpolation
+        static constexpr int FIR_LEN = 15;
+        static constexpr int FIR_CENTER = 7;
+        static const float hb_filter[FIR_LEN] = {
+            -0.0076f, 0.0000f, 0.0527f, 0.0000f, -0.1681f, 0.0000f, 0.6230f,
+             1.0000f,
+             0.6230f, 0.0000f, -0.1681f, 0.0000f, 0.0527f, 0.0000f, -0.0076f
+        };
+
+        size_t n_samples = ulaw_data.size();
+        std::vector<float> decoded(n_samples);
+        for (size_t i = 0; i < n_samples; i++) {
+            decoded[i] = ulaw_to_float(ulaw_data[i]);
+        }
+
+        size_t frame_size = 160;
+        std::vector<float> iap_output(n_samples * 2, 0.0f);
+        float fir_history[FIR_CENTER] = {};
+
+        for (size_t offset = 0; offset < n_samples; offset += frame_size) {
+            size_t chunk = std::min(frame_size, n_samples - offset);
+            std::vector<float> ext(FIR_CENTER + chunk);
+            for (int i = 0; i < FIR_CENTER; i++) ext[i] = fir_history[i];
+            for (size_t i = 0; i < chunk; i++) ext[FIR_CENTER + i] = decoded[offset + i];
+            int ext_len = FIR_CENTER + (int)chunk;
+
+            size_t out_len = chunk * 2;
+            for (size_t n = 0; n < out_len; n++) {
+                float sum = 0.0f;
+                for (int k = 0; k < FIR_LEN; k++) {
+                    int src_idx_2x = (int)n - k + FIR_CENTER;
+                    if (src_idx_2x & 1) continue;
+                    int ext_idx = src_idx_2x / 2 + FIR_CENTER;
+                    if (ext_idx < 0 || ext_idx >= ext_len) continue;
+                    sum += ext[ext_idx] * hb_filter[k];
+                }
+                iap_output[offset * 2 + n] = sum * 2.0f;
+            }
+
+            if (chunk >= (size_t)FIR_CENTER) {
+                for (int i = 0; i < FIR_CENTER; i++)
+                    fir_history[i] = decoded[offset + chunk - FIR_CENTER + i];
+            } else {
+                int shift = (int)chunk;
+                for (int i = 0; i < FIR_CENTER - shift; i++) fir_history[i] = fir_history[i + shift];
+                for (int i = 0; i < shift; i++) fir_history[FIR_CENTER - shift + i] = decoded[offset + i];
+            }
         }
 
         auto end_time = std::chrono::steady_clock::now();
         double latency_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
-        // Step 4: Compute quality metrics by comparing original vs roundtripped audio
-        size_t compare_len = std::min(samples_8k.size(), iap_output.size() / 2);
-        if (compare_len == 0) {
+        std::vector<float> ref_16k(samples_8k.size() * 2, 0.0f);
+        {
+            float ref_hist[FIR_CENTER] = {};
+            for (size_t off = 0; off < samples_8k.size(); off += frame_size) {
+                size_t ch = std::min(frame_size, samples_8k.size() - off);
+                std::vector<float> rext(FIR_CENTER + ch);
+                for (int i = 0; i < FIR_CENTER; i++) rext[i] = ref_hist[i];
+                for (size_t i = 0; i < ch; i++) rext[FIR_CENTER + i] = samples_8k[off + i] / 32768.0f;
+                int rext_len = FIR_CENTER + (int)ch;
+                size_t rout = ch * 2;
+                for (size_t rn = 0; rn < rout; rn++) {
+                    float sum = 0.0f;
+                    for (int k = 0; k < FIR_LEN; k++) {
+                        int si = (int)rn - k + FIR_CENTER;
+                        if (si & 1) continue;
+                        int ri = si / 2 + FIR_CENTER;
+                        if (ri < 0 || ri >= rext_len) continue;
+                        sum += rext[ri] * hb_filter[k];
+                    }
+                    ref_16k[off * 2 + rn] = sum * 2.0f;
+                }
+                if (ch >= (size_t)FIR_CENTER) {
+                    for (int i = 0; i < FIR_CENTER; i++)
+                        ref_hist[i] = samples_8k[off + ch - FIR_CENTER + i] / 32768.0f;
+                } else {
+                    int sh = (int)ch;
+                    for (int i = 0; i < FIR_CENTER - sh; i++) ref_hist[i] = ref_hist[i + sh];
+                    for (int i = 0; i < sh; i++) ref_hist[FIR_CENTER - sh + i] = samples_8k[off + i] / 32768.0f;
+                }
+            }
+        }
+
+        size_t compare_len = std::min(ref_16k.size(), iap_output.size());
+        if (compare_len < 2) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"No samples to compare\"}");
             return;
         }
 
-        // SNR calculation: compare original 8kHz samples against mu-law decoded samples
-        // signal_power = mean(original^2), noise_power = mean((original - decoded)^2)
         double signal_power = 0.0, noise_power = 0.0;
         for (size_t i = 0; i < compare_len; i++) {
-            double orig_f = samples_8k[i] / 32768.0;
-            double decoded_f = ulaw_to_float(ulaw_data[i]);
-            signal_power += orig_f * orig_f;
-            noise_power += (orig_f - decoded_f) * (orig_f - decoded_f);
+            double orig = ref_16k[i];
+            double proc = iap_output[i];
+            signal_power += orig * orig;
+            noise_power += (orig - proc) * (orig - proc);
         }
         signal_power /= compare_len;
         noise_power /= compare_len;
 
-        // SNR = 10 * log10(signal / noise). Higher is better. ~5-6dB typical for G.711.
         double snr_db = (noise_power > 1e-15) ? 10.0 * log10(signal_power / noise_power) : 99.0;
 
-        // Upsampling interpolation error: verify midpoint samples match expectation
-        double upsample_error = 0.0;
-        size_t upsample_count = 0;
-        for (size_t i = 0; i + 1 < compare_len; i++) {
-            double s0 = ulaw_to_float(ulaw_data[i]);
-            double s1 = ulaw_to_float(ulaw_data[i + 1]);
-            double expected_mid = 0.5 * (s0 + s1);
-            double actual_mid = iap_output[i * 2 + 1];
-            upsample_error += (expected_mid - actual_mid) * (expected_mid - actual_mid);
-            upsample_count++;
-        }
-
-        // THD: combine mu-law quantization distortion + upsampling interpolation error
-        // THD% = 100 * sqrt(total_distortion_power / signal_power)
         double thd_percent = 0.0;
         if (signal_power > 1e-15) {
-            double ulaw_distortion = noise_power;
-            double upsample_distortion = (upsample_count > 0) ? upsample_error / upsample_count : 0.0;
-            double total_distortion = ulaw_distortion + upsample_distortion;
-            thd_percent = 100.0 * sqrt(total_distortion / signal_power);
+            thd_percent = 100.0 * sqrt(noise_power / signal_power);
             if (thd_percent > 100.0) thd_percent = 100.0;
         }
 

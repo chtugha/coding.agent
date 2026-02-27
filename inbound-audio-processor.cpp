@@ -122,7 +122,6 @@ private:
         return "ERROR:Unknown command\n";
     }
 
-
     void init_g711_tables() {
         for (int i = 0; i < 256; ++i) {
             int mu = ~i;
