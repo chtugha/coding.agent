@@ -1313,6 +1313,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <span class="nav-icon">&#x1F4CB;</span>Live Logs</a>
 <a class="wt-nav-item" data-page="database" onclick="showPage('database')">
 <span class="nav-icon">&#x1F5C4;</span>Database</a>
+<a class="wt-nav-item" data-page="credentials" onclick="showPage('credentials')">
+<span class="nav-icon">&#x1F511;</span>Credentials</a>
 </div>
 <div class="wt-status-bar" id="statusBar">
 <span id="statusText">Connecting...</span>
@@ -1460,6 +1462,33 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div></div>
 <div id="queryResults"></div>
 <div id="schemaView" class="hidden"></div>
+</div></div>
+
+<div class="wt-page" id="page-credentials">
+<div class="wt-content">
+<h2 class="wt-page-title">Credentials</h2>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">HuggingFace</span></div>
+<div class="wt-field">
+<label>Access Token</label>
+<div style="display:flex;gap:8px">
+<input type="password" class="wt-input" id="credHfToken" placeholder="hf_..." style="flex:1">
+<button class="wt-btn wt-btn-primary" onclick="saveCredential('hf_token','credHfToken')">Save</button>
+</div>
+<div id="credHfStatus" style="font-size:12px;margin-top:4px"></div>
+</div>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">GitHub</span></div>
+<div class="wt-field">
+<label>Access Token</label>
+<div style="display:flex;gap:8px">
+<input type="password" class="wt-input" id="credGhToken" placeholder="ghp_..." style="flex:1">
+<button class="wt-btn wt-btn-primary" onclick="saveCredential('github_token','credGhToken')">Save</button>
+</div>
+<div id="credGhStatus" style="font-size:12px;margin-top:4px"></div>
+</div>
+</div>
 </div></div>
 
 <div class="wt-page" id="page-beta-testing">
@@ -1977,6 +2006,7 @@ function showPage(p){
   if(p==='models'){loadModels();loadModelComparison();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
+  if(p==='credentials'){loadCredentials();}
 }
 
 function fetchStatus(){
@@ -2343,6 +2373,38 @@ function loadSchema(){
       '<div class="wt-card"><div class="wt-card-title" style="margin-bottom:8px">'+escapeHtml(t.name)+'</div>'
       +'<pre style="font-size:12px;font-family:var(--wt-mono);margin:0;white-space:pre-wrap;color:var(--wt-text-secondary)">'+escapeHtml(t.sql)+'</pre></div>'
     ).join('');
+  });
+}
+
+function loadCredentials(){
+  fetch('/api/settings').then(r=>r.json()).then(d=>{
+    var s=d.settings||{};
+    document.getElementById('credHfToken').value=s.hf_token&&s.hf_token!=='***'?s.hf_token:'';
+    document.getElementById('credGhToken').value=s.github_token&&s.github_token!=='***'?s.github_token:'';
+    document.getElementById('credHfToken').placeholder=s.hf_token==='***'?'Token saved (hidden)':'hf_...';
+    document.getElementById('credGhToken').placeholder=s.github_token==='***'?'Token saved (hidden)':'ghp_...';
+  }).catch(()=>{});
+}
+
+function saveCredential(key,inputId){
+  var val=document.getElementById(inputId).value.trim();
+  if(!val){return;}
+  var statusId=key==='hf_token'?'credHfStatus':'credGhStatus';
+  var el=document.getElementById(statusId);
+  el.style.color='var(--wt-text-secondary)';el.textContent='Saving...';
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:key,value:val})}).then(r=>r.json()).then(d=>{
+    if(d.status==='saved'){
+      el.style.color='var(--wt-success)';el.textContent='Saved successfully';
+      document.getElementById(inputId).value='';
+      document.getElementById(inputId).placeholder='Token saved (hidden)';
+    }else{
+      el.style.color='var(--wt-danger)';el.textContent='Error: '+(d.error||'Unknown');
+    }
+    setTimeout(()=>{el.textContent='';},3000);
+  }).catch(()=>{
+    el.style.color='var(--wt-danger)';el.textContent='Network error';
+    setTimeout(()=>{el.textContent='';},3000);
   });
 }
 
@@ -7104,7 +7166,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 if (count > 0) json << ",";
                 const char* k = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
                 const char* v = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-                json << "\"" << escape_json(k ? k : "") << "\":\"" << escape_json(v ? v : "") << "\"";
+                std::string key_str = k ? k : "";
+                std::string val_str = v ? v : "";
+                if ((key_str == "hf_token" || key_str == "github_token") && !val_str.empty()) {
+                    val_str = "***";
+                }
+                json << "\"" << escape_json(key_str) << "\":\"" << escape_json(val_str) << "\"";
                 count++;
             }
             sqlite3_finalize(stmt);
