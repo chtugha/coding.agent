@@ -1472,8 +1472,9 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div class="wt-field">
 <label>Access Token</label>
 <div style="display:flex;gap:8px">
-<input type="password" class="wt-input" id="credHfToken" placeholder="hf_..." style="flex:1">
-<button class="wt-btn wt-btn-primary" onclick="saveCredential('hf_token','credHfToken')">Save</button>
+<input type="password" class="wt-input" id="credHfToken" placeholder="hf_..." style="flex:1" autocomplete="new-password">
+<button class="wt-btn wt-btn-primary" onclick="saveCredential('hf_token','credHfToken','credHfStatus')">Save</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" id="credHfClear" style="display:none" onclick="clearCredential('hf_token','credHfToken','credHfStatus')">Clear</button>
 </div>
 <div id="credHfStatus" style="font-size:12px;margin-top:4px"></div>
 </div>
@@ -1483,8 +1484,9 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div class="wt-field">
 <label>Access Token</label>
 <div style="display:flex;gap:8px">
-<input type="password" class="wt-input" id="credGhToken" placeholder="ghp_..." style="flex:1">
-<button class="wt-btn wt-btn-primary" onclick="saveCredential('github_token','credGhToken')">Save</button>
+<input type="password" class="wt-input" id="credGhToken" placeholder="ghp_..." style="flex:1" autocomplete="new-password">
+<button class="wt-btn wt-btn-primary" onclick="saveCredential('github_token','credGhToken','credGhStatus')">Save</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" id="credGhClear" style="display:none" onclick="clearCredential('github_token','credGhToken','credGhStatus')">Clear</button>
 </div>
 <div id="credGhStatus" style="font-size:12px;margin-top:4px"></div>
 </div>
@@ -2377,27 +2379,69 @@ function loadSchema(){
 }
 
 function loadCredentials(){
-  fetch('/api/settings').then(r=>r.json()).then(d=>{
+  fetch('/api/settings').then(r=>{
+    if(!r.ok)throw new Error('Server error '+r.status);
+    return r.json();
+  }).then(d=>{
     var s=d.settings||{};
-    document.getElementById('credHfToken').value=s.hf_token&&s.hf_token!=='***'?s.hf_token:'';
-    document.getElementById('credGhToken').value=s.github_token&&s.github_token!=='***'?s.github_token:'';
-    document.getElementById('credHfToken').placeholder=s.hf_token==='***'?'Token saved (hidden)':'hf_...';
-    document.getElementById('credGhToken').placeholder=s.github_token==='***'?'Token saved (hidden)':'ghp_...';
-  }).catch(()=>{});
+    var hfSaved=s.hf_token==='***', ghSaved=s.github_token==='***';
+    document.getElementById('credHfToken').value='';
+    document.getElementById('credGhToken').value='';
+    document.getElementById('credHfToken').placeholder=hfSaved?'Token saved (hidden)':'hf_...';
+    document.getElementById('credGhToken').placeholder=ghSaved?'Token saved (hidden)':'ghp_...';
+    document.getElementById('credHfClear').style.display=hfSaved?'':'none';
+    document.getElementById('credGhClear').style.display=ghSaved?'':'none';
+  }).catch(e=>{
+    var el=document.getElementById('credHfStatus');
+    if(el){el.style.color='var(--wt-danger)';el.textContent='Failed to load: '+e.message;
+      setTimeout(()=>{el.textContent='';},5000);}
+  });
 }
 
-function saveCredential(key,inputId){
-  var val=document.getElementById(inputId).value.trim();
-  if(!val){return;}
-  var statusId=key==='hf_token'?'credHfStatus':'credGhStatus';
+function saveCredential(key,inputId,statusId){
+  var inp=document.getElementById(inputId);
   var el=document.getElementById(statusId);
+  if(!inp||!el)return;
+  var val=inp.value.trim();
+  if(!val){el.style.color='var(--wt-danger)';el.textContent='Token cannot be empty';
+    setTimeout(()=>{el.textContent='';},3000);return;}
   el.style.color='var(--wt-text-secondary)';el.textContent='Saving...';
   fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({key:key,value:val})}).then(r=>r.json()).then(d=>{
+    body:JSON.stringify({key:key,value:val})}).then(r=>{
+    if(!r.ok)return r.json().catch(()=>({error:'Server error '+r.status}));
+    return r.json();
+  }).then(d=>{
     if(d.status==='saved'){
       el.style.color='var(--wt-success)';el.textContent='Saved successfully';
-      document.getElementById(inputId).value='';
-      document.getElementById(inputId).placeholder='Token saved (hidden)';
+      inp.value='';inp.placeholder='Token saved (hidden)';
+      var clearBtn=key==='hf_token'?document.getElementById('credHfClear'):document.getElementById('credGhClear');
+      if(clearBtn)clearBtn.style.display='';
+    }else{
+      el.style.color='var(--wt-danger)';el.textContent='Error: '+(d.error||'Unknown');
+    }
+    setTimeout(()=>{el.textContent='';},3000);
+  }).catch(()=>{
+    el.style.color='var(--wt-danger)';el.textContent='Network error';
+    setTimeout(()=>{el.textContent='';},3000);
+  });
+}
+
+function clearCredential(key,inputId,statusId){
+  var el=document.getElementById(statusId);
+  if(!el)return;
+  if(!confirm('Remove saved token?'))return;
+  el.style.color='var(--wt-text-secondary)';el.textContent='Removing...';
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:key,value:''})}).then(r=>{
+    if(!r.ok)return r.json().catch(()=>({error:'Server error '+r.status}));
+    return r.json();
+  }).then(d=>{
+    if(d.status==='saved'){
+      el.style.color='var(--wt-success)';el.textContent='Token removed';
+      var inp=document.getElementById(inputId);
+      if(inp){inp.value='';inp.placeholder=key==='hf_token'?'hf_...':'ghp_...';}
+      var clearBtn=key==='hf_token'?document.getElementById('credHfClear'):document.getElementById('credGhClear');
+      if(clearBtn)clearBtn.style.display='none';
     }else{
       el.style.color='var(--wt-danger)';el.textContent='Error: '+(d.error||'Unknown');
     }
@@ -7185,6 +7229,30 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             if (key.empty()) {
                 mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing key\"}");
                 return;
+            }
+
+            if (key == "hf_token" || key == "github_token") {
+                auto trimmed = value;
+                trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
+                if (!trimmed.empty()) trimmed.erase(trimmed.find_last_not_of(" \t\r\n") + 1);
+                if (trimmed.empty()) {
+                    if (db_) {
+                        sqlite3_stmt* del_stmt;
+                        const char* del_sql = "DELETE FROM settings WHERE key = ?";
+                        if (sqlite3_prepare_v2(db_, del_sql, -1, &del_stmt, nullptr) == SQLITE_OK) {
+                            sqlite3_bind_text(del_stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+                            sqlite3_step(del_stmt);
+                            sqlite3_finalize(del_stmt);
+                        }
+                    }
+                    mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
+                    return;
+                }
+                if (trimmed.size() > 4096) {
+                    mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Token too long (max 4096)\"}");
+                    return;
+                }
+                value = trimmed;
             }
 
             if (db_) {
