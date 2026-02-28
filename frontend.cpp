@@ -1999,6 +1999,30 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
 <!-- LLaMA Models Panel -->
 <div id="modelTabLlama" style="display:none">
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Search HuggingFace LLaMA Models</span>
+</div>
+<div style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;margin-bottom:8px;align-items:end">
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Search Query</label>
+    <input class="wt-input" id="hfLlamaSearchQuery" placeholder="e.g. llama german gguf small" value="llama german gguf">
+  </div>
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Sort by</label>
+    <select class="wt-select" id="hfLlamaSearchSort">
+      <option value="downloads">Downloads</option>
+      <option value="likes">Likes</option>
+      <option value="lastModified">Recently Updated</option>
+    </select>
+  </div>
+  <button class="wt-btn wt-btn-primary" onclick="searchHuggingFaceLlama()" id="hfLlamaSearchBtn">&#x1F50D; Search</button>
+</div>
+<div id="hfLlamaSearchStatus" style="font-size:12px;margin-bottom:8px"></div>
+<div id="hfLlamaSearchResults"></div>
+</div>
+
 <div class="wt-card">
 <div class="wt-card-header">
 <span class="wt-card-title">Registered LLaMA Models</span>
@@ -2084,6 +2108,29 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Latency vs Accuracy Scatter</span></div>
 <canvas id="compScatterChart" style="max-height:280px"></canvas>
+</div>
+</div>
+
+<div id="compLlamaCharts" style="display:none">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">German Compliance (%)</span></div>
+<canvas id="compGermanChart" style="max-height:280px"></canvas>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Interrupt Latency (ms)</span></div>
+<canvas id="compInterruptChart" style="max-height:280px"></canvas>
+</div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Avg Words per Response</span></div>
+<canvas id="compTokensChart" style="max-height:280px"></canvas>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Quality Score vs Latency</span></div>
+<canvas id="compQualityScatterChart" style="max-height:280px"></canvas>
+</div>
 </div>
 </div>
 
@@ -3813,8 +3860,10 @@ function formatNumber(n){
   return String(n);
 }
 
-function showDownloadDialog(idx){
-  var m=(window._hfSearchModels||[])[idx];
+function showDownloadDialog(idx,serviceType){
+  serviceType=serviceType||'whisper';
+  var models=serviceType==='llama'?(window._hfLlamaSearchModels||[]):(window._hfSearchModels||[]);
+  var m=models[idx];
   if(!m) return;
   var repoId=m.modelId||m.id||'';
   var existing=document.getElementById('dlModal');
@@ -3823,17 +3872,19 @@ function showDownloadDialog(idx){
   modal.id='dlModal';
   modal.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
   modal.dataset.repoId=repoId;
+  modal.dataset.serviceType=serviceType;
+  var backendOpts=serviceType==='llama'
+    ?'<option value="metal">Metal GPU</option><option value="cpu">CPU only</option>'
+    :'<option value="coreml">CoreML (Apple Silicon)</option><option value="metal">Metal GPU</option><option value="cpu">CPU only</option>';
+  var fileHint=serviceType==='llama'?'e.g. model-q8_0.gguf':'e.g. ggml-model.bin';
   modal.innerHTML='<div style="background:var(--wt-card-bg);border-radius:var(--wt-radius);padding:24px;width:480px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.3)">'
-    +'<h3 style="margin:0 0 16px">Download from '+escapeHtml(repoId)+'</h3>'
+    +'<h3 style="margin:0 0 16px">Download '+serviceType.toUpperCase()+' model from '+escapeHtml(repoId)+'</h3>'
     +'<div class="wt-field"><label>Filename</label>'
-    +'<input class="wt-input" id="dlFilename" placeholder="e.g. ggml-model.bin" value=""></div>'
+    +'<input class="wt-input" id="dlFilename" placeholder="'+fileHint+'" value=""></div>'
     +'<div class="wt-field"><label>Display Name</label>'
     +'<input class="wt-input" id="dlModelName" placeholder="Model display name" value=""></div>'
     +'<div class="wt-field"><label>Backend</label>'
-    +'<select class="wt-select" id="dlBackend">'
-    +'<option value="coreml">CoreML (Apple Silicon)</option>'
-    +'<option value="metal">Metal GPU</option>'
-    +'<option value="cpu">CPU only</option></select></div>'
+    +'<select class="wt-select" id="dlBackend">'+backendOpts+'</select></div>'
     +'<div id="dlModalError" style="color:var(--wt-danger);font-size:12px;margin-bottom:8px"></div>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end">'
     +'<button class="wt-btn wt-btn-secondary" onclick="document.getElementById(\'dlModal\').remove()">Cancel</button>'
@@ -3848,6 +3899,7 @@ function submitDownload(){
   var modal=document.getElementById('dlModal');
   if(!modal) return;
   var repoId=modal.dataset.repoId||'';
+  var serviceType=modal.dataset.serviceType||'whisper';
   var filename=(document.getElementById('dlFilename').value||'').trim();
   var modelName=(document.getElementById('dlModelName').value||'').trim();
   var backend=document.getElementById('dlBackend').value;
@@ -3856,16 +3908,17 @@ function submitDownload(){
   if(/[^A-Za-z0-9._-]/.test(filename)){errEl.textContent='Filename must only contain alphanumeric, dash, underscore, dot.';return;}
   if(!modelName) modelName=filename.replace(/\\.bin$/,'').replace(/\\.gguf$/,'');
   modal.remove();
-  startModelDownload(repoId,filename,modelName,backend);
+  startModelDownload(repoId,filename,modelName,backend,serviceType);
 }
 
 var activeDownloads={};
 
-function startModelDownload(repoId,filename,modelName,backend){
-  var statusEl=document.getElementById('hfSearchStatus');
+function startModelDownload(repoId,filename,modelName,backend,serviceType){
+  serviceType=serviceType||'whisper';
+  var statusEl=document.getElementById(serviceType==='llama'?'hfLlamaSearchStatus':'hfSearchStatus');
   statusEl.innerHTML='<span style="color:var(--wt-accent)">Starting download of '+escapeHtml(filename)+'...</span>';
   fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({repo_id:repoId,filename:filename,model_name:modelName,backend:backend})})
+    body:JSON.stringify({repo_id:repoId,filename:filename,model_name:modelName,backend:backend,service:serviceType})})
   .then(r=>r.json()).then(data=>{
     if(data.error){
       statusEl.innerHTML='<span style="color:var(--wt-danger)">'+escapeHtml(data.error)+'</span>';
@@ -3960,10 +4013,10 @@ function renderComparisonTable(runs){
   el.innerHTML=html;
 }
 
-var compCharts={accuracy:null,latency:null,size:null,scatter:null};
+var compCharts={accuracy:null,latency:null,size:null,scatter:null,german:null,interrupt:null,tokens:null,qualityScatter:null};
 
 function destroyCompCharts(){
-  ['accuracy','latency','size','scatter'].forEach(k=>{
+  Object.keys(compCharts).forEach(k=>{
     if(compCharts[k]){compCharts[k].destroy();compCharts[k]=null;}
   });
 }
@@ -3984,13 +4037,13 @@ function renderComparisonCharts(runs){
     compCharts.accuracy=new Chart(accCanvas,{
       type:'bar',
       data:{labels:labels,datasets:[{
-        label:'Accuracy (%)',
+        label:'Score (%)',
         data:labels.map(n=>byModel[n].avg_accuracy),
         backgroundColor:bgColors,
         borderRadius:4
       }]},
       options:{responsive:true,plugins:{legend:{display:false}},
-        scales:{y:{beginAtZero:true,max:100,title:{display:true,text:'Accuracy (%)'}}}}
+        scales:{y:{beginAtZero:true,max:100,title:{display:true,text:'Score (%)'}}}}
     });
   }
 
@@ -4045,7 +4098,90 @@ function renderComparisonCharts(runs){
         }}},
         scales:{
           x:{title:{display:true,text:'P50 Latency (ms)'},beginAtZero:true},
-          y:{title:{display:true,text:'Accuracy (%)'},min:0,max:100}
+          y:{title:{display:true,text:'Score (%)'},min:0,max:100}
+        }
+      }
+    });
+  }
+
+  var llamaRuns=runs.filter(r=>(r.model_type||'whisper')==='llama');
+  var llamaChartsEl=document.getElementById('compLlamaCharts');
+  if(llamaChartsEl) llamaChartsEl.style.display=llamaRuns.length>0?'block':'none';
+  if(llamaRuns.length===0) return;
+
+  var llamaByModel={};
+  llamaRuns.forEach(r=>{if(!llamaByModel[r.model_name]) llamaByModel[r.model_name]=r;});
+  var llamaLabels=Object.keys(llamaByModel);
+  var llamaColors=llamaLabels.map((_,i)=>colors[i%colors.length]);
+
+  var germanCanvas=document.getElementById('compGermanChart');
+  if(germanCanvas){
+    compCharts.german=new Chart(germanCanvas,{
+      type:'bar',
+      data:{labels:llamaLabels,datasets:[{
+        label:'German %',
+        data:llamaLabels.map(n=>(llamaByModel[n].german_pct||0)),
+        backgroundColor:llamaColors,
+        borderRadius:4
+      }]},
+      options:{responsive:true,plugins:{legend:{display:false}},
+        scales:{y:{beginAtZero:true,max:100,title:{display:true,text:'German Compliance (%)'}}}}
+    });
+  }
+
+  var intCanvas=document.getElementById('compInterruptChart');
+  if(intCanvas){
+    compCharts.interrupt=new Chart(intCanvas,{
+      type:'bar',
+      data:{labels:llamaLabels,datasets:[{
+        label:'Interrupt (ms)',
+        data:llamaLabels.map(n=>(llamaByModel[n].interrupt_latency_ms||0)),
+        backgroundColor:llamaColors,
+        borderRadius:4
+      }]},
+      options:{responsive:true,plugins:{legend:{display:false}},
+        scales:{y:{beginAtZero:true,title:{display:true,text:'Interrupt Latency (ms)'}}}}
+    });
+  }
+
+  var tokCanvas=document.getElementById('compTokensChart');
+  if(tokCanvas){
+    compCharts.tokens=new Chart(tokCanvas,{
+      type:'bar',
+      data:{labels:llamaLabels,datasets:[{
+        label:'Avg Words',
+        data:llamaLabels.map(n=>(llamaByModel[n].avg_tokens||0)),
+        backgroundColor:llamaColors,
+        borderRadius:4
+      }]},
+      options:{responsive:true,plugins:{legend:{display:false}},
+        scales:{y:{beginAtZero:true,title:{display:true,text:'Avg Words / Response'}}}}
+    });
+  }
+
+  var qsCanvas=document.getElementById('compQualityScatterChart');
+  if(qsCanvas){
+    var qsData=llamaLabels.map((n,i)=>({
+      x:llamaByModel[n].avg_latency_ms||llamaByModel[n].p50_latency_ms,
+      y:llamaByModel[n].avg_accuracy,
+      label:n
+    }));
+    compCharts.qualityScatter=new Chart(qsCanvas,{
+      type:'scatter',
+      data:{datasets:[{
+        label:'LLaMA Models',
+        data:qsData,
+        backgroundColor:llamaColors,
+        pointRadius:8,
+        pointHoverRadius:12
+      }]},
+      options:{responsive:true,
+        plugins:{tooltip:{callbacks:{
+          label:function(ctx){return ctx.raw.label+': '+ctx.raw.x+'ms, '+ctx.raw.y.toFixed(1)+'%';}
+        }}},
+        scales:{
+          x:{title:{display:true,text:'Avg Latency (ms)'},beginAtZero:true},
+          y:{title:{display:true,text:'Quality Score (%)'},min:0,max:100}
         }
       }
     });
@@ -4132,6 +4268,59 @@ function renderLlamaBenchmarkResults(r){
     +' &nbsp;|&nbsp; Interrupt: '+r.interrupt_latency_ms+'ms &nbsp;|&nbsp; Prompts: '+r.prompts_tested
     +'</div>';
   document.getElementById('llamaBenchmarkResults').innerHTML=html;
+}
+
+var _hfLlamaSearchGen=0;
+function searchHuggingFaceLlama(){
+  var btn=document.getElementById('hfLlamaSearchBtn');
+  var statusEl=document.getElementById('hfLlamaSearchStatus');
+  var resultsEl=document.getElementById('hfLlamaSearchResults');
+  btn.disabled=true;
+  statusEl.innerHTML='<span style="color:var(--wt-accent)">Searching HuggingFace for LLaMA models...</span>';
+  resultsEl.innerHTML='';
+  var query=document.getElementById('hfLlamaSearchQuery').value.trim();
+  var sort=document.getElementById('hfLlamaSearchSort').value;
+  var gen=++_hfLlamaSearchGen;
+  fetch('/api/models/search',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({query:query,task:'text-generation',sort:sort,limit:20})})
+  .then(r=>r.json()).then(data=>{
+    if(gen!==_hfLlamaSearchGen) return;
+    btn.disabled=false;
+    if(data.error){
+      statusEl.innerHTML='<span style="color:var(--wt-danger)">'+escapeHtml(data.error)+'</span>'
+        +(data.has_token?'':' <em>(No HF token set - go to Credentials page)</em>');
+      return;
+    }
+    var models=data.models||[];
+    statusEl.innerHTML='<span style="color:var(--wt-success)">Found '+models.length+' models</span>'
+      +(data.has_token?'':' <em style="color:var(--wt-warning)">(No HF token - some gated models may be inaccessible)</em>');
+    if(!models.length){resultsEl.innerHTML='<em>No models found.</em>';return;}
+    var html='<table class="wt-table"><thead><tr>'
+      +'<th>Model</th><th>Downloads</th><th>Likes</th><th>Tags</th><th>Updated</th><th>Action</th>'
+      +'</tr></thead><tbody>';
+    window._hfLlamaSearchModels=models;
+    models.forEach(function(m,idx){
+      var id=m.modelId||m.id||'';
+      var dl=m.downloads||0;
+      var likes=m.likes||0;
+      var tags=(m.tags||[]).slice(0,5).join(', ');
+      var updated=m.lastModified?(new Date(m.lastModified)).toLocaleDateString():'';
+      html+='<tr>'
+        +'<td><a href="https://huggingface.co/'+escapeHtml(id)+'" target="_blank" style="color:var(--wt-accent)"><strong>'+escapeHtml(id)+'</strong></a></td>'
+        +'<td>'+formatNumber(dl)+'</td>'
+        +'<td>'+likes+'</td>'
+        +'<td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(tags)+'</td>'
+        +'<td style="font-size:11px">'+updated+'</td>'
+        +'<td><button class="wt-btn wt-btn-sm wt-btn-primary" data-idx="'+idx+'" onclick="showDownloadDialog(parseInt(this.dataset.idx),\'llama\')">Download</button></td>'
+        +'</tr>';
+    });
+    html+='</tbody></table>';
+    resultsEl.innerHTML=html;
+  }).catch(e=>{
+    if(gen!==_hfLlamaSearchGen) return;
+    btn.disabled=false;
+    statusEl.innerHTML='<span style="color:var(--wt-danger)">Search failed: '+escapeHtml(String(e))+'</span>';
+  });
 }
 
 // ===== END MODELS PAGE =====
@@ -7964,6 +8153,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         std::string filename = extract_json_string(body, "filename");
         std::string model_name = extract_json_string(body, "model_name");
         std::string backend = extract_json_string(body, "backend");
+        std::string service = extract_json_string(body, "service");
+        if (service != "whisper" && service != "llama") service = "whisper";
 
         if (repo_id.empty() || filename.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n",
@@ -8018,7 +8209,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         std::string abs_models_str(abs_models_dir);
 
-        std::thread([this, repo_id, filename, local_path, hf_token, model_name, backend, progress, abs_models_str]() {
+        std::thread([this, repo_id, filename, local_path, hf_token, model_name, backend, service, progress, abs_models_str]() {
             std::string url = "https://huggingface.co/" + repo_id + "/resolve/main/" + filename;
             std::string tmp_path = local_path + ".downloading";
 
@@ -8111,7 +8302,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 sqlite3_stmt* stmt;
                 const char* sql = "INSERT INTO models (service, name, path, backend, size_mb, config_json, added_timestamp) VALUES (?, ?, ?, ?, ?, '{}', ?)";
                 if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_text(stmt, 1, "whisper", -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 1, service.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(stmt, 2, model_name.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(stmt, 3, abs_path, -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(stmt, 4, backend.c_str(), -1, SQLITE_TRANSIENT);

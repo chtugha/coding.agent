@@ -242,7 +242,8 @@ Test LLaMA TCP interconnection and optimize for short, clear German responses.
 
 **Files**: `llama-service.cpp`, `frontend.cpp` (LLaMA quality test handler/UI)
 
-### [ ] Step: Stage 8 — LLaMA Model Search & Benchmarking
+### [x] Step: Stage 8 — LLaMA Model Search & Benchmarking
+<!-- chat-id: b3543f1d-65f0-4a11-86c0-72cb80bde6cf -->
 
 Search HuggingFace for better LLaMA models and compare performance.
 
