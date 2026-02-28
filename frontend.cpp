@@ -2091,7 +2091,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Accuracy Comparison</span></div>
+<div class="wt-card-header"><span class="wt-card-title">Score Comparison</span></div>
 <canvas id="compAccuracyChart" style="max-height:280px"></canvas>
 </div>
 <div class="wt-card">
@@ -3925,7 +3925,7 @@ function startModelDownload(repoId,filename,modelName,backend,serviceType){
       return;
     }
     var dlId=data.download_id;
-    activeDownloads[dlId]={filename:filename,repoId:repoId};
+    activeDownloads[dlId]={filename:filename,repoId:repoId,serviceType:serviceType};
     statusEl.innerHTML='<span style="color:var(--wt-accent)">Downloading '+escapeHtml(filename)+' (ID: '+dlId+')...</span>'
       +'<div id="dlProgress_'+dlId+'" style="margin-top:4px"><div class="progress" style="height:20px;background:var(--wt-border);border-radius:4px;overflow:hidden">'
       +'<div id="dlBar_'+dlId+'" style="height:100%;background:var(--wt-accent);transition:width 0.5s;width:0%"></div>'
@@ -3954,7 +3954,8 @@ function pollDownloadProgress(dlId){
       pctText.textContent=mbDl+'MB / '+mbTotal+(data.total_bytes>0?' ('+pct+'%)':'');
       if(data.complete||data.failed){
         clearInterval(iv);
-        var statusEl=document.getElementById('hfSearchStatus');
+        var svcType=(activeDownloads[dlId]||{}).serviceType||'whisper';
+        var statusEl=document.getElementById(svcType==='llama'?'hfLlamaSearchStatus':'hfSearchStatus');
         if(data.failed){
           statusEl.innerHTML='<span style="color:var(--wt-danger)">Download failed: '+escapeHtml(data.error||'Unknown error')+'</span>';
         } else {
@@ -4027,10 +4028,13 @@ function renderComparisonCharts(runs){
   var byModel={};
   runs.forEach(r=>{if(!byModel[r.model_name]) byModel[r.model_name]=r;});
   var labels=Object.keys(byModel);
-  var colors=['rgba(59,130,246,0.7)','rgba(34,197,94,0.7)','rgba(251,146,60,0.7)',
-    'rgba(168,85,247,0.7)','rgba(239,68,68,0.7)','rgba(14,165,233,0.7)',
-    'rgba(245,158,11,0.7)','rgba(99,102,241,0.7)'];
-  var bgColors=labels.map((_,i)=>colors[i%colors.length]);
+  var whisperColors=['rgba(59,130,246,0.7)','rgba(34,197,94,0.7)','rgba(14,165,233,0.7)','rgba(6,182,212,0.7)'];
+  var llamaColors_=['rgba(168,85,247,0.7)','rgba(124,58,237,0.7)','rgba(192,132,252,0.7)','rgba(139,92,246,0.7)'];
+  var bgColors=labels.map(function(_,i){
+    var r=byModel[labels[i]];
+    if((r.model_type||'whisper')==='llama') return llamaColors_[i%llamaColors_.length];
+    return whisperColors[i%whisperColors.length];
+  });
 
   var accCanvas=document.getElementById('compAccuracyChart');
   if(accCanvas){
@@ -4042,7 +4046,12 @@ function renderComparisonCharts(runs){
         backgroundColor:bgColors,
         borderRadius:4
       }]},
-      options:{responsive:true,plugins:{legend:{display:false}},
+      options:{responsive:true,plugins:{legend:{display:false},
+        tooltip:{callbacks:{label:function(ctx){
+          var n=labels[ctx.dataIndex];var r=byModel[n];
+          var t=(r.model_type||'whisper')==='llama'?'Quality':'Accuracy';
+          return n+': '+ctx.raw.toFixed(1)+'% ('+t+')';
+        }}}},
         scales:{y:{beginAtZero:true,max:100,title:{display:true,text:'Score (%)'}}}}
     });
   }
@@ -4112,7 +4121,7 @@ function renderComparisonCharts(runs){
   var llamaByModel={};
   llamaRuns.forEach(r=>{if(!llamaByModel[r.model_name]) llamaByModel[r.model_name]=r;});
   var llamaLabels=Object.keys(llamaByModel);
-  var llamaColors=llamaLabels.map((_,i)=>colors[i%colors.length]);
+  var llamaColors=llamaLabels.map((_,i)=>llamaColors_[i%llamaColors_.length]);
 
   var germanCanvas=document.getElementById('compGermanChart');
   if(germanCanvas){
