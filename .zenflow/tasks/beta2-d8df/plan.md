@@ -261,7 +261,8 @@ Search HuggingFace for better LLaMA models and compare performance.
 
 **Files**: `frontend.cpp` (model search/download/benchmark, comparison charts)
 
-### [ ] Step: Stage 9 — Shut-Up Mechanism Testing
+### [x] Step: Stage 9 — Shut-Up Mechanism Testing
+<!-- chat-id: cddf4fbf-a308-46c3-a59f-25ecdf2e3ed3 -->
 
 Validate interrupt/barge-in functionality.
 

@@ -83,6 +83,12 @@ public:
             this->handle_call_end(call_id);
         });
 
+        interconnect_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
+            if (active) {
+                handle_speech_active(call_id);
+            }
+        });
+
         return true;
     }
 
@@ -388,6 +394,20 @@ private:
         std::cout << "📞 Created outbound audio state for call_id " << cid << std::endl;
         log_fwd_.forward("INFO", cid, "Created outbound audio state");
         return state;
+    }
+
+    void handle_speech_active(uint32_t call_id) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        auto it = calls_.find(call_id);
+        if (it == calls_.end()) return;
+        auto& state = it->second;
+        std::lock_guard<std::mutex> sl(state->mutex);
+        size_t flushed = state->buffer.size() - state->read_pos;
+        state->buffer.clear();
+        state->read_pos = 0;
+        std::memset(state->fir_history, 0, sizeof(state->fir_history));
+        std::cout << "SPEECH_ACTIVE [call " << call_id << "] — flushed " << flushed << " bytes of audio buffer" << std::endl;
+        log_fwd_.forward("WARN", call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
     }
 
     void handle_call_end(uint32_t call_id) {

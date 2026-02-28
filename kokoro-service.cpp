@@ -733,6 +733,7 @@ struct CallContext {
     std::condition_variable queue_cv;
     std::thread worker;
     std::atomic<bool> active{true};
+    std::atomic<bool> interrupted{false};
 };
 
 class KokoroService {
@@ -765,6 +766,12 @@ public:
 
         node_.register_call_end_handler([this](uint32_t call_id) {
             handle_call_end(call_id);
+        });
+
+        node_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
+            if (active) {
+                handle_speech_active(call_id);
+            }
         });
 
         return true;
@@ -1052,6 +1059,11 @@ private:
                 ctx->text_queue.pop();
             }
 
+            if (ctx->interrupted.load()) {
+                ctx->interrupted = false;
+                continue;
+            }
+
             std::printf("Synthesizing for call %u: %s\n", ctx->call_id, text.c_str());
 
             std::vector<float> samples;
@@ -1062,6 +1074,14 @@ private:
             }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
+
+            if (ctx->interrupted.load()) {
+                ctx->interrupted = false;
+                std::printf("Synthesis interrupted for call %u — discarding %zu samples\n",
+                           ctx->call_id, samples.size());
+                log_fwd_.forward("WARN", ctx->call_id, "Synthesis interrupted — discarding audio");
+                continue;
+            }
 
             if (samples.empty() || samples.size() > MAX_AUDIO_SAMPLES) {
                 std::fprintf(stderr, "Invalid audio output for call %u: %zu samples\n",
@@ -1104,6 +1124,21 @@ private:
             std::fprintf(stderr, "Failed to send audio for call %u\n", call_id);
             log_fwd_.forward("ERROR", call_id, "Failed to send audio to OAP");
         }
+    }
+
+    void handle_speech_active(uint32_t call_id) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        auto it = calls_.find(call_id);
+        if (it == calls_.end()) return;
+        auto& ctx = it->second;
+        ctx->interrupted = true;
+        {
+            std::lock_guard<std::mutex> qlock(ctx->queue_mutex);
+            std::queue<std::string> empty;
+            std::swap(ctx->text_queue, empty);
+        }
+        std::printf("SPEECH_ACTIVE [call %u] — flushed TTS queue, interrupting synthesis\n", call_id);
+        log_fwd_.forward("WARN", call_id, "SPEECH_ACTIVE — flushed TTS queue, interrupting synthesis");
     }
 
     void handle_call_end(uint32_t call_id) {
