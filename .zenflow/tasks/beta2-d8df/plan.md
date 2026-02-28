@@ -189,7 +189,8 @@ Add Credentials page to frontend for HuggingFace and GitHub tokens.
 
 **Files**: `frontend.cpp` (sidebar nav, page HTML, JS functions, settings API handler)
 
-### [ ] Step: Stage 6 — Whisper Model Search & Benchmarking
+### [x] Step: Stage 6 — Whisper Model Search & Benchmarking
+<!-- chat-id: f0bab62b-1f76-41a9-9495-38f6fab6b8d1 -->
 
 Search HuggingFace for better Whisper models and compare performance.
 

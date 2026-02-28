@@ -292,6 +292,19 @@ private:
     std::map<int64_t, std::shared_ptr<AsyncTask>> async_tasks_;
     std::atomic<int64_t> async_id_counter_{0};
 
+    struct DownloadProgress {
+        std::atomic<int64_t> bytes_downloaded{0};
+        std::atomic<int64_t> total_bytes{0};
+        std::atomic<bool> complete{false};
+        std::atomic<bool> failed{false};
+        std::string error;
+        std::string filename;
+        std::string local_path;
+        std::mutex mu;
+    };
+    std::mutex downloads_mutex_;
+    std::map<int64_t, std::shared_ptr<DownloadProgress>> downloads_;
+
     int64_t create_async_task(const std::string& type) {
         int64_t id = ++async_id_counter_;
         auto task = std::make_shared<AsyncTask>();
@@ -1161,6 +1174,12 @@ private:
                 handle_models_benchmarks_get(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/add")) == 0) {
                 handle_models_add(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/search")) == 0) {
+                handle_models_search(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/download")) == 0) {
+                handle_models_download(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/download/progress")) == 0) {
+                handle_models_download_progress(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/benchmark")) == 0) {
                 handle_whisper_benchmark(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/llama/prompts")) == 0) {
@@ -1867,6 +1886,37 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
 <div class="wt-card">
 <div class="wt-card-header">
+<span class="wt-card-title">Search HuggingFace Models</span>
+</div>
+<div style="display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;margin-bottom:8px;align-items:end">
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Search Query</label>
+    <input class="wt-input" id="hfSearchQuery" placeholder="e.g. whisper german coreml ggml" value="whisper german">
+  </div>
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Task</label>
+    <select class="wt-select" id="hfSearchTask">
+      <option value="automatic-speech-recognition">ASR (Speech-to-Text)</option>
+      <option value="text-generation">Text Generation</option>
+      <option value="">Any task</option>
+    </select>
+  </div>
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Sort by</label>
+    <select class="wt-select" id="hfSearchSort">
+      <option value="downloads">Downloads</option>
+      <option value="likes">Likes</option>
+      <option value="lastModified">Recently Updated</option>
+    </select>
+  </div>
+  <button class="wt-btn wt-btn-primary" onclick="searchHuggingFace()" id="hfSearchBtn">&#x1F50D; Search</button>
+</div>
+<div id="hfSearchStatus" style="font-size:12px;margin-bottom:8px"></div>
+<div id="hfSearchResults"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header">
 <span class="wt-card-title">Registered Whisper Models</span>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
 </div>
@@ -1874,7 +1924,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Add Whisper Model</span></div>
+<div class="wt-card-header"><span class="wt-card-title">Add Whisper Model Manually</span></div>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
   <input class="wt-input" id="addModelName" placeholder="Name (e.g. large-v3-turbo-q5)">
   <input class="wt-input" id="addModelPath" placeholder="Full path to .bin file">
@@ -1971,15 +2021,40 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div class="wt-card">
 <div class="wt-card-header">
 <span class="wt-card-title">Model Benchmark Comparison</span>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModelComparison()">&#x21BB; Refresh</button>
+<div style="display:flex;gap:8px;align-items:center">
+  <select class="wt-select" id="compFilterType" style="width:auto;font-size:12px" onchange="loadModelComparison()">
+    <option value="">All Types</option>
+    <option value="whisper">Whisper Only</option>
+    <option value="llama">LLaMA Only</option>
+  </select>
+  <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModelComparison()">&#x21BB; Refresh</button>
+</div>
 </div>
 <div id="comparisonTable"><em>No benchmark runs yet. Run benchmarks on models to compare them.</em></div>
 </div>
 
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Latency Comparison Chart</span></div>
-<canvas id="modelComparisonChart" style="max-height:300px"></canvas>
+<div class="wt-card-header"><span class="wt-card-title">Accuracy Comparison</span></div>
+<canvas id="compAccuracyChart" style="max-height:280px"></canvas>
 </div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Latency Comparison</span></div>
+<canvas id="compLatencyChart" style="max-height:280px"></canvas>
+</div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Model Size (MB)</span></div>
+<canvas id="compSizeChart" style="max-height:280px"></canvas>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Latency vs Accuracy Scatter</span></div>
+<canvas id="compScatterChart" style="max-height:280px"></canvas>
+</div>
+</div>
+
 </div><!-- end modelTabCompare -->
 
 </div></div><!-- end page-models -->
@@ -3445,8 +3520,6 @@ function updateVadThresholdDisplay(val){
 
 // ===== MODELS PAGE =====
 
-var modelCompChart=null;
-
 function switchModelTab(tab){
   ['whisper','llama','compare'].forEach(t=>{
     document.getElementById('modelTab'+t.charAt(0).toUpperCase()+t.slice(1)).style.display=(t===tab)?'':'none';
@@ -3648,10 +3721,176 @@ function renderBenchmarkResults(r){
   document.getElementById('benchmarkResults').innerHTML=html;
 }
 
+var _hfSearchGen=0;
+function searchHuggingFace(){
+  var btn=document.getElementById('hfSearchBtn');
+  var statusEl=document.getElementById('hfSearchStatus');
+  var resultsEl=document.getElementById('hfSearchResults');
+  btn.disabled=true;
+  statusEl.innerHTML='<span style="color:var(--wt-accent)">Searching HuggingFace...</span>';
+  resultsEl.innerHTML='';
+  var query=document.getElementById('hfSearchQuery').value.trim();
+  var task=document.getElementById('hfSearchTask').value;
+  var sort=document.getElementById('hfSearchSort').value;
+  var gen=++_hfSearchGen;
+  fetch('/api/models/search',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({query:query,task:task,sort:sort,limit:20})})
+  .then(r=>r.json()).then(data=>{
+    if(gen!==_hfSearchGen) return;
+    btn.disabled=false;
+    if(data.error){
+      statusEl.innerHTML='<span style="color:var(--wt-danger)">'+escapeHtml(data.error)+'</span>'
+        +(data.has_token?'':' <em>(No HF token set - go to Credentials page)</em>');
+      return;
+    }
+    var models=data.models||[];
+    statusEl.innerHTML='<span style="color:var(--wt-success)">Found '+models.length+' models</span>'
+      +(data.has_token?'':' <em style="color:var(--wt-warning)">(No HF token - some gated models may be inaccessible)</em>');
+    if(!models.length){resultsEl.innerHTML='<em>No models found.</em>';return;}
+    var html='<table class="wt-table"><thead><tr>'
+      +'<th>Model</th><th>Downloads</th><th>Likes</th><th>Tags</th><th>Updated</th><th>Action</th>'
+      +'</tr></thead><tbody>';
+    window._hfSearchModels=models;
+    models.forEach(function(m,idx){
+      var id=m.modelId||m.id||'';
+      var dl=m.downloads||0;
+      var likes=m.likes||0;
+      var tags=(m.tags||[]).slice(0,5).join(', ');
+      var updated=m.lastModified?(new Date(m.lastModified)).toLocaleDateString():'';
+      html+='<tr>'
+        +'<td><a href="https://huggingface.co/'+escapeHtml(id)+'" target="_blank" style="color:var(--wt-accent)"><strong>'+escapeHtml(id)+'</strong></a></td>'
+        +'<td>'+formatNumber(dl)+'</td>'
+        +'<td>'+likes+'</td>'
+        +'<td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(tags)+'</td>'
+        +'<td style="font-size:11px">'+updated+'</td>'
+        +'<td><button class="wt-btn wt-btn-sm wt-btn-primary" data-idx="'+idx+'" onclick="showDownloadDialog(parseInt(this.dataset.idx))">Download</button></td>'
+        +'</tr>';
+    });
+    html+='</tbody></table>';
+    resultsEl.innerHTML=html;
+  }).catch(e=>{
+    if(gen!==_hfSearchGen) return;
+    btn.disabled=false;
+    statusEl.innerHTML='<span style="color:var(--wt-danger)">Search failed: '+escapeHtml(String(e))+'</span>';
+  });
+}
+
+function formatNumber(n){
+  if(n>=1000000) return (n/1000000).toFixed(1)+'M';
+  if(n>=1000) return (n/1000).toFixed(1)+'K';
+  return String(n);
+}
+
+function showDownloadDialog(idx){
+  var m=(window._hfSearchModels||[])[idx];
+  if(!m) return;
+  var repoId=m.modelId||m.id||'';
+  var existing=document.getElementById('dlModal');
+  if(existing) existing.remove();
+  var modal=document.createElement('div');
+  modal.id='dlModal';
+  modal.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  modal.dataset.repoId=repoId;
+  modal.innerHTML='<div style="background:var(--wt-card-bg);border-radius:var(--wt-radius);padding:24px;width:480px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.3)">'
+    +'<h3 style="margin:0 0 16px">Download from '+escapeHtml(repoId)+'</h3>'
+    +'<div class="wt-field"><label>Filename</label>'
+    +'<input class="wt-input" id="dlFilename" placeholder="e.g. ggml-model.bin" value=""></div>'
+    +'<div class="wt-field"><label>Display Name</label>'
+    +'<input class="wt-input" id="dlModelName" placeholder="Model display name" value=""></div>'
+    +'<div class="wt-field"><label>Backend</label>'
+    +'<select class="wt-select" id="dlBackend">'
+    +'<option value="coreml">CoreML (Apple Silicon)</option>'
+    +'<option value="metal">Metal GPU</option>'
+    +'<option value="cpu">CPU only</option></select></div>'
+    +'<div id="dlModalError" style="color:var(--wt-danger);font-size:12px;margin-bottom:8px"></div>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end">'
+    +'<button class="wt-btn wt-btn-secondary" onclick="document.getElementById(\'dlModal\').remove()">Cancel</button>'
+    +'<button class="wt-btn wt-btn-primary" onclick="submitDownload()">Download</button>'
+    +'</div></div>';
+  document.body.appendChild(modal);
+  modal.addEventListener('click',function(e){if(e.target===modal)modal.remove();});
+  document.getElementById('dlFilename').focus();
+}
+
+function submitDownload(){
+  var modal=document.getElementById('dlModal');
+  if(!modal) return;
+  var repoId=modal.dataset.repoId||'';
+  var filename=(document.getElementById('dlFilename').value||'').trim();
+  var modelName=(document.getElementById('dlModelName').value||'').trim();
+  var backend=document.getElementById('dlBackend').value;
+  var errEl=document.getElementById('dlModalError');
+  if(!filename){errEl.textContent='Filename is required.';return;}
+  if(/[^A-Za-z0-9._-]/.test(filename)){errEl.textContent='Filename must only contain alphanumeric, dash, underscore, dot.';return;}
+  if(!modelName) modelName=filename.replace(/\\.bin$/,'').replace(/\\.gguf$/,'');
+  modal.remove();
+  startModelDownload(repoId,filename,modelName,backend);
+}
+
+var activeDownloads={};
+
+function startModelDownload(repoId,filename,modelName,backend){
+  var statusEl=document.getElementById('hfSearchStatus');
+  statusEl.innerHTML='<span style="color:var(--wt-accent)">Starting download of '+escapeHtml(filename)+'...</span>';
+  fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({repo_id:repoId,filename:filename,model_name:modelName,backend:backend})})
+  .then(r=>r.json()).then(data=>{
+    if(data.error){
+      statusEl.innerHTML='<span style="color:var(--wt-danger)">'+escapeHtml(data.error)+'</span>';
+      return;
+    }
+    var dlId=data.download_id;
+    activeDownloads[dlId]={filename:filename,repoId:repoId};
+    statusEl.innerHTML='<span style="color:var(--wt-accent)">Downloading '+escapeHtml(filename)+' (ID: '+dlId+')...</span>'
+      +'<div id="dlProgress_'+dlId+'" style="margin-top:4px"><div class="progress" style="height:20px;background:var(--wt-border);border-radius:4px;overflow:hidden">'
+      +'<div id="dlBar_'+dlId+'" style="height:100%;background:var(--wt-accent);transition:width 0.5s;width:0%"></div>'
+      +'</div><span id="dlPctText_'+dlId+'" style="font-size:11px">0%</span></div>';
+    pollDownloadProgress(dlId);
+  }).catch(e=>{
+    statusEl.innerHTML='<span style="color:var(--wt-danger)">Download failed: '+escapeHtml(String(e))+'</span>';
+  });
+}
+
+function pollDownloadProgress(dlId){
+  var iv=setInterval(function(){
+    fetch('/api/models/download/progress?id='+dlId).then(r=>r.json()).then(data=>{
+      var bar=document.getElementById('dlBar_'+dlId);
+      var pctText=document.getElementById('dlPctText_'+dlId);
+      if(!bar) {clearInterval(iv);return;}
+      var pct=0;
+      if(data.total_bytes>0){
+        pct=Math.min(100,Math.round(data.bytes_downloaded/data.total_bytes*100));
+      } else if(data.bytes_downloaded>0){
+        pct=50;
+      }
+      bar.style.width=pct+'%';
+      var mbDl=(data.bytes_downloaded/1048576).toFixed(1);
+      var mbTotal=data.total_bytes>0?((data.total_bytes/1048576).toFixed(1)+'MB'):'?';
+      pctText.textContent=mbDl+'MB / '+mbTotal+(data.total_bytes>0?' ('+pct+'%)':'');
+      if(data.complete||data.failed){
+        clearInterval(iv);
+        var statusEl=document.getElementById('hfSearchStatus');
+        if(data.failed){
+          statusEl.innerHTML='<span style="color:var(--wt-danger)">Download failed: '+escapeHtml(data.error||'Unknown error')+'</span>';
+        } else {
+          bar.style.width='100%';
+          pctText.textContent=mbDl+'MB - Complete!';
+          statusEl.innerHTML='<span style="color:var(--wt-success)">Downloaded and registered: '+escapeHtml(data.filename)+'</span>';
+          loadModels();
+        }
+        delete activeDownloads[dlId];
+      }
+    }).catch(function(){});
+  },1000);
+}
+
 function loadModelComparison(){
+  var filterType=(document.getElementById('compFilterType')||{}).value||'';
   fetch('/api/models/benchmarks').then(r=>r.json()).then(data=>{
-    renderComparisonTable(data.runs||[]);
-    renderComparisonChart(data.runs||[]);
+    var runs=data.runs||[];
+    if(filterType) runs=runs.filter(r=>(r.model_type||'whisper')===filterType);
+    renderComparisonTable(runs);
+    renderComparisonCharts(runs);
   }).catch(e=>console.error('loadModelComparison',e));
 }
 
@@ -3689,39 +3928,96 @@ function renderComparisonTable(runs){
   el.innerHTML=html;
 }
 
-function renderComparisonChart(runs){
-  var canvas=document.getElementById('modelComparisonChart');
-  if(!canvas||!runs.length) return;
-  if(modelCompChart){modelCompChart.destroy();modelCompChart=null;}
-  // Group: keep latest run per model
+var compCharts={accuracy:null,latency:null,size:null,scatter:null};
+
+function destroyCompCharts(){
+  ['accuracy','latency','size','scatter'].forEach(k=>{
+    if(compCharts[k]){compCharts[k].destroy();compCharts[k]=null;}
+  });
+}
+
+function renderComparisonCharts(runs){
+  destroyCompCharts();
+  if(!runs.length) return;
   var byModel={};
   runs.forEach(r=>{if(!byModel[r.model_name]) byModel[r.model_name]=r;});
   var labels=Object.keys(byModel);
-  var p50=labels.map(n=>byModel[n].p50_latency_ms);
-  var p95=labels.map(n=>byModel[n].p95_latency_ms);
-  var p99=labels.map(n=>byModel[n].p99_latency_ms);
-  var acc=labels.map(n=>byModel[n].avg_accuracy);
-  modelCompChart=new Chart(canvas,{
-    type:'bar',
-    data:{
-      labels,
-      datasets:[
-        {label:'P50 Latency (ms)',data:p50,backgroundColor:'rgba(59,130,246,0.7)',yAxisID:'y'},
-        {label:'P95 Latency (ms)',data:p95,backgroundColor:'rgba(251,146,60,0.7)',yAxisID:'y'},
-        {label:'P99 Latency (ms)',data:p99,backgroundColor:'rgba(239,68,68,0.7)',yAxisID:'y'},
-        {label:'Accuracy %',data:acc,type:'line',borderColor:'rgba(34,197,94,1)',
-         backgroundColor:'rgba(34,197,94,0.15)',yAxisID:'y2',tension:0.3}
-      ]
-    },
-    options:{
-      responsive:true,
-      scales:{
-        y:{title:{display:true,text:'Latency (ms)'},beginAtZero:true},
-        y2:{position:'right',title:{display:true,text:'Accuracy (%)'},min:0,max:100,
-            grid:{drawOnChartArea:false}}
+  var colors=['rgba(59,130,246,0.7)','rgba(34,197,94,0.7)','rgba(251,146,60,0.7)',
+    'rgba(168,85,247,0.7)','rgba(239,68,68,0.7)','rgba(14,165,233,0.7)',
+    'rgba(245,158,11,0.7)','rgba(99,102,241,0.7)'];
+  var bgColors=labels.map((_,i)=>colors[i%colors.length]);
+
+  var accCanvas=document.getElementById('compAccuracyChart');
+  if(accCanvas){
+    compCharts.accuracy=new Chart(accCanvas,{
+      type:'bar',
+      data:{labels:labels,datasets:[{
+        label:'Accuracy (%)',
+        data:labels.map(n=>byModel[n].avg_accuracy),
+        backgroundColor:bgColors,
+        borderRadius:4
+      }]},
+      options:{responsive:true,plugins:{legend:{display:false}},
+        scales:{y:{beginAtZero:true,max:100,title:{display:true,text:'Accuracy (%)'}}}}
+    });
+  }
+
+  var latCanvas=document.getElementById('compLatencyChart');
+  if(latCanvas){
+    compCharts.latency=new Chart(latCanvas,{
+      type:'bar',
+      data:{labels:labels,datasets:[
+        {label:'P50 (ms)',data:labels.map(n=>byModel[n].p50_latency_ms),backgroundColor:'rgba(59,130,246,0.7)',borderRadius:4},
+        {label:'P95 (ms)',data:labels.map(n=>byModel[n].p95_latency_ms),backgroundColor:'rgba(251,146,60,0.7)',borderRadius:4},
+        {label:'P99 (ms)',data:labels.map(n=>byModel[n].p99_latency_ms),backgroundColor:'rgba(239,68,68,0.7)',borderRadius:4}
+      ]},
+      options:{responsive:true,scales:{y:{beginAtZero:true,title:{display:true,text:'Latency (ms)'}}}}
+    });
+  }
+
+  var sizeCanvas=document.getElementById('compSizeChart');
+  if(sizeCanvas){
+    compCharts.size=new Chart(sizeCanvas,{
+      type:'bar',
+      data:{labels:labels,datasets:[{
+        label:'Size (MB)',
+        data:labels.map(n=>byModel[n].memory_mb),
+        backgroundColor:bgColors,
+        borderRadius:4
+      }]},
+      options:{responsive:true,plugins:{legend:{display:false}},
+        indexAxis:'y',
+        scales:{x:{beginAtZero:true,title:{display:true,text:'Size (MB)'}}}}
+    });
+  }
+
+  var scatterCanvas=document.getElementById('compScatterChart');
+  if(scatterCanvas){
+    var scatterData=labels.map((n,i)=>({
+      x:byModel[n].p50_latency_ms,
+      y:byModel[n].avg_accuracy,
+      label:n
+    }));
+    compCharts.scatter=new Chart(scatterCanvas,{
+      type:'scatter',
+      data:{datasets:[{
+        label:'Models',
+        data:scatterData,
+        backgroundColor:bgColors,
+        pointRadius:8,
+        pointHoverRadius:12
+      }]},
+      options:{responsive:true,
+        plugins:{tooltip:{callbacks:{
+          label:function(ctx){return ctx.raw.label+': '+ctx.raw.x+'ms, '+ctx.raw.y.toFixed(1)+'%';}
+        }}},
+        scales:{
+          x:{title:{display:true,text:'P50 Latency (ms)'},beginAtZero:true},
+          y:{title:{display:true,text:'Accuracy (%)'},min:0,max:100}
+        }
       }
-    }
-  });
+    });
+  }
 }
 
 var llamaBenchmarkPollInterval=null;
@@ -7431,6 +7727,425 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         json << "]}";
 
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    static bool is_safe_repo_id(const std::string& s) {
+        if (s.empty() || s.size() > 256) return false;
+        int slash_count = 0;
+        for (unsigned char ch : s) {
+            if (ch == '/') { slash_count++; continue; }
+            if (isalnum(ch) || ch == '-' || ch == '_' || ch == '.') continue;
+            return false;
+        }
+        return slash_count == 1 && s.front() != '/' && s.back() != '/';
+    }
+
+    static bool is_safe_filename(const std::string& s) {
+        if (s.empty() || s.size() > 256) return false;
+        if (s.find("..") != std::string::npos) return false;
+        for (unsigned char ch : s) {
+            if (isalnum(ch) || ch == '-' || ch == '_' || ch == '.') continue;
+            return false;
+        }
+        return s.front() != '.' && s.back() != '.';
+    }
+
+    static std::string url_encode(const std::string& s) {
+        std::string result;
+        for (unsigned char ch : s) {
+            if (isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+                result += ch;
+            } else {
+                char hex[4];
+                snprintf(hex, sizeof(hex), "%%%02X", ch);
+                result += hex;
+            }
+        }
+        return result;
+    }
+
+    std::string write_curl_header_file(const std::string& token) {
+        if (token.empty()) return "";
+        char tmpname[] = "/tmp/wt_hdr_XXXXXX";
+        int fd = mkstemp(tmpname);
+        if (fd < 0) return "";
+        std::string header = "Authorization: Bearer " + token + "\n";
+        ssize_t written = write(fd, header.c_str(), header.size());
+        close(fd);
+        if (written != static_cast<ssize_t>(header.size())) {
+            unlink(tmpname);
+            return "";
+        }
+        return std::string(tmpname);
+    }
+
+    std::string run_curl_safe(const std::vector<std::string>& args) {
+        int pipefd[2];
+        if (pipe(pipefd) != 0) return "";
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            close(pipefd[0]);
+            close(pipefd[1]);
+            return "";
+        }
+
+        if (pid == 0) {
+            close(pipefd[0]);
+            dup2(pipefd[1], STDOUT_FILENO);
+            dup2(pipefd[1], STDERR_FILENO);
+            close(pipefd[1]);
+
+            std::vector<const char*> argv;
+            argv.push_back("curl");
+            for (const auto& a : args) argv.push_back(a.c_str());
+            argv.push_back(nullptr);
+
+            execvp("curl", const_cast<char* const*>(argv.data()));
+            _exit(127);
+        }
+
+        close(pipefd[1]);
+        std::string result;
+        char buf[4096];
+        ssize_t n;
+        while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+            result.append(buf, n);
+        }
+        close(pipefd[0]);
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return result;
+    }
+
+    int run_curl_to_file(const std::vector<std::string>& args, std::string* err_out = nullptr) {
+        int errpipe[2] = {-1, -1};
+        if (err_out && pipe(errpipe) != 0) err_out = nullptr;
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            if (errpipe[0] >= 0) { close(errpipe[0]); close(errpipe[1]); }
+            return -1;
+        }
+        if (pid == 0) {
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDOUT_FILENO);
+                close(devnull);
+            }
+            if (err_out && errpipe[1] >= 0) {
+                close(errpipe[0]);
+                dup2(errpipe[1], STDERR_FILENO);
+                close(errpipe[1]);
+            } else {
+                int dn = open("/dev/null", O_WRONLY);
+                if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
+            }
+            std::vector<const char*> argv;
+            argv.push_back("curl");
+            for (const auto& a : args) argv.push_back(a.c_str());
+            argv.push_back(nullptr);
+            execvp("curl", const_cast<char* const*>(argv.data()));
+            _exit(127);
+        }
+        if (err_out && errpipe[0] >= 0) {
+            close(errpipe[1]);
+            std::string captured;
+            char buf[1024];
+            ssize_t n;
+            while ((n = read(errpipe[0], buf, sizeof(buf))) > 0) {
+                if (captured.size() < 2048) captured.append(buf, std::min((size_t)n, 2048 - captured.size()));
+            }
+            close(errpipe[0]);
+            *err_out = captured;
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+
+    void handle_models_search(struct mg_connection *c, struct mg_http_message *hm) {
+        std::string body(hm->body.buf, hm->body.len);
+        std::string query = extract_json_string(body, "query");
+        std::string task_filter = extract_json_string(body, "task");
+        std::string sort_by = extract_json_string(body, "sort");
+        int limit_val = 20;
+
+        if (query.empty()) query = "whisper";
+        if (sort_by.empty()) sort_by = "downloads";
+
+        {
+            std::string body_str(body);
+            size_t lp = body_str.find("\"limit\":");
+            if (lp != std::string::npos) {
+                int lv = atoi(body_str.c_str() + lp + 8);
+                if (lv > 0 && lv <= 100) limit_val = lv;
+            }
+        }
+
+        std::string hf_token = get_setting("hf_token", "");
+
+        std::string api_url = "https://huggingface.co/api/models?search=" + url_encode(query)
+            + "&sort=" + url_encode(sort_by)
+            + "&direction=-1"
+            + "&limit=" + std::to_string(limit_val);
+        if (!task_filter.empty()) {
+            api_url += "&pipeline_tag=" + url_encode(task_filter);
+        }
+
+        std::string header_file = write_curl_header_file(hf_token);
+
+        std::vector<std::string> args = {"-s", "-S", "--max-time", "20", "-L"};
+        if (!header_file.empty()) {
+            args.push_back("-H");
+            args.push_back("@" + header_file);
+        }
+        args.push_back(api_url);
+
+        std::string raw = run_curl_safe(args);
+
+        if (!header_file.empty()) unlink(header_file.c_str());
+
+        if (raw.empty() || raw[0] != '[') {
+            std::string err_msg;
+            if (raw.empty()) {
+                err_msg = "No response from HuggingFace API";
+            } else if (raw[0] == '{') {
+                err_msg = "HuggingFace API error: " + raw.substr(0, 200);
+            } else {
+                err_msg = "Invalid response from HuggingFace API";
+            }
+            mg_http_reply(c, 502, "Content-Type: application/json\r\n",
+                "{\"error\":\"%s\",\"has_token\":%s}",
+                escape_json(err_msg).c_str(), hf_token.empty() ? "false" : "true");
+            return;
+        }
+
+        std::string resp = "{\"models\":" + raw + ",\"has_token\":" +
+            std::string(hf_token.empty() ? "false" : "true") + "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
+    }
+
+    void handle_models_download(struct mg_connection *c, struct mg_http_message *hm) {
+        std::string body(hm->body.buf, hm->body.len);
+        std::string repo_id = extract_json_string(body, "repo_id");
+        std::string filename = extract_json_string(body, "filename");
+        std::string model_name = extract_json_string(body, "model_name");
+        std::string backend = extract_json_string(body, "backend");
+
+        if (repo_id.empty() || filename.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"Missing repo_id or filename\"}");
+            return;
+        }
+
+        if (!is_safe_repo_id(repo_id)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"Invalid repo_id. Use format: owner/model with alphanumeric, dash, underscore, dot only.\"}");
+            return;
+        }
+
+        if (!is_safe_filename(filename)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"Invalid filename. Use alphanumeric, dash, underscore, dot only. No path separators.\"}");
+            return;
+        }
+
+        if (model_name.empty()) model_name = filename;
+        if (backend.empty()) backend = "coreml";
+
+        std::string hf_token = get_setting("hf_token", "");
+
+        std::string models_dir = "models";
+        mkdir(models_dir.c_str(), 0755);
+
+        std::string local_path = models_dir + "/" + filename;
+
+        char abs_models_dir[PATH_MAX];
+        if (!realpath(models_dir.c_str(), abs_models_dir)) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                "{\"error\":\"Cannot resolve models directory\"}");
+            return;
+        }
+
+        struct stat st;
+        if (stat(local_path.c_str(), &st) == 0) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
+                "{\"error\":\"File already exists\",\"path\":\"%s\"}", escape_json(local_path).c_str());
+            return;
+        }
+
+        int64_t dl_id = ++async_id_counter_;
+        auto progress = std::make_shared<DownloadProgress>();
+        progress->filename = filename;
+        progress->local_path = local_path;
+        {
+            std::lock_guard<std::mutex> lock(downloads_mutex_);
+            downloads_[dl_id] = progress;
+        }
+
+        std::string abs_models_str(abs_models_dir);
+
+        std::thread([this, repo_id, filename, local_path, hf_token, model_name, backend, progress, abs_models_str]() {
+            std::string url = "https://huggingface.co/" + repo_id + "/resolve/main/" + filename;
+            std::string tmp_path = local_path + ".downloading";
+
+            std::string header_file = write_curl_header_file(hf_token);
+
+            std::vector<std::string> head_args = {"-s", "-S", "-L", "-I", "--max-time", "10"};
+            if (!header_file.empty()) {
+                head_args.push_back("-H");
+                head_args.push_back("@" + header_file);
+            }
+            head_args.push_back(url);
+
+            std::string head_resp = run_curl_safe(head_args);
+            {
+                std::string lower_head;
+                for (char ch : head_resp) lower_head += tolower(ch);
+                size_t cl_pos = lower_head.find("content-length:");
+                if (cl_pos != std::string::npos) {
+                    int64_t cl = atoll(head_resp.c_str() + cl_pos + 15);
+                    if (cl > 0) progress->total_bytes.store(cl);
+                }
+            }
+
+            std::vector<std::string> dl_args = {"-s", "-S", "-L", "--max-time", "3600", "-o", tmp_path};
+            if (!header_file.empty()) {
+                dl_args.push_back("-H");
+                dl_args.push_back("@" + header_file);
+            }
+            dl_args.push_back(url);
+
+            std::thread size_tracker([&tmp_path, &progress](){
+                while (!progress->complete.load() && !progress->failed.load()) {
+                    struct stat st;
+                    if (stat(tmp_path.c_str(), &st) == 0) {
+                        progress->bytes_downloaded.store(st.st_size);
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+            });
+
+            std::string curl_stderr;
+            int ret = run_curl_to_file(dl_args, &curl_stderr);
+            progress->complete.store(true);
+            size_tracker.join();
+
+            if (!header_file.empty()) unlink(header_file.c_str());
+
+            struct stat fst;
+            if (ret != 0 || stat(tmp_path.c_str(), &fst) != 0 || fst.st_size < 1024) {
+                progress->failed.store(true);
+                {
+                    std::lock_guard<std::mutex> lock(progress->mu);
+                    std::string detail = "Download failed (curl exit " + std::to_string(ret) + ")";
+                    if (!curl_stderr.empty()) {
+                        detail += ": " + curl_stderr.substr(0, 512);
+                    }
+                    progress->error = detail;
+                }
+                unlink(tmp_path.c_str());
+                return;
+            }
+
+            if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
+                progress->failed.store(true);
+                {
+                    std::lock_guard<std::mutex> lock(progress->mu);
+                    progress->error = "Failed to move file to final path";
+                }
+                unlink(tmp_path.c_str());
+                return;
+            }
+
+            char abs_path[PATH_MAX];
+            if (!realpath(local_path.c_str(), abs_path) ||
+                std::string(abs_path).find(abs_models_str) != 0) {
+                progress->failed.store(true);
+                {
+                    std::lock_guard<std::mutex> lock(progress->mu);
+                    progress->error = "Path traversal detected — file removed";
+                }
+                unlink(local_path.c_str());
+                return;
+            }
+
+            progress->bytes_downloaded.store(fst.st_size);
+
+            if (db_) {
+                int size_mb = static_cast<int>(fst.st_size / (1024 * 1024));
+
+                sqlite3_stmt* stmt;
+                const char* sql = "INSERT INTO models (service, name, path, backend, size_mb, config_json, added_timestamp) VALUES (?, ?, ?, ?, ?, '{}', ?)";
+                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(stmt, 1, "whisper", -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, model_name.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 3, abs_path, -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 4, backend.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(stmt, 5, size_mb);
+                    sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(time(nullptr)));
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
+            }
+        }).detach();
+
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+            "{\"download_id\":%lld,\"filename\":\"%s\",\"path\":\"%s\"}",
+            (long long)dl_id, escape_json(filename).c_str(), escape_json(local_path).c_str());
+    }
+
+    void handle_models_download_progress(struct mg_connection *c, struct mg_http_message *hm) {
+        char id_buf[32] = {0};
+        mg_http_get_var(&hm->query, "id", id_buf, sizeof(id_buf));
+        int64_t dl_id = atoll(id_buf);
+        if (dl_id <= 0) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing id\"}");
+            return;
+        }
+
+        int64_t snap_bytes = 0, snap_total = 0;
+        bool snap_complete = false, snap_failed = false;
+        std::string snap_error, snap_filename, snap_local_path;
+        bool found = false, is_done = false;
+
+        {
+            std::lock_guard<std::mutex> lock(downloads_mutex_);
+            auto it = downloads_.find(dl_id);
+            if (it != downloads_.end()) {
+                found = true;
+                auto& p = it->second;
+                snap_bytes = p->bytes_downloaded.load();
+                snap_total = p->total_bytes.load();
+                snap_complete = p->complete.load();
+                snap_failed = p->failed.load();
+                {
+                    std::lock_guard<std::mutex> plock(p->mu);
+                    snap_error = p->error;
+                }
+                snap_filename = p->filename;
+                snap_local_path = p->local_path;
+                is_done = snap_complete || snap_failed;
+                if (is_done) downloads_.erase(it);
+            }
+        }
+
+        if (!found) {
+            mg_http_reply(c, 404, "Content-Type: application/json\r\n", "{\"error\":\"Unknown download id\"}");
+            return;
+        }
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"bytes_downloaded\":%lld,\"total_bytes\":%lld,\"complete\":%s,\"failed\":%s"
+            ",\"error\":\"%s\",\"filename\":\"%s\",\"path\":\"%s\"}",
+            (long long)snap_bytes,
+            (long long)snap_total,
+            snap_complete ? "true" : "false",
+            snap_failed ? "true" : "false",
+            escape_json(snap_error).c_str(),
+            escape_json(snap_filename).c_str(),
+            escape_json(snap_local_path).c_str());
     }
 
     void handle_models_add(struct mg_connection *c, struct mg_http_message *hm) {
