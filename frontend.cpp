@@ -1473,8 +1473,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <label>Access Token</label>
 <div style="display:flex;gap:8px">
 <input type="password" class="wt-input" id="credHfToken" placeholder="hf_..." style="flex:1" autocomplete="new-password">
-<button class="wt-btn wt-btn-primary" onclick="saveCredential('hf_token','credHfToken','credHfStatus')">Save</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" id="credHfClear" style="display:none" onclick="clearCredential('hf_token','credHfToken','credHfStatus')">Clear</button>
+<button class="wt-btn wt-btn-primary" onclick="saveCredential('hf_token','credHfToken','credHfStatus','credHfClear')">Save</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" id="credHfClear" style="display:none" onclick="clearCredential('hf_token','credHfToken','credHfStatus','credHfClear','hf_...')">Clear</button>
 </div>
 <div id="credHfStatus" style="font-size:12px;margin-top:4px"></div>
 </div>
@@ -1485,8 +1485,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <label>Access Token</label>
 <div style="display:flex;gap:8px">
 <input type="password" class="wt-input" id="credGhToken" placeholder="ghp_..." style="flex:1" autocomplete="new-password">
-<button class="wt-btn wt-btn-primary" onclick="saveCredential('github_token','credGhToken','credGhStatus')">Save</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" id="credGhClear" style="display:none" onclick="clearCredential('github_token','credGhToken','credGhStatus')">Clear</button>
+<button class="wt-btn wt-btn-primary" onclick="saveCredential('github_token','credGhToken','credGhStatus','credGhClear')">Save</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" id="credGhClear" style="display:none" onclick="clearCredential('github_token','credGhToken','credGhStatus','credGhClear','ghp_...')">Clear</button>
 </div>
 <div id="credGhStatus" style="font-size:12px;margin-top:4px"></div>
 </div>
@@ -2379,26 +2379,32 @@ function loadSchema(){
 }
 
 function loadCredentials(){
+  var credFields=[
+    {key:'hf_token',inputId:'credHfToken',clearId:'credHfClear',statusId:'credHfStatus',ph:'hf_...'},
+    {key:'github_token',inputId:'credGhToken',clearId:'credGhClear',statusId:'credGhStatus',ph:'ghp_...'}
+  ];
   fetch('/api/settings').then(r=>{
     if(!r.ok)throw new Error('Server error '+r.status);
     return r.json();
   }).then(d=>{
     var s=d.settings||{};
-    var hfSaved=s.hf_token==='***', ghSaved=s.github_token==='***';
-    document.getElementById('credHfToken').value='';
-    document.getElementById('credGhToken').value='';
-    document.getElementById('credHfToken').placeholder=hfSaved?'Token saved (hidden)':'hf_...';
-    document.getElementById('credGhToken').placeholder=ghSaved?'Token saved (hidden)':'ghp_...';
-    document.getElementById('credHfClear').style.display=hfSaved?'':'none';
-    document.getElementById('credGhClear').style.display=ghSaved?'':'none';
+    credFields.forEach(f=>{
+      var inp=document.getElementById(f.inputId);
+      var clr=document.getElementById(f.clearId);
+      var saved=s[f.key]==='***';
+      if(inp){inp.value='';inp.placeholder=saved?'Token saved (hidden)':f.ph;}
+      if(clr){clr.style.display=saved?'':'none';}
+    });
   }).catch(e=>{
-    var el=document.getElementById('credHfStatus');
-    if(el){el.style.color='var(--wt-danger)';el.textContent='Failed to load: '+e.message;
-      setTimeout(()=>{el.textContent='';},5000);}
+    credFields.forEach(f=>{
+      var el=document.getElementById(f.statusId);
+      if(el){el.style.color='var(--wt-danger)';el.textContent='Failed to load: '+e.message;
+        setTimeout(()=>{el.textContent='';},5000);}
+    });
   });
 }
 
-function saveCredential(key,inputId,statusId){
+function saveCredential(key,inputId,statusId,clearBtnId){
   var inp=document.getElementById(inputId);
   var el=document.getElementById(statusId);
   if(!inp||!el)return;
@@ -2414,8 +2420,8 @@ function saveCredential(key,inputId,statusId){
     if(d.status==='saved'){
       el.style.color='var(--wt-success)';el.textContent='Saved successfully';
       inp.value='';inp.placeholder='Token saved (hidden)';
-      var clearBtn=key==='hf_token'?document.getElementById('credHfClear'):document.getElementById('credGhClear');
-      if(clearBtn)clearBtn.style.display='';
+      var clr=document.getElementById(clearBtnId);
+      if(clr)clr.style.display='';
     }else{
       el.style.color='var(--wt-danger)';el.textContent='Error: '+(d.error||'Unknown');
     }
@@ -2426,7 +2432,7 @@ function saveCredential(key,inputId,statusId){
   });
 }
 
-function clearCredential(key,inputId,statusId){
+function clearCredential(key,inputId,statusId,clearBtnId,defaultPh){
   var el=document.getElementById(statusId);
   if(!el)return;
   if(!confirm('Remove saved token?'))return;
@@ -2439,9 +2445,9 @@ function clearCredential(key,inputId,statusId){
     if(d.status==='saved'){
       el.style.color='var(--wt-success)';el.textContent='Token removed';
       var inp=document.getElementById(inputId);
-      if(inp){inp.value='';inp.placeholder=key==='hf_token'?'hf_...':'ghp_...';}
-      var clearBtn=key==='hf_token'?document.getElementById('credHfClear'):document.getElementById('credGhClear');
-      if(clearBtn)clearBtn.style.display='none';
+      if(inp){inp.value='';inp.placeholder=defaultPh||'';}
+      var clr=document.getElementById(clearBtnId);
+      if(clr)clr.style.display='none';
     }else{
       el.style.color='var(--wt-danger)';el.textContent='Error: '+(d.error||'Unknown');
     }
