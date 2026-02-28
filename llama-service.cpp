@@ -415,7 +415,14 @@ private:
             return "RESPONSE:" + std::to_string(elapsed) + "ms:" + response + "\n";
         }
         if (cmd.rfind("SHUTUP_TEST:", 0) == 0) {
-            std::string prompt = cmd.substr(12);
+            std::string rest = cmd.substr(12);
+            int delay_ms = 200;
+            size_t pipe = rest.rfind('|');
+            std::string prompt = rest;
+            if (pipe != std::string::npos) {
+                delay_ms = std::max(0, std::min(5000, std::atoi(rest.substr(pipe + 1).c_str())));
+                prompt = rest.substr(0, pipe);
+            }
             uint32_t test_cid = 99998;
 
             auto call = get_or_create_call(test_cid);
@@ -430,7 +437,8 @@ private:
                 if (call->generating.load()) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            if (delay_ms > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
 
             auto interrupt_start = std::chrono::steady_clock::now();
             call->generating = false;

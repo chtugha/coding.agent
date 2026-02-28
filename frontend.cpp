@@ -1788,18 +1788,18 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Test 4b: Shut-Up Mechanism (Pipeline)</span></div>
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
-  Tests barge-in / interrupt (shut-up) across the full pipeline. Injects audio via SIP to trigger LLaMA response,
-  then injects more audio to trigger SPEECH_ACTIVE signal. Measures: LLaMA interrupt latency, Kokoro queue flush,
-  OAP buffer flush. Tests edge cases: early interrupt, late interrupt, rapid successive interrupts.
-  Requires: Full pipeline running (SIP + IAP + VAD + Whisper + LLaMA + Kokoro + OAP).
+  Tests the LLaMA shut-up (interrupt / barge-in) mechanism via command port with configurable delays.
+  Measures generation-interrupt latency across scenarios: immediate, standard (200ms), late (1s), and rapid successive.
+  Also checks Kokoro and OAP status for signal propagation readiness.
+  Requires: LLaMA service running. Kokoro + OAP optional (status-checked only).
 </p>
 <div class="wt-field">
 <label>Scenarios</label>
 <select class="wt-select" id="shutupScenarios" multiple style="width:100%;padding:8px;height:80px">
-<option value="basic" selected>Basic: Trigger response, interrupt mid-generation</option>
-<option value="early" selected>Early: Interrupt at start of generation</option>
-<option value="late" selected>Late: Interrupt near end of generation</option>
-<option value="rapid" selected>Rapid: 3 successive interrupts</option>
+<option value="basic" selected>Basic: 200ms delay, interrupt mid-generation</option>
+<option value="early" selected>Early: 0ms delay, interrupt immediately</option>
+<option value="late" selected>Late: 1000ms delay, interrupt near end</option>
+<option value="rapid" selected>Rapid: 3 successive interrupts (100ms delay each)</option>
 </select>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
@@ -6404,7 +6404,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             r.description = "Trigger response, wait 200ms, then interrupt mid-generation";
 
             std::string err;
-            std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt, err, 15);
+            std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt + "|200", err, 15);
             if (resp.empty() || resp.rfind("SHUTUP_RESULT:", 0) != 0) {
                 r.detail = "LLaMA command failed: " + (err.empty() ? resp : err);
                 return r;
@@ -6415,38 +6415,24 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         } else if (scenario == "early") {
             r.name = "Early Interrupt";
-            r.description = "Interrupt at very start of generation (~50ms)";
+            r.description = "Interrupt immediately after generation starts (0ms delay)";
 
             std::string err;
-            auto start = std::chrono::steady_clock::now();
-
-            std::thread gen_thread([&]() {
-                tcp_command(llama_cmd_port, "TEST_PROMPT:" + prompt, err, 15);
-            });
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-            auto int_start = std::chrono::steady_clock::now();
-            std::string shutup_resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt, err, 15);
-            auto int_end = std::chrono::steady_clock::now();
-
-            gen_thread.join();
-
-            if (!shutup_resp.empty() && shutup_resp.rfind("SHUTUP_RESULT:", 0) == 0) {
-                parse_shutup_result(shutup_resp, r.interrupt_latency_ms, r.total_ms);
-            } else {
-                r.total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(int_end - start).count();
-                r.interrupt_latency_ms = std::chrono::duration<double, std::milli>(int_end - int_start).count();
+            std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt + "|0", err, 15);
+            if (resp.empty() || resp.rfind("SHUTUP_RESULT:", 0) != 0) {
+                r.detail = "LLaMA command failed: " + (err.empty() ? resp : err);
+                return r;
             }
+            parse_shutup_result(resp, r.interrupt_latency_ms, r.total_ms);
             r.pass = (r.interrupt_latency_ms <= 500);
             r.detail = r.pass ? "Early interrupt successful" : "Early interrupt too slow";
 
         } else if (scenario == "late") {
             r.name = "Late Interrupt";
-            r.description = "Wait longer before interrupt (may catch end of generation)";
+            r.description = "Wait 1000ms before interrupt (may catch end of generation)";
 
             std::string err;
-            std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt, err, 15);
+            std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt + "|1000", err, 15);
 
             if (resp.empty() || resp.rfind("SHUTUP_RESULT:", 0) != 0) {
                 r.detail = "LLaMA command failed: " + (err.empty() ? resp : err);
@@ -6466,7 +6452,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
             for (int i = 0; i < 3; i++) {
                 std::string err;
-                std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt, err, 15);
+                std::string resp = tcp_command(llama_cmd_port, "SHUTUP_TEST:" + prompt + "|100", err, 15);
                 if (!resp.empty() && resp.rfind("SHUTUP_RESULT:", 0) == 0) {
                     double il = 0, tm = 0;
                     parse_shutup_result(resp, il, tm);
@@ -6480,7 +6466,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             r.interrupt_latency_ms = max_latency;
             r.total_ms = total_time;
             r.pass = (success_count == 3);
-            r.detail = std::to_string(success_count) + "/3 interrupts within 500ms target, max=" + std::to_string((int)max_latency) + "ms";
+            char detail_buf[128];
+            snprintf(detail_buf, sizeof(detail_buf), "%d/3 interrupts within 500ms target, max=%.1fms", success_count, max_latency);
+            r.detail = detail_buf;
         }
 
         {
@@ -6497,37 +6485,45 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
     void parse_shutup_result(const std::string& resp, double& interrupt_ms, double& total_ms) {
         if (resp.rfind("SHUTUP_RESULT:", 0) != 0) return;
-        size_t p1 = resp.find("ms:", 14);
-        if (p1 != std::string::npos) {
-            interrupt_ms = std::stod(resp.substr(14, p1 - 14));
-            size_t p2 = resp.find("ms", p1 + 3);
-            if (p2 != std::string::npos) {
-                total_ms = std::stod(resp.substr(p1 + 3, p2 - (p1 + 3)));
+        try {
+            size_t p1 = resp.find("ms:", 14);
+            if (p1 != std::string::npos) {
+                interrupt_ms = std::stod(resp.substr(14, p1 - 14));
+                size_t p2 = resp.find("ms", p1 + 3);
+                if (p2 != std::string::npos) {
+                    total_ms = std::stod(resp.substr(p1 + 3, p2 - (p1 + 3)));
+                }
             }
-        }
+        } catch (...) {}
     }
 
     void run_shutup_pipeline_test_async(int64_t task_id, std::vector<std::string> scenarios) {
-        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
-        std::string ping_err;
-        if (tcp_command(llama_cmd_port, "PING", ping_err, 3) != "PONG") {
-            finish_async_task(task_id, "{\"error\":\"LLaMA service not reachable\"}");
-            return;
-        }
+        try {
+            uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+            std::string ping_err;
+            if (tcp_command(llama_cmd_port, "PING", ping_err, 3) != "PONG") {
+                finish_async_task(task_id, "{\"error\":\"LLaMA service not reachable\"}");
+                return;
+            }
 
-        std::string json = "{\"scenarios\":[";
-        for (size_t i = 0; i < scenarios.size(); i++) {
-            auto r = run_shutup_scenario(scenarios[i]);
-            if (i > 0) json += ",";
-            json += "{\"name\":\"" + escape_json(r.name) + "\"";
-            json += ",\"description\":\"" + escape_json(r.description) + "\"";
-            json += ",\"pass\":" + std::string(r.pass ? "true" : "false");
-            json += ",\"interrupt_latency_ms\":" + std::to_string(r.interrupt_latency_ms);
-            json += ",\"total_ms\":" + std::to_string(r.total_ms);
-            json += ",\"detail\":\"" + escape_json(r.detail) + "\"}";
+            std::string json = "{\"scenarios\":[";
+            for (size_t i = 0; i < scenarios.size(); i++) {
+                auto r = run_shutup_scenario(scenarios[i]);
+                if (i > 0) json += ",";
+                json += "{\"name\":\"" + escape_json(r.name) + "\"";
+                json += ",\"description\":\"" + escape_json(r.description) + "\"";
+                json += ",\"pass\":" + std::string(r.pass ? "true" : "false");
+                json += ",\"interrupt_latency_ms\":" + std::to_string(r.interrupt_latency_ms);
+                json += ",\"total_ms\":" + std::to_string(r.total_ms);
+                json += ",\"detail\":\"" + escape_json(r.detail) + "\"}";
+            }
+            json += "]}";
+            finish_async_task(task_id, json);
+        } catch (const std::exception& e) {
+            finish_async_task(task_id, std::string("{\"error\":\"") + escape_json(e.what()) + "\"}");
+        } catch (...) {
+            finish_async_task(task_id, "{\"error\":\"Unknown error in shut-up pipeline test\"}");
         }
-        json += "]}";
-        finish_async_task(task_id, json);
     }
 
     void handle_llama_benchmark(struct mg_connection *c, struct mg_http_message *hm) {
