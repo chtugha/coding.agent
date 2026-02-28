@@ -963,6 +963,13 @@ private:
 
             if (samples.empty()) return "ERROR:synthesis failed\n";
 
+            float wav_peak = 0.0f;
+            for (float s : samples) { float a = std::abs(s); if (a > wav_peak) wav_peak = a; }
+            if (wav_peak > 1.0f) {
+                float scale = 0.95f / wav_peak;
+                for (float& s : samples) s *= scale;
+            }
+
             std::ofstream out(path, std::ios::binary);
             if (!out.is_open()) return "ERROR:cannot open " + path + "\n";
 
@@ -1089,9 +1096,19 @@ private:
                 continue;
             }
 
-            std::printf("Synthesized %zu samples in %lldms for call %u\n",
-                        samples.size(), elapsed, ctx->call_id);
-            log_fwd_.forward("INFO", ctx->call_id, "Synthesized %zu samples in %lldms", samples.size(), elapsed);
+            float peak = 0.0f;
+            for (float s : samples) {
+                float a = std::abs(s);
+                if (a > peak) peak = a;
+            }
+            if (peak > 1.0f) {
+                float scale = 0.95f / peak;
+                for (float& s : samples) s *= scale;
+            }
+
+            std::printf("Synthesized %zu samples in %lldms for call %u (peak=%.3f)\n",
+                        samples.size(), elapsed, ctx->call_id, peak);
+            log_fwd_.forward("INFO", ctx->call_id, "Synthesized %zu samples in %lldms (peak=%.3f)", samples.size(), elapsed, peak);
 
             send_audio_to_downstream(ctx->call_id, samples);
         }

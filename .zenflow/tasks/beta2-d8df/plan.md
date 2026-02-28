@@ -283,7 +283,8 @@ Validate interrupt/barge-in functionality.
 
 **Files**: `llama-service.cpp`, `kokoro-service.cpp`, `vad-service.cpp`, `frontend.cpp` (shut-up test handler)
 
-### [ ] Step: Stage 10 — Kokoro TTS Testing & Optimization
+### [x] Step: Stage 10 — Kokoro TTS Testing & Optimization
+<!-- chat-id: 05e1523c-263d-46a2-a265-6cfe282b50c4 -->
 
 Test Kokoro for interconnection, quality, and speed.
 
