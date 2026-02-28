@@ -98,14 +98,46 @@ static std::string escape_json(const std::string& s) {
     return result;
 }
 
+static bool contains_whole_word(const std::string& text, const std::string& word) {
+    size_t pos = 0;
+    while ((pos = text.find(word, pos)) != std::string::npos) {
+        bool pre_ok  = (pos == 0 || !isalpha((unsigned char)text[pos - 1]));
+        bool post_ok = (pos + word.size() >= text.size() ||
+                        !isalpha((unsigned char)text[pos + word.size()]));
+        if (pre_ok && post_ok) return true;
+        pos++;
+    }
+    return false;
+}
+
 static bool detect_german(const std::string& text) {
-    static const char* markers[] = {"ich", "der", "die", "das", "ist", "ein", "und",
-        "für", "mit", "auf", "den", "dem", "des", "von", "als", "auch", "nicht",
-        "sich", "wie", "kann", "gerne", "bitte", "danke", "ja", "nein"};
+    static const char* word_markers[] = {
+        "ich", "der", "die", "das", "ist", "ein", "und",
+        "den", "dem", "des", "von", "als", "auch", "nicht",
+        "sich", "wie", "kann", "gerne", "bitte", "danke", "nein",
+        "es", "zu", "er", "sie", "wir", "ihr",
+        "mir", "dir", "uns", "ihm", "mich", "dich",
+        "sind", "oder", "aber", "haben", "werden",
+        "schon", "sehr", "noch", "hier", "dort", "diese",
+        "einen", "einer", "gute", "guten"
+    };
+    static const char* substr_markers[] = {"ü", "ö", "ä", "ß"};
     std::string lower = text;
     for (auto& ch : lower) ch = tolower((unsigned char)ch);
     int hits = 0;
-    for (const auto* m : markers) { if (lower.find(m) != std::string::npos) hits++; }
+    for (const auto* m : word_markers) {
+        if (contains_whole_word(lower, m)) hits++;
+    }
+    for (const auto* m : substr_markers) {
+        if (lower.find(m) != std::string::npos) hits++;
+    }
+    int word_count = 0;
+    bool in_w = false;
+    for (char ch : text) {
+        if (ch == ' ' || ch == '\n' || ch == '\t') in_w = false;
+        else if (!in_w) { in_w = true; word_count++; }
+    }
+    if (word_count <= 3) return hits >= 1;
     return hits >= 2;
 }
 

@@ -25,7 +25,7 @@ struct LlamaChatMessage {
 
 struct LlamaCall {
     uint32_t id;
-    int seq_id;
+    uint32_t seq_id;
     int n_past = 0;
     std::vector<LlamaChatMessage> messages;
     std::chrono::steady_clock::time_point last_activity;
@@ -189,18 +189,21 @@ private:
         auto call = get_or_create_call(cid);
         call->last_activity = std::chrono::steady_clock::now();
 
-        if (call->generating.exchange(true)) {
-            std::cout << "⚠️  [" << cid << "] Interrupting previous generation" << std::endl;
+        // Interrupt-then-takeover guard: if another thread (e.g. SHUTUP_TEST) is
+        // already generating for this call, signal it to stop (generating=false),
+        // then wait on llama_mutex_ for it to exit, then re-arm generating=true.
+        bool was_generating = call->generating.exchange(true);
+        if (was_generating) {
             call->generating = false;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
         std::lock_guard<std::mutex> lock(llama_mutex_);
+        call->generating = true;
 
         call->messages.push_back({"user", text});
 
         std::vector<llama_chat_message> chat_msgs;
-        chat_msgs.push_back({"system", "Du bist ein extrem effizienter Telefon-Assistent. Antworte IMMER auf DEUTSCH. Deine Antworten sind extrem kurz (max. 15 Wörter). Sei höflich aber komm sofort zum Punkt."});
+        chat_msgs.push_back({"system", "Du bist ein freundlicher deutscher Telefon-Assistent. WICHTIG: Antworte IMMER auf Deutsch, NIEMALS auf Englisch. Halte dich SEHR KURZ: maximal 1 Satz, höchstens 15 Wörter. Sei hilfsbereit, höflich und natürlich. Antworte mit vollständigen Sätzen."});
         
         for (const auto& m : call->messages) {
             chat_msgs.push_back({m.role.c_str(), m.content.c_str()});
@@ -243,7 +246,7 @@ private:
         call->n_past = tokens.size();
         llama_batch_free(batch);
 
-        static constexpr int MAX_TOKENS = 48;
+        static constexpr int MAX_TOKENS = 64;
         auto gen_start = std::chrono::steady_clock::now();
         std::string response;
         llama_token id;
@@ -284,7 +287,12 @@ private:
             std::chrono::steady_clock::now() - gen_start).count();
 
         size_t start = response.find_first_not_of(" \n\r\t");
-        if (start != std::string::npos) response = response.substr(start);
+        if (start == std::string::npos) {
+            response.clear();
+        } else {
+            size_t end = response.find_last_not_of(" \n\r\t");
+            response = response.substr(start, end - start + 1);
+        }
 
         call->messages.push_back({"assistant", response});
         std::cout << "🦙 [" << cid << "] DE (" << gen_ms << "ms): " << response << std::endl;
@@ -295,6 +303,11 @@ private:
     std::vector<llama_token> tokenize(const std::string& text, bool bos) {
         std::vector<llama_token> res(text.size() + 2);
         int n = llama_tokenize(vocab_, text.c_str(), text.size(), res.data(), res.size(), bos, true);
+        if (n < 0) {
+            res.resize(-n);
+            n = llama_tokenize(vocab_, text.c_str(), text.size(), res.data(), res.size(), bos, true);
+        }
+        if (n <= 0) return {};
         res.resize(n);
         return res;
     }
@@ -316,7 +329,7 @@ private:
         if (calls_.count(cid)) return calls_[cid];
         auto call = std::make_shared<LlamaCall>();
         call->id = cid;
-        call->seq_id = 0;
+        call->seq_id = next_seq_id_.fetch_add(1);
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
         std::cout << "📞 Created conversation context for call_id " << cid << std::endl;
@@ -463,6 +476,7 @@ private:
     struct llama_sampler* sampler_ = nullptr;
     std::mutex llama_mutex_;
     std::mutex calls_mutex_;
+    std::atomic<uint32_t> next_seq_id_{0};
     std::map<uint32_t, std::shared_ptr<LlamaCall>> calls_;
     std::queue<WorkItem> work_queue_;
     std::mutex work_mutex_;

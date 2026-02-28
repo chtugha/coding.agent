@@ -216,7 +216,8 @@ Search HuggingFace for better Whisper models and compare performance.
 
 **Files**: `frontend.cpp` (new API endpoints, enhanced Models page HTML/JS)
 
-### [ ] Step: Stage 7 — LLaMA Service Testing & Optimization
+### [x] Step: Stage 7 — LLaMA Service Testing & Optimization
+<!-- chat-id: aa061a23-a9ec-4b37-9e5f-12d7c4403b85 -->
 
 Test LLaMA TCP interconnection and optimize for short, clear German responses.
 

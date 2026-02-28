@@ -9,10 +9,12 @@ alwaysApply: true
 The **LLaMA Service** (`llama-service.cpp`) generates intelligent responses based on the transcribed text from Whisper.
 
 ## Internal Function
-- **Inference**: Uses the **Llama-3.2-1B-Instruct** model (Q8_0 GGUF) with `llama_chat_apply_template` for robust, template-aware conversation logic.
-- **German Optimization**: Features a specialized German system prompt designed for concise, empathetic, and natural phone interactions.
+- **Inference**: Uses the **Llama-3.2-1B-Instruct** model (Q8_0 GGUF) with `llama_chat_apply_template` for robust, template-aware conversation logic. Greedy sampling with max 64 tokens per response. Stops at sentence-ending punctuation (`.`, `?`, `!`) or EOS.
+- **German Optimization**: Specialized German system prompt enforcing: always German, max 1 sentence / 15 words, polite and natural. Avg quality score ~70% across 10 test prompts, 90% German detection rate (word-boundary matching), ~320ms avg latency. Full pipeline tested: SIP→IAP→VAD→Whisper→LLaMA with audio injection via test SIP provider.
 - **Apple Silicon Optimization**: Native Metal/MPS acceleration for extremely low-latency response generation.
-- **Session Isolation**: Each call has an independent conversational context managed via sequence IDs in the KV cache.
+- **Session Isolation**: Each call has an independent conversational context managed via sequence IDs in the KV cache. Context cleared on CALL_END.
+- **Shut-up Mechanism**: SPEECH_ACTIVE signal interrupts active generation (sets `generating = false`). Worker loop defers new responses while speech is active. Interrupt latency ~5-13ms.
+- **Tokenizer Resilience**: Handles negative token counts from `llama_tokenize` by retrying with larger buffer.
 
 ## Inbound Connections
 - **Whisper Service (TCP)**: Receives transcribed text via interconnect on ports 13130 (mgmt) and 13131 (data).
