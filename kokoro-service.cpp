@@ -1056,6 +1056,7 @@ private:
         }
 
         auto& ctx = it->second;
+        ctx->interrupted = false;
         {
             std::lock_guard<std::mutex> qlock(ctx->queue_mutex);
             ctx->text_queue.push(text);

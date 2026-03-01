@@ -219,8 +219,16 @@ private:
 
             static const char* suffix_patterns[] = {
                 "Untertitelung", "Untertitel der", "Untertitel von",
-                "Untertitelung des ZDF", "des ZDF",
+                "Untertitelung des ZDF, 2020", "Untertitelung des ZDF, 2021",
+                "Untertitelung des ZDF, 2022", "Untertitelung des ZDF, 2023",
+                "Untertitelung des ZDF, 2024", "Untertitelung des ZDF, 2025",
+                "Untertitelung des ZDF", "des ZDF, 2020", "des ZDF",
                 "Hier geht's", "Hier gehts", "Mehr dazu",
+                "Vielen Dank", "Vielen Dank fürs Zuschauen",
+                "Vielen Dank für die Aufmerksamkeit",
+                "Danke fürs Zuschauen",
+                "Fieber", "Finde", "Fieh", "Fieh, da", "Fiehla", "Fieh da",
+                "Filo", "Filo, filo",
                 nullptr
             };
             for (int i = 0; suffix_patterns[i]; ++i) {
@@ -382,7 +390,10 @@ const char* WhisperService::hallucination_patterns_[] = {
     "Copyright",
     "www.",
     "Amara.org",
+    "Vielen Dank",
     "Danke fürs Zuschauen",
+    "Vielen Dank fürs Zuschauen",
+    "Vielen Dank für die Aufmerksamkeit",
     "Ich habe mich nicht mehr",
     "Und ich habe mich nicht mehr",
     "Ich habe es mir nicht mehr",
@@ -392,6 +403,12 @@ const char* WhisperService::hallucination_patterns_[] = {
     "[Musik]",
     "[Applaus]",
     "MwSt",
+    "Fieh",
+    "Fieh, da",
+    "Fiehla",
+    "Fieh da",
+    "Filo",
+    "Filo, filo",
     nullptr
 };
 

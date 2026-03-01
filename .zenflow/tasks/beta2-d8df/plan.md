@@ -310,7 +310,8 @@ Test Kokoro for interconnection, quality, and speed.
 
 **Files**: `kokoro-service.cpp`, `frontend.cpp` (Kokoro quality test/benchmark handler/UI)
 
-### [ ] Step: Stage 11 — OAP & Full Loop Test
+### [x] Step: Stage 11 — OAP & Full Loop Test
+<!-- chat-id: 2ac4f227-8929-4035-b521-37e9463bb95d -->
 
 Test outbound audio processing and validate full-loop audio fidelity with 2 lines.
 

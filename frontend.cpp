@@ -1232,6 +1232,8 @@ private:
                 handle_tts_roundtrip(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/pipeline/health")) == 0) {
                 handle_pipeline_health(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/full_loop_test")) == 0) {
+                handle_full_loop_test(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/multiline_stress")) == 0) {
                 handle_multiline_stress(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
@@ -1849,6 +1851,26 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 <div id="ttsRoundtripStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="ttsRoundtripResults" style="margin-top:12px"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Test 6b: Full Loop File Test (WER)</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Injects test audio files through full pipeline with 2 SIP lines. Measures Word Error Rate (WER)
+  between LLaMA response text and Whisper Line 2 re-transcription of Kokoro/OAP output.
+  Flow: TestFile &#x2192; SIP(L1) &#x2192; IAP &#x2192; VAD &#x2192; Whisper &#x2192; LLaMA &#x2192; Kokoro &#x2192; OAP &#x2192; SIP(L2) &#x2192; Whisper(L2).
+  Requires: All services + 2 lines + active conference call.
+</p>
+<div class="wt-field">
+<label>Select Test Files (hold Ctrl/Cmd for multiple)</label>
+<select class="wt-select" id="fullLoopFiles" multiple style="width:100%;padding:8px;height:100px">
+</select>
+</div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button class="wt-btn wt-btn-primary" id="fullLoopBtn" onclick="runFullLoopTest()">&#x25B6; Run Full Loop Test</button>
+</div>
+<div id="fullLoopStatus" style="margin-top:8px;font-size:12px"></div>
+<div id="fullLoopResults" style="margin-top:12px"></div>
 </div>
 
 <div class="wt-card">
@@ -2676,6 +2698,8 @@ function refreshTestFiles(){
     sel1.innerHTML='<option value="">-- Select a test file --</option>'+d.files.map(f=>'<option value="'+escapeHtml(f.name)+'">'+escapeHtml(f.name)+'</option>').join('');
     sel2.innerHTML=d.files.map(f=>'<option value="'+escapeHtml(f.name)+'">'+escapeHtml(f.name)+'</option>').join('');
     if(sel3)sel3.innerHTML='<option value="">-- Select a test file --</option>'+d.files.map(f=>'<option value="'+escapeHtml(f.name)+'">'+escapeHtml(f.name)+'</option>').join('');
+    var sel4=document.getElementById('fullLoopFiles');
+    if(sel4)sel4.innerHTML=d.files.map(f=>'<option value="'+escapeHtml(f.name)+'">'+escapeHtml(f.name)+'</option>').join('');
   }).catch(e=>console.error('Failed to load test files:',e));
   loadLogLevels();
 }
@@ -3135,11 +3159,12 @@ function pollTtsRoundtripTask(taskId){
     if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
     var s=d.summary;
     status.innerHTML='<span style="color:var(--wt-success)">Round-trip complete — '+s.pass+'/'+s.total+' passed (L1 avg: '+s.avg_similarity_in.toFixed(1)+'%, L2 avg: '+s.avg_similarity_out.toFixed(1)+'%)</span>';
-    var html='<table class="wt-table"><tr><th>Injected Phrase</th><th>Whisper L1</th><th>L1 Sim%</th><th>LLaMA Response</th><th>Whisper L2 (Kokoro)</th><th>L2 Sim%</th><th>E2E</th><th>Status</th></tr>';
+    var html='<table class="wt-table"><tr><th>Injected Phrase</th><th>Whisper L1</th><th>L1 Sim%</th><th>LLaMA Response</th><th>Whisper L2 (Kokoro)</th><th>L2 Sim%</th><th>WER%</th><th>E2E</th><th>Status</th></tr>';
     d.results.forEach(function(r){
       var color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
       var inColor=r.similarity_in>=60?'var(--wt-success)':r.similarity_in>=40?'var(--wt-warning)':'var(--wt-danger)';
       var outColor=r.similarity_out>=50?'var(--wt-success)':r.similarity_out>=30?'var(--wt-warning)':'var(--wt-danger)';
+      var werColor=(r.wer_out||100)<=10?'var(--wt-success)':(r.wer_out||100)<=30?'var(--wt-warning)':'var(--wt-danger)';
       html+='<tr>';
       html+='<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.phrase)+'</td>';
       html+='<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.transcription_in||'')+'</td>';
@@ -3147,6 +3172,7 @@ function pollTtsRoundtripTask(taskId){
       html+='<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.llama_response||'')+'</td>';
       html+='<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">'+escapeHtml(r.transcription_out||'')+'</td>';
       html+='<td style="color:'+outColor+';font-weight:bold">'+(r.similarity_out||0).toFixed(1)+'%</td>';
+      html+='<td style="color:'+werColor+';font-weight:bold">'+(r.wer_out!=null?r.wer_out.toFixed(1):'—')+'%</td>';
       html+='<td>'+(r.e2e_ms/1000).toFixed(1)+'s</td>';
       html+='<td style="color:'+color+'">'+r.status+'</td>';
       html+='</tr>';
@@ -3162,6 +3188,71 @@ function pollTtsRoundtripTask(taskId){
     }
     results.innerHTML=html;
   }).catch(function(e){console.error('pollTtsRoundtripTask',e);});
+}
+
+var fullLoopPoll=null;
+function runFullLoopTest(){
+  if(fullLoopPoll){clearInterval(fullLoopPoll);fullLoopPoll=null;}
+  var status=document.getElementById('fullLoopStatus');
+  var results=document.getElementById('fullLoopResults');
+  var btn=document.getElementById('fullLoopBtn');
+  var sel=document.getElementById('fullLoopFiles');
+  var files=[];
+  for(var i=0;i<sel.options.length;i++){if(sel.options[i].selected)files.push(sel.options[i].value);}
+  if(files.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one test file</span>';return;}
+  btn.disabled=true;
+  status.innerHTML='<span style="color:var(--wt-accent)">Starting full loop test...</span>';
+  results.innerHTML='';
+  fetch('/api/full_loop_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:files})})
+    .then(function(r){
+      if(r.status===202) return r.json();
+      return r.json().then(function(d){throw new Error(d.error||'HTTP '+r.status);});
+    }).then(function(d){
+      status.innerHTML='<span style="color:var(--wt-accent)">Full loop test running (task '+d.task_id+')... This may take several minutes.</span>';
+      fullLoopPoll=setInterval(function(){pollFullLoopTask(d.task_id);},3000);
+    }).catch(function(e){
+      btn.disabled=false;
+      status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+    });
+}
+
+function pollFullLoopTask(taskId){
+  fetch('/api/async/status?task_id='+taskId).then(function(r){return r.json();}).then(function(d){
+    if(d.status==='running') return;
+    clearInterval(fullLoopPoll);fullLoopPoll=null;
+    document.getElementById('fullLoopBtn').disabled=false;
+    var status=document.getElementById('fullLoopStatus');
+    var results=document.getElementById('fullLoopResults');
+    if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error)+'</span>';return;}
+    var s=d.summary;
+    status.innerHTML='<span style="color:'+(s.avg_wer<=10?'var(--wt-success)':s.avg_wer<=30?'var(--wt-warning)':'var(--wt-danger)')+'">Full loop complete — '+s.pass+'/'+s.total+' passed | Avg WER: '+s.avg_wer.toFixed(1)+'% | Avg Sim: '+s.avg_similarity.toFixed(1)+'%</span>';
+    var html='<table class="wt-table"><tr><th>File</th><th>Whisper L1</th><th>LLaMA Response</th><th>Whisper L2</th><th>WER%</th><th>Sim%</th><th>E2E</th><th>Status</th></tr>';
+    d.results.forEach(function(r){
+      var color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
+      var werColor=(r.wer||100)<=10?'var(--wt-success)':(r.wer||100)<=30?'var(--wt-warning)':'var(--wt-danger)';
+      var simColor=(r.similarity||0)>=70?'var(--wt-success)':(r.similarity||0)>=40?'var(--wt-warning)':'var(--wt-danger)';
+      html+='<tr>';
+      html+='<td style="font-size:11px">'+escapeHtml(r.file)+'</td>';
+      html+='<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:11px">'+escapeHtml(r.whisper_l1||'')+'</td>';
+      html+='<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:11px">'+escapeHtml(r.llama_response||r.error||'')+'</td>';
+      html+='<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:11px">'+escapeHtml(r.whisper_l2||'')+'</td>';
+      html+='<td style="color:'+werColor+';font-weight:bold">'+(r.wer!=null?r.wer.toFixed(1):'—')+'</td>';
+      html+='<td style="color:'+simColor+';font-weight:bold">'+(r.similarity!=null?r.similarity.toFixed(1):'—')+'</td>';
+      html+='<td>'+((r.e2e_ms||0)/1000).toFixed(1)+'s</td>';
+      html+='<td style="color:'+color+'">'+r.status+'</td>';
+      html+='</tr>';
+    });
+    html+='</table>';
+    if(s){
+      html+='<div style="margin-top:10px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px">';
+      html+='<strong>Summary:</strong> Avg WER: '+s.avg_wer.toFixed(1)+'%';
+      html+=' | Avg Similarity: '+s.avg_similarity.toFixed(1)+'%';
+      html+=' | Avg E2E: '+(s.avg_e2e_ms/1000).toFixed(1)+'s';
+      html+=' | Pass (WER&le;10%): '+s.pass+' | Warn: '+s.warn+' | Fail: '+s.fail;
+      html+='</div>';
+    }
+    results.innerHTML=html;
+  }).catch(function(e){console.error('pollFullLoopTask',e);});
 }
 
 function checkSipProvider(){
@@ -5808,6 +5899,40 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return similarity;
     }
 
+    double calculate_word_error_rate(const std::string& reference, const std::string& hypothesis) {
+        std::string n_ref = normalize_for_comparison(reference);
+        std::string n_hyp = normalize_for_comparison(hypothesis);
+
+        auto split_words = [](const std::string& s) -> std::vector<std::string> {
+            std::vector<std::string> words;
+            std::istringstream iss(s);
+            std::string w;
+            while (iss >> w) { if (!w.empty()) words.push_back(w); }
+            return words;
+        };
+
+        std::vector<std::string> ref_words = split_words(n_ref);
+        std::vector<std::string> hyp_words = split_words(n_hyp);
+
+        if (ref_words.empty() && hyp_words.empty()) return 0.0;
+        if (ref_words.empty()) return 100.0;
+
+        size_t m = ref_words.size(), n = hyp_words.size();
+        std::vector<size_t> prev(n + 1), curr(n + 1);
+        for (size_t j = 0; j <= n; j++) prev[j] = j;
+
+        for (size_t i = 1; i <= m; i++) {
+            curr[0] = i;
+            for (size_t j = 1; j <= n; j++) {
+                size_t cost = (ref_words[i - 1] == hyp_words[j - 1]) ? 0 : 1;
+                curr[j] = std::min({prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost});
+            }
+            std::swap(prev, curr);
+        }
+
+        return (double)prev[n] / (double)m * 100.0;
+    }
+
     // Makes a simple HTTP POST request to localhost:<port><path> with JSON body.
     // Returns the response body string, or sets error on failure.
     // Used to communicate with test_sip_provider for audio injection.
@@ -5957,7 +6082,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     //   3. Concatenate all transcription chunks in chronological order
     // Returns the combined text and total Whisper inference latency.
     TranscriptionResult wait_for_whisper_transcription(
-            uint64_t after_seq, int timeout_ms = 30000) {
+            uint64_t after_seq, int timeout_ms = 30000, uint32_t filter_call_id = 0) {
         TranscriptionResult result;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         auto settle_deadline = deadline;
@@ -5971,6 +6096,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 for (const auto& entry : recent_logs_) {
                     if (entry.seq <= last_found_seq) continue;
                     if (entry.service != ServiceType::WHISPER_SERVICE) continue;
+                    if (filter_call_id > 0 && entry.call_id != filter_call_id) continue;
 
                     const std::string& msg = entry.message;
                     size_t tpos = msg.find("Transcription (");
@@ -7189,8 +7315,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
             std::string transcription_out = tr2.found ? tr2.text : "";
             double similarity_out = 0;
+            double wer_out = 100.0;
             if (!llama_text.empty() && !transcription_out.empty()) {
                 similarity_out = calculate_levenshtein_similarity(llama_text, transcription_out);
+                wer_out = calculate_word_error_rate(llama_text, transcription_out);
             }
 
             std::string status_str;
@@ -7238,6 +7366,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                  << ",\"llama_response\":\"" << escape_json(llama_text) << "\""
                  << ",\"transcription_out\":\"" << escape_json(transcription_out) << "\""
                  << ",\"similarity_out\":" << similarity_out
+                 << ",\"wer_out\":" << wer_out
                  << ",\"llama_ms\":" << (int)llama_res.gen_ms
                  << ",\"e2e_ms\":" << (int)e2e_ms
                  << ",\"status\":\"" << status_str << "\"}";
@@ -7264,6 +7393,213 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
              << ",\"warn\":" << warn_count
              << ",\"fail\":" << fail_count
              << ",\"total\":" << (int)phrases.size()
+             << "}}";
+
+        finish_async_task(task_id, json.str());
+    }
+
+    void handle_full_loop_test(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+
+        struct mg_str body = hm->body;
+        std::vector<std::string> files;
+        int plen = 0;
+        int pofs = mg_json_get(body, "$.files", &plen);
+        if (pofs >= 0) {
+            struct mg_str arr = mg_str_n(body.buf + pofs, (size_t)plen);
+            size_t ofs = 0;
+            struct mg_str key, val;
+            while ((ofs = mg_json_next(arr, ofs, &key, &val)) > 0) {
+                if (val.len >= 2 && val.buf[0] == '"') {
+                    char buf[1024];
+                    if (mg_json_unescape(mg_str_n(val.buf + 1, val.len - 2), buf, sizeof(buf)))
+                        files.push_back(buf);
+                }
+            }
+        }
+
+        if (files.empty()) {
+            files = {"sample_01.wav"};
+        }
+
+        int64_t task_id = create_async_task("full_loop_test");
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            auto& task = async_tasks_[task_id];
+            task->worker = std::thread(&FrontendServer::run_full_loop_test_async, this,
+                task_id, std::move(files));
+        }
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
+
+    void run_full_loop_test_async(int64_t task_id, std::vector<std::string> files) {
+        std::string sip_err;
+        std::string status_resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", sip_err);
+        if (!sip_err.empty() || status_resp.find("\"call_active\":true") == std::string::npos) {
+            finish_async_task(task_id, "{\"error\":\"No active call on test_sip_provider — start a conference call with 2 lines first\"}");
+            return;
+        }
+
+        uint16_t oap_cmd = whispertalk::service_cmd_port(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+        std::string oap_err;
+        std::string oap_resp = tcp_command(oap_cmd, "PING", oap_err, 3);
+        if (oap_resp != "PONG") {
+            finish_async_task(task_id, "{\"error\":\"OAP service not reachable — start all pipeline services first\"}");
+            return;
+        }
+
+        std::stringstream json;
+        json << "{\"results\":[";
+        bool first = true;
+        int pass_count = 0, warn_count = 0, fail_count = 0;
+        double total_wer = 0.0;
+        double total_sim = 0.0;
+        double total_e2e = 0.0;
+        int processed = 0;
+
+        for (const auto& file : files) {
+            uint64_t seq_before = current_log_seq();
+            auto e2e_start = std::chrono::steady_clock::now();
+
+            std::string inject_body = "{\"file\":\"" + escape_json(file) + "\",\"leg\":\"a\",\"no_silence\":true}";
+            std::string inject_err;
+            std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
+
+            if (!inject_err.empty() || inject_resp.find("\"success\":true") == std::string::npos) {
+                if (!first) json << ",";
+                json << "{\"file\":\"" << escape_json(file) << "\""
+                     << ",\"error\":\"" << escape_json(inject_err.empty() ? inject_resp : inject_err) << "\""
+                     << ",\"status\":\"FAIL\"}";
+                first = false;
+                fail_count++;
+                continue;
+            }
+
+            uint32_t l1_call_id = 0;
+            uint32_t l2_call_id = 0;
+            {
+                std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "GET_STATS");
+                std::istringstream iss(resp);
+                std::string tok;
+                iss >> tok; // "STATS"
+                int cnt = 0; iss >> cnt;
+                std::vector<std::pair<uint32_t,int>> calls;
+                while (iss >> tok) {
+                    if (tok.substr(0, 3) == "DS:") continue;
+                    size_t p1 = tok.find(':');
+                    size_t p2 = (p1 != std::string::npos) ? tok.find(':', p1 + 1) : std::string::npos;
+                    if (p1 != std::string::npos && p2 != std::string::npos) {
+                        try {
+                            uint32_t cid = std::stoul(tok.substr(0, p1));
+                            int line = std::stoi(tok.substr(p1 + 1, p2 - p1 - 1));
+                            calls.push_back({cid, line});
+                        } catch (...) {}
+                    }
+                }
+                for (auto& [cid, line] : calls) {
+                    if (line == 0) l1_call_id = cid;
+                    if (line == 1) l2_call_id = cid;
+                }
+            }
+
+            TranscriptionResult tr1 = wait_for_whisper_transcription(seq_before, 30000, l1_call_id);
+            std::string whisper_l1 = tr1.found ? tr1.text : "";
+
+            LlamaResponseResult llama_res = wait_for_llama_response(seq_before, 30000);
+            std::string llama_text = llama_res.found ? llama_res.text : "";
+
+            uint64_t seq_after_llama = current_log_seq();
+
+            TranscriptionResult tr2 = wait_for_whisper_transcription(seq_after_llama, 60000, l2_call_id);
+
+            auto e2e_end = std::chrono::steady_clock::now();
+            double e2e_ms = std::chrono::duration_cast<std::chrono::milliseconds>(e2e_end - e2e_start).count();
+
+            std::string whisper_l2 = tr2.found ? tr2.text : "";
+            double wer = 100.0;
+            double similarity = 0.0;
+            if (!llama_text.empty() && !whisper_l2.empty()) {
+                wer = calculate_word_error_rate(llama_text, whisper_l2);
+                similarity = calculate_levenshtein_similarity(llama_text, whisper_l2);
+            }
+
+            std::string status_str;
+            bool llama_ok = llama_res.found && !llama_text.empty();
+            bool l2_ok = tr2.found && !whisper_l2.empty();
+
+            if (llama_ok && l2_ok && wer <= 10.0) {
+                status_str = "PASS"; pass_count++;
+            } else if (llama_ok && l2_ok && wer <= 30.0) {
+                status_str = "WARN"; warn_count++;
+            } else {
+                status_str = "FAIL"; fail_count++;
+            }
+
+            total_wer += wer;
+            total_sim += similarity;
+            total_e2e += e2e_ms;
+            processed++;
+
+            if (db_) {
+                const char* sql = "INSERT INTO test_results (test_name,service,status,details,timestamp) "
+                    "VALUES ('full_loop',?1,?2,?3,strftime('%s','now'))";
+                sqlite3_stmt* stmt = nullptr;
+                if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_text(stmt, 1, "full_pipeline", -1, SQLITE_STATIC);
+                    sqlite3_bind_text(stmt, 2, status_str.c_str(), -1, SQLITE_TRANSIENT);
+                    std::string details = file + " -> L1:" + whisper_l1
+                        + " -> LLaMA:" + llama_text
+                        + " -> L2:" + whisper_l2
+                        + " (WER=" + std::to_string((int)wer) + "%"
+                        + " sim=" + std::to_string((int)similarity) + "%)"
+                        + " e2e=" + std::to_string((int)e2e_ms) + "ms";
+                    sqlite3_bind_text(stmt, 3, details.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
+            }
+
+            if (!first) json << ",";
+            json << "{\"file\":\"" << escape_json(file) << "\""
+                 << ",\"whisper_l1\":\"" << escape_json(whisper_l1) << "\""
+                 << ",\"llama_response\":\"" << escape_json(llama_text) << "\""
+                 << ",\"whisper_l2\":\"" << escape_json(whisper_l2) << "\""
+                 << ",\"wer\":" << wer
+                 << ",\"similarity\":" << similarity
+                 << ",\"llama_ms\":" << (int)llama_res.gen_ms
+                 << ",\"e2e_ms\":" << (int)e2e_ms
+                 << ",\"status\":\"" << status_str << "\"}";
+            first = false;
+
+            if (&file != &files.back()) {
+                uint64_t drain_seq = current_log_seq();
+                std::this_thread::sleep_for(std::chrono::seconds(8));
+                for (int drain = 0; drain < 10; drain++) {
+                    uint64_t cur = current_log_seq();
+                    if (cur == drain_seq) break;
+                    drain_seq = cur;
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                }
+            }
+        }
+
+        json << "]";
+
+        double avg_wer = processed > 0 ? total_wer / processed : 100.0;
+        double avg_sim = processed > 0 ? total_sim / processed : 0.0;
+        double avg_e2e = processed > 0 ? total_e2e / processed : 0.0;
+
+        json << ",\"summary\":{"
+             << "\"avg_wer\":" << avg_wer
+             << ",\"avg_similarity\":" << avg_sim
+             << ",\"avg_e2e_ms\":" << (int)avg_e2e
+             << ",\"pass\":" << pass_count
+             << ",\"warn\":" << warn_count
+             << ",\"fail\":" << fail_count
+             << ",\"total\":" << (int)files.size()
              << "}}";
 
         finish_async_task(task_id, json.str());
