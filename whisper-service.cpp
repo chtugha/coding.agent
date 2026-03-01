@@ -3,10 +3,10 @@
 // Pipeline position: VAD → [Whisper] → LLaMA
 //
 // Receives pre-segmented float32 PCM audio chunks (16kHz) from the VAD Service.
-// Each chunk is a complete speech segment (typically 1-4 seconds) already validated
+// Each chunk is a complete speech segment (typically 1-8 seconds) already validated
 // by VAD — no voice activity detection is performed here.
 //
-// Decoding: GREEDY (not beam search). On short 2-4s segments, greedy is ~3-5x faster
+// Decoding: GREEDY (not beam search). On short 2-8s segments, greedy is ~3-5x faster
 // than beam_size=5 with negligible accuracy difference. Temperature fallback handles errors.
 //
 // No audio normalization — whisper-cli doesn't normalize and produces correct
@@ -170,10 +170,11 @@ private:
 
     bool is_hallucination(const std::string& text) {
         if (text.empty()) return false;
-        std::string t = text;
-        while (!t.empty() && t.front() == ' ') t.erase(t.begin());
-        while (!t.empty() && t.back() == ' ') t.pop_back();
-        if (t.size() < 3) return true;
+        size_t start = 0, end = text.size();
+        while (start < end && text[start] == ' ') start++;
+        while (end > start && text[end - 1] == ' ') end--;
+        if (end - start < 3) return true;
+        std::string t = text.substr(start, end - start);
 
         std::string core = t;
         while (!core.empty() && (core.back() == '.' || core.back() == '!' ||
@@ -218,17 +219,16 @@ private:
             }
 
             static const char* suffix_patterns[] = {
-                "Untertitelung", "Untertitel der", "Untertitel von",
                 "Untertitelung des ZDF, 2020", "Untertitelung des ZDF, 2021",
                 "Untertitelung des ZDF, 2022", "Untertitelung des ZDF, 2023",
                 "Untertitelung des ZDF, 2024", "Untertitelung des ZDF, 2025",
-                "Untertitelung des ZDF", "des ZDF, 2020", "des ZDF",
-                "Hier geht's", "Hier gehts", "Mehr dazu",
+                "Untertitelung des ZDF", "Untertitelung",
+                "Untertitel der", "Untertitel von",
+                "des ZDF, 2020", "des ZDF",
                 "Vielen Dank fürs Zuschauen",
                 "Vielen Dank für die Aufmerksamkeit",
                 "Danke fürs Zuschauen",
-                "Fieh", "Fieh, da", "Fiehla", "Fieh da",
-                "Filo", "Filo, filo",
+                "Hier geht's", "Hier gehts", "Mehr dazu",
                 nullptr
             };
             for (int i = 0; suffix_patterns[i]; ++i) {
@@ -263,12 +263,14 @@ private:
             return;
         }
 
-        float rms = 0.0f;
-        for (size_t i = 0; i < audio_len; ++i) rms += audio[i] * audio[i];
-        rms = std::sqrt(rms / audio_len);
-
-        float peak = 0.0f;
-        for (size_t i = 0; i < audio_len; ++i) peak = std::max(peak, std::abs(audio[i]));
+        float sum_sq = 0.0f, peak = 0.0f;
+        for (size_t i = 0; i < audio_len; ++i) {
+            float s = audio[i];
+            sum_sq += s * s;
+            float a = std::abs(s);
+            if (a > peak) peak = a;
+        }
+        float rms = std::sqrt(sum_sq / audio_len);
 
         log_fwd_.forward("DEBUG", call_id,
             "Audio chunk: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
@@ -288,11 +290,10 @@ private:
         wparams.greedy.best_of = 1;
         wparams.temperature = 0.0f;
         wparams.temperature_inc = 0.2f;
-        wparams.entropy_thold = 2.4f;
+        wparams.entropy_thold = 2.8f;
         wparams.logprob_thold = -1.0f;
-        wparams.no_speech_thold = 0.6f;
+        wparams.no_speech_thold = 0.9f;
 
-        // Use full encoder context (audio_ctx=0 means use all 1500 frames).
         wparams.audio_ctx = 0;
 
         wparams.no_context = true;
@@ -390,27 +391,14 @@ const char* WhisperService::hallucination_patterns_[] = {
     "Copyright",
     "www.",
     "Amara.org",
-    "Vielen Dank",
     "Danke fürs Zuschauen",
     "Vielen Dank fürs Zuschauen",
     "Vielen Dank für die Aufmerksamkeit",
-    "Ich habe mich nicht mehr",
-    "Und ich habe mich nicht mehr",
-    "Ich habe es mir nicht mehr",
-    "es mir nicht mehr",
     "Musik",
     "Applaus",
     "[Musik]",
     "[Applaus]",
     "MwSt",
-    "Fieber",
-    "Finde",
-    "Fieh",
-    "Fieh, da",
-    "Fiehla",
-    "Fieh da",
-    "Filo",
-    "Filo, filo",
     nullptr
 };
 

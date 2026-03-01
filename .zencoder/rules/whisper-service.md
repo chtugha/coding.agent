@@ -10,9 +10,10 @@ The **Whisper Service** (`whisper-service.cpp`) performs Automatic Speech Recogn
 
 ## Internal Function
 - **Inference**: Uses `whisper.cpp` optimized for Apple Silicon via **CoreML/Metal**, providing near-real-time transcription. Receives complete speech segments (typically 1-8 seconds) — no VAD logic is performed here.
-- **Decoding**: GREEDY strategy (not beam search). On short 2-8s segments, greedy is ~3-5x faster than beam_size=5 with negligible accuracy difference. Temperature fallback handles errors.
+- **Decoding**: GREEDY strategy (not beam search). On short 2-8s segments, greedy is ~3-5x faster than beam_size=5 with negligible accuracy difference. Temperature fallback handles errors (temp_inc=0.2).
+- **Telephony-Optimized Params**: `no_speech_thold=0.9` (prevents early decoder stop on G.711 audio), `entropy_thold=2.8` (tolerant of telephony uncertainty). No `initial_prompt` — prompts cause hallucination artifacts on codec-degraded audio.
 - **No Normalization**: Audio is passed directly to Whisper without peak normalization, matching whisper-cli default behavior for optimal transcription accuracy.
-- **Hallucination Filter**: Detects and filters common Whisper hallucination patterns (e.g., "Untertitel", "Vielen Dank") using exact-match comparison. Also detects repetitive text patterns.
+- **Hallucination Filter**: Detects and filters common Whisper hallucination patterns (e.g., "Untertitel", "Copyright", "Musik") using exact-match comparison. Also detects repetitive text patterns. Legitimate conversational phrases (greetings, farewells) are NOT filtered.
 - **Trailing Hallucination Stripping**: Post-transcription step that iteratively removes known hallucination suffixes (e.g., "Untertitelung des ZDF", "Hier geht's") from otherwise valid transcriptions using word-boundary-aware matching.
 - **RMS Energy Check**: Rejects chunks with RMS < 0.005 as near-silence to prevent hallucinations.
 - **Packet Buffering**: If LLaMA is disconnected, buffers up to 64 transcription packets and drains them when reconnected.

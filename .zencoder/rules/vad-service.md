@@ -14,7 +14,7 @@ The **VAD Service** (`vad-service.cpp`) performs Voice Activity Detection on the
 - **Chunk Constraints**: Maximum 8s chunks (default, configurable via `--vad-max-chunk-ms`), minimum 0.5s (reject noise bursts). RMS energy filter (threshold 0.005) prevents near-silence hallucinations. Smart-split searches for energy dips near chunk boundaries when max length is reached.
 - **Inactivity Flush**: If no new audio arrives for 1000ms while speech is active, flushes the buffer immediately.
 - **Speech Signal Broadcasting**: Sends SPEECH_ACTIVE/SPEECH_IDLE management messages downstream to coordinate with TTS (e.g., stop playback when caller speaks).
-- **Context Preservation**: Includes 6 frames (300ms) of pre-speech context audio for natural chunk boundaries, capturing initial consonants and articles.
+- **Context Preservation**: Includes 8 frames (400ms) of pre-speech context audio for natural chunk boundaries, capturing weak initial vowels, consonants, and articles.
 
 ## Inbound Connections
 - **Inbound Audio Processor (TCP)**: Receives float32 PCM audio (16kHz) on ports 13115 (mgmt) and 13116 (data).

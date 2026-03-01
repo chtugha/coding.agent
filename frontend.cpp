@@ -6354,10 +6354,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
 
             if (found_new) {
-                // Reset settle timer — wait 4s after last transcription for more chunks.
-                // VAD silence detection (400ms) + Whisper inference (~500ms) + inter-chunk gap
-                // means chunks can arrive 1-2s apart; 4s provides enough margin.
-                settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+                settle_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
                 if (settle_deadline > deadline) settle_deadline = deadline;
             } else if (!found_any && std::chrono::steady_clock::now() >= deadline) {
                 break;
@@ -8367,11 +8364,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 latency_ms = total_ms;
             }
 
-            // Wait for VAD buffer to fully flush before injecting next file.
-            // The silence stream from test_sip_provider drives VAD silence detection,
-            // but we need enough silence frames to reset the VAD state completely.
-            // vad_inactivity_flush_ms_ defaults to 2000ms; we add 1s margin.
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
             double similarity = calculate_levenshtein_similarity(ground_truth, transcription);
 

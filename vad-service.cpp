@@ -92,9 +92,9 @@ class VadService {
     size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 8;
     // vad_min_speech_samples_: 500ms — reject clicks and noise bursts.
     size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;
-    // vad_context_frames_: include 6 frames (300ms) of pre-speech context audio so the
-    //   chunk captures the onset of speech including initial consonants/articles.
-    int vad_context_frames_ = 6;
+    // vad_context_frames_: include 8 frames (400ms) of pre-speech context audio so the
+    //   chunk captures the onset of speech including weak initial vowels/consonants.
+    int vad_context_frames_ = 8;
     // vad_onset_frames_: require 3 consecutive above-threshold frames to confirm
     //   speech onset, preventing single-frame noise spikes from triggering.
     int vad_onset_frames_ = 3;
@@ -344,12 +344,14 @@ private:
 
     void processing_loop() {
         while (running_ && g_running) {
-            // data_cv_ is used purely as an interruptible sleep mechanism — there is no
-            // shared state guarded by data_mutex_. The CV is notified by receiver_loop
-            // when new audio arrives so processing wakes immediately instead of polling.
             {
                 std::unique_lock<std::mutex> lk(data_mutex_);
-                data_cv_.wait_for(lk, std::chrono::milliseconds(5));
+                bool has_calls;
+                {
+                    std::lock_guard<std::mutex> cl(calls_mutex_);
+                    has_calls = !calls_.empty();
+                }
+                data_cv_.wait_for(lk, std::chrono::milliseconds(has_calls ? 5 : 50));
             }
 
             std::vector<std::shared_ptr<VadCall>> active;
@@ -368,10 +370,14 @@ private:
                     std::lock_guard<std::mutex> lock(call->mutex);
 
                     size_t pos = call->vad_pos;
+                    std::vector<float> frame_buf(vad_frame_size_);
                     while (pos + vad_frame_size_ <= call->audio_buffer.size()) {
+                        std::copy(call->audio_buffer.begin() + pos,
+                                  call->audio_buffer.begin() + pos + vad_frame_size_,
+                                  frame_buf.begin());
                         float energy = 0;
                         for (size_t i = 0; i < vad_frame_size_; ++i) {
-                            float s = call->audio_buffer[pos + i];
+                            float s = frame_buf[i];
                             energy += s * s;
                         }
                         energy /= static_cast<float>(vad_frame_size_);
