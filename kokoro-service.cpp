@@ -32,6 +32,19 @@ static const int KOKORO_SAMPLE_RATE = 24000;
 static const size_t MAX_AUDIO_SAMPLES = 10 * KOKORO_SAMPLE_RATE;
 static const size_t PHONEME_CACHE_MAX = 10000;
 
+static float normalize_audio(std::vector<float>& samples, float ceiling = 0.95f) {
+    float peak = 0.0f;
+    for (float s : samples) {
+        float a = std::abs(s);
+        if (a > peak) peak = a;
+    }
+    if (peak > 1.0f) {
+        float scale = ceiling / peak;
+        for (float& s : samples) s *= scale;
+    }
+    return peak;
+}
+
 #ifndef ESPEAK_NG_DATA_DIR
 #define ESPEAK_NG_DATA_DIR ""
 #endif
@@ -879,11 +892,13 @@ private:
             double duration_s = (double)samples.size() / KOKORO_SAMPLE_RATE;
             double rtf = (elapsed / 1000.0) / duration_s;
 
-            float peak = 0.0f;
+            // Report raw (pre-normalization) peak for diagnostics.
+            // Production path (call_worker) applies normalize_audio() before OAP.
+            float raw_peak = 0.0f;
             double sum_sq = 0.0;
             for (float s : samples) {
                 float a = std::abs(s);
-                if (a > peak) peak = a;
+                if (a > raw_peak) raw_peak = a;
                 sum_sq += s * s;
             }
             double rms = std::sqrt(sum_sq / samples.size());
@@ -891,7 +906,7 @@ private:
             return "SYNTH_RESULT:" + std::to_string(elapsed) + "ms:"
                 + std::to_string(samples.size()) + ":" + std::to_string(KOKORO_SAMPLE_RATE) + ":"
                 + std::to_string(duration_s) + "s:rtf=" + std::to_string(rtf)
-                + ":peak=" + std::to_string(peak) + ":rms=" + std::to_string(rms) + "\n";
+                + ":peak=" + std::to_string(raw_peak) + ":rms=" + std::to_string(rms) + "\n";
         }
         if (cmd.rfind("BENCHMARK:", 0) == 0) {
             std::string text = cmd.substr(10);
@@ -963,12 +978,7 @@ private:
 
             if (samples.empty()) return "ERROR:synthesis failed\n";
 
-            float wav_peak = 0.0f;
-            for (float s : samples) { float a = std::abs(s); if (a > wav_peak) wav_peak = a; }
-            if (wav_peak > 1.0f) {
-                float scale = 0.95f / wav_peak;
-                for (float& s : samples) s *= scale;
-            }
+            normalize_audio(samples);
 
             std::ofstream out(path, std::ios::binary);
             if (!out.is_open()) return "ERROR:cannot open " + path + "\n";
@@ -1096,19 +1106,14 @@ private:
                 continue;
             }
 
-            float peak = 0.0f;
-            for (float s : samples) {
-                float a = std::abs(s);
-                if (a > peak) peak = a;
-            }
-            if (peak > 1.0f) {
-                float scale = 0.95f / peak;
-                for (float& s : samples) s *= scale;
-            }
+            float raw_peak = normalize_audio(samples);
 
-            std::printf("Synthesized %zu samples in %lldms for call %u (peak=%.3f)\n",
-                        samples.size(), elapsed, ctx->call_id, peak);
-            log_fwd_.forward("INFO", ctx->call_id, "Synthesized %zu samples in %lldms (peak=%.3f)", samples.size(), elapsed, peak);
+            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
+                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak,
+                        raw_peak > 1.0f ? " -> normalized" : "");
+            log_fwd_.forward("INFO", ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f%s)",
+                             samples.size(), (long long)elapsed, raw_peak,
+                             raw_peak > 1.0f ? " -> normalized" : "");
 
             send_audio_to_downstream(ctx->call_id, samples);
         }
