@@ -2676,6 +2676,7 @@ function escapeHtml(s){
 }
 
 var callLineMap={};
+var _clmPending=null;
 function refreshCallLineMap(){
   fetch('/api/sip/stats').then(function(r){return r.json();}).then(function(d){
     if(!d.calls)return;
@@ -2690,6 +2691,9 @@ setTimeout(refreshCallLineMap,500);
 function fmtCallBadge(cid){
   if(!cid)return'';
   var lbl=callLineMap[cid];
+  if(!lbl&&!_clmPending){
+    _clmPending=setTimeout(function(){_clmPending=null;refreshCallLineMap();},300);
+  }
   var txt=lbl?(lbl+' C'+cid):('C'+cid);
   return ' <span class="log-cid">'+txt+'</span>';
 }
@@ -7616,8 +7620,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
             if (fi + 1 < files.size()) {
                 uint64_t drain_seq = current_log_seq();
-                std::this_thread::sleep_for(std::chrono::seconds(8));
-                for (int drain = 0; drain < 10; drain++) {
+                std::this_thread::sleep_for(std::chrono::seconds(4));
+                for (int drain = 0; drain < 5; drain++) {
                     uint64_t cur = current_log_seq();
                     if (cur == drain_seq) break;
                     drain_seq = cur;
