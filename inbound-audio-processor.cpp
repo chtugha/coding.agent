@@ -191,22 +191,24 @@ private:
 
     std::shared_ptr<CallState> get_or_create_call(uint32_t cid) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(cid)) return calls_[cid];
+        auto it = calls_.find(cid);
+        if (it != calls_.end()) return it->second;
         auto state = std::make_shared<CallState>();
         state->id = cid;
         state->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = state;
-        std::cout << "📞 Created call state for call_id " << cid << std::endl;
+        std::cout << "Created call state for call_id " << cid << std::endl;
         log_fwd_.forward("INFO", cid, "Created call state");
         return state;
     }
 
     void handle_call_end(uint32_t call_id) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(call_id)) {
-            std::cout << "🛑 Call " << call_id << " ended, cleaning up" << std::endl;
+        auto it = calls_.find(call_id);
+        if (it != calls_.end()) {
+            std::cout << "Call " << call_id << " ended, cleaning up" << std::endl;
             log_fwd_.forward("INFO", call_id, "Call ended, cleaning up");
-            calls_.erase(call_id);
+            calls_.erase(it);
         }
     }
 
@@ -215,7 +217,7 @@ private:
         std::lock_guard<std::mutex> lock(calls_mutex_);
         for (auto it = calls_.begin(); it != calls_.end(); ) {
             if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count() > 60) {
-                std::cout << "🧹 Cleaning up inactive call " << it->first << std::endl;
+                std::cout << "Cleaning up inactive call " << it->first << std::endl;
                 it = calls_.erase(it);
             } else {
                 ++it;

@@ -46,30 +46,36 @@ inline const float* iap_fir_coeffs() {
     return coeffs;
 }
 
-// FIR half-band upsample: processes one frame (up to IAP_ULAW_FRAME samples) of
-// 8kHz float input into 16kHz float output with 2× zero-stuffing + FIR filtering.
+// Polyphase FIR half-band upsample: 8kHz → 16kHz via 2× zero-stuff + 15-tap filter.
+// Exploits half-band structure: odd taps (1,3,5,9,11,13) are zero, center tap (7) = 1.0.
+//   Odd outputs:  out[2i+1] = 2.0 * x[i - 3]  (delayed passthrough, no multiply)
+//   Even outputs: out[2i]   = 2.0 * sum of 8 non-zero taps  (8 MACs vs 15 branchy iterations)
+// ~3.7× fewer operations than the naive FIR loop.
 // `history` must point to IAP_FIR_CENTER floats that persist across calls.
 // Returns number of output samples written (= in_len * 2).
 inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
                                       float* out, float* history) {
     if (in_len > (size_t)IAP_ULAW_FRAME) in_len = IAP_ULAW_FRAME;
-    const float* hb = iap_fir_coeffs();
+    if (in_len == 0) return 0;
+
+    static constexpr float H0 = -0.0076f;
+    static constexpr float H2 =  0.0527f;
+    static constexpr float H4 = -0.1681f;
+    static constexpr float H6 =  0.6230f;
+
     float ext[IAP_FIR_CENTER + IAP_ULAW_FRAME];
     for (int i = 0; i < IAP_FIR_CENTER; i++) ext[i] = history[i];
     for (size_t i = 0; i < in_len; i++) ext[IAP_FIR_CENTER + i] = in[i];
-    int ext_len = IAP_FIR_CENTER + (int)in_len;
 
     size_t out_len = in_len * 2;
-    for (size_t n = 0; n < out_len; n++) {
-        float sum = 0.0f;
-        for (int k = 0; k < IAP_FIR_LEN; k++) {
-            int src_idx_2x = (int)n - k + IAP_FIR_CENTER;
-            if (src_idx_2x & 1) continue;
-            int ext_idx = src_idx_2x / 2 + IAP_FIR_CENTER;
-            if (ext_idx < 0 || ext_idx >= ext_len) continue;
-            sum += ext[ext_idx] * hb[k];
-        }
-        out[n] = sum * 2.0f;
+    const int N = (int)in_len;
+
+    for (int i = 0; i < N; i++) {
+        const float* x = ext + i;
+        float even = H0 * x[7] + H2 * x[6] + H4 * x[5] + H6 * x[4]
+                   + H6 * x[3] + H4 * x[2] + H2 * x[1] + H0 * x[0];
+        out[2 * i] = even * 2.0f;
+        out[2 * i + 1] = ext[i + 4] * 2.0f;
     }
 
     if (in_len >= (size_t)IAP_FIR_CENTER) {

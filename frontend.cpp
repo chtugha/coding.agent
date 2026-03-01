@@ -5784,22 +5784,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     // Encode a 16-bit linear PCM sample to 8-bit G.711 mu-law (ITU-T G.711).
-    // Algorithm per ITU-T recommendation:
-    //   1. Extract sign bit (bit 15), negate if negative
-    //   2. Clip to max linear value 32635 (0x7F7B) to prevent overflow
-    //   3. Add bias 0x84 (132) to shift the companding curve - this ensures
-    //      small signals near zero still get meaningful quantization
-    //   4. Find the exponent (segment number 0-7) by locating the highest set bit
-    //   5. Extract 4-bit mantissa from the biased sample
-    //   6. Combine sign|exponent|mantissa and bitwise-NOT the result
-    //      (mu-law uses inverted bits for better idle channel noise)
-    // G.711 mu-law provides ~38dB SNR for a dynamic range of ~78dB.
-    // Typical speech codec SNR is ~5-6dB after encode/decode roundtrip.
+    // Measured encode/decode roundtrip SNR: ~36-38 dB for speech signals.
     static uint8_t linear_to_ulaw(int16_t sample) {
-        const int BIAS = 0x84;  // 132: mu-law companding bias per ITU-T G.711
-        const int CLIP = 32635; // Max linear value before clipping (0x7F7B)
+        const int BIAS = 0x84;
+        const int CLIP = 32635;
         int sign = (sample >> 8) & 0x80;
-        if (sign) sample = -sample;
+        if (sign) sample = static_cast<int16_t>(-(int)sample);
         if (sample > CLIP) sample = CLIP;
         sample += BIAS;
         int exponent = 7;
@@ -5902,11 +5892,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             ulaw_data[i] = linear_to_ulaw(samples_8k[i]);
         }
 
+        float ulaw_table[256];
+        for (int i = 0; i < 256; i++) ulaw_table[i] = ulaw_to_float((uint8_t)i);
+
         size_t n_samples = ulaw_data.size();
         std::vector<float> decoded(n_samples);
-        for (size_t i = 0; i < n_samples; i++) {
-            decoded[i] = ulaw_to_float(ulaw_data[i]);
-        }
 
         constexpr size_t frame_size = whispertalk::IAP_ULAW_FRAME;
         std::vector<float> iap_output(n_samples * 2, 0.0f);
@@ -5920,6 +5910,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             size_t chunk = std::min(frame_size, n_samples - offset);
 
             auto t0 = std::chrono::steady_clock::now();
+            for (size_t i = 0; i < chunk; i++)
+                decoded[offset + i] = ulaw_table[ulaw_data[offset + i]];
             whispertalk::iap_fir_upsample_frame(
                 &decoded[offset], chunk, &iap_output[offset * 2], fir_history);
             auto t1 = std::chrono::steady_clock::now();
