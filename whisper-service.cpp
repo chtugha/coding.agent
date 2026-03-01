@@ -38,6 +38,7 @@ static constexpr int WSP_SAMPLES_PER_MS = WSP_SAMPLE_RATE / 1000;
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
     size_t min_speech_samples_ = WSP_SAMPLE_RATE / 2;
+    std::atomic<bool> hallucination_filter_enabled_{false};
 
 public:
     WhisperService(const std::string& model_path, const std::string& language = "de") 
@@ -135,6 +136,19 @@ private:
 
     std::string handle_whisper_command(const std::string& cmd) {
         if (cmd == "PING") return "PONG\n";
+        if (cmd == "HALLUCINATION_FILTER:ON") {
+            hallucination_filter_enabled_.store(true);
+            log_fwd_.forward("INFO", 0, "Hallucination filter enabled");
+            return "OK:HALLUCINATION_FILTER:ON\n";
+        }
+        if (cmd == "HALLUCINATION_FILTER:OFF") {
+            hallucination_filter_enabled_.store(false);
+            log_fwd_.forward("INFO", 0, "Hallucination filter disabled");
+            return "OK:HALLUCINATION_FILTER:OFF\n";
+        }
+        if (cmd == "HALLUCINATION_FILTER:STATUS") {
+            return std::string("HALLUCINATION_FILTER:") + (hallucination_filter_enabled_.load() ? "ON" : "OFF") + "\n";
+        }
         if (cmd == "STATUS") {
             std::string model_file = model_path_;
             size_t slash = model_file.rfind('/');
@@ -142,6 +156,7 @@ private:
             return "MODEL:" + model_file
                 + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
                 + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":HALLUCINATION_FILTER:" + (hallucination_filter_enabled_.load() ? "ON" : "OFF")
                 + "\n";
         }
         return "ERROR:Unknown command\n";
@@ -312,21 +327,23 @@ private:
                 text += whisper_full_get_segment_text(ctx_, i);
             }
             if (!text.empty()) {
-                if (is_hallucination(text)) {
-                    log_fwd_.forward("DEBUG", call_id, "Hallucination filtered: %s", text.c_str());
-                    std::cout << "[" << call_id << "] Hallucination filtered: " << text << std::endl;
-                    return;
-                }
+                if (hallucination_filter_enabled_.load(std::memory_order_relaxed)) {
+                    if (is_hallucination(text)) {
+                        log_fwd_.forward("DEBUG", call_id, "Hallucination filtered: %s", text.c_str());
+                        std::cout << "[" << call_id << "] Hallucination filtered: " << text << std::endl;
+                        return;
+                    }
 
-                std::string cleaned = strip_trailing_hallucinations(text);
-                if (cleaned.empty() || cleaned.size() < 3) {
-                    log_fwd_.forward("DEBUG", call_id, "Stripped to empty: %s", text.c_str());
-                    return;
+                    std::string cleaned = strip_trailing_hallucinations(text);
+                    if (cleaned.empty() || cleaned.size() < 3) {
+                        log_fwd_.forward("DEBUG", call_id, "Stripped to empty: %s", text.c_str());
+                        return;
+                    }
+                    if (cleaned != text) {
+                        log_fwd_.forward("DEBUG", call_id, "Stripped hallucination tail: '%s' -> '%s'", text.c_str(), cleaned.c_str());
+                    }
+                    text = cleaned;
                 }
-                if (cleaned != text) {
-                    log_fwd_.forward("DEBUG", call_id, "Stripped hallucination tail: '%s' -> '%s'", text.c_str(), cleaned.c_str());
-                }
-                text = cleaned;
 
                 double audio_dur_ms = audio_len / (double)WSP_SAMPLES_PER_MS;
                 double rtf = whisper_ms / audio_dur_ms;

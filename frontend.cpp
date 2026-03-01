@@ -1230,6 +1230,8 @@ private:
                 handle_test_results(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_test")) == 0) {
                 handle_whisper_accuracy_test(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/hallucination_filter")) == 0) {
+                handle_whisper_hallucination_filter(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/vad/config")) == 0) {
                 handle_vad_config(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_results")) == 0) {
@@ -1493,6 +1495,12 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <select class="wt-select" id="whisperLang" onchange="updateWhisperArgs()" style="font-size:12px"></select></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Model</label>
 <select class="wt-select" id="whisperModel" onchange="updateWhisperArgs()" style="font-size:12px"></select></div>
+<div class="wt-field" style="margin-top:8px;margin-bottom:0;display:flex;align-items:center;gap:8px">
+<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
+<input type="checkbox" id="whisperHallucinationFilter" onchange="toggleHallucinationFilter(this.checked)" style="width:16px;height:16px;cursor:pointer">
+Hallucination Filter</label>
+<span id="whisperHalluFilterStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
 </div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
@@ -2468,6 +2476,7 @@ function updateSvcDetail(s){
   if(s.name==='WHISPER_SERVICE'){
     wc.classList.remove('hidden');
     loadWhisperConfig(s.default_args||'');
+    loadHallucinationFilterState();
   } else {
     wc.classList.add('hidden');
   }
@@ -2493,6 +2502,23 @@ function updateWhisperArgs(){
   var lang=document.getElementById('whisperLang').value;
   var model=document.getElementById('whisperModel').value;
   document.getElementById('svcDetailArgs').value='--language '+lang+' '+model;
+}
+function toggleHallucinationFilter(enabled){
+  var statusEl=document.getElementById('whisperHalluFilterStatus');
+  statusEl.textContent='...';
+  fetch('/api/whisper/hallucination_filter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled?'true':'false'})})
+  .then(r=>r.json()).then(d=>{
+    if(d.error){statusEl.textContent='(offline)';document.getElementById('whisperHallucinationFilter').checked=false;return;}
+    statusEl.textContent=d.enabled?'ON':'OFF';
+  }).catch(()=>{statusEl.textContent='(error)';});
+}
+function loadHallucinationFilterState(){
+  var cb=document.getElementById('whisperHallucinationFilter');
+  var statusEl=document.getElementById('whisperHalluFilterStatus');
+  fetch('/api/whisper/hallucination_filter').then(r=>r.json()).then(d=>{
+    if(d.error){cb.checked=false;statusEl.textContent='(offline)';return;}
+    cb.checked=d.enabled;statusEl.textContent=d.enabled?'ON':'OFF';
+  }).catch(()=>{cb.checked=false;statusEl.textContent='(offline)';});
 }
 
 function showServicesOverview(){
@@ -8464,6 +8490,36 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                  << "\"max_chunk_ms\":" << max_chunk_ms
                  << "}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+        }
+    }
+
+    void handle_whisper_hallucination_filter(struct mg_connection *c, struct mg_http_message *hm) {
+        int whisper_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::WHISPER_SERVICE);
+        std::string err;
+
+        if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
+            std::string body(hm->body.buf, hm->body.len);
+            std::string enabled_str = extract_json_string(body, "enabled");
+            bool enable = (enabled_str == "true" || enabled_str == "1");
+            std::string cmd = enable ? "HALLUCINATION_FILTER:ON\n" : "HALLUCINATION_FILTER:OFF\n";
+            std::string resp = tcp_command(whisper_cmd_port, cmd, err, 3);
+            if (!err.empty()) {
+                mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                    "{\"error\":\"%s\"}", err.c_str());
+                return;
+            }
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"success\":true,\"enabled\":%s}", enable ? "true" : "false");
+        } else {
+            std::string resp = tcp_command(whisper_cmd_port, "HALLUCINATION_FILTER:STATUS\n", err, 3);
+            if (!err.empty()) {
+                mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                    "{\"error\":\"%s\",\"enabled\":false}", err.c_str());
+                return;
+            }
+            bool enabled = resp.find("ON") != std::string::npos;
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"enabled\":%s}", enabled ? "true" : "false");
         }
     }
 
