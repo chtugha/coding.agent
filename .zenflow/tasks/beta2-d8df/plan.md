@@ -338,7 +338,8 @@ Test outbound audio processing and validate full-loop audio fidelity with 2 line
 
 **Files**: `outbound-audio-processor.cpp`, `sip-client-main.cpp`, `frontend.cpp` (full-loop test UI/handler, WER function)
 
-### [ ] Step: Stage 12 — Full Pipeline Stress Test
+### [x] Step: Stage 12 — Full Pipeline Stress Test
+<!-- chat-id: 32857ae0-4724-41cf-99e2-7ad300ec7456 -->
 
 2-minute continuous operation test to find and fix bottlenecks.
 

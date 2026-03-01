@@ -337,6 +337,31 @@ private:
     std::mutex downloads_mutex_;
     std::map<int64_t, std::shared_ptr<DownloadProgress>> downloads_;
 
+    struct PipelineStressProgress {
+        std::atomic<bool> running{true};
+        std::atomic<bool> stop_requested{false};
+        std::atomic<int> elapsed_s{0};
+        std::atomic<int> duration_s{120};
+        std::atomic<int> cycles_completed{0};
+        std::atomic<int> cycles_ok{0};
+        std::atomic<int> cycles_fail{0};
+        std::atomic<int> total_latency_ms{0};
+        std::atomic<int> min_latency_ms{999999};
+        std::atomic<int> max_latency_ms{0};
+        struct SvcSnap {
+            std::atomic<int> memory_mb{0};
+            std::atomic<bool> reachable{true};
+            std::atomic<int> ping_ok{0};
+            std::atomic<int> ping_fail{0};
+            std::atomic<int> total_ping_ms{0};
+        };
+        SvcSnap svcs[7];
+        std::mutex result_mutex;
+        std::string result_json;
+    };
+    std::shared_ptr<PipelineStressProgress> pipeline_stress_;
+    std::mutex pipeline_stress_mutex_;
+
     int64_t create_async_task(const std::string& type) {
         int64_t id = ++async_id_counter_;
         auto task = std::make_shared<AsyncTask>();
@@ -516,6 +541,15 @@ private:
                 test_type TEXT,
                 status TEXT,
                 metrics_json TEXT,
+                timestamp INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS test_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_name TEXT,
+                service TEXT,
+                status TEXT,
+                details TEXT,
                 timestamp INTEGER
             );
         )";
@@ -1236,6 +1270,12 @@ private:
                 handle_full_loop_test(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/multiline_stress")) == 0) {
                 handle_multiline_stress(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/pipeline_stress_test")) == 0) {
+                handle_pipeline_stress_test(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/pipeline_stress/progress")) == 0) {
+                handle_pipeline_stress_progress(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/pipeline_stress/stop")) == 0) {
+                handle_pipeline_stress_stop(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
                 handle_async_status(c, hm);
             } else {
@@ -1901,6 +1941,47 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 <div id="stressStatus" style="font-size:12px;margin-bottom:8px"></div>
 <div id="stressResults"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Test 9: Full Pipeline Stress Test</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Continuously injects test audio through the full pipeline for a configurable duration.
+  Measures end-to-end latency, per-service memory, health, and throughput under sustained load.
+  Requires: All 7 services running + test_sip_provider with active call.
+</p>
+<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+  <label style="font-size:13px">Duration:
+    <select class="wt-select" id="pstressDuration" style="width:100px;margin-left:4px">
+      <option value="30">30s</option>
+      <option value="60">60s</option>
+      <option value="120" selected>2 min</option>
+      <option value="300">5 min</option>
+    </select>
+  </label>
+  <button class="wt-btn wt-btn-primary" id="pstressRunBtn" onclick="runPipelineStressTest()">&#x25B6; Start Stress Test</button>
+  <button class="wt-btn wt-btn-danger" id="pstressStopBtn" onclick="stopPipelineStressTest()" style="display:none">&#x25A0; Stop</button>
+</div>
+<div id="pstressProgress" style="display:none;margin-bottom:10px">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+    <span id="pstressElapsed" style="font-size:13px;font-weight:600">0s / 120s</span>
+    <span id="pstressCycles" style="font-size:12px;color:var(--wt-text-secondary)">0 cycles</span>
+  </div>
+  <div style="height:8px;background:var(--wt-border);border-radius:4px;overflow:hidden">
+    <div id="pstressBar" style="height:100%;width:0%;background:var(--wt-accent);transition:width 0.5s"></div>
+  </div>
+</div>
+<div id="pstressStatus" style="font-size:12px;margin-bottom:8px"></div>
+<div id="pstressMetrics" style="display:none;margin-bottom:10px">
+  <h4 style="font-size:14px;font-weight:600;margin:8px 0">Service Health &amp; Memory</h4>
+  <table class="wt-table" style="width:100%">
+    <thead><tr><th>Service</th><th>Status</th><th>Ping OK</th><th>Ping Fail</th><th>Avg Ping</th><th>Memory (MB)</th></tr></thead>
+    <tbody id="pstressSvcBody"></tbody>
+  </table>
+  <h4 style="font-size:14px;font-weight:600;margin:12px 0 8px">Pipeline Throughput</h4>
+  <div id="pstressThroughput" style="font-size:13px"></div>
+</div>
+<div id="pstressResults"></div>
 </div>
 
 <div class="wt-card">
@@ -3148,6 +3229,97 @@ function runMultilineStress(){
     btn.disabled=false;
     status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
   });
+}
+
+var pstressPoll=null;
+function runPipelineStressTest(){
+  if(pstressPoll){clearInterval(pstressPoll);pstressPoll=null;}
+  var btn=document.getElementById('pstressRunBtn');
+  var stopBtn=document.getElementById('pstressStopBtn');
+  var status=document.getElementById('pstressStatus');
+  var progress=document.getElementById('pstressProgress');
+  var metrics=document.getElementById('pstressMetrics');
+  var results=document.getElementById('pstressResults');
+  var dur=parseInt(document.getElementById('pstressDuration').value)||120;
+  btn.disabled=true;stopBtn.style.display='inline-block';
+  progress.style.display='block';metrics.style.display='block';
+  results.innerHTML='';
+  status.innerHTML='<span style="color:var(--wt-accent)">Starting full pipeline stress test ('+dur+'s)...</span>';
+  document.getElementById('pstressElapsed').textContent='0s / '+dur+'s';
+  document.getElementById('pstressCycles').textContent='0 cycles';
+  document.getElementById('pstressBar').style.width='0%';
+  fetch('/api/pipeline_stress_test',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({duration_s:dur})})
+  .then(function(r){return r.json();}).then(function(d){
+    if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">'+escapeHtml(d.error)+'</span>';btn.disabled=false;stopBtn.style.display='none';progress.style.display='none';return;}
+    status.innerHTML='<span style="color:var(--wt-accent)">Running...</span>';
+    pstressPoll=setInterval(function(){pollPipelineStress(dur);},2000);
+  }).catch(function(e){
+    btn.disabled=false;stopBtn.style.display='none';progress.style.display='none';
+    status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
+  });
+}
+function stopPipelineStressTest(){
+  fetch('/api/pipeline_stress/stop',{method:'POST'}).then(function(){
+    document.getElementById('pstressStatus').innerHTML='<span style="color:var(--wt-warning)">Stopping...</span>';
+  });
+}
+var svcNames=['SIP','IAP','VAD','Whisper','LLaMA','Kokoro','OAP'];
+function pollPipelineStress(dur){
+  fetch('/api/pipeline_stress/progress').then(function(r){return r.json();}).then(function(d){
+    if(d.error){return;}
+    var elapsed=d.elapsed_s||0;
+    var total=d.duration_s||dur;
+    var pct=Math.min(100,Math.round(100*elapsed/total));
+    document.getElementById('pstressBar').style.width=pct+'%';
+    document.getElementById('pstressElapsed').textContent=elapsed+'s / '+total+'s';
+    var cyc=d.cycles_completed||0;
+    document.getElementById('pstressCycles').textContent=cyc+' cycles ('+
+      (d.cycles_ok||0)+' ok, '+(d.cycles_fail||0)+' fail)';
+    var svcs=d.services||[];
+    var tbody=document.getElementById('pstressSvcBody');
+    var html='';
+    for(var i=0;i<svcs.length;i++){
+      var s=svcs[i];
+      var col=s.reachable?'var(--wt-success)':'var(--wt-danger)';
+      html+='<tr><td>'+escapeHtml(s.name)+'</td>'
+        +'<td style="color:'+col+';font-weight:bold">'+(s.reachable?'Online':'Offline')+'</td>'
+        +'<td>'+s.ping_ok+'</td><td>'+s.ping_fail+'</td>'
+        +'<td>'+s.avg_ping_ms+'ms</td><td>'+s.memory_mb+'</td></tr>';
+    }
+    tbody.innerHTML=html;
+    var avgLat=(cyc>0)?Math.round((d.total_latency_ms||0)/cyc):0;
+    document.getElementById('pstressThroughput').innerHTML=
+      '<strong>Avg E2E latency:</strong> '+avgLat+'ms &nbsp; '
+      +'<strong>Min:</strong> '+(d.min_latency_ms>=999999?'-':d.min_latency_ms)+'ms &nbsp; '
+      +'<strong>Max:</strong> '+(d.max_latency_ms||0)+'ms &nbsp; '
+      +'<strong>Cycles/min:</strong> '+(elapsed>0?((cyc*60/elapsed).toFixed(1)):'0');
+    if(!d.running){
+      clearInterval(pstressPoll);pstressPoll=null;
+      document.getElementById('pstressRunBtn').disabled=false;
+      document.getElementById('pstressStopBtn').style.display='none';
+      var ok_pct=cyc>0?Math.round(100*(d.cycles_ok||0)/cyc):0;
+      var col2=ok_pct>=90?'var(--wt-success)':ok_pct>=70?'var(--wt-warning)':'var(--wt-danger)';
+      document.getElementById('pstressStatus').innerHTML=
+        '<span style="color:'+col2+';font-weight:bold">Completed: '+ok_pct+'% success</span>'
+        +' ('+cyc+' cycles, '+(d.cycles_ok||0)+' ok, '+(d.cycles_fail||0)+' fail, '+elapsed+'s)';
+      if(d.result){
+        var r2=d.result;
+        var rhtml='<h4 style="font-size:14px;font-weight:600;margin:8px 0">Final Summary</h4>'
+          +'<table class="wt-table"><tr><th>Metric</th><th>Value</th></tr>'
+          +'<tr><td>Total Cycles</td><td>'+cyc+'</td></tr>'
+          +'<tr><td>Success Rate</td><td style="color:'+col2+';font-weight:bold">'+ok_pct+'%</td></tr>'
+          +'<tr><td>Avg E2E Latency</td><td>'+avgLat+'ms</td></tr>'
+          +'<tr><td>Min Latency</td><td>'+(d.min_latency_ms>=999999?'-':d.min_latency_ms)+'ms</td></tr>'
+          +'<tr><td>Max Latency</td><td>'+(d.max_latency_ms||0)+'ms</td></tr>'
+          +'<tr><td>Throughput</td><td>'+(elapsed>0?((cyc*60/elapsed).toFixed(1)):'0')+' cycles/min</td></tr>'
+          +'<tr><td>Duration</td><td>'+elapsed+'s</td></tr>'
+          +'<tr><td>Errors</td><td>'+(d.cycles_fail||0)+'</td></tr>'
+          +'</table>';
+        document.getElementById('pstressResults').innerHTML=rhtml;
+      }
+    }
+  }).catch(function(){});
 }
 
 var ttsRoundtripPoll=null;
@@ -7767,6 +7939,272 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
              << ",\"overall_success_pct\":" << (grand_total > 0 ? (int)(100.0 * grand_ok / grand_total) : 0)
              << "}";
         finish_async_task(task_id, json.str());
+    }
+
+    void handle_pipeline_stress_test(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(pipeline_stress_mutex_);
+            if (pipeline_stress_ && pipeline_stress_->running.load()) {
+                mg_http_reply(c, 409, "Content-Type: application/json\r\n",
+                    "{\"error\":\"Pipeline stress test already running\"}");
+                return;
+            }
+        }
+
+        struct mg_str body = hm->body;
+        int duration_s = (int)mg_json_get_long(body, "$.duration_s", 120);
+        if (duration_s < 10) duration_s = 10;
+        if (duration_s > 600) duration_s = 600;
+
+        static const std::pair<ServiceType, const char*> required_svc[] = {
+            {ServiceType::SIP_CLIENT, "SIP Client"},
+            {ServiceType::INBOUND_AUDIO_PROCESSOR, "IAP"},
+            {ServiceType::VAD_SERVICE, "VAD"},
+            {ServiceType::WHISPER_SERVICE, "Whisper"},
+            {ServiceType::LLAMA_SERVICE, "LLaMA"},
+            {ServiceType::KOKORO_SERVICE, "Kokoro"},
+            {ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
+        };
+        for (const auto& [svc, name] : required_svc) {
+            std::string err;
+            std::string resp = tcp_command(service_cmd_port(svc), "PING", err, 3);
+            if (resp.find("PONG") == std::string::npos) {
+                mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                    "{\"error\":\"%s not reachable — start all 7 pipeline services first\"}", name);
+                return;
+            }
+        }
+
+        std::string sip_err;
+        std::string sip_status = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", sip_err);
+        if (!sip_err.empty() || sip_status.find("\"call_active\":true") == std::string::npos) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"No active call on test_sip_provider — start SIP client and establish a call first\"}");
+            return;
+        }
+
+        std::vector<std::string> files;
+        {
+            std::lock_guard<std::mutex> lock(testfiles_mutex_);
+            for (const auto& tf : testfiles_) files.push_back(tf.name);
+        }
+        if (files.empty()) files.push_back("sample_01.wav");
+
+        auto progress = std::make_shared<PipelineStressProgress>();
+        progress->duration_s.store(duration_s);
+        {
+            std::lock_guard<std::mutex> lock(pipeline_stress_mutex_);
+            pipeline_stress_ = progress;
+        }
+
+        std::thread([this, duration_s, files, progress]() {
+            run_pipeline_stress_async(duration_s, files, progress);
+        }).detach();
+
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+            "{\"status\":\"started\",\"duration_s\":%d}", duration_s);
+    }
+
+    void handle_pipeline_stress_progress(struct mg_connection *c, struct mg_http_message *hm) {
+        (void)hm;
+        std::shared_ptr<PipelineStressProgress> p;
+        {
+            std::lock_guard<std::mutex> lock(pipeline_stress_mutex_);
+            p = pipeline_stress_;
+        }
+        if (!p) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"running\":false,\"error\":\"No stress test has been run\"}");
+            return;
+        }
+
+        static const char* svc_names[] = {"SIP","IAP","VAD","Whisper","LLaMA","Kokoro","OAP"};
+        std::stringstream json;
+        json << "{\"running\":" << (p->running.load() ? "true" : "false")
+             << ",\"elapsed_s\":" << p->elapsed_s.load()
+             << ",\"duration_s\":" << p->duration_s.load()
+             << ",\"cycles_completed\":" << p->cycles_completed.load()
+             << ",\"cycles_ok\":" << p->cycles_ok.load()
+             << ",\"cycles_fail\":" << p->cycles_fail.load()
+             << ",\"total_latency_ms\":" << p->total_latency_ms.load()
+             << ",\"min_latency_ms\":" << p->min_latency_ms.load()
+             << ",\"max_latency_ms\":" << p->max_latency_ms.load()
+             << ",\"services\":[";
+        for (int i = 0; i < 7; i++) {
+            if (i > 0) json << ",";
+            int ok = p->svcs[i].ping_ok.load();
+            int fail = p->svcs[i].ping_fail.load();
+            int avg_ms = ok > 0 ? p->svcs[i].total_ping_ms.load() / ok : 0;
+            json << "{\"name\":\"" << svc_names[i] << "\""
+                 << ",\"reachable\":" << (p->svcs[i].reachable.load() ? "true" : "false")
+                 << ",\"ping_ok\":" << ok
+                 << ",\"ping_fail\":" << fail
+                 << ",\"avg_ping_ms\":" << avg_ms
+                 << ",\"memory_mb\":" << p->svcs[i].memory_mb.load() << "}";
+        }
+        json << "]";
+        if (!p->running.load()) {
+            std::lock_guard<std::mutex> lock(p->result_mutex);
+            if (!p->result_json.empty()) {
+                json << ",\"result\":" << p->result_json;
+            }
+        }
+        json << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    void handle_pipeline_stress_stop(struct mg_connection *c, struct mg_http_message *hm) {
+        (void)hm;
+        std::shared_ptr<PipelineStressProgress> p;
+        {
+            std::lock_guard<std::mutex> lock(pipeline_stress_mutex_);
+            p = pipeline_stress_;
+        }
+        if (p && p->running.load()) {
+            p->stop_requested.store(true);
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"stopping\"}");
+        } else {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"not_running\"}");
+        }
+    }
+
+    void run_pipeline_stress_async(int duration_s, std::vector<std::string> files,
+                                    std::shared_ptr<PipelineStressProgress> progress) {
+        static const ServiceType svc_types[] = {
+            ServiceType::SIP_CLIENT,
+            ServiceType::INBOUND_AUDIO_PROCESSOR,
+            ServiceType::VAD_SERVICE,
+            ServiceType::WHISPER_SERVICE,
+            ServiceType::LLAMA_SERVICE,
+            ServiceType::KOKORO_SERVICE,
+            ServiceType::OUTBOUND_AUDIO_PROCESSOR,
+        };
+        static const char* svc_service_names[] = {
+            "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE",
+            "WHISPER_SERVICE", "LLAMA_SERVICE", "KOKORO_SERVICE",
+            "OUTBOUND_AUDIO_PROCESSOR"
+        };
+
+        auto start_time = std::chrono::steady_clock::now();
+        auto deadline = start_time + std::chrono::seconds(duration_s);
+        int file_idx = 0;
+
+        std::thread health_thread([&, progress]() {
+            while (progress->running.load() && !progress->stop_requested.load()) {
+                for (int i = 0; i < 7; i++) {
+                    uint16_t port = service_cmd_port(svc_types[i]);
+                    auto t0 = std::chrono::steady_clock::now();
+                    std::string err;
+                    std::string resp = tcp_command(port, "PING", err, 2);
+                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    if (resp.find("PONG") != std::string::npos) {
+                        progress->svcs[i].reachable.store(true);
+                        progress->svcs[i].ping_ok++;
+                        progress->svcs[i].total_ping_ms += (int)ms;
+                    } else {
+                        progress->svcs[i].reachable.store(false);
+                        progress->svcs[i].ping_fail++;
+                    }
+                    progress->svcs[i].memory_mb.store(get_service_memory_mb(svc_service_names[i]));
+                }
+                auto now = std::chrono::steady_clock::now();
+                progress->elapsed_s.store((int)std::chrono::duration_cast<std::chrono::seconds>(
+                    now - start_time).count());
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+            }
+        });
+
+        while (std::chrono::steady_clock::now() < deadline && !progress->stop_requested.load()) {
+            const auto& file = files[file_idx % files.size()];
+            file_idx++;
+
+            uint64_t seq_before = current_log_seq();
+            auto cycle_start = std::chrono::steady_clock::now();
+
+            std::string inject_body = "{\"file\":\"" + escape_json(file) + "\",\"leg\":\"a\"}";
+            std::string inject_err;
+            std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
+
+            bool cycle_ok = false;
+            if (!inject_err.empty() || inject_resp.find("\"success\":true") == std::string::npos) {
+                progress->cycles_fail++;
+            } else {
+                TranscriptionResult tr = wait_for_whisper_transcription(seq_before, 30000);
+                if (tr.found && !tr.text.empty()) {
+                    cycle_ok = true;
+                }
+            }
+
+            auto cycle_end = std::chrono::steady_clock::now();
+            int cycle_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(
+                cycle_end - cycle_start).count();
+
+            if (cycle_ok) {
+                progress->cycles_ok++;
+                progress->total_latency_ms += cycle_ms;
+                int cur_min = progress->min_latency_ms.load();
+                while (cycle_ms < cur_min && !progress->min_latency_ms.compare_exchange_weak(cur_min, cycle_ms));
+                int cur_max = progress->max_latency_ms.load();
+                while (cycle_ms > cur_max && !progress->max_latency_ms.compare_exchange_weak(cur_max, cycle_ms));
+            } else {
+                if (!inject_err.empty()) { /* already counted */ }
+                else { progress->cycles_fail++; }
+            }
+            progress->cycles_completed++;
+
+            auto now = std::chrono::steady_clock::now();
+            progress->elapsed_s.store((int)std::chrono::duration_cast<std::chrono::seconds>(
+                now - start_time).count());
+
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+
+        progress->running.store(false);
+        if (health_thread.joinable()) health_thread.join();
+
+        auto final_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        progress->elapsed_s.store((int)final_elapsed);
+
+        int cyc = progress->cycles_completed.load();
+        int ok = progress->cycles_ok.load();
+        int fail = progress->cycles_fail.load();
+        int total_lat = progress->total_latency_ms.load();
+        int avg_lat = ok > 0 ? total_lat / ok : 0;
+
+        std::stringstream result;
+        result << "{\"total_cycles\":" << cyc
+               << ",\"cycles_ok\":" << ok
+               << ",\"cycles_fail\":" << fail
+               << ",\"success_pct\":" << (cyc > 0 ? (int)(100.0 * ok / cyc) : 0)
+               << ",\"avg_latency_ms\":" << avg_lat
+               << ",\"duration_s\":" << (int)final_elapsed
+               << "}";
+
+        {
+            std::lock_guard<std::mutex> lock(progress->result_mutex);
+            progress->result_json = result.str();
+        }
+
+        if (db_) {
+            std::string status_str = (cyc > 0 && ok * 100 / cyc >= 90) ? "PASS" : "FAIL";
+            std::string metrics = result.str();
+            const char* sql = "INSERT INTO service_test_runs (service,test_type,status,metrics_json,timestamp) "
+                "VALUES ('full_pipeline','pipeline_stress',?1,?2,strftime('%s','now'))";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, status_str.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, metrics.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
     }
 
     void handle_async_status(struct mg_connection *c, struct mg_http_message *hm) {
