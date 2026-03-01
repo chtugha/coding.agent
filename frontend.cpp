@@ -3288,7 +3288,8 @@ function pollPipelineStress(dur){
         +'<td>'+s.avg_ping_ms+'ms</td><td>'+s.memory_mb+'</td></tr>';
     }
     tbody.innerHTML=html;
-    var avgLat=(cyc>0)?Math.round((d.total_latency_ms||0)/cyc):0;
+    var okCyc=d.cycles_ok||0;
+    var avgLat=(okCyc>0)?Math.round((d.total_latency_ms||0)/okCyc):0;
     document.getElementById('pstressThroughput').innerHTML=
       '<strong>Avg E2E latency:</strong> '+avgLat+'ms &nbsp; '
       +'<strong>Min:</strong> '+(d.min_latency_ms>=999999?'-':d.min_latency_ms)+'ms &nbsp; '
@@ -8131,8 +8132,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::string inject_err;
             std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
+            bool inject_failed = (!inject_err.empty() ||
+                inject_resp.find("\"success\":true") == std::string::npos);
             bool cycle_ok = false;
-            if (!inject_err.empty() || inject_resp.find("\"success\":true") == std::string::npos) {
+            if (inject_failed) {
                 progress->cycles_fail++;
             } else {
                 TranscriptionResult tr = wait_for_whisper_transcription(seq_before, 30000);
@@ -8152,9 +8155,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 while (cycle_ms < cur_min && !progress->min_latency_ms.compare_exchange_weak(cur_min, cycle_ms));
                 int cur_max = progress->max_latency_ms.load();
                 while (cycle_ms > cur_max && !progress->max_latency_ms.compare_exchange_weak(cur_max, cycle_ms));
-            } else {
-                if (!inject_err.empty()) { /* already counted */ }
-                else { progress->cycles_fail++; }
+            } else if (!inject_failed) {
+                progress->cycles_fail++;
             }
             progress->cycles_completed++;
 
@@ -8195,12 +8197,24 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         if (db_) {
             std::string status_str = (cyc > 0 && ok * 100 / cyc >= 90) ? "PASS" : "FAIL";
             std::string metrics = result.str();
-            const char* sql = "INSERT INTO service_test_runs (service,test_type,status,metrics_json,timestamp) "
+            std::string details = std::to_string(cyc) + " cycles, " + std::to_string(ok)
+                + " ok, " + std::to_string(fail) + " fail, avg_lat=" + std::to_string(avg_lat)
+                + "ms, " + std::to_string((int)final_elapsed) + "s";
+            const char* sql1 = "INSERT INTO service_test_runs (service,test_type,status,metrics_json,timestamp) "
                 "VALUES ('full_pipeline','pipeline_stress',?1,?2,strftime('%s','now'))";
             sqlite3_stmt* stmt = nullptr;
-            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_prepare_v2(db_, sql1, -1, &stmt, nullptr) == SQLITE_OK) {
                 sqlite3_bind_text(stmt, 1, status_str.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(stmt, 2, metrics.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+            const char* sql2 = "INSERT INTO test_results (test_name,service,status,details,timestamp) "
+                "VALUES ('pipeline_stress','full_pipeline',?1,?2,strftime('%s','now'))";
+            stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, sql2, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, status_str.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, details.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_step(stmt);
                 sqlite3_finalize(stmt);
             }
