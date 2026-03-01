@@ -370,14 +370,10 @@ private:
                     std::lock_guard<std::mutex> lock(call->mutex);
 
                     size_t pos = call->vad_pos;
-                    std::vector<float> frame_buf(vad_frame_size_);
                     while (pos + vad_frame_size_ <= call->audio_buffer.size()) {
-                        std::copy(call->audio_buffer.begin() + pos,
-                                  call->audio_buffer.begin() + pos + vad_frame_size_,
-                                  frame_buf.begin());
                         float energy = 0;
                         for (size_t i = 0; i < vad_frame_size_; ++i) {
-                            float s = frame_buf[i];
+                            float s = call->audio_buffer[pos + i];
                             energy += s * s;
                         }
                         energy /= static_cast<float>(vad_frame_size_);

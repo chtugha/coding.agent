@@ -6304,7 +6304,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     // With chunked VAD, a single audio file may produce multiple transcription chunks.
     // This function collects all chunks by waiting for transcription activity to settle:
     //   1. Wait until the first transcription appears (up to timeout_ms)
-    //   2. After finding a transcription, keep waiting for 2s of inactivity
+    //   2. After finding a transcription, keep waiting for 5s of inactivity
     //   3. Concatenate all transcription chunks in chronological order
     // Returns the combined text and total Whisper inference latency.
     TranscriptionResult wait_for_whisper_transcription(
