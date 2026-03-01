@@ -8508,8 +8508,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     "{\"error\":\"%s\"}", err.c_str());
                 return;
             }
+            bool confirmed = resp.find(":ON") != std::string::npos;
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                "{\"success\":true,\"enabled\":%s}", enable ? "true" : "false");
+                "{\"success\":true,\"enabled\":%s}", confirmed ? "true" : "false");
         } else {
             std::string resp = tcp_command(whisper_cmd_port, "HALLUCINATION_FILTER:STATUS\n", err, 3);
             if (!err.empty()) {
@@ -8517,7 +8518,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     "{\"error\":\"%s\",\"enabled\":false}", err.c_str());
                 return;
             }
-            bool enabled = resp.find("ON") != std::string::npos;
+            bool enabled = resp.find(":ON") != std::string::npos;
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
                 "{\"enabled\":%s}", enabled ? "true" : "false");
         }
