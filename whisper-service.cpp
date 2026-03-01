@@ -224,10 +224,10 @@ private:
                 "Untertitelung des ZDF, 2024", "Untertitelung des ZDF, 2025",
                 "Untertitelung des ZDF", "des ZDF, 2020", "des ZDF",
                 "Hier geht's", "Hier gehts", "Mehr dazu",
-                "Vielen Dank", "Vielen Dank fürs Zuschauen",
+                "Vielen Dank fürs Zuschauen",
                 "Vielen Dank für die Aufmerksamkeit",
                 "Danke fürs Zuschauen",
-                "Fieber", "Finde", "Fieh", "Fieh, da", "Fiehla", "Fieh da",
+                "Fieh", "Fieh, da", "Fiehla", "Fieh da",
                 "Filo", "Filo, filo",
                 nullptr
             };
@@ -403,6 +403,8 @@ const char* WhisperService::hallucination_patterns_[] = {
     "[Musik]",
     "[Applaus]",
     "MwSt",
+    "Fieber",
+    "Finde",
     "Fieh",
     "Fieh, da",
     "Fiehla",

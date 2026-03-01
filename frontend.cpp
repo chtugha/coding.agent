@@ -2688,7 +2688,7 @@ setInterval(refreshCallLineMap,5000);
 setTimeout(refreshCallLineMap,500);
 
 function fmtCallBadge(cid){
-  if(!cid||cid===0)return'';
+  if(!cid)return'';
   var lbl=callLineMap[cid];
   var txt=lbl?(lbl+' C'+cid):('C'+cid);
   return ' <span class="log-cid">'+txt+'</span>';
@@ -5398,69 +5398,93 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
-    // Parses GET_STATS response from SIP Client (see sip-client-main.cpp get_stats()).
-    // Wire format: "STATS <n_calls> DS:<0|1> <id>:<line>:<rx>:<tx>:<rx_bytes>:<tx_bytes>:<duration>:<fwd>:<discard> ..."
-    void handle_sip_stats(struct mg_connection *c) {
-        std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "GET_STATS");
-        if (resp.empty()) {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"calls\":[],\"error\":\"SIP Client not reachable\"}");
-            return;
-        }
+    struct SipCallInfo {
+        uint32_t call_id = 0;
+        int line_index = -1;
+        uint64_t rtp_rx = 0, rtp_tx = 0, rx_bytes = 0, tx_bytes = 0;
+        uint64_t duration = 0, fwd = 0, discard = 0;
+    };
 
-        std::stringstream json;
-        json << "{\"calls\":[";
+    struct SipStatsResult {
+        bool valid = false;
+        bool ds_connected = false;
+        std::vector<SipCallInfo> calls;
+    };
+
+    SipStatsResult parse_sip_stats() {
+        SipStatsResult result;
+        std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "GET_STATS");
+        if (resp.empty()) return result;
 
         std::istringstream iss(resp);
         std::string token;
         iss >> token;
-        if (token != "STATS") {
-            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Invalid response format\"}");
-            return;
-        }
-        
-        int count;
+        if (token != "STATS") return result;
+
+        int count = 0;
         iss >> count;
-        
-        static constexpr size_t DS_PREFIX_LEN = 3; // "DS:" prefix length
-        bool ds_connected = false;
-        bool first = true;
+        result.valid = true;
+
         while (iss >> token) {
-            if (token.size() >= DS_PREFIX_LEN && token.substr(0, DS_PREFIX_LEN) == "DS:") {
-                ds_connected = (token == "DS:1");
+            if (token.size() >= 3 && token.substr(0, 3) == "DS:") {
+                result.ds_connected = (token == "DS:1");
                 continue;
             }
             std::vector<std::string> parts;
             size_t pos = 0;
             while (pos < token.size()) {
                 size_t next = token.find(':', pos);
-                if (next == std::string::npos) {
-                    parts.push_back(token.substr(pos));
-                    break;
-                }
+                if (next == std::string::npos) { parts.push_back(token.substr(pos)); break; }
                 parts.push_back(token.substr(pos, next - pos));
                 pos = next + 1;
             }
-            
             if (parts.size() >= 7) {
-                if (!first) json << ",";
-                json << "{"
-                     << "\"call_id\":" << parts[0]
-                     << ",\"line_index\":" << parts[1]
-                     << ",\"rtp_rx_count\":" << parts[2]
-                     << ",\"rtp_tx_count\":" << parts[3]
-                     << ",\"rtp_rx_bytes\":" << parts[4]
-                     << ",\"rtp_tx_bytes\":" << parts[5]
-                     << ",\"duration_sec\":" << parts[6];
-                if (parts.size() >= 9) {
-                    json << ",\"rtp_fwd_count\":" << parts[7]
-                         << ",\"rtp_discard_count\":" << parts[8];
-                }
-                json << "}";
-                first = false;
+                SipCallInfo ci;
+                try {
+                    ci.call_id = static_cast<uint32_t>(std::stoul(parts[0]));
+                    ci.line_index = std::stoi(parts[1]);
+                    ci.rtp_rx = std::stoull(parts[2]);
+                    ci.rtp_tx = std::stoull(parts[3]);
+                    ci.rx_bytes = std::stoull(parts[4]);
+                    ci.tx_bytes = std::stoull(parts[5]);
+                    ci.duration = std::stoull(parts[6]);
+                    if (parts.size() >= 9) {
+                        ci.fwd = std::stoull(parts[7]);
+                        ci.discard = std::stoull(parts[8]);
+                    }
+                    result.calls.push_back(ci);
+                } catch (...) {}
             }
         }
+        return result;
+    }
 
-        json << "],\"downstream_connected\":" << (ds_connected ? "true" : "false") << "}";
+    void handle_sip_stats(struct mg_connection *c) {
+        auto stats = parse_sip_stats();
+        if (!stats.valid) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"calls\":[],\"error\":\"SIP Client not reachable\"}");
+            return;
+        }
+
+        std::stringstream json;
+        json << "{\"calls\":[";
+        bool first = true;
+        for (const auto& ci : stats.calls) {
+            if (!first) json << ",";
+            json << "{"
+                 << "\"call_id\":" << ci.call_id
+                 << ",\"line_index\":" << ci.line_index
+                 << ",\"rtp_rx_count\":" << ci.rtp_rx
+                 << ",\"rtp_tx_count\":" << ci.rtp_tx
+                 << ",\"rtp_rx_bytes\":" << ci.rx_bytes
+                 << ",\"rtp_tx_bytes\":" << ci.tx_bytes
+                 << ",\"duration_sec\":" << ci.duration
+                 << ",\"rtp_fwd_count\":" << ci.fwd
+                 << ",\"rtp_discard_count\":" << ci.discard
+                 << "}";
+            first = false;
+        }
+        json << "],\"downstream_connected\":" << (stats.ds_connected ? "true" : "false") << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
@@ -7463,12 +7487,24 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
-        uint16_t oap_cmd = whispertalk::service_cmd_port(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
-        std::string oap_err;
-        std::string oap_resp = tcp_command(oap_cmd, "PING", oap_err, 3);
-        if (oap_resp != "PONG") {
-            finish_async_task(task_id, "{\"error\":\"OAP service not reachable — start all pipeline services first\"}");
-            return;
+        static const std::pair<whispertalk::ServiceType, const char*> required_services[] = {
+            {whispertalk::ServiceType::SIP_CLIENT, "SIP Client"},
+            {whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, "IAP"},
+            {whispertalk::ServiceType::VAD_SERVICE, "VAD"},
+            {whispertalk::ServiceType::WHISPER_SERVICE, "Whisper"},
+            {whispertalk::ServiceType::LLAMA_SERVICE, "LLaMA"},
+            {whispertalk::ServiceType::KOKORO_SERVICE, "Kokoro"},
+            {whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
+        };
+        for (const auto& [svc, name] : required_services) {
+            uint16_t cmd_port = whispertalk::service_cmd_port(svc);
+            std::string err;
+            std::string resp = tcp_command(cmd_port, "PING", err, 3);
+            if (resp.find("PONG") == std::string::npos) {
+                std::string msg = "{\"error\":\"" + std::string(name) + " service not reachable — start all pipeline services first\"}";
+                finish_async_task(task_id, msg);
+                return;
+            }
         }
 
         std::stringstream json;
@@ -7480,7 +7516,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         double total_e2e = 0.0;
         int processed = 0;
 
-        for (const auto& file : files) {
+        for (size_t fi = 0; fi < files.size(); fi++) {
+            const auto& file = files[fi];
             uint64_t seq_before = current_log_seq();
             auto e2e_start = std::chrono::steady_clock::now();
 
@@ -7501,27 +7538,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             uint32_t l1_call_id = 0;
             uint32_t l2_call_id = 0;
             {
-                std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "GET_STATS");
-                std::istringstream iss(resp);
-                std::string tok;
-                iss >> tok; // "STATS"
-                int cnt = 0; iss >> cnt;
-                std::vector<std::pair<uint32_t,int>> calls;
-                while (iss >> tok) {
-                    if (tok.substr(0, 3) == "DS:") continue;
-                    size_t p1 = tok.find(':');
-                    size_t p2 = (p1 != std::string::npos) ? tok.find(':', p1 + 1) : std::string::npos;
-                    if (p1 != std::string::npos && p2 != std::string::npos) {
-                        try {
-                            uint32_t cid = std::stoul(tok.substr(0, p1));
-                            int line = std::stoi(tok.substr(p1 + 1, p2 - p1 - 1));
-                            calls.push_back({cid, line});
-                        } catch (...) {}
-                    }
-                }
-                for (auto& [cid, line] : calls) {
-                    if (line == 0) l1_call_id = cid;
-                    if (line == 1) l2_call_id = cid;
+                auto stats = parse_sip_stats();
+                for (const auto& ci : stats.calls) {
+                    if (ci.line_index == 0) l1_call_id = ci.call_id;
+                    if (ci.line_index == 1) l2_call_id = ci.call_id;
                 }
             }
 
@@ -7594,7 +7614,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                  << ",\"status\":\"" << status_str << "\"}";
             first = false;
 
-            if (&file != &files.back()) {
+            if (fi + 1 < files.size()) {
                 uint64_t drain_seq = current_log_seq();
                 std::this_thread::sleep_for(std::chrono::seconds(8));
                 for (int drain = 0; drain < 10; drain++) {
