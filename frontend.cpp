@@ -8095,7 +8095,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         auto deadline = start_time + std::chrono::seconds(duration_s);
         int file_idx = 0;
 
-        std::thread health_thread([&, progress]() {
+        std::thread health_thread([this, start_time, progress]() {
             while (progress->running.load() && !progress->stop_requested.load()) {
                 for (int i = 0; i < 7; i++) {
                     uint16_t port = service_cmd_port(svc_types[i]);
@@ -8164,7 +8164,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             progress->elapsed_s.store((int)std::chrono::duration_cast<std::chrono::seconds>(
                 now - start_time).count());
 
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
         progress->running.store(false);
