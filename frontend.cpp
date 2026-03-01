@@ -1315,6 +1315,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-log-entry .log-lvl-WARN{color:#ffd60a}
 .wt-log-entry .log-lvl-ERROR{color:#ff453a;font-weight:600}
 .wt-log-entry .log-lvl-DEBUG{color:#98989d}
+.wt-log-entry .log-cid{color:#bf5af2;font-size:11px;font-weight:500;padding:0 4px;border-radius:3px;background:rgba(191,90,242,0.12)}
 .wt-table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
 .wt-table th{font-weight:600;color:var(--wt-text-secondary);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;padding:8px 12px;border-bottom:1px solid var(--wt-border);text-align:left}
 .wt-table td{padding:10px 12px;border-bottom:0.5px solid var(--wt-border);vertical-align:middle}
@@ -2473,7 +2474,7 @@ function connectSvcSSE(name){
       if(e.service!==name)return;
       var lc=/^[A-Z]+$/.test(e.level)?e.level:'INFO';
       el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(e.timestamp)+'</span> '
-        +'<span class="log-lvl-'+lc+'">'+escapeHtml(e.level)+'</span> '+escapeHtml(e.message)+'</div>';
+        +'<span class="log-lvl-'+lc+'">'+escapeHtml(e.level)+'</span>'+fmtCallBadge(e.call_id)+' '+escapeHtml(e.message)+'</div>';
     });
     el.scrollTop=el.scrollHeight;
   }).catch(function(){});
@@ -2483,7 +2484,7 @@ function connectSvcSSE(name){
       var d=JSON.parse(e.data);
       var lc=/^[A-Z]+$/.test(d.level)?d.level:'INFO';
       el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(d.timestamp)+'</span> '
-        +'<span class="log-lvl-'+lc+'">'+escapeHtml(d.level)+'</span> '+escapeHtml(d.message)+'</div>';
+        +'<span class="log-lvl-'+lc+'">'+escapeHtml(d.level)+'</span>'+fmtCallBadge(d.call_id)+' '+escapeHtml(d.message)+'</div>';
       el.scrollTop=el.scrollHeight;
     }catch(x){}
   };
@@ -2508,7 +2509,7 @@ function reconnectLogSSE(){
         var lc=/^[A-Z]+$/.test(e.level)?e.level:'INFO';
         el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(e.timestamp)+'</span> '
           +'<span class="log-svc">'+escapeHtml(e.service)+'</span> '
-          +'<span class="log-lvl-'+lc+'">'+escapeHtml(e.level)+'</span> '+escapeHtml(e.message)+'</div>';
+          +'<span class="log-lvl-'+lc+'">'+escapeHtml(e.level)+'</span>'+fmtCallBadge(e.call_id)+' '+escapeHtml(e.message)+'</div>';
       });
       if(document.getElementById('autoScrollToggle').classList.contains('on')){el.scrollTop=el.scrollHeight;}
     }).catch(function(){});
@@ -2523,7 +2524,7 @@ function reconnectLogSSE(){
       var lc=/^[A-Z]+$/.test(d.level)?d.level:'INFO';
       el.innerHTML+='<div class="wt-log-entry"><span class="log-ts">'+escapeHtml(d.timestamp)+'</span> '
         +'<span class="log-svc">'+escapeHtml(d.service)+'</span> '
-        +'<span class="log-lvl-'+lc+'">'+escapeHtml(d.level)+'</span> '+escapeHtml(d.message)+'</div>';
+        +'<span class="log-lvl-'+lc+'">'+escapeHtml(d.level)+'</span>'+fmtCallBadge(d.call_id)+' '+escapeHtml(d.message)+'</div>';
       if(el.children.length>2000){el.removeChild(el.firstChild);}
       if(document.getElementById('autoScrollToggle').classList.contains('on')){el.scrollTop=el.scrollHeight;}
     }catch(x){}
@@ -2672,6 +2673,25 @@ function toggleThemeMenu(){
 function escapeHtml(s){
   if(!s)return'';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+var callLineMap={};
+function refreshCallLineMap(){
+  fetch('/api/sip/stats').then(function(r){return r.json();}).then(function(d){
+    if(!d.calls)return;
+    var m={};
+    d.calls.forEach(function(c){m[c.call_id]='L'+c.line_index;});
+    callLineMap=m;
+  }).catch(function(){});
+}
+setInterval(refreshCallLineMap,5000);
+setTimeout(refreshCallLineMap,500);
+
+function fmtCallBadge(cid){
+  if(!cid||cid===0)return'';
+  var lbl=callLineMap[cid];
+  var txt=lbl?(lbl+' C'+cid):('C'+cid);
+  return ' <span class="log-cid">'+txt+'</span>';
 }
 
 function refreshTestFiles(){
