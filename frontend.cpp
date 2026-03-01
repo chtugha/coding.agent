@@ -2683,6 +2683,11 @@ function refreshCallLineMap(){
     var m={};
     d.calls.forEach(function(c){m[c.call_id]='L'+c.line_index;});
     callLineMap=m;
+    document.querySelectorAll('span.log-cid[data-cid]').forEach(function(el){
+      var cid=parseInt(el.getAttribute('data-cid'),10);
+      var lbl=m[cid];
+      if(lbl){el.textContent=lbl+' C'+cid;}
+    });
   }).catch(function(){});
 }
 setInterval(refreshCallLineMap,5000);
@@ -2695,7 +2700,7 @@ function fmtCallBadge(cid){
     _clmPending=setTimeout(function(){_clmPending=null;refreshCallLineMap();},300);
   }
   var txt=lbl?(lbl+' C'+cid):('C'+cid);
-  return ' <span class="log-cid">'+txt+'</span>';
+  return ' <span class="log-cid" data-cid="'+cid+'">'+txt+'</span>';
 }
 
 function refreshTestFiles(){
