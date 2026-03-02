@@ -53,22 +53,22 @@ Implement real-time log level control per service.
 - Update `LogForwarder::forward()` to check level before sending (early return if below threshold)
 - Add `--log-level <LEVEL>` CLI argument to all 7 services (default: INFO)
 - Add `SET_LOG_LEVEL:<LEVEL>` command to each service's command port handler → calls `log_fwd_.set_level()`
-- Update `frontend.cpp` `handle_log_level_settings` POST: after DB write, call `send_negotiation_command(service, "SET_LOG_LEVEL:" + level)` with graceful offline handling
+- Update `frontend.cpp` `handle_log_level_settings` POST: after DB write, call `send_negotiation_command(service, "SET_LOG_LEVEL:" + level)` with graceful offline handling (service may be down — not an error)
+- Modify `frontend.cpp` `start_service()`: after the `VAD_SERVICE` special-case block (~line 785), read `log_level_<NAME>` from SQLite and append `--log-level <LEVEL>` to `use_args` so DB-persisted levels are applied on every (re)start even when the service was offline when the level was changed
 - Files: `interconnect.h`, `inbound-audio-processor.cpp`, `vad-service.cpp`, `whisper-service.cpp`, `llama-service.cpp`, `kokoro-service.cpp`, `outbound-audio-processor.cpp`, `sip-client-main.cpp`, `frontend.cpp`
-- Verify: build succeeds; start whisper-service with `--log-level ERROR`, change to DEBUG via UI, verify DEBUG logs appear without restart
+- Verify: (1) start whisper-service with `--log-level ERROR` → only ERROR logs in frontend; (2) change to DEBUG via UI Save All → DEBUG logs appear immediately without restart; (3) stop whisper-service, set level to WARN via UI, restart → verify WARN level is active from first log line
 
 ### [ ] Step: Logging Robustness Audit & Hardening
 
 Verify and harden the full logging chain so tests can be read reliably.
 
-- Audit `LogForwarder::forward()` buffer sizes vs max log message size
-- Audit `frontend.cpp` `process_log_message()` for malformed/oversized datagrams
-- Audit `frontend.cpp` `run_log_server()` recv buffer (4096 bytes vs max possible message)
-- Ensure `MAX_RECENT_LOGS` ring buffer is properly enforced in `recent_logs_` deque
-- Verify SQLite log writes don't block log reception thread (async if needed)
-- Add defensive bounds checking where missing
+- Audit `LogForwarder::forward()` buffer sizes: `msg[2048]`, `buf[2200]` — confirm TRACE-level messages cannot overflow; truncation must be safe (no UB)
+- Audit `frontend.cpp` `process_log_message()`: add early-return guard for strings that don't match `SERVICE LEVEL CALLID MESSAGE` format; verify no crash on malformed/short/empty datagrams
+- Audit `frontend.cpp` `run_log_server()` recv buffer (4096 bytes): max outbound UDP is 2200 bytes — document sizes as compatible; no resize needed
+- Ensure `MAX_RECENT_LOGS` ring buffer cap is enforced correctly in `recent_logs_` deque (pop_front when over limit)
+- SQLite log write latency: time the INSERT in `enqueue_log` with `std::chrono`. **Decision criterion**: if write takes > 1ms avg, introduce async write queue (`std::queue<LogEntry>` + dedicated writer thread + mutex). If < 1ms, add a comment documenting the measurement and close the item — no speculative refactor.
 - Files: `interconnect.h`, `frontend.cpp`
-- Verify: send oversized/malformed UDP to port 22022 → frontend does not crash; logs continue flowing
+- Verify: send malformed UDP to port 22022 (`echo "garbage" | nc -u 127.0.0.1 22022`) → frontend does not crash; subsequent valid logs still appear in UI
 
 ### [ ] Step: Interconnect Communication Testing & Speed Improvements
 
@@ -98,7 +98,7 @@ Run full 1-minute pipeline test, measure WER and latency, find bottlenecks.
 - Fix VAD parameters if chunks are too long or short
 - Fix Whisper parameters if WER is below 90%
 - Fix LLaMA parameters if response latency is above 500ms
-- Target: ≥90% similarity (WARN+PASS), Whisper inference ≤300ms avg
+- **WER targets**: zero FAILs (< 90%) is the hard floor; maximise PASS count (≥ 99.5%). Samples landing in WARN (90–99.5%) are acceptable but trigger tuning. Whisper inference ≤ 300ms avg.
 - Files: `vad-service.cpp`, `whisper-service.cpp`, `llama-service.cpp` as needed
 - Also: `tests/run_pipeline_test.py` — add per-stage latency reporting if log data supports it
 

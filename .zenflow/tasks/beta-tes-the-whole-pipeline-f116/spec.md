@@ -89,7 +89,15 @@ Multi-week, multi-component task spanning:
 - `kokoro-service.cpp`: same
 - `outbound-audio-processor.cpp`: same
 - `sip-client-main.cpp`: same
-- `frontend.cpp`: push `SET_LOG_LEVEL` when log level saved + service enum mapping
+- `frontend.cpp`:
+  - Push `SET_LOG_LEVEL` to running service when log level saved
+  - **Modify `start_service()`**: after the `VAD_SERVICE` special-case block (line ~785), read `log_level_<NAME>` from SQLite and append `--log-level <LEVEL>` to `use_args`. This ensures the DB-persisted level is honoured on every (re)start regardless of whether the service was online when the setting was saved:
+    ```cpp
+    std::string stored_level = get_setting("log_level_" + name, "");
+    if (!stored_level.empty() && stored_level != "INFO") {
+        use_args += " --log-level " + stored_level;
+    }
+    ```
 
 ### Area 2: Logging Robustness
 
@@ -100,9 +108,12 @@ Multi-week, multi-component task spanning:
 - SQLite log writes don't block service log reception
 
 **Files to audit and harden**:
-- `interconnect.h` `LogForwarder::forward()` — verify buffer sizes (currently `msg[2048]`, `buf[2200]`)
-- `frontend.cpp` `process_log_message()` — verify parse robustness on malformed input
-- `frontend.cpp` `run_log_server()` — verify recv buffer size vs max message size
+- `interconnect.h` `LogForwarder::forward()` — verify buffer sizes (currently `msg[2048]`, `buf[2200]`); at TRACE level the format string could produce messages near the limit; confirm truncation is safe.
+- `frontend.cpp` `process_log_message()` — verify parse robustness on malformed/oversized input; add early-return guards for strings that don't match expected `SERVICE LEVEL CALLID MESSAGE` format.
+- `frontend.cpp` `run_log_server()` — recv buffer is 4096 bytes; max outbound UDP is `2200` bytes from `LogForwarder`; the sizes are compatible but must be documented.
+- `frontend.cpp` SQLite log writes: measure wall-clock cost of the INSERT in `enqueue_log`. **Criterion: if the write path holds the log mutex for > 1ms on average, introduce an async write queue (std::queue + dedicated writer thread). If < 1ms, document "no async needed" and close this item.** No speculative async refactor.
+
+**No new files** — all changes are in-place.
 
 ### Area 3: Interconnect / Service Communication Testing
 
@@ -136,7 +147,11 @@ Multi-week, multi-component task spanning:
 - LLaMA response: ≤ 500ms (Llama-3.2-1B-Instruct, greedy, max 64 tokens)
 - Kokoro synthesis: ≤ 300ms for short responses
 - End-to-end: Speech end → audio playback start ≤ 1500ms (real-time threshold)
-- WER: ≥ 90% similarity (Levenshtein-based), target ≥ 99.5% PASS rate
+- **WER thresholds** (from `run_pipeline_test.py`):
+  - `PASS`: Levenshtein similarity ≥ 99.5% — exact/near-exact match
+  - `WARN`: similarity 90–99.5% — acceptable, minor word errors
+  - `FAIL`: similarity < 90% — unacceptable
+  - **Goal**: maximise PASS count across 20 samples; the floor is zero FAILs. If samples land in WARN, tune Whisper/VAD params to push them toward PASS. Reaching 99.5% on all samples may not be achievable for all audio quality levels — WARN is acceptable, FAIL is not.
 
 **Files modified if bottlenecks found**:
 - `vad-service.cpp`: VAD params tuning (silence threshold, chunk size)
@@ -173,7 +188,7 @@ Multi-week, multi-component task spanning:
 | `kokoro-service.cpp` | `--log-level` arg, `SET_LOG_LEVEL` command |
 | `outbound-audio-processor.cpp` | `--log-level` arg, `SET_LOG_LEVEL` command |
 | `sip-client-main.cpp` | `--log-level` arg, `SET_LOG_LEVEL` command |
-| `frontend.cpp` | Push `SET_LOG_LEVEL` to service on level save; verify logging robustness |
+| `frontend.cpp` | Push `SET_LOG_LEVEL` to running service on level save; modify `start_service()` to append `--log-level` from DB; verify logging robustness |
 | `tests/run_pipeline_test.py` | Enhance with per-stage latency reporting, bottleneck flags |
 
 ### No New Files
@@ -240,7 +255,7 @@ python3 tests/run_pipeline_test.py "ggml-large-v3-turbo-q5_0" Testfiles
 
 | Risk | Mitigation |
 |------|-----------|
-| SET_LOG_LEVEL push fails (service offline) | Frontend handles silently; level applied at next start via CLI arg stored in DB |
+| SET_LOG_LEVEL push fails (service offline) | Frontend handles silently (no error to user); on next start, `start_service()` reads `log_level_<NAME>` from DB and appends `--log-level <LEVEL>` to launch args — ensuring the setting is always honoured |
 | LogForwarder buffer overflow on TRACE level | Already bounded: `msg[2048]`, `buf[2200]`; verify sizes are sufficient |
 | Whisper CoreML model not loaded | Check model path; test with CPU fallback |
 | LLaMA slow on large context | Context cleared on CALL_END; bounded by 64 token max |
