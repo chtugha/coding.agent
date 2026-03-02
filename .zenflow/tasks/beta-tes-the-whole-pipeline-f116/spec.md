@@ -95,6 +95,7 @@ Multi-week, multi-component task spanning:
     ```cpp
     std::string stored_level = get_setting("log_level_" + name, "");
     if (!stored_level.empty() && stored_level != "INFO") {
+        // INFO is the built-in default; skip to keep args clean
         use_args += " --log-level " + stored_level;
     }
     ```
