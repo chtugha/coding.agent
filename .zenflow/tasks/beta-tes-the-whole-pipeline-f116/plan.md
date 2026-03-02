@@ -59,7 +59,8 @@ Implement real-time log level control per service.
 - Files: `interconnect.h`, `inbound-audio-processor.cpp`, `vad-service.cpp`, `whisper-service.cpp`, `llama-service.cpp`, `kokoro-service.cpp`, `outbound-audio-processor.cpp`, `sip-client-main.cpp`, `frontend.cpp`
 - Verify: (1) start whisper-service with `--log-level ERROR` → only ERROR logs in frontend; (2) change to DEBUG via UI Save All → DEBUG logs appear immediately without restart; (3) stop whisper-service, set level to WARN via UI, restart → verify WARN level is active from first log line
 
-### [ ] Step: Logging Robustness Audit & Hardening
+### [x] Step: Logging Robustness Audit & Hardening
+<!-- chat-id: 1664e83a-3115-4f02-a9ae-7db962f32245 -->
 
 Verify and harden the full logging chain so tests can be read reliably.
 

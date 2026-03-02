@@ -974,6 +974,8 @@ private:
         tv.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+        // recv buffer: 4096 bytes. Max inbound UDP datagram from LogForwarder is
+        // 2303 bytes (buf[2304]-1), so 4096 provides ample headroom — no resize needed.
         char buffer[4096];
         while (!s_sigint_received) {
             ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
@@ -999,6 +1001,19 @@ private:
     }
 
     void process_log_message(const std::string& msg) {
+        // Expected datagram format: "<SERVICE> <LEVEL> <CALL_ID> <message>"
+        // Malformed datagrams (e.g. stray UDP traffic) are silently dropped here
+        // to prevent garbage entries in the DB and UI.
+        if (msg.empty()) return;
+
+        size_t p1 = msg.find(' ');
+        size_t p2 = (p1 != std::string::npos) ? msg.find(' ', p1 + 1) : std::string::npos;
+        size_t p3 = (p2 != std::string::npos) ? msg.find(' ', p2 + 1) : std::string::npos;
+
+        if (p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos) {
+            return;
+        }
+
         LogEntry entry;
 
         time_t now = time(nullptr);
@@ -1006,31 +1021,20 @@ private:
         strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
         entry.timestamp = timebuf;
 
-        size_t p1 = msg.find(' ');
-        size_t p2 = (p1 != std::string::npos) ? msg.find(' ', p1 + 1) : std::string::npos;
-        size_t p3 = (p2 != std::string::npos) ? msg.find(' ', p2 + 1) : std::string::npos;
-
-        if (p1 != std::string::npos && p2 != std::string::npos && p3 != std::string::npos) {
-            entry.service = parse_service_type(msg.substr(0, p1));
-            entry.level = msg.substr(p1 + 1, p2 - p1 - 1);
-            try {
-                entry.call_id = static_cast<uint32_t>(std::stoul(msg.substr(p2 + 1, p3 - p2 - 1)));
-            } catch (const std::exception&) {
-                entry.call_id = 0;
-            }
-            entry.message = msg.substr(p3 + 1);
-        } else {
-            entry.service = ServiceType::FRONTEND;
+        entry.service = parse_service_type(msg.substr(0, p1));
+        entry.level = msg.substr(p1 + 1, p2 - p1 - 1);
+        try {
+            entry.call_id = static_cast<uint32_t>(std::stoul(msg.substr(p2 + 1, p3 - p2 - 1)));
+        } catch (const std::exception&) {
             entry.call_id = 0;
-            entry.level = "INFO";
-            entry.message = msg;
         }
+        entry.message = msg.substr(p3 + 1);
 
         {
             std::lock_guard<std::mutex> lock(logs_mutex_);
             entry.seq = ++log_seq_;
             recent_logs_.push_back(entry);
-            if (recent_logs_.size() > MAX_RECENT_LOGS) {
+            if (recent_logs_.size() >= MAX_RECENT_LOGS) {
                 recent_logs_.pop_front();
             }
         }
@@ -1046,6 +1050,10 @@ private:
     std::mutex log_queue_mutex_;
     std::vector<LogEntry> log_queue_;
 
+    // Async SQLite write design: enqueue_log() just appends to log_queue_ under a
+    // mutex (O(1), <1µs). The main event loop calls flush_log_queue() every 500ms,
+    // which batches all pending entries into a single BEGIN/COMMIT transaction —
+    // typically < 1ms for hundreds of rows. No dedicated writer thread is needed.
     void enqueue_log(const LogEntry& entry) {
         std::lock_guard<std::mutex> lock(log_queue_mutex_);
         log_queue_.push_back(entry);

@@ -1315,11 +1315,16 @@ public:
 
 private:
     void vforward(const char* level, uint32_t call_id, const char* fmt, va_list args) {
+        // msg[2048]: max log message body. vsnprintf truncates safely at 2047 chars + null.
         char msg[2048];
         int mlen = vsnprintf(msg, sizeof(msg), fmt, args);
         if (mlen <= 0) return;
         if (mlen >= (int)sizeof(msg)) mlen = (int)sizeof(msg) - 1;
 
+        // buf[2304]: format is "<SERVICE> <LEVEL> <CALL_ID> <message>"
+        // Max prefix overhead: 23 (service) + 1 + 5 (level) + 1 + 10 (uint32) + 1 = 41 chars
+        // Max total: 41 + 2047 = 2088 < 2304 — no overflow possible.
+        // recv buffer on frontend side is 4096, well above this maximum.
         char buf[2304];
         int blen = snprintf(buf, sizeof(buf), "%s %s %u %.*s",
                             svc_name_, level, call_id, mlen, msg);
