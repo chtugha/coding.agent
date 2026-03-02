@@ -368,7 +368,9 @@ private:
                 std::vector<whispertalk::Packet> to_drain;
                 {
                     std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
-                    to_drain.assign(buffered_packets_.begin(), buffered_packets_.end());
+                    to_drain.assign(std::make_move_iterator(buffered_packets_.begin()),
+                                   std::make_move_iterator(buffered_packets_.end()));
+                    buffered_packets_.clear();
                 }
                 // Drain old buffered packets first (preserves chronological order).
                 size_t drained = 0;
@@ -378,8 +380,10 @@ private:
                 }
                 {
                     std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
-                    buffered_packets_.erase(buffered_packets_.begin(),
-                                           buffered_packets_.begin() + (std::ptrdiff_t)drained);
+                    // Move unsent remainder back into the deque.
+                    for (size_t i = drained; i < to_drain.size(); ++i) {
+                        buffered_packets_.push_back(std::move(to_drain[i]));
+                    }
                     // If drain failed (buffer still has entries), queue current packet too.
                     if (!buffered_packets_.empty()) {
                         if (buffered_packets_.size() >= MAX_BUFFER_PACKETS) {
