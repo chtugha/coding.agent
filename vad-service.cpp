@@ -70,10 +70,9 @@ struct VadCall {
     size_t last_buffer_size = 0;
     std::chrono::steady_clock::time_point last_buffer_growth;
     std::vector<float> frame_energies;
-    // Cumulative sum-of-squares and peak for the current speech segment,
+    // Cumulative sum-of-squares for the current speech segment,
     // tracked during frame processing to avoid re-scanning in send_chunk_downstream.
     float speech_sum_sq = 0.0f;
-    float speech_peak = 0.0f;
     size_t speech_sample_count = 0;
 };
 
@@ -206,7 +205,6 @@ private:
         call.frame_energies.clear();
         call.speech_signaled = false;
         call.speech_sum_sq = 0.0f;
-        call.speech_peak = 0.0f;
         call.speech_sample_count = 0;
         return was_signaled;
     }
@@ -408,7 +406,6 @@ private:
                                     // Pre-allocate for max chunk to avoid realloc during speech.
                                     call->frame_energies.reserve(vad_max_speech_samples_ / vad_frame_size_ + 1);
                                     call->speech_sum_sq = 0.0f;
-                                    call->speech_peak = 0.0f;
                                     call->speech_sample_count = 0;
                                     // Record where frame_energies[0] starts (onset confirmation frame).
                                     // This is distinct from speech_start which includes context frames.
@@ -520,6 +517,8 @@ private:
                                 to_send.assign(
                                     call->audio_buffer.begin() + call->speech_start,
                                     call->audio_buffer.end());
+                                chunk_sum_sq = call->speech_sum_sq;
+                                chunk_sample_count = call->speech_sample_count;
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
                                 call->last_buffer_size = 0;
@@ -537,7 +536,7 @@ private:
 
                     // Trim non-speech buffer, keeping context frames for next onset detection.
                     // Only trim when accumulated excess exceeds 4x the keep threshold to avoid
-                    // frequent small deque erases (each erase is O(N) on remaining elements).
+                    // frequent small deque erases (each front-erase is O(elements_removed)).
                     if (!call->in_speech) {
                         size_t keep_frames = vad_context_frames_ + 2;
                         size_t keep = vad_frame_size_ * keep_frames;
@@ -560,6 +559,8 @@ private:
                                 to_send.assign(
                                     call->audio_buffer.begin() + call->speech_start,
                                     call->audio_buffer.end());
+                                chunk_sum_sq = call->speech_sum_sq;
+                                chunk_sample_count = call->speech_sample_count;
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
                                 call->last_buffer_size = 0;
