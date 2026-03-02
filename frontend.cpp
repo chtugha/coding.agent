@@ -573,6 +573,7 @@ private:
             "ALTER TABLE model_benchmark_runs ADD COLUMN german_pct REAL",
             "ALTER TABLE iap_quality_tests ADD COLUMN rms_error_pct REAL",
             "ALTER TABLE iap_quality_tests ADD COLUMN max_latency_ms REAL",
+            "ALTER TABLE iap_quality_tests DROP COLUMN thd_percent",
             nullptr
         };
         for (int i = 0; migrations[i]; i++) {
@@ -3935,7 +3936,8 @@ function renderIapChart(){
             },
             afterBody:function(items){
               var idx=items[0].dataIndex;
-              return 'Status: '+window.iapTestHistory[idx].status;
+              var h=window.iapTestHistory[idx];
+              return ['Avg Latency: '+h.latency.toFixed(4)+' ms','Max Latency: '+h.maxLatency.toFixed(4)+' ms','Status: '+h.status];
             }
           }
         },
