@@ -1231,9 +1231,38 @@ private:
     }
 };
 
+enum class LogLevel : int {
+    ERROR = 0,
+    WARN  = 1,
+    INFO  = 2,
+    DEBUG = 3,
+    TRACE = 4
+};
+
+inline const char* log_level_string(LogLevel lvl) {
+    switch (lvl) {
+        case LogLevel::ERROR: return "ERROR";
+        case LogLevel::WARN:  return "WARN";
+        case LogLevel::INFO:  return "INFO";
+        case LogLevel::DEBUG: return "DEBUG";
+        case LogLevel::TRACE: return "TRACE";
+        default: return "INFO";
+    }
+}
+
+inline LogLevel log_level_from_string(const char* s) {
+    if (!s) return LogLevel::INFO;
+    if (strcasecmp(s, "ERROR") == 0) return LogLevel::ERROR;
+    if (strcasecmp(s, "WARN")  == 0) return LogLevel::WARN;
+    if (strcasecmp(s, "INFO")  == 0) return LogLevel::INFO;
+    if (strcasecmp(s, "DEBUG") == 0) return LogLevel::DEBUG;
+    if (strcasecmp(s, "TRACE") == 0) return LogLevel::TRACE;
+    return LogLevel::INFO;
+}
+
 class LogForwarder {
 public:
-    LogForwarder() : sock_(-1), port_(0) {}
+    LogForwarder() : sock_(-1), port_(0), log_level_(static_cast<int>(LogLevel::INFO)) {}
 
     ~LogForwarder() {
         if (sock_ >= 0) ::close(sock_);
@@ -1252,31 +1281,60 @@ public:
         }
     }
 
-    void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
+    void set_level(LogLevel level) {
+        log_level_.store(static_cast<int>(level), std::memory_order_relaxed);
+    }
+
+    void set_level(const char* level_str) {
+        set_level(log_level_from_string(level_str));
+    }
+
+    LogLevel get_level() const {
+        return static_cast<LogLevel>(log_level_.load(std::memory_order_relaxed));
+    }
+
+    void forward(LogLevel lvl, uint32_t call_id, const char* fmt, ...) {
         if (sock_ < 0) return;
-        char msg[2048];
+        if (static_cast<int>(lvl) > log_level_.load(std::memory_order_relaxed)) return;
         va_list args;
         va_start(args, fmt);
-        int mlen = vsnprintf(msg, sizeof(msg), fmt, args);
+        vforward(log_level_string(lvl), call_id, fmt, args);
         va_end(args);
-        if (mlen <= 0) return;
+    }
 
-        char buf[2200];
-        int blen = snprintf(buf, sizeof(buf), "%s %s %u %.*s",
-                            svc_name_, level, call_id, mlen, msg);
-        if (blen > 0) {
-            sendto(sock_, buf, static_cast<size_t>(blen), 0,
-                   (struct sockaddr*)&addr_, sizeof(addr_));
-        }
+    void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
+        if (sock_ < 0) return;
+        if (static_cast<int>(log_level_from_string(level)) > log_level_.load(std::memory_order_relaxed)) return;
+        va_list args;
+        va_start(args, fmt);
+        vforward(level, call_id, fmt, args);
+        va_end(args);
     }
 
     bool active() const { return sock_ >= 0 && port_ > 0; }
 
 private:
+    void vforward(const char* level, uint32_t call_id, const char* fmt, va_list args) {
+        char msg[2048];
+        int mlen = vsnprintf(msg, sizeof(msg), fmt, args);
+        if (mlen <= 0) return;
+        if (mlen >= (int)sizeof(msg)) mlen = (int)sizeof(msg) - 1;
+
+        char buf[2304];
+        int blen = snprintf(buf, sizeof(buf), "%s %s %u %.*s",
+                            svc_name_, level, call_id, mlen, msg);
+        if (blen > 0) {
+            if (blen >= (int)sizeof(buf)) blen = (int)sizeof(buf) - 1;
+            sendto(sock_, buf, static_cast<size_t>(blen), 0,
+                   (struct sockaddr*)&addr_, sizeof(addr_));
+        }
+    }
+
     int sock_;
     uint16_t port_;
     const char* svc_name_ = "UNKNOWN";
     struct sockaddr_in addr_;
+    std::atomic<int> log_level_;
 };
 
 }

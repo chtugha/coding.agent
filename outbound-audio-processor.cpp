@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <unistd.h>
+#include <getopt.h>
 #include "interconnect.h"
 
 static constexpr int AA_FILTER_TAPS = 15;
@@ -63,6 +64,10 @@ struct CallState {
 class OutboundAudioProcessor {
 public:
     OutboundAudioProcessor() : running_(true), interconnect_(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR) {
+    }
+
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
     }
 
     bool init() {
@@ -173,6 +178,11 @@ private:
 
     std::string handle_command(const std::string& cmd) {
         if (cmd == "PING") return "PONG\n";
+        if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = cmd.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             std::string result = "ACTIVE_CALLS:" + std::to_string(calls_.size());
@@ -341,7 +351,7 @@ private:
                     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count();
                     if (age > 60) {
                         std::cout << "Stale call " << it->first << " (" << age << "s idle), removing" << std::endl;
-                        log_fwd_.forward("WARN", it->first, "Stale call removed after %lds idle", age);
+                        log_fwd_.forward(whispertalk::LogLevel::WARN, it->first, "Stale call removed after %lds idle", age);
                         it = calls_.erase(it);
                     } else {
                         ++it;
@@ -374,7 +384,7 @@ private:
                 if (!interconnect_.send_to_downstream(pkt)) {
                     if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                         std::cout << "⚠️  [" << state->id << "] SIP disconnected, discarding audio" << std::endl;
-                        log_fwd_.forward("WARN", state->id, "SIP disconnected, discarding audio");
+                        log_fwd_.forward(whispertalk::LogLevel::WARN, state->id, "SIP disconnected, discarding audio");
                     }
                 }
             }
@@ -392,7 +402,7 @@ private:
         state->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = state;
         std::cout << "📞 Created outbound audio state for call_id " << cid << std::endl;
-        log_fwd_.forward("INFO", cid, "Created outbound audio state");
+        log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created outbound audio state");
         return state;
     }
 
@@ -407,14 +417,14 @@ private:
         state->read_pos = 0;
         std::memset(state->fir_history, 0, sizeof(state->fir_history));
         std::cout << "SPEECH_ACTIVE [call " << call_id << "] — flushed " << flushed << " bytes of audio buffer" << std::endl;
-        log_fwd_.forward("WARN", call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
+        log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
     }
 
     void handle_call_end(uint32_t call_id) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         if (calls_.count(call_id)) {
             std::cout << "🛑 Call " << call_id << " ended, cleaning up outbound audio" << std::endl;
-            log_fwd_.forward("INFO", call_id, "Call ended, cleaning up outbound audio");
+            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up outbound audio");
             calls_.erase(call_id);
         }
     }
@@ -427,11 +437,26 @@ private:
     whispertalk::LogForwarder log_fwd_;
 };
 
-int main() {
+int main(int argc, char** argv) {
+    std::string log_level = "INFO";
+
+    static struct option long_opts[] = {
+        {"log-level", required_argument, 0, 'L'},
+        {0, 0, 0, 0}
+    };
+    int opt;
+    while ((opt = getopt_long(argc, argv, "L:", long_opts, nullptr)) != -1) {
+        switch (opt) {
+            case 'L': log_level = optarg; break;
+            default: break;
+        }
+    }
+
     OutboundAudioProcessor proc;
     if (!proc.init()) {
         return 1;
     }
+    proc.set_log_level(log_level.c_str());
     proc.run();
     return 0;
 }

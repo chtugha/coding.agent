@@ -147,6 +147,10 @@ public:
                   << std::endl;
     }
 
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
+    }
+
     bool init() {
         if (!interconnect_.initialize()) {
             std::cerr << "Failed to initialize interconnect" << std::endl;
@@ -298,6 +302,11 @@ private:
 
     std::string handle_vad_command(const std::string& cmd) {
         if (cmd == "PING") return "PONG\n";
+        if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = cmd.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             size_t speech_active = 0;
@@ -411,7 +420,7 @@ private:
                                     // This is distinct from speech_start which includes context frames.
                                     call->energies_sample_origin = pos;
                                     if (vad_logging_enabled_) {
-                                        log_fwd_.forward("DEBUG", call->id,
+                                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
                                             "VAD speech_start at sample %zu (energy=%.6f threshold=%.6f noise_floor=%.6f onset=%d)",
                                             pos, energy, threshold, call->noise_floor, call->onset_count);
                                     }
@@ -451,7 +460,7 @@ private:
                             chunk_sample_count = call->speech_sample_count;
                             if (vad_logging_enabled_) {
                                 double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
-                                log_fwd_.forward("DEBUG", call->id,
+                                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
                                     "VAD speech_end (silence) — %zu samples (%.0fms) queued for transcription",
                                     to_send.size(), dur_ms);
                             }
@@ -473,7 +482,7 @@ private:
                             if (vad_logging_enabled_) {
                                 double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                 bool was_smart = (split != pos);
-                                log_fwd_.forward("DEBUG", call->id,
+                                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
                                     "VAD speech_end (max_length%s) — %zu samples (%.0fms) queued for transcription",
                                     was_smart ? ", smart-split" : "", to_send.size(), dur_ms);
                             }
@@ -525,7 +534,7 @@ private:
                                 needs_idle_broadcast = reset_call_state(*call);
                                 if (vad_logging_enabled_) {
                                     double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
-                                    log_fwd_.forward("DEBUG", call->id,
+                                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
                                         "VAD speech_end (inactivity %dms) — %zu samples (%.0fms) queued",
                                         vad_inactivity_flush_ms_, to_send.size(), dur_ms);
                                 }
@@ -604,7 +613,7 @@ private:
                                 float pre_sum_sq = 0.0f, size_t pre_count = 0) {
         if (audio.size() < vad_min_speech_samples_) {
             if (vad_logging_enabled_) {
-                log_fwd_.forward("DEBUG", call_id,
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                     "Skipping chunk: %zu samples (%.0fms) below minimum %zu",
                     audio.size(), audio.size() / (double)VAD_SAMPLES_PER_MS, vad_min_speech_samples_);
             }
@@ -625,7 +634,7 @@ private:
 
         if (rms < 0.005f) {
             if (vad_logging_enabled_) {
-                log_fwd_.forward("DEBUG", call_id,
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                     "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / (double)VAD_SAMPLES_PER_MS);
             }
             return;
@@ -639,7 +648,7 @@ private:
         }
 
         if (vad_logging_enabled_) {
-            log_fwd_.forward("INFO", call_id,
+            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
                 "VAD chunk -> Whisper: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
                 audio.size(), audio.size() / (double)VAD_SAMPLES_PER_MS, rms, peak);
         }
@@ -649,7 +658,7 @@ private:
         pkt.trace.record(whispertalk::ServiceType::VAD_SERVICE, 1);
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                log_fwd_.forward("WARN", call_id, "Whisper disconnected, discarding speech chunk");
+                log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Whisper disconnected, discarding speech chunk");
             }
         }
     }
@@ -663,7 +672,7 @@ private:
         call->last_buffer_growth = std::chrono::steady_clock::now();
         calls_[cid] = call;
         std::cout << "Created VAD session for call_id " << cid << std::endl;
-        log_fwd_.forward("INFO", cid, "Created VAD session");
+        log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created VAD session");
         return call;
     }
 
@@ -672,7 +681,7 @@ private:
         auto it = calls_.find(call_id);
         if (it != calls_.end()) {
             std::cout << "Call " << call_id << " ended, closing VAD session" << std::endl;
-            log_fwd_.forward("INFO", call_id, "Call ended, closing VAD session");
+            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, closing VAD session");
             calls_.erase(it);
         }
     }
@@ -700,22 +709,25 @@ int main(int argc, char** argv) {
     float vad_threshold = 2.0f;
     int vad_silence_ms = 400;
     int vad_max_chunk_ms = 8000;
+    std::string log_level = "INFO";
 
     static struct option long_opts[] = {
         {"vad-window-ms",    required_argument, 0, 'w'},
         {"vad-threshold",    required_argument, 0, 't'},
         {"vad-silence-ms",   required_argument, 0, 's'},
         {"vad-max-chunk-ms", required_argument, 0, 'c'},
+        {"log-level",        required_argument, 0, 'L'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "w:t:s:c:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "w:t:s:c:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'w': vad_window_ms = atoi(optarg); break;
             case 't': vad_threshold = atof(optarg); break;
             case 's': vad_silence_ms = atoi(optarg); break;
             case 'c': vad_max_chunk_ms = atoi(optarg); break;
+            case 'L': log_level = optarg; break;
             default: break;
         }
     }
@@ -727,6 +739,7 @@ int main(int argc, char** argv) {
     if (!service.init()) {
         return 1;
     }
+    service.set_log_level(log_level.c_str());
     service.run();
 
     return 0;

@@ -786,6 +786,12 @@ private:
                 if (!vad_c.empty()) use_args += " --vad-max-chunk-ms " + vad_c;
             }
 
+            if (args_override.empty()) {
+                std::string ll_key = "log_level_" + name;
+                std::string ll = get_setting(ll_key, "");
+                if (!ll.empty()) use_args += " --log-level " + ll;
+            }
+
             auto argv_strings = split_args(use_args);
 
             mkdir("logs", 0755);
@@ -2783,6 +2789,14 @@ function escapeHtml(s){
   if(!s)return'';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+function showToast(msg,type){
+  var el=document.createElement('div');
+  el.textContent=msg;
+  el.style.cssText='position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:6px;z-index:10000;font-size:14px;max-width:400px;box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity 0.3s;'
+    +(type==='error'?'background:#dc3545;color:#fff;':'background:var(--wt-card-bg,#2a2a2a);color:var(--wt-text,#e0e0e0);border:1px solid var(--wt-border,#444);');
+  document.body.appendChild(el);
+  setTimeout(function(){el.style.opacity='0';setTimeout(function(){el.remove();},300);},3000);
+}
 
 var callLineMap={};
 var _clmPending=null;
@@ -2863,7 +2877,12 @@ function saveAllLogLevels(){
     return fetch('/api/settings/log_level',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({service:s,level:level})});
   });
-  Promise.all(promises).then(()=>alert('Log levels saved successfully!')).catch(e=>alert('Error saving log levels: '+e));
+  Promise.all(promises).then(responses=>Promise.all(responses.map(r=>r.json()))).then(results=>{
+    var offline=results.map((r,i)=>r.live_update?null:services[i]).filter(Boolean);
+    var msg='Log levels saved.';
+    if(offline.length>0) msg+=' ('+offline.join(', ')+' offline — will apply on next start)';
+    showToast(msg);
+  }).catch(e=>showToast('Error saving log levels: '+e,'error'));
 }
 
 function refreshInjectLegs(){
@@ -8759,9 +8778,29 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 }
             }
 
+            bool live_update = false;
+            {
+                static const struct { const char* name; whispertalk::ServiceType type; } svc_map[] = {
+                    {"SIP_CLIENT",               whispertalk::ServiceType::SIP_CLIENT},
+                    {"INBOUND_AUDIO_PROCESSOR",  whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR},
+                    {"VAD_SERVICE",              whispertalk::ServiceType::VAD_SERVICE},
+                    {"WHISPER_SERVICE",          whispertalk::ServiceType::WHISPER_SERVICE},
+                    {"LLAMA_SERVICE",            whispertalk::ServiceType::LLAMA_SERVICE},
+                    {"KOKORO_SERVICE",           whispertalk::ServiceType::KOKORO_SERVICE},
+                    {"OUTBOUND_AUDIO_PROCESSOR", whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
+                };
+                for (const auto& m : svc_map) {
+                    if (service == m.name) {
+                        std::string resp = send_negotiation_command(m.type, "SET_LOG_LEVEL:" + level);
+                        live_update = (resp.find("OK") != std::string::npos);
+                        break;
+                    }
+                }
+            }
+
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
-                "{\"success\":true,\"service\":\"%s\",\"level\":\"%s\"}", 
-                service.c_str(), level.c_str());
+                "{\"success\":true,\"service\":\"%s\",\"level\":\"%s\",\"live_update\":%s}", 
+                service.c_str(), level.c_str(), live_update ? "true" : "false");
         }
     }
 

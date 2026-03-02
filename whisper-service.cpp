@@ -79,6 +79,10 @@ public:
         return true;
     }
 
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
+    }
+
     void run() {
         std::thread receiver_thread(&WhisperService::receiver_loop, this);
         std::thread cmd_thread(&WhisperService::command_listener_loop, this);
@@ -136,14 +140,19 @@ private:
 
     std::string handle_whisper_command(const std::string& cmd) {
         if (cmd == "PING") return "PONG\n";
+        if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = cmd.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
         if (cmd == "HALLUCINATION_FILTER:ON") {
             hallucination_filter_enabled_.store(true);
-            log_fwd_.forward("INFO", 0, "Hallucination filter enabled");
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Hallucination filter enabled");
             return "OK:HALLUCINATION_FILTER:ON\n";
         }
         if (cmd == "HALLUCINATION_FILTER:OFF") {
             hallucination_filter_enabled_.store(false);
-            log_fwd_.forward("INFO", 0, "Hallucination filter disabled");
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Hallucination filter disabled");
             return "OK:HALLUCINATION_FILTER:OFF\n";
         }
         if (cmd == "HALLUCINATION_FILTER:STATUS") {
@@ -272,7 +281,7 @@ private:
     // matching whisper-cli default behavior.
     void transcribe_and_send(uint32_t call_id, const float* audio, size_t audio_len) {
         if (audio_len < min_speech_samples_) {
-            log_fwd_.forward("DEBUG", call_id,
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                 "Skipping chunk: %zu samples (%.0fms) below minimum %zu",
                 audio_len, audio_len / (double)WSP_SAMPLES_PER_MS, min_speech_samples_);
             return;
@@ -287,12 +296,12 @@ private:
         }
         float rms = std::sqrt(sum_sq / audio_len);
 
-        log_fwd_.forward("DEBUG", call_id,
+        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
             "Audio chunk: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
             audio_len, audio_len / (double)WSP_SAMPLES_PER_MS, rms, peak);
 
         if (rms < 0.005f) {
-            log_fwd_.forward("DEBUG", call_id,
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                 "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio_len / (double)WSP_SAMPLES_PER_MS);
             return;
         }
@@ -329,18 +338,18 @@ private:
             if (!text.empty()) {
                 if (hallucination_filter_enabled_.load(std::memory_order_relaxed)) {
                     if (is_hallucination(text)) {
-                        log_fwd_.forward("DEBUG", call_id, "Hallucination filtered: %s", text.c_str());
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id, "Hallucination filtered: %s", text.c_str());
                         std::cout << "[" << call_id << "] Hallucination filtered: " << text << std::endl;
                         return;
                     }
 
                     std::string cleaned = strip_trailing_hallucinations(text);
                     if (cleaned.empty() || cleaned.size() < 3) {
-                        log_fwd_.forward("DEBUG", call_id, "Stripped to empty: %s", text.c_str());
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id, "Stripped to empty: %s", text.c_str());
                         return;
                     }
                     if (cleaned != text) {
-                        log_fwd_.forward("DEBUG", call_id, "Stripped hallucination tail: '%s' -> '%s'", text.c_str(), cleaned.c_str());
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id, "Stripped hallucination tail: '%s' -> '%s'", text.c_str(), cleaned.c_str());
                     }
                     text = cleaned;
                 }
@@ -349,7 +358,7 @@ private:
                 double rtf = whisper_ms / audio_dur_ms;
                 std::cout << "[" << call_id << "] Transcription (" << whisper_ms << "ms, RTF=" 
                           << std::fixed << std::setprecision(2) << rtf << "): " << text << std::endl;
-                log_fwd_.forward("INFO", call_id, "Transcription (%lldms): %s", whisper_ms, text.c_str());
+                log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Transcription (%lldms): %s", whisper_ms, text.c_str());
 
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
@@ -380,13 +389,13 @@ private:
             }
         } else {
             std::cerr << "[" << call_id << "] Whisper transcription failed" << std::endl;
-            log_fwd_.forward("ERROR", call_id, "Whisper transcription failed");
+            log_fwd_.forward(whispertalk::LogLevel::ERROR, call_id, "Whisper transcription failed");
         }
     }
 
     void handle_call_end(uint32_t call_id) {
         std::cout << "Call " << call_id << " ended" << std::endl;
-        log_fwd_.forward("INFO", call_id, "Call ended");
+        log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended");
     }
 
     std::atomic<bool> running_;
@@ -426,18 +435,21 @@ int main(int argc, char** argv) {
 
     std::string model_path;
     std::string language = "de";
+    std::string log_level = "INFO";
 
     static struct option long_opts[] = {
-        {"language", required_argument, 0, 'l'},
-        {"model", required_argument, 0, 'm'},
+        {"language",  required_argument, 0, 'l'},
+        {"model",     required_argument, 0, 'm'},
+        {"log-level", required_argument, 0, 'L'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "l:m:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "l:m:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'l': language = optarg; break;
             case 'm': model_path = optarg; break;
+            case 'L': log_level = optarg; break;
             default: break;
         }
     }
@@ -465,6 +477,7 @@ int main(int argc, char** argv) {
         if (!service.init()) {
             return 1;
         }
+        service.set_log_level(log_level.c_str());
         service.run();
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
