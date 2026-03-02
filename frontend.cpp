@@ -1033,10 +1033,10 @@ private:
         {
             std::lock_guard<std::mutex> lock(logs_mutex_);
             entry.seq = ++log_seq_;
-            recent_logs_.push_back(entry);
             if (recent_logs_.size() >= MAX_RECENT_LOGS) {
                 recent_logs_.pop_front();
             }
+            recent_logs_.push_back(entry);
         }
 
         enqueue_log(entry);
