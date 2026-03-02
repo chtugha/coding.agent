@@ -363,23 +363,31 @@ private:
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 1);
+                // Snapshot buffer, then send outside the lock to avoid holding
+                // buffer_mutex_ during blocking network I/O.
+                std::vector<whispertalk::Packet> to_drain;
                 {
                     std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
-                    // Drain old buffered packets first (preserves chronological order).
-                    while (!buffered_packets_.empty()) {
-                        auto& front = buffered_packets_.front();
-                        if (interconnect_.send_to_downstream(front)) {
-                            buffered_packets_.pop_front();
-                        } else {
-                            break;
-                        }
-                    }
+                    to_drain.assign(buffered_packets_.begin(), buffered_packets_.end());
+                }
+                // Drain old buffered packets first (preserves chronological order).
+                size_t drained = 0;
+                for (auto& p : to_drain) {
+                    if (!interconnect_.send_to_downstream(p)) break;
+                    ++drained;
+                }
+                {
+                    std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
+                    buffered_packets_.erase(buffered_packets_.begin(),
+                                           buffered_packets_.begin() + (std::ptrdiff_t)drained);
                     // If drain failed (buffer still has entries), queue current packet too.
                     if (!buffered_packets_.empty()) {
                         if (buffered_packets_.size() >= MAX_BUFFER_PACKETS) {
                             buffered_packets_.pop_front();
                         }
                         buffered_packets_.push_back(pkt);
+                        std::cout << "[" << call_id << "] LLaMA disconnected, buffering transcription ("
+                                  << buffered_packets_.size() << " in queue)" << std::endl;
                         log_fwd_.forward(whispertalk::LogLevel::WARN, call_id,
                             "LLaMA disconnected, buffering transcription (%zu in queue)",
                             buffered_packets_.size());
@@ -390,6 +398,8 @@ private:
                 if (!interconnect_.send_to_downstream(pkt)) {
                     std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
                     buffered_packets_.push_back(pkt);
+                    std::cout << "[" << call_id << "] LLaMA disconnected, buffering transcription ("
+                              << buffered_packets_.size() << " in queue)" << std::endl;
                     log_fwd_.forward(whispertalk::LogLevel::WARN, call_id,
                         "LLaMA disconnected, buffering transcription (%zu in queue)",
                         buffered_packets_.size());
