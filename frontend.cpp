@@ -1760,7 +1760,7 @@ Hallucination Filter</label>
 <div><strong>Window:</strong> <span id="currentVadWindow" style="color:var(--wt-primary)">50</span> ms</div>
 <div><strong>Threshold:</strong> <span id="currentVadThreshold" style="color:var(--wt-primary)">2.0</span></div>
 <div><strong>Silence:</strong> <span id="currentVadSilence" style="color:var(--wt-primary)">400</span> ms</div>
-<div><strong>Max Chunk:</strong> <span id="currentVadMaxChunk" style="color:var(--wt-primary)">4000</span> ms</div>
+<div><strong>Max Chunk:</strong> <span id="currentVadMaxChunk" style="color:var(--wt-primary)">8000</span> ms</div>
 </div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
@@ -1786,8 +1786,8 @@ Hallucination Filter</label>
 </div>
 </div>
 <div class="wt-field">
-<label>Max Chunk (ms): <span id="vadMaxChunkValue">4000</span></label>
-<input type="range" id="vadMaxChunkSlider" min="1000" max="10000" value="4000" step="500" style="width:100%" oninput="document.getElementById('vadMaxChunkValue').textContent=this.value">
+<label>Max Chunk (ms): <span id="vadMaxChunkValue">8000</span></label>
+<input type="range" id="vadMaxChunkSlider" min="1000" max="10000" value="8000" step="500" style="width:100%" oninput="document.getElementById('vadMaxChunkValue').textContent=this.value">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
 <span>1000ms</span><span>10000ms</span>
 </div>

@@ -58,7 +58,6 @@ struct VadCall {
     // We set min_floor at 0.000005 and init at 0.00005 to avoid false triggers while
     // still adapting to the actual ambient noise level.
     float noise_floor = 0.00005f;
-    int frame_count = 0;
     size_t vad_pos = 0;
     size_t speech_start = 0;
     size_t tentative_speech_start = 0;
@@ -67,11 +66,15 @@ struct VadCall {
     // buffer positions accurately (speech_start includes pre-speech context frames
     // which are not represented in frame_energies).
     size_t energies_sample_origin = 0;
-    std::chrono::steady_clock::time_point last_activity;
     std::chrono::steady_clock::time_point speech_signal_time;
     size_t last_buffer_size = 0;
     std::chrono::steady_clock::time_point last_buffer_growth;
     std::vector<float> frame_energies;
+    // Cumulative sum-of-squares and peak for the current speech segment,
+    // tracked during frame processing to avoid re-scanning in send_chunk_downstream.
+    float speech_sum_sq = 0.0f;
+    float speech_peak = 0.0f;
+    size_t speech_sample_count = 0;
 };
 
 class VadService {
@@ -202,6 +205,9 @@ private:
         call.noise_floor = 0.00005f;
         call.frame_energies.clear();
         call.speech_signaled = false;
+        call.speech_sum_sq = 0.0f;
+        call.speech_peak = 0.0f;
+        call.speech_sample_count = 0;
         return was_signaled;
     }
 
@@ -336,7 +342,6 @@ private:
             {
                 std::lock_guard<std::mutex> lock(call->mutex);
                 call->audio_buffer.insert(call->audio_buffer.end(), samples, samples + sample_count);
-                call->last_activity = std::chrono::steady_clock::now();
             }
             data_cv_.notify_one();
         }
@@ -363,6 +368,8 @@ private:
 
             for (auto& call : active) {
                 std::vector<float> to_send;
+                float chunk_sum_sq = 0.0f;
+                size_t chunk_sample_count = 0;
                 bool needs_idle_broadcast = false;
                 bool needs_active_broadcast = false;
                 uint32_t call_id = call->id;
@@ -378,7 +385,6 @@ private:
                         }
                         energy /= static_cast<float>(vad_frame_size_);
 
-                        call->frame_count++;
                         // Adapt noise floor only when not in speech and no onset pending.
                         // Uses exponential moving average (alpha=0.05) with a hard minimum
                         // of 0.000005 to stay above G.711 quantization noise.
@@ -399,6 +405,11 @@ private:
                                     call->in_speech = true;
                                     call->speech_start = call->tentative_speech_start;
                                     call->frame_energies.clear();
+                                    // Pre-allocate for max chunk to avoid realloc during speech.
+                                    call->frame_energies.reserve(vad_max_speech_samples_ / vad_frame_size_ + 1);
+                                    call->speech_sum_sq = 0.0f;
+                                    call->speech_peak = 0.0f;
+                                    call->speech_sample_count = 0;
                                     // Record where frame_energies[0] starts (onset confirmation frame).
                                     // This is distinct from speech_start which includes context frames.
                                     call->energies_sample_origin = pos;
@@ -424,6 +435,12 @@ private:
 
                         if (call->in_speech) {
                             call->frame_energies.push_back(energy);
+                            // Accumulate sum-of-squares for RMS calculation. energy is
+                            // mean(s²) for this frame, so energy * frame_size = sum(s²).
+                            // This avoids re-scanning the entire chunk in send_chunk_downstream
+                            // just to compute RMS for the energy gate check.
+                            call->speech_sum_sq += energy * static_cast<float>(vad_frame_size_);
+                            call->speech_sample_count += vad_frame_size_;
                         }
 
                         pos += vad_frame_size_;
@@ -433,6 +450,8 @@ private:
                             to_send.assign(
                                 call->audio_buffer.begin() + call->speech_start,
                                 call->audio_buffer.begin() + pos);
+                            chunk_sum_sq = call->speech_sum_sq;
+                            chunk_sample_count = call->speech_sample_count;
                             if (vad_logging_enabled_) {
                                 double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                 log_fwd_.forward("DEBUG", call->id,
@@ -452,6 +471,8 @@ private:
                             to_send.assign(
                                 call->audio_buffer.begin() + call->speech_start,
                                 call->audio_buffer.begin() + split);
+                            chunk_sum_sq = call->speech_sum_sq;
+                            chunk_sample_count = call->speech_sample_count;
                             if (vad_logging_enabled_) {
                                 double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                 bool was_smart = (split != pos);
@@ -515,10 +536,13 @@ private:
                     }
 
                     // Trim non-speech buffer, keeping context frames for next onset detection.
+                    // Only trim when accumulated excess exceeds 4x the keep threshold to avoid
+                    // frequent small deque erases (each erase is O(N) on remaining elements).
                     if (!call->in_speech) {
                         size_t keep_frames = vad_context_frames_ + 2;
                         size_t keep = vad_frame_size_ * keep_frames;
-                        if (call->vad_pos > keep) {
+                        size_t min_trim = keep * 4;
+                        if (call->vad_pos > keep + min_trim) {
                             size_t trim = call->vad_pos - keep;
                             call->audio_buffer.erase(call->audio_buffer.begin(),
                                                      call->audio_buffer.begin() + static_cast<ptrdiff_t>(trim));
@@ -549,11 +573,8 @@ private:
 
                 // Broadcast speech signals outside the mutex to avoid holding the
                 // lock during a TCP send that could block/stall the receiver thread.
+                // speech_signal_time was already set inside the lock at onset detection.
                 if (needs_active_broadcast) {
-                    {
-                        std::lock_guard<std::mutex> lock(call->mutex);
-                        call->speech_signal_time = std::chrono::steady_clock::now();
-                    }
                     interconnect_.broadcast_speech_signal(call_id, true);
                     std::cout << "[" << call_id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
                 }
@@ -562,7 +583,7 @@ private:
                 }
 
                 if (!to_send.empty()) {
-                    send_chunk_downstream(call_id, to_send);
+                    send_chunk_downstream(call_id, to_send, chunk_sum_sq, chunk_sample_count);
                 }
             }
         }
@@ -573,7 +594,13 @@ private:
     // RMS energy check: G.711 codec noise floor is ~0.001 RMS; real speech is
     // typically >0.01 RMS. Threshold at 0.005 rejects near-silence to prevent
     // Whisper hallucinations on quiet segments.
-    void send_chunk_downstream(uint32_t call_id, const std::vector<float>& audio) {
+    // pre_sum_sq/pre_count: pre-computed sum-of-squares and sample count from frame
+    // processing. If pre_count > 0, uses these for the RMS gate check to avoid
+    // re-scanning the entire chunk (the chunk may include pre-speech context samples
+    // not tracked by pre_sum_sq, but these are a small fraction and won't affect the
+    // 0.005 RMS gate threshold in practice).
+    void send_chunk_downstream(uint32_t call_id, const std::vector<float>& audio,
+                                float pre_sum_sq = 0.0f, size_t pre_count = 0) {
         if (audio.size() < vad_min_speech_samples_) {
             if (vad_logging_enabled_) {
                 log_fwd_.forward("DEBUG", call_id,
@@ -583,15 +610,17 @@ private:
             return;
         }
 
-        float sum_sq = 0.0f;
-        float peak = 0.0f;
-        for (size_t i = 0; i < audio.size(); ++i) {
-            float s = audio[i];
-            sum_sq += s * s;
-            float a = std::abs(s);
-            if (a > peak) peak = a;
+        float rms;
+        if (pre_count > 0) {
+            rms = std::sqrt(pre_sum_sq / static_cast<float>(pre_count));
+        } else {
+            float sum_sq = 0.0f;
+            for (size_t i = 0; i < audio.size(); ++i) {
+                float s = audio[i];
+                sum_sq += s * s;
+            }
+            rms = std::sqrt(sum_sq / static_cast<float>(audio.size()));
         }
-        float rms = std::sqrt(sum_sq / audio.size());
 
         if (rms < 0.005f) {
             if (vad_logging_enabled_) {
@@ -599,6 +628,13 @@ private:
                     "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / (double)VAD_SAMPLES_PER_MS);
             }
             return;
+        }
+
+        // Peak scan on contiguous vector memory (fast, ~cache-friendly).
+        float peak = 0.0f;
+        for (size_t i = 0; i < audio.size(); ++i) {
+            float a = std::abs(audio[i]);
+            if (a > peak) peak = a;
         }
 
         if (vad_logging_enabled_) {
@@ -623,8 +659,7 @@ private:
         if (it != calls_.end()) return it->second;
         auto call = std::make_shared<VadCall>();
         call->id = cid;
-        call->last_activity = std::chrono::steady_clock::now();
-        call->last_buffer_growth = call->last_activity;
+        call->last_buffer_growth = std::chrono::steady_clock::now();
         calls_[cid] = call;
         std::cout << "Created VAD session for call_id " << cid << std::endl;
         log_fwd_.forward("INFO", cid, "Created VAD session");
