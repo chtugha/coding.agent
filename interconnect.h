@@ -693,7 +693,7 @@ private:
     ServiceType type_;
     std::atomic<bool> running_;
     static constexpr size_t SEND_BUF_SIZE = 65536;
-    static constexpr int DOWNSTREAM_RECONNECT_MS = 500;
+    static constexpr int DOWNSTREAM_RECONNECT_MS = 200;
 
     mutable std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;

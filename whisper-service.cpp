@@ -363,28 +363,36 @@ private:
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 1);
-                if (!interconnect_.send_to_downstream(pkt)) {
-                    if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                        std::cout << "[" << call_id << "] LLaMA disconnected, buffering transcription" << std::endl;
-                        
-                        std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
-                        if (buffered_packets_.size() < MAX_BUFFER_PACKETS) {
-                            buffered_packets_.push_back(pkt);
-                        } else {
-                            buffered_packets_.pop_front();
-                            buffered_packets_.push_back(pkt);
-                        }
-                    }
-                } else {
+                {
                     std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
+                    // Drain old buffered packets first (preserves chronological order).
                     while (!buffered_packets_.empty()) {
-                        auto& buffered = buffered_packets_.front();
-                        if (interconnect_.send_to_downstream(buffered)) {
+                        auto& front = buffered_packets_.front();
+                        if (interconnect_.send_to_downstream(front)) {
                             buffered_packets_.pop_front();
                         } else {
                             break;
                         }
                     }
+                    // If drain failed (buffer still has entries), queue current packet too.
+                    if (!buffered_packets_.empty()) {
+                        if (buffered_packets_.size() >= MAX_BUFFER_PACKETS) {
+                            buffered_packets_.pop_front();
+                        }
+                        buffered_packets_.push_back(pkt);
+                        log_fwd_.forward(whispertalk::LogLevel::WARN, call_id,
+                            "LLaMA disconnected, buffering transcription (%zu in queue)",
+                            buffered_packets_.size());
+                        return;
+                    }
+                }
+                // Buffer empty — send current packet directly.
+                if (!interconnect_.send_to_downstream(pkt)) {
+                    std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
+                    buffered_packets_.push_back(pkt);
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, call_id,
+                        "LLaMA disconnected, buffering transcription (%zu in queue)",
+                        buffered_packets_.size());
                 }
             }
         } else {

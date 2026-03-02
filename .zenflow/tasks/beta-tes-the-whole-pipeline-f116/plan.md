@@ -72,7 +72,8 @@ Verify and harden the full logging chain so tests can be read reliably.
 - Files: `interconnect.h`, `frontend.cpp`
 - Verify: send malformed UDP to port 22022 (`echo "garbage" | nc -u 127.0.0.1 22022`) → frontend does not crash; subsequent valid logs still appear in UI
 
-### [ ] Step: Interconnect Communication Testing & Speed Improvements
+### [x] Step: Interconnect Communication Testing & Speed Improvements
+<!-- chat-id: a043a4ef-7d5e-4889-b40d-d456ab657ee0 -->
 
 Test and improve service-pair communication and reconnect behavior.
 
