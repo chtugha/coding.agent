@@ -66,13 +66,23 @@ public:
         srand(time(NULL));
     }
 
+    static constexpr const char* DEFAULT_LINE_NAMES[] = {
+        "alice", "bob", "charlie", "david", "eve", "frank", "george", "helen", "ivan", "julia",
+        "karl", "laura", "max", "nina", "oscar", "petra", "quinn", "rosa", "sam", "tina"
+    };
+
     bool init(const std::string& user, const std::string& server, int port, int num_lines) {
         server_ = server;
         server_port_ = port;
         local_ip_ = "127.0.0.1";
 
         for (int i = 0; i < num_lines; ++i) {
-            std::string line_user = (num_lines == 1) ? user : user + std::to_string(i + 1);
+            std::string line_user;
+            if (num_lines == 1) {
+                line_user = user;
+            } else {
+                line_user = (i < 20) ? DEFAULT_LINE_NAMES[i] : user + std::to_string(i + 1);
+            }
             int idx = create_line(line_user, server, "");
             if (idx < 0) return false;
         }
