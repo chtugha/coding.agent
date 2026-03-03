@@ -440,8 +440,8 @@ private:
             }
         }
 
-        if (requested_users.size() < 2) {
-            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"Need at least 2 users for a conference\"}");
+        if (requested_users.empty()) {
+            mg_http_reply(c, 400, CORS_HEADERS, "{\"error\":\"Need at least 1 user\"}");
             return;
         }
         if (requested_users.size() > MAX_LINES) {

@@ -97,9 +97,11 @@ class VadService {
     // vad_context_frames_: include 8 frames (400ms) of pre-speech context audio so the
     //   chunk captures the onset of speech including weak initial vowels/consonants.
     int vad_context_frames_ = 8;
-    // vad_onset_frames_: require 3 consecutive above-threshold frames to confirm
-    //   speech onset, preventing single-frame noise spikes from triggering.
-    int vad_onset_frames_ = 3;
+    // vad_onset_frames_: require 2 consecutive above-threshold frames to confirm
+    //   speech onset. Reduced from 3 to detect quiet vowel onsets (e.g. "Abfall-"
+    //   after a comma pause) that may produce only 1 borderline-threshold frame
+    //   before exceeding it. 2 frames still prevents single-frame noise spikes.
+    int vad_onset_frames_ = 2;
     int speech_signal_timeout_s_ = 10;
     // vad_inactivity_flush_ms_: if no new audio arrives for 1000ms while speech is
     //   active, flush the buffer immediately (handles end-of-stream).
@@ -453,16 +455,23 @@ private:
 
                         // Silence-triggered speech end: enough consecutive silent frames detected.
                         if (call->in_speech && call->silence_count > vad_silence_frames_) {
-                            to_send.assign(
-                                call->audio_buffer.begin() + call->speech_start,
-                                call->audio_buffer.begin() + pos);
-                            chunk_sum_sq = call->speech_sum_sq;
-                            chunk_sample_count = call->speech_sample_count;
-                            if (vad_logging_enabled_) {
-                                double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
-                                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
-                                    "VAD speech_end (silence) — %zu samples (%.0fms) queued for transcription",
-                                    to_send.size(), dur_ms);
+                            size_t buf_sz = call->audio_buffer.size();
+                            if (call->speech_start <= pos && pos <= buf_sz) {
+                                to_send.assign(
+                                    call->audio_buffer.begin() + call->speech_start,
+                                    call->audio_buffer.begin() + pos);
+                                chunk_sum_sq = call->speech_sum_sq;
+                                chunk_sample_count = call->speech_sample_count;
+                                if (vad_logging_enabled_) {
+                                    double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
+                                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
+                                        "VAD speech_end (silence) — %zu samples (%.0fms) queued for transcription",
+                                        to_send.size(), dur_ms);
+                                }
+                            } else {
+                                log_fwd_.forward(whispertalk::LogLevel::WARN, call->id,
+                                    "VAD: bounds error at silence end — speech_start=%zu pos=%zu buf=%zu — resetting",
+                                    call->speech_start, pos, buf_sz);
                             }
                             compact_buffer(*call, pos);
                             pos = 0;
@@ -474,9 +483,22 @@ private:
                         size_t speech_len = pos - call->speech_start;
                         if (call->in_speech && speech_len > vad_max_speech_samples_) {
                             size_t split = find_smart_split_point(*call, pos);
-                            to_send.assign(
-                                call->audio_buffer.begin() + call->speech_start,
-                                call->audio_buffer.begin() + split);
+                            size_t buf_sz = call->audio_buffer.size();
+                            if (call->speech_start <= split && split <= buf_sz) {
+                                to_send.assign(
+                                    call->audio_buffer.begin() + call->speech_start,
+                                    call->audio_buffer.begin() + split);
+                            } else {
+                                log_fwd_.forward(whispertalk::LogLevel::WARN, call->id,
+                                    "VAD: bounds error at max-length split — speech_start=%zu split=%zu buf=%zu — using full pos",
+                                    call->speech_start, split, buf_sz);
+                                split = (pos <= buf_sz) ? pos : buf_sz;
+                                if (call->speech_start <= split) {
+                                    to_send.assign(
+                                        call->audio_buffer.begin() + call->speech_start,
+                                        call->audio_buffer.begin() + split);
+                                }
+                            }
                             chunk_sum_sq = call->speech_sum_sq;
                             chunk_sample_count = call->speech_sample_count;
                             if (vad_logging_enabled_) {
@@ -658,7 +680,11 @@ private:
         pkt.trace.record(whispertalk::ServiceType::VAD_SERVICE, 1);
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Whisper disconnected, discarding speech chunk");
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - last_disc_warn_).count() >= 5) {
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Whisper disconnected, discarding speech chunk");
+                    last_disc_warn_ = now;
+                }
             }
         }
     }
@@ -696,6 +722,7 @@ private:
     std::mutex data_mutex_;
     std::condition_variable data_cv_;
     std::map<uint32_t, std::shared_ptr<VadCall>> calls_;
+    std::chrono::steady_clock::time_point last_disc_warn_{};
     whispertalk::InterconnectNode interconnect_;
     whispertalk::LogForwarder log_fwd_;
 };

@@ -93,13 +93,14 @@ public:
         });
 
         interconnect_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
-            std::cout << "[" << call_id << "] Speech signal: " << (active ? "ACTIVE" : "IDLE") << std::endl;
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
+                "Speech signal: %s", active ? "ACTIVE" : "IDLE");
             if (active) {
                 std::lock_guard<std::mutex> lock(calls_mutex_);
                 auto it = calls_.find(call_id);
                 if (it != calls_.end() && it->second->generating) {
-                    std::cout << "🤫 [" << call_id << "] Speech detected — interrupting generation" << std::endl;
-                    log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Speech detected — interrupting generation (shut-up)");
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
+                        "Speech detected — interrupting generation (shut-up)");
                     it->second->generating = false;
                 }
             }

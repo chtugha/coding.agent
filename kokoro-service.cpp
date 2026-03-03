@@ -1170,12 +1170,10 @@ private:
             std::queue<std::string> empty;
             std::swap(ctx->text_queue, empty);
         }
-        std::printf("SPEECH_ACTIVE [call %u] — flushed TTS queue, interrupting synthesis\n", call_id);
-        log_fwd_.forward(LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed TTS queue, interrupting synthesis");
+        log_fwd_.forward(LogLevel::DEBUG, call_id, "SPEECH_ACTIVE — flushed TTS queue, interrupting synthesis");
     }
 
     void handle_call_end(uint32_t call_id) {
-        std::printf("Call %u ended - cleaning up synthesis thread\n", call_id);
         log_fwd_.forward(LogLevel::INFO, call_id, "Call ended, cleaning up synthesis thread");
         std::shared_ptr<CallContext> ctx;
         {
