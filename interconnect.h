@@ -46,30 +46,36 @@ inline const float* iap_fir_coeffs() {
     return coeffs;
 }
 
-// FIR half-band upsample: processes one frame (up to IAP_ULAW_FRAME samples) of
-// 8kHz float input into 16kHz float output with 2× zero-stuffing + FIR filtering.
+// Polyphase FIR half-band upsample: 8kHz → 16kHz via 2× zero-stuff + 15-tap filter.
+// Exploits half-band structure: odd taps (1,3,5,9,11,13) are zero, center tap (7) = 1.0.
+//   Odd outputs:  out[2i+1] = 2.0 * x[i - 3]  (delayed passthrough, no multiply)
+//   Even outputs: out[2i]   = 2.0 * sum of 8 non-zero taps  (8 MACs vs 15 branchy iterations)
+// ~3.7× fewer operations than the naive FIR loop.
 // `history` must point to IAP_FIR_CENTER floats that persist across calls.
 // Returns number of output samples written (= in_len * 2).
 inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
                                       float* out, float* history) {
     if (in_len > (size_t)IAP_ULAW_FRAME) in_len = IAP_ULAW_FRAME;
-    const float* hb = iap_fir_coeffs();
+    if (in_len == 0) return 0;
+
+    static constexpr float H0 = -0.0076f;
+    static constexpr float H2 =  0.0527f;
+    static constexpr float H4 = -0.1681f;
+    static constexpr float H6 =  0.6230f;
+
     float ext[IAP_FIR_CENTER + IAP_ULAW_FRAME];
     for (int i = 0; i < IAP_FIR_CENTER; i++) ext[i] = history[i];
     for (size_t i = 0; i < in_len; i++) ext[IAP_FIR_CENTER + i] = in[i];
-    int ext_len = IAP_FIR_CENTER + (int)in_len;
 
     size_t out_len = in_len * 2;
-    for (size_t n = 0; n < out_len; n++) {
-        float sum = 0.0f;
-        for (int k = 0; k < IAP_FIR_LEN; k++) {
-            int src_idx_2x = (int)n - k + IAP_FIR_CENTER;
-            if (src_idx_2x & 1) continue;
-            int ext_idx = src_idx_2x / 2 + IAP_FIR_CENTER;
-            if (ext_idx < 0 || ext_idx >= ext_len) continue;
-            sum += ext[ext_idx] * hb[k];
-        }
-        out[n] = sum * 2.0f;
+    const int N = (int)in_len;
+
+    for (int i = 0; i < N; i++) {
+        const float* x = ext + i;
+        float even = H0 * x[7] + H2 * x[6] + H4 * x[5] + H6 * x[4]
+                   + H6 * x[3] + H4 * x[2] + H2 * x[1] + H0 * x[0];
+        out[2 * i] = even * 2.0f;
+        out[2 * i + 1] = ext[i + 4] * 2.0f;
     }
 
     if (in_len >= (size_t)IAP_FIR_CENTER) {
@@ -687,7 +693,7 @@ private:
     ServiceType type_;
     std::atomic<bool> running_;
     static constexpr size_t SEND_BUF_SIZE = 65536;
-    static constexpr int DOWNSTREAM_RECONNECT_MS = 500;
+    static constexpr int DOWNSTREAM_RECONNECT_MS = 200;
 
     mutable std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;
@@ -1225,9 +1231,38 @@ private:
     }
 };
 
+enum class LogLevel : int {
+    ERROR = 0,
+    WARN  = 1,
+    INFO  = 2,
+    DEBUG = 3,
+    TRACE = 4
+};
+
+inline const char* log_level_string(LogLevel lvl) {
+    switch (lvl) {
+        case LogLevel::ERROR: return "ERROR";
+        case LogLevel::WARN:  return "WARN";
+        case LogLevel::INFO:  return "INFO";
+        case LogLevel::DEBUG: return "DEBUG";
+        case LogLevel::TRACE: return "TRACE";
+        default: return "INFO";
+    }
+}
+
+inline LogLevel log_level_from_string(const char* s) {
+    if (!s) return LogLevel::INFO;
+    if (strcasecmp(s, "ERROR") == 0) return LogLevel::ERROR;
+    if (strcasecmp(s, "WARN")  == 0) return LogLevel::WARN;
+    if (strcasecmp(s, "INFO")  == 0) return LogLevel::INFO;
+    if (strcasecmp(s, "DEBUG") == 0) return LogLevel::DEBUG;
+    if (strcasecmp(s, "TRACE") == 0) return LogLevel::TRACE;
+    return LogLevel::INFO;
+}
+
 class LogForwarder {
 public:
-    LogForwarder() : sock_(-1), port_(0) {}
+    LogForwarder() : sock_(-1), port_(0), log_level_(static_cast<int>(LogLevel::INFO)) {}
 
     ~LogForwarder() {
         if (sock_ >= 0) ::close(sock_);
@@ -1246,31 +1281,65 @@ public:
         }
     }
 
-    void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
+    void set_level(LogLevel level) {
+        log_level_.store(static_cast<int>(level), std::memory_order_relaxed);
+    }
+
+    void set_level(const char* level_str) {
+        set_level(log_level_from_string(level_str));
+    }
+
+    LogLevel get_level() const {
+        return static_cast<LogLevel>(log_level_.load(std::memory_order_relaxed));
+    }
+
+    void forward(LogLevel lvl, uint32_t call_id, const char* fmt, ...) {
         if (sock_ < 0) return;
-        char msg[2048];
+        if (static_cast<int>(lvl) > log_level_.load(std::memory_order_relaxed)) return;
         va_list args;
         va_start(args, fmt);
-        int mlen = vsnprintf(msg, sizeof(msg), fmt, args);
+        vforward(log_level_string(lvl), call_id, fmt, args);
         va_end(args);
-        if (mlen <= 0) return;
+    }
 
-        char buf[2200];
-        int blen = snprintf(buf, sizeof(buf), "%s %s %u %.*s",
-                            svc_name_, level, call_id, mlen, msg);
-        if (blen > 0) {
-            sendto(sock_, buf, static_cast<size_t>(blen), 0,
-                   (struct sockaddr*)&addr_, sizeof(addr_));
-        }
+    void forward(const char* level, uint32_t call_id, const char* fmt, ...) {
+        if (sock_ < 0) return;
+        if (static_cast<int>(log_level_from_string(level)) > log_level_.load(std::memory_order_relaxed)) return;
+        va_list args;
+        va_start(args, fmt);
+        vforward(level, call_id, fmt, args);
+        va_end(args);
     }
 
     bool active() const { return sock_ >= 0 && port_ > 0; }
 
 private:
+    void vforward(const char* level, uint32_t call_id, const char* fmt, va_list args) {
+        // msg[2048]: max log message body. vsnprintf truncates safely at 2047 chars + null.
+        char msg[2048];
+        int mlen = vsnprintf(msg, sizeof(msg), fmt, args);
+        if (mlen <= 0) return;
+        if (mlen >= (int)sizeof(msg)) mlen = (int)sizeof(msg) - 1;
+
+        // buf[2304]: format is "<SERVICE> <LEVEL> <CALL_ID> <message>"
+        // Max prefix overhead: 23 (service) + 1 + 5 (level) + 1 + 10 (uint32) + 1 = 41 chars
+        // Max total: 41 + 2047 = 2088 < 2304 — no overflow possible.
+        // recv buffer on frontend side is 4096, well above this maximum.
+        char buf[2304];
+        int blen = snprintf(buf, sizeof(buf), "%s %s %u %.*s",
+                            svc_name_, level, call_id, mlen, msg);
+        if (blen > 0) {
+            if (blen >= (int)sizeof(buf)) blen = (int)sizeof(buf) - 1;
+            sendto(sock_, buf, static_cast<size_t>(blen), 0,
+                   (struct sockaddr*)&addr_, sizeof(addr_));
+        }
+    }
+
     int sock_;
     uint16_t port_;
     const char* svc_name_ = "UNKNOWN";
     struct sockaddr_in addr_;
+    std::atomic<int> log_level_;
 };
 
 }

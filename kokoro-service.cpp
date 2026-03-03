@@ -19,6 +19,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <cmath>
 
 #ifdef KOKORO_COREML
@@ -825,6 +826,10 @@ public:
         node_.shutdown();
     }
 
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
+    }
+
 private:
     void command_listener_loop() {
         uint16_t port = whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE);
@@ -1030,6 +1035,11 @@ private:
         if (cmd == "PING") {
             return "PONG\n";
         }
+        if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = cmd.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             return "ACTIVE_CALLS:" + std::to_string(calls_.size())
@@ -1051,7 +1061,7 @@ private:
             ctx->worker = std::thread(&KokoroService::call_worker, this, ctx);
             calls_[pkt.call_id] = ctx;
             std::printf("Started synthesis thread for call %u\n", pkt.call_id);
-            log_fwd_.forward("INFO", pkt.call_id, "Started synthesis thread");
+            log_fwd_.forward(LogLevel::INFO, pkt.call_id, "Started synthesis thread");
             it = calls_.find(pkt.call_id);
         }
 
@@ -1097,7 +1107,7 @@ private:
                 ctx->interrupted = false;
                 std::printf("Synthesis interrupted for call %u — discarding %zu samples\n",
                            ctx->call_id, samples.size());
-                log_fwd_.forward("WARN", ctx->call_id, "Synthesis interrupted — discarding audio");
+                log_fwd_.forward(LogLevel::WARN, ctx->call_id, "Synthesis interrupted — discarding audio");
                 continue;
             }
 
@@ -1112,7 +1122,7 @@ private:
             std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
                         samples.size(), (long long)elapsed, ctx->call_id, raw_peak,
                         raw_peak > 1.0f ? " -> normalized" : "");
-            log_fwd_.forward("INFO", ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f%s)",
+            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f%s)",
                              samples.size(), (long long)elapsed, raw_peak,
                              raw_peak > 1.0f ? " -> normalized" : "");
 
@@ -1145,7 +1155,7 @@ private:
                        samples.size(), KOKORO_SAMPLE_RATE, call_id);
         } else {
             std::fprintf(stderr, "Failed to send audio for call %u\n", call_id);
-            log_fwd_.forward("ERROR", call_id, "Failed to send audio to OAP");
+            log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio to OAP");
         }
     }
 
@@ -1161,12 +1171,12 @@ private:
             std::swap(ctx->text_queue, empty);
         }
         std::printf("SPEECH_ACTIVE [call %u] — flushed TTS queue, interrupting synthesis\n", call_id);
-        log_fwd_.forward("WARN", call_id, "SPEECH_ACTIVE — flushed TTS queue, interrupting synthesis");
+        log_fwd_.forward(LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed TTS queue, interrupting synthesis");
     }
 
     void handle_call_end(uint32_t call_id) {
         std::printf("Call %u ended - cleaning up synthesis thread\n", call_id);
-        log_fwd_.forward("INFO", call_id, "Call ended, cleaning up synthesis thread");
+        log_fwd_.forward(LogLevel::INFO, call_id, "Call ended, cleaning up synthesis thread");
         std::shared_ptr<CallContext> ctx;
         {
             std::lock_guard<std::mutex> lock(calls_mutex_);
@@ -1219,16 +1229,25 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
 
     std::string voice = "df_eva";
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg.rfind("--voice=", 0) == 0) {
-            voice = arg.substr(8);
-        } else if (arg == "--voice" && i + 1 < argc) {
-            voice = argv[++i];
-        } else if (arg == "--help" || arg == "-h") {
-            std::printf("Usage: kokoro-service [OPTIONS]\n");
-            std::printf("  --voice=NAME  Voice to use (default: df_eva, also: dm_bernd)\n");
-            return 0;
+    std::string log_level = "INFO";
+
+    static struct option long_opts[] = {
+        {"voice",     required_argument, 0, 'v'},
+        {"log-level", required_argument, 0, 'L'},
+        {"help",      no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+    int opt;
+    while ((opt = getopt_long(argc, argv, "v:L:h", long_opts, nullptr)) != -1) {
+        switch (opt) {
+            case 'v': voice = optarg; break;
+            case 'L': log_level = optarg; break;
+            case 'h':
+                std::printf("Usage: kokoro-service [OPTIONS]\n");
+                std::printf("  --voice NAME      Voice to use (default: df_eva, also: dm_bernd)\n");
+                std::printf("  --log-level LEVEL Log level: ERROR WARN INFO DEBUG TRACE (default: INFO)\n");
+                return 0;
+            default: break;
         }
     }
 
@@ -1241,6 +1260,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    service.set_log_level(log_level.c_str());
     service.run();
 
     return 0;

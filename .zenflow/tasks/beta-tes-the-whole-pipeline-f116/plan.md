@@ -44,7 +44,8 @@ Save the output to `{@artifacts_path}/spec.md` with:
 
 ---
 
-### [ ] Step: Log Level Filtering — interconnect.h + All Services
+### [x] Step: Log Level Filtering — interconnect.h + All Services
+<!-- chat-id: 08d6c4cc-c262-4a35-8c72-33c8360ca0fc -->
 
 Implement real-time log level control per service.
 
@@ -58,7 +59,8 @@ Implement real-time log level control per service.
 - Files: `interconnect.h`, `inbound-audio-processor.cpp`, `vad-service.cpp`, `whisper-service.cpp`, `llama-service.cpp`, `kokoro-service.cpp`, `outbound-audio-processor.cpp`, `sip-client-main.cpp`, `frontend.cpp`
 - Verify: (1) start whisper-service with `--log-level ERROR` → only ERROR logs in frontend; (2) change to DEBUG via UI Save All → DEBUG logs appear immediately without restart; (3) stop whisper-service, set level to WARN via UI, restart → verify WARN level is active from first log line
 
-### [ ] Step: Logging Robustness Audit & Hardening
+### [x] Step: Logging Robustness Audit & Hardening
+<!-- chat-id: 1664e83a-3115-4f02-a9ae-7db962f32245 -->
 
 Verify and harden the full logging chain so tests can be read reliably.
 
@@ -70,7 +72,8 @@ Verify and harden the full logging chain so tests can be read reliably.
 - Files: `interconnect.h`, `frontend.cpp`
 - Verify: send malformed UDP to port 22022 (`echo "garbage" | nc -u 127.0.0.1 22022`) → frontend does not crash; subsequent valid logs still appear in UI
 
-### [ ] Step: Interconnect Communication Testing & Speed Improvements
+### [x] Step: Interconnect Communication Testing & Speed Improvements
+<!-- chat-id: a043a4ef-7d5e-4889-b40d-d456ab657ee0 -->
 
 Test and improve service-pair communication and reconnect behavior.
 

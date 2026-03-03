@@ -58,7 +58,6 @@ struct VadCall {
     // We set min_floor at 0.000005 and init at 0.00005 to avoid false triggers while
     // still adapting to the actual ambient noise level.
     float noise_floor = 0.00005f;
-    int frame_count = 0;
     size_t vad_pos = 0;
     size_t speech_start = 0;
     size_t tentative_speech_start = 0;
@@ -67,11 +66,14 @@ struct VadCall {
     // buffer positions accurately (speech_start includes pre-speech context frames
     // which are not represented in frame_energies).
     size_t energies_sample_origin = 0;
-    std::chrono::steady_clock::time_point last_activity;
     std::chrono::steady_clock::time_point speech_signal_time;
     size_t last_buffer_size = 0;
     std::chrono::steady_clock::time_point last_buffer_growth;
     std::vector<float> frame_energies;
+    // Cumulative sum-of-squares for the current speech segment,
+    // tracked during frame processing to avoid re-scanning in send_chunk_downstream.
+    float speech_sum_sq = 0.0f;
+    size_t speech_sample_count = 0;
 };
 
 class VadService {
@@ -145,6 +147,10 @@ public:
                   << std::endl;
     }
 
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
+    }
+
     bool init() {
         if (!interconnect_.initialize()) {
             std::cerr << "Failed to initialize interconnect" << std::endl;
@@ -202,6 +208,8 @@ private:
         call.noise_floor = 0.00005f;
         call.frame_energies.clear();
         call.speech_signaled = false;
+        call.speech_sum_sq = 0.0f;
+        call.speech_sample_count = 0;
         return was_signaled;
     }
 
@@ -294,6 +302,11 @@ private:
 
     std::string handle_vad_command(const std::string& cmd) {
         if (cmd == "PING") return "PONG\n";
+        if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = cmd.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             size_t speech_active = 0;
@@ -336,7 +349,6 @@ private:
             {
                 std::lock_guard<std::mutex> lock(call->mutex);
                 call->audio_buffer.insert(call->audio_buffer.end(), samples, samples + sample_count);
-                call->last_activity = std::chrono::steady_clock::now();
             }
             data_cv_.notify_one();
         }
@@ -363,6 +375,8 @@ private:
 
             for (auto& call : active) {
                 std::vector<float> to_send;
+                float chunk_sum_sq = 0.0f;
+                size_t chunk_sample_count = 0;
                 bool needs_idle_broadcast = false;
                 bool needs_active_broadcast = false;
                 uint32_t call_id = call->id;
@@ -378,7 +392,6 @@ private:
                         }
                         energy /= static_cast<float>(vad_frame_size_);
 
-                        call->frame_count++;
                         // Adapt noise floor only when not in speech and no onset pending.
                         // Uses exponential moving average (alpha=0.05) with a hard minimum
                         // of 0.000005 to stay above G.711 quantization noise.
@@ -399,11 +412,15 @@ private:
                                     call->in_speech = true;
                                     call->speech_start = call->tentative_speech_start;
                                     call->frame_energies.clear();
+                                    // Pre-allocate for max chunk to avoid realloc during speech.
+                                    call->frame_energies.reserve(vad_max_speech_samples_ / vad_frame_size_ + 1);
+                                    call->speech_sum_sq = 0.0f;
+                                    call->speech_sample_count = 0;
                                     // Record where frame_energies[0] starts (onset confirmation frame).
                                     // This is distinct from speech_start which includes context frames.
                                     call->energies_sample_origin = pos;
                                     if (vad_logging_enabled_) {
-                                        log_fwd_.forward("DEBUG", call->id,
+                                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
                                             "VAD speech_start at sample %zu (energy=%.6f threshold=%.6f noise_floor=%.6f onset=%d)",
                                             pos, energy, threshold, call->noise_floor, call->onset_count);
                                     }
@@ -424,6 +441,12 @@ private:
 
                         if (call->in_speech) {
                             call->frame_energies.push_back(energy);
+                            // Accumulate sum-of-squares for RMS calculation. energy is
+                            // mean(s²) for this frame, so energy * frame_size = sum(s²).
+                            // This avoids re-scanning the entire chunk in send_chunk_downstream
+                            // just to compute RMS for the energy gate check.
+                            call->speech_sum_sq += energy * static_cast<float>(vad_frame_size_);
+                            call->speech_sample_count += vad_frame_size_;
                         }
 
                         pos += vad_frame_size_;
@@ -433,9 +456,11 @@ private:
                             to_send.assign(
                                 call->audio_buffer.begin() + call->speech_start,
                                 call->audio_buffer.begin() + pos);
+                            chunk_sum_sq = call->speech_sum_sq;
+                            chunk_sample_count = call->speech_sample_count;
                             if (vad_logging_enabled_) {
                                 double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
-                                log_fwd_.forward("DEBUG", call->id,
+                                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
                                     "VAD speech_end (silence) — %zu samples (%.0fms) queued for transcription",
                                     to_send.size(), dur_ms);
                             }
@@ -452,10 +477,12 @@ private:
                             to_send.assign(
                                 call->audio_buffer.begin() + call->speech_start,
                                 call->audio_buffer.begin() + split);
+                            chunk_sum_sq = call->speech_sum_sq;
+                            chunk_sample_count = call->speech_sample_count;
                             if (vad_logging_enabled_) {
                                 double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
                                 bool was_smart = (split != pos);
-                                log_fwd_.forward("DEBUG", call->id,
+                                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
                                     "VAD speech_end (max_length%s) — %zu samples (%.0fms) queued for transcription",
                                     was_smart ? ", smart-split" : "", to_send.size(), dur_ms);
                             }
@@ -499,13 +526,15 @@ private:
                                 to_send.assign(
                                     call->audio_buffer.begin() + call->speech_start,
                                     call->audio_buffer.end());
+                                chunk_sum_sq = call->speech_sum_sq;
+                                chunk_sample_count = call->speech_sample_count;
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
                                 call->last_buffer_size = 0;
                                 needs_idle_broadcast = reset_call_state(*call);
                                 if (vad_logging_enabled_) {
                                     double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
-                                    log_fwd_.forward("DEBUG", call->id,
+                                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
                                         "VAD speech_end (inactivity %dms) — %zu samples (%.0fms) queued",
                                         vad_inactivity_flush_ms_, to_send.size(), dur_ms);
                                 }
@@ -515,10 +544,13 @@ private:
                     }
 
                     // Trim non-speech buffer, keeping context frames for next onset detection.
+                    // Only trim when accumulated excess exceeds 4x the keep threshold to avoid
+                    // frequent small deque erases (each front-erase is O(elements_removed)).
                     if (!call->in_speech) {
                         size_t keep_frames = vad_context_frames_ + 2;
                         size_t keep = vad_frame_size_ * keep_frames;
-                        if (call->vad_pos > keep) {
+                        size_t min_trim = keep * 4;
+                        if (call->vad_pos > keep + min_trim) {
                             size_t trim = call->vad_pos - keep;
                             call->audio_buffer.erase(call->audio_buffer.begin(),
                                                      call->audio_buffer.begin() + static_cast<ptrdiff_t>(trim));
@@ -536,6 +568,8 @@ private:
                                 to_send.assign(
                                     call->audio_buffer.begin() + call->speech_start,
                                     call->audio_buffer.end());
+                                chunk_sum_sq = call->speech_sum_sq;
+                                chunk_sample_count = call->speech_sample_count;
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
                                 call->last_buffer_size = 0;
@@ -549,11 +583,8 @@ private:
 
                 // Broadcast speech signals outside the mutex to avoid holding the
                 // lock during a TCP send that could block/stall the receiver thread.
+                // speech_signal_time was already set inside the lock at onset detection.
                 if (needs_active_broadcast) {
-                    {
-                        std::lock_guard<std::mutex> lock(call->mutex);
-                        call->speech_signal_time = std::chrono::steady_clock::now();
-                    }
                     interconnect_.broadcast_speech_signal(call_id, true);
                     std::cout << "[" << call_id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
                 }
@@ -562,7 +593,7 @@ private:
                 }
 
                 if (!to_send.empty()) {
-                    send_chunk_downstream(call_id, to_send);
+                    send_chunk_downstream(call_id, to_send, chunk_sum_sq, chunk_sample_count);
                 }
             }
         }
@@ -573,36 +604,51 @@ private:
     // RMS energy check: G.711 codec noise floor is ~0.001 RMS; real speech is
     // typically >0.01 RMS. Threshold at 0.005 rejects near-silence to prevent
     // Whisper hallucinations on quiet segments.
-    void send_chunk_downstream(uint32_t call_id, const std::vector<float>& audio) {
+    // pre_sum_sq/pre_count: pre-computed sum-of-squares and sample count from frame
+    // processing. If pre_count > 0, uses these for the RMS gate check to avoid
+    // re-scanning the entire chunk (the chunk may include pre-speech context samples
+    // not tracked by pre_sum_sq, but these are a small fraction and won't affect the
+    // 0.005 RMS gate threshold in practice).
+    void send_chunk_downstream(uint32_t call_id, const std::vector<float>& audio,
+                                float pre_sum_sq = 0.0f, size_t pre_count = 0) {
         if (audio.size() < vad_min_speech_samples_) {
             if (vad_logging_enabled_) {
-                log_fwd_.forward("DEBUG", call_id,
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                     "Skipping chunk: %zu samples (%.0fms) below minimum %zu",
                     audio.size(), audio.size() / (double)VAD_SAMPLES_PER_MS, vad_min_speech_samples_);
             }
             return;
         }
 
-        float sum_sq = 0.0f;
-        float peak = 0.0f;
-        for (size_t i = 0; i < audio.size(); ++i) {
-            float s = audio[i];
-            sum_sq += s * s;
-            float a = std::abs(s);
-            if (a > peak) peak = a;
+        float rms;
+        if (pre_count > 0) {
+            rms = std::sqrt(pre_sum_sq / static_cast<float>(pre_count));
+        } else {
+            float sum_sq = 0.0f;
+            for (size_t i = 0; i < audio.size(); ++i) {
+                float s = audio[i];
+                sum_sq += s * s;
+            }
+            rms = std::sqrt(sum_sq / static_cast<float>(audio.size()));
         }
-        float rms = std::sqrt(sum_sq / audio.size());
 
         if (rms < 0.005f) {
             if (vad_logging_enabled_) {
-                log_fwd_.forward("DEBUG", call_id,
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                     "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / (double)VAD_SAMPLES_PER_MS);
             }
             return;
         }
 
+        // Peak scan on contiguous vector memory (fast, ~cache-friendly).
+        float peak = 0.0f;
+        for (size_t i = 0; i < audio.size(); ++i) {
+            float a = std::abs(audio[i]);
+            if (a > peak) peak = a;
+        }
+
         if (vad_logging_enabled_) {
-            log_fwd_.forward("INFO", call_id,
+            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
                 "VAD chunk -> Whisper: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
                 audio.size(), audio.size() / (double)VAD_SAMPLES_PER_MS, rms, peak);
         }
@@ -612,7 +658,7 @@ private:
         pkt.trace.record(whispertalk::ServiceType::VAD_SERVICE, 1);
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                log_fwd_.forward("WARN", call_id, "Whisper disconnected, discarding speech chunk");
+                log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Whisper disconnected, discarding speech chunk");
             }
         }
     }
@@ -623,11 +669,10 @@ private:
         if (it != calls_.end()) return it->second;
         auto call = std::make_shared<VadCall>();
         call->id = cid;
-        call->last_activity = std::chrono::steady_clock::now();
-        call->last_buffer_growth = call->last_activity;
+        call->last_buffer_growth = std::chrono::steady_clock::now();
         calls_[cid] = call;
         std::cout << "Created VAD session for call_id " << cid << std::endl;
-        log_fwd_.forward("INFO", cid, "Created VAD session");
+        log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created VAD session");
         return call;
     }
 
@@ -636,7 +681,7 @@ private:
         auto it = calls_.find(call_id);
         if (it != calls_.end()) {
             std::cout << "Call " << call_id << " ended, closing VAD session" << std::endl;
-            log_fwd_.forward("INFO", call_id, "Call ended, closing VAD session");
+            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, closing VAD session");
             calls_.erase(it);
         }
     }
@@ -664,22 +709,25 @@ int main(int argc, char** argv) {
     float vad_threshold = 2.0f;
     int vad_silence_ms = 400;
     int vad_max_chunk_ms = 8000;
+    std::string log_level = "INFO";
 
     static struct option long_opts[] = {
         {"vad-window-ms",    required_argument, 0, 'w'},
         {"vad-threshold",    required_argument, 0, 't'},
         {"vad-silence-ms",   required_argument, 0, 's'},
         {"vad-max-chunk-ms", required_argument, 0, 'c'},
+        {"log-level",        required_argument, 0, 'L'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "w:t:s:c:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "w:t:s:c:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'w': vad_window_ms = atoi(optarg); break;
             case 't': vad_threshold = atof(optarg); break;
             case 's': vad_silence_ms = atoi(optarg); break;
             case 'c': vad_max_chunk_ms = atoi(optarg); break;
+            case 'L': log_level = optarg; break;
             default: break;
         }
     }
@@ -691,6 +739,7 @@ int main(int argc, char** argv) {
     if (!service.init()) {
         return 1;
     }
+    service.set_log_level(log_level.c_str());
     service.run();
 
     return 0;

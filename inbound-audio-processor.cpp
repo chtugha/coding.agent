@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <signal.h>
+#include <getopt.h>
 #include "interconnect.h"
 
 static std::atomic<bool> g_running{true};
@@ -48,6 +49,10 @@ public:
         });
 
         return true;
+    }
+
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
     }
 
     void run() {
@@ -108,6 +113,11 @@ private:
 
     std::string handle_iap_command(const std::string& cmd) {
         if (cmd == "PING") return "PONG\n";
+        if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = cmd.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             char buf[256];
@@ -175,7 +185,7 @@ private:
                 char msg[128];
                 snprintf(msg, sizeof(msg), "Per-packet latency: avg=%.1fus max=%.1fus (%llu pkts)",
                          avg_us, latency_max_.load(std::memory_order_relaxed), (unsigned long long)count);
-                log_fwd_.forward("DEBUG", pkt.call_id, msg);
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, pkt.call_id, msg);
             }
 
             whispertalk::Packet out_pkt(pkt.call_id, state->pcm, out_len * sizeof(float));
@@ -183,7 +193,7 @@ private:
             out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
             if (!interconnect_.send_to_downstream(out_pkt)) {
                 if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                    log_fwd_.forward("WARN", pkt.call_id, "Downstream disconnected, discarding");
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, pkt.call_id, "Downstream disconnected, discarding");
                 }
             }
         }
@@ -191,22 +201,24 @@ private:
 
     std::shared_ptr<CallState> get_or_create_call(uint32_t cid) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(cid)) return calls_[cid];
+        auto it = calls_.find(cid);
+        if (it != calls_.end()) return it->second;
         auto state = std::make_shared<CallState>();
         state->id = cid;
         state->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = state;
-        std::cout << "📞 Created call state for call_id " << cid << std::endl;
-        log_fwd_.forward("INFO", cid, "Created call state");
+        std::cout << "Created call state for call_id " << cid << std::endl;
+        log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created call state");
         return state;
     }
 
     void handle_call_end(uint32_t call_id) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(call_id)) {
-            std::cout << "🛑 Call " << call_id << " ended, cleaning up" << std::endl;
-            log_fwd_.forward("INFO", call_id, "Call ended, cleaning up");
-            calls_.erase(call_id);
+        auto it = calls_.find(call_id);
+        if (it != calls_.end()) {
+            std::cout << "Call " << call_id << " ended, cleaning up" << std::endl;
+            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up");
+            calls_.erase(it);
         }
     }
 
@@ -215,7 +227,7 @@ private:
         std::lock_guard<std::mutex> lock(calls_mutex_);
         for (auto it = calls_.begin(); it != calls_.end(); ) {
             if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count() > 60) {
-                std::cout << "🧹 Cleaning up inactive call " << it->first << std::endl;
+                std::cout << "Cleaning up inactive call " << it->first << std::endl;
                 it = calls_.erase(it);
             } else {
                 ++it;
@@ -235,15 +247,30 @@ private:
     whispertalk::LogForwarder log_fwd_;
 };
 
-int main() {
+int main(int argc, char** argv) {
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);
+
+    std::string log_level = "INFO";
+
+    static struct option long_opts[] = {
+        {"log-level", required_argument, 0, 'L'},
+        {0, 0, 0, 0}
+    };
+    int opt;
+    while ((opt = getopt_long(argc, argv, "L:", long_opts, nullptr)) != -1) {
+        switch (opt) {
+            case 'L': log_level = optarg; break;
+            default: break;
+        }
+    }
 
     InboundAudioProcessor proc;
     if (!proc.init()) {
         return 1;
     }
+    proc.set_log_level(log_level.c_str());
     proc.run();
     return 0;
 }

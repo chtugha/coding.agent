@@ -573,6 +573,7 @@ private:
             "ALTER TABLE model_benchmark_runs ADD COLUMN german_pct REAL",
             "ALTER TABLE iap_quality_tests ADD COLUMN rms_error_pct REAL",
             "ALTER TABLE iap_quality_tests ADD COLUMN max_latency_ms REAL",
+            "ALTER TABLE iap_quality_tests DROP COLUMN thd_percent",
             nullptr
         };
         for (int i = 0; migrations[i]; i++) {
@@ -581,7 +582,7 @@ private:
 
         const char* seed = R"(
             INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
-                ('SIP_CLIENT', 'bin/sip-client', '--lines 1 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
+                ('SIP_CLIENT', 'bin/sip-client', '--lines 2 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
                 ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
                 ('VAD_SERVICE', 'bin/vad-service', '', 'Voice Activity Detection + speech segmentation'),
                 ('WHISPER_SERVICE', 'bin/whisper-service', '--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (Metal)'),
@@ -591,6 +592,7 @@ private:
                 ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'default');
             UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
+            UPDATE service_config SET default_args='--lines 2 alice 127.0.0.1 5060' WHERE service='SIP_CLIENT' AND default_args='--lines 1 alice 127.0.0.1 5060';
         )";
         sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
 
@@ -784,6 +786,12 @@ private:
                 if (!vad_c.empty()) use_args += " --vad-max-chunk-ms " + vad_c;
             }
 
+            if (args_override.empty()) {
+                std::string ll_key = "log_level_" + name;
+                std::string ll = get_setting(ll_key, "");
+                if (!ll.empty()) use_args += " --log-level " + ll;
+            }
+
             auto argv_strings = split_args(use_args);
 
             mkdir("logs", 0755);
@@ -966,6 +974,8 @@ private:
         tv.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+        // recv buffer: 4096 bytes. Max inbound UDP datagram from LogForwarder is
+        // 2303 bytes (buf[2304]-1), so 4096 provides ample headroom — no resize needed.
         char buffer[4096];
         while (!s_sigint_received) {
             ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
@@ -991,6 +1001,19 @@ private:
     }
 
     void process_log_message(const std::string& msg) {
+        // Expected datagram format: "<SERVICE> <LEVEL> <CALL_ID> <message>"
+        // Malformed datagrams (e.g. stray UDP traffic) are silently dropped here
+        // to prevent garbage entries in the DB and UI.
+        if (msg.empty()) return;
+
+        size_t p1 = msg.find(' ');
+        size_t p2 = (p1 != std::string::npos) ? msg.find(' ', p1 + 1) : std::string::npos;
+        size_t p3 = (p2 != std::string::npos) ? msg.find(' ', p2 + 1) : std::string::npos;
+
+        if (p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos) {
+            return;
+        }
+
         LogEntry entry;
 
         time_t now = time(nullptr);
@@ -998,33 +1021,22 @@ private:
         strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
         entry.timestamp = timebuf;
 
-        size_t p1 = msg.find(' ');
-        size_t p2 = (p1 != std::string::npos) ? msg.find(' ', p1 + 1) : std::string::npos;
-        size_t p3 = (p2 != std::string::npos) ? msg.find(' ', p2 + 1) : std::string::npos;
-
-        if (p1 != std::string::npos && p2 != std::string::npos && p3 != std::string::npos) {
-            entry.service = parse_service_type(msg.substr(0, p1));
-            entry.level = msg.substr(p1 + 1, p2 - p1 - 1);
-            try {
-                entry.call_id = static_cast<uint32_t>(std::stoul(msg.substr(p2 + 1, p3 - p2 - 1)));
-            } catch (const std::exception&) {
-                entry.call_id = 0;
-            }
-            entry.message = msg.substr(p3 + 1);
-        } else {
-            entry.service = ServiceType::FRONTEND;
+        entry.service = parse_service_type(msg.substr(0, p1));
+        entry.level = msg.substr(p1 + 1, p2 - p1 - 1);
+        try {
+            entry.call_id = static_cast<uint32_t>(std::stoul(msg.substr(p2 + 1, p3 - p2 - 1)));
+        } catch (const std::exception&) {
             entry.call_id = 0;
-            entry.level = "INFO";
-            entry.message = msg;
         }
+        entry.message = msg.substr(p3 + 1);
 
         {
             std::lock_guard<std::mutex> lock(logs_mutex_);
             entry.seq = ++log_seq_;
-            recent_logs_.push_back(entry);
-            if (recent_logs_.size() > MAX_RECENT_LOGS) {
+            if (recent_logs_.size() >= MAX_RECENT_LOGS) {
                 recent_logs_.pop_front();
             }
+            recent_logs_.push_back(entry);
         }
 
         enqueue_log(entry);
@@ -1038,6 +1050,10 @@ private:
     std::mutex log_queue_mutex_;
     std::vector<LogEntry> log_queue_;
 
+    // Async SQLite write design: enqueue_log() just appends to log_queue_ under a
+    // mutex (O(1), <1µs). The main event loop calls flush_log_queue() every 500ms,
+    // which batches all pending entries into a single BEGIN/COMMIT transaction —
+    // typically < 1ms for hundreds of rows. No dedicated writer thread is needed.
     void enqueue_log(const LogEntry& entry) {
         std::lock_guard<std::mutex> lock(log_queue_mutex_);
         log_queue_.push_back(entry);
@@ -1230,6 +1246,8 @@ private:
                 handle_test_results(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_test")) == 0) {
                 handle_whisper_accuracy_test(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/hallucination_filter")) == 0) {
+                handle_whisper_hallucination_filter(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/vad/config")) == 0) {
                 handle_vad_config(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_results")) == 0) {
@@ -1493,6 +1511,12 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <select class="wt-select" id="whisperLang" onchange="updateWhisperArgs()" style="font-size:12px"></select></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Model</label>
 <select class="wt-select" id="whisperModel" onchange="updateWhisperArgs()" style="font-size:12px"></select></div>
+<div class="wt-field" style="margin-top:8px;margin-bottom:0;display:flex;align-items:center;gap:8px">
+<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
+<input type="checkbox" id="whisperHallucinationFilter" onchange="toggleHallucinationFilter(this.checked)" style="width:16px;height:16px;cursor:pointer">
+Hallucination Filter</label>
+<span id="whisperHalluFilterStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
 </div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
@@ -1751,7 +1775,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div><strong>Window:</strong> <span id="currentVadWindow" style="color:var(--wt-primary)">50</span> ms</div>
 <div><strong>Threshold:</strong> <span id="currentVadThreshold" style="color:var(--wt-primary)">2.0</span></div>
 <div><strong>Silence:</strong> <span id="currentVadSilence" style="color:var(--wt-primary)">400</span> ms</div>
-<div><strong>Max Chunk:</strong> <span id="currentVadMaxChunk" style="color:var(--wt-primary)">4000</span> ms</div>
+<div><strong>Max Chunk:</strong> <span id="currentVadMaxChunk" style="color:var(--wt-primary)">8000</span> ms</div>
 </div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
@@ -1777,8 +1801,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 </div>
 <div class="wt-field">
-<label>Max Chunk (ms): <span id="vadMaxChunkValue">4000</span></label>
-<input type="range" id="vadMaxChunkSlider" min="1000" max="10000" value="4000" step="500" style="width:100%" oninput="document.getElementById('vadMaxChunkValue').textContent=this.value">
+<label>Max Chunk (ms): <span id="vadMaxChunkValue">8000</span></label>
+<input type="range" id="vadMaxChunkSlider" min="1000" max="10000" value="8000" step="500" style="width:100%" oninput="document.getElementById('vadMaxChunkValue').textContent=this.value">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
 <span>1000ms</span><span>10000ms</span>
 </div>
@@ -2468,6 +2492,7 @@ function updateSvcDetail(s){
   if(s.name==='WHISPER_SERVICE'){
     wc.classList.remove('hidden');
     loadWhisperConfig(s.default_args||'');
+    loadHallucinationFilterState();
   } else {
     wc.classList.add('hidden');
   }
@@ -2493,6 +2518,23 @@ function updateWhisperArgs(){
   var lang=document.getElementById('whisperLang').value;
   var model=document.getElementById('whisperModel').value;
   document.getElementById('svcDetailArgs').value='--language '+lang+' '+model;
+}
+function toggleHallucinationFilter(enabled){
+  var statusEl=document.getElementById('whisperHalluFilterStatus');
+  statusEl.textContent='...';
+  fetch('/api/whisper/hallucination_filter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled?'true':'false'})})
+  .then(r=>r.json()).then(d=>{
+    if(d.error){statusEl.textContent='(offline)';document.getElementById('whisperHallucinationFilter').checked=false;return;}
+    statusEl.textContent=d.enabled?'ON':'OFF';
+  }).catch(()=>{statusEl.textContent='(error)';});
+}
+function loadHallucinationFilterState(){
+  var cb=document.getElementById('whisperHallucinationFilter');
+  var statusEl=document.getElementById('whisperHalluFilterStatus');
+  fetch('/api/whisper/hallucination_filter').then(r=>r.json()).then(d=>{
+    if(d.error){cb.checked=false;statusEl.textContent='(offline)';return;}
+    cb.checked=d.enabled;statusEl.textContent=d.enabled?'ON':'OFF';
+  }).catch(()=>{cb.checked=false;statusEl.textContent='(offline)';});
 }
 
 function showServicesOverview(){
@@ -2755,6 +2797,14 @@ function escapeHtml(s){
   if(!s)return'';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+function showToast(msg,type){
+  var el=document.createElement('div');
+  el.textContent=msg;
+  el.style.cssText='position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:6px;z-index:10000;font-size:14px;max-width:400px;box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity 0.3s;'
+    +(type==='error'?'background:#dc3545;color:#fff;':'background:var(--wt-card-bg,#2a2a2a);color:var(--wt-text,#e0e0e0);border:1px solid var(--wt-border,#444);');
+  document.body.appendChild(el);
+  setTimeout(function(){el.style.opacity='0';setTimeout(function(){el.remove();},300);},3000);
+}
 
 var callLineMap={};
 var _clmPending=null;
@@ -2835,7 +2885,12 @@ function saveAllLogLevels(){
     return fetch('/api/settings/log_level',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({service:s,level:level})});
   });
-  Promise.all(promises).then(()=>alert('Log levels saved successfully!')).catch(e=>alert('Error saving log levels: '+e));
+  Promise.all(promises).then(responses=>Promise.all(responses.map(r=>r.json()))).then(results=>{
+    var offline=results.map((r,i)=>r.live_update?null:services[i]).filter(Boolean);
+    var msg='Log levels saved.';
+    if(offline.length>0) msg+=' ('+offline.join(', ')+' offline — will apply on next start)';
+    showToast(msg);
+  }).catch(e=>showToast('Error saving log levels: '+e,'error'));
 }
 
 function refreshInjectLegs(){
@@ -3909,7 +3964,8 @@ function renderIapChart(){
             },
             afterBody:function(items){
               var idx=items[0].dataIndex;
-              return 'Status: '+window.iapTestHistory[idx].status;
+              var h=window.iapTestHistory[idx];
+              return ['Avg Latency: '+h.latency.toFixed(4)+' ms','Max Latency: '+h.maxLatency.toFixed(4)+' ms','Status: '+h.status];
             }
           }
         },
@@ -5758,22 +5814,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     // Encode a 16-bit linear PCM sample to 8-bit G.711 mu-law (ITU-T G.711).
-    // Algorithm per ITU-T recommendation:
-    //   1. Extract sign bit (bit 15), negate if negative
-    //   2. Clip to max linear value 32635 (0x7F7B) to prevent overflow
-    //   3. Add bias 0x84 (132) to shift the companding curve - this ensures
-    //      small signals near zero still get meaningful quantization
-    //   4. Find the exponent (segment number 0-7) by locating the highest set bit
-    //   5. Extract 4-bit mantissa from the biased sample
-    //   6. Combine sign|exponent|mantissa and bitwise-NOT the result
-    //      (mu-law uses inverted bits for better idle channel noise)
-    // G.711 mu-law provides ~38dB SNR for a dynamic range of ~78dB.
-    // Typical speech codec SNR is ~5-6dB after encode/decode roundtrip.
+    // Measured encode/decode roundtrip SNR: ~36-38 dB for speech signals.
     static uint8_t linear_to_ulaw(int16_t sample) {
-        const int BIAS = 0x84;  // 132: mu-law companding bias per ITU-T G.711
-        const int CLIP = 32635; // Max linear value before clipping (0x7F7B)
+        const int BIAS = 0x84;
+        const int CLIP = 32635;
         int sign = (sample >> 8) & 0x80;
-        if (sign) sample = -sample;
+        if (sign) sample = static_cast<int16_t>(-(int)sample);
         if (sample > CLIP) sample = CLIP;
         sample += BIAS;
         int exponent = 7;
@@ -5876,11 +5922,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             ulaw_data[i] = linear_to_ulaw(samples_8k[i]);
         }
 
+        float ulaw_table[256];
+        for (int i = 0; i < 256; i++) ulaw_table[i] = ulaw_to_float((uint8_t)i);
+
         size_t n_samples = ulaw_data.size();
         std::vector<float> decoded(n_samples);
-        for (size_t i = 0; i < n_samples; i++) {
-            decoded[i] = ulaw_to_float(ulaw_data[i]);
-        }
 
         constexpr size_t frame_size = whispertalk::IAP_ULAW_FRAME;
         std::vector<float> iap_output(n_samples * 2, 0.0f);
@@ -5894,6 +5940,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             size_t chunk = std::min(frame_size, n_samples - offset);
 
             auto t0 = std::chrono::steady_clock::now();
+            for (size_t i = 0; i < chunk; i++)
+                decoded[offset + i] = ulaw_table[ulaw_data[offset + i]];
             whispertalk::iap_fir_upsample_frame(
                 &decoded[offset], chunk, &iap_output[offset * 2], fir_history);
             auto t1 = std::chrono::steady_clock::now();
@@ -8467,6 +8515,37 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    void handle_whisper_hallucination_filter(struct mg_connection *c, struct mg_http_message *hm) {
+        int whisper_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::WHISPER_SERVICE);
+        std::string err;
+
+        if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
+            std::string body(hm->body.buf, hm->body.len);
+            std::string enabled_str = extract_json_string(body, "enabled");
+            bool enable = (enabled_str == "true" || enabled_str == "1");
+            std::string cmd = enable ? "HALLUCINATION_FILTER:ON\n" : "HALLUCINATION_FILTER:OFF\n";
+            std::string resp = tcp_command(whisper_cmd_port, cmd, err, 3);
+            if (!err.empty()) {
+                mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                    "{\"error\":\"%s\"}", err.c_str());
+                return;
+            }
+            bool confirmed = resp.find(":ON") != std::string::npos;
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"success\":true,\"enabled\":%s}", confirmed ? "true" : "false");
+        } else {
+            std::string resp = tcp_command(whisper_cmd_port, "HALLUCINATION_FILTER:STATUS\n", err, 3);
+            if (!err.empty()) {
+                mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                    "{\"error\":\"%s\",\"enabled\":false}", err.c_str());
+                return;
+            }
+            bool enabled = resp.find(":ON") != std::string::npos;
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"enabled\":%s}", enabled ? "true" : "false");
+        }
+    }
+
     void handle_whisper_accuracy_results(struct mg_connection *c, struct mg_http_message *hm) {
         std::string limit_str = "20";
         if (hm->query.len > 0) {
@@ -8707,9 +8786,29 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 }
             }
 
+            bool live_update = false;
+            {
+                static const struct { const char* name; whispertalk::ServiceType type; } svc_map[] = {
+                    {"SIP_CLIENT",               whispertalk::ServiceType::SIP_CLIENT},
+                    {"INBOUND_AUDIO_PROCESSOR",  whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR},
+                    {"VAD_SERVICE",              whispertalk::ServiceType::VAD_SERVICE},
+                    {"WHISPER_SERVICE",          whispertalk::ServiceType::WHISPER_SERVICE},
+                    {"LLAMA_SERVICE",            whispertalk::ServiceType::LLAMA_SERVICE},
+                    {"KOKORO_SERVICE",           whispertalk::ServiceType::KOKORO_SERVICE},
+                    {"OUTBOUND_AUDIO_PROCESSOR", whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
+                };
+                for (const auto& m : svc_map) {
+                    if (service == m.name) {
+                        std::string resp = send_negotiation_command(m.type, "SET_LOG_LEVEL:" + level);
+                        live_update = (resp.find("OK") != std::string::npos);
+                        break;
+                    }
+                }
+            }
+
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
-                "{\"success\":true,\"service\":\"%s\",\"level\":\"%s\"}", 
-                service.c_str(), level.c_str());
+                "{\"success\":true,\"service\":\"%s\",\"level\":\"%s\",\"live_update\":%s}", 
+                service.c_str(), level.c_str(), live_update ? "true" : "false");
         }
     }
 

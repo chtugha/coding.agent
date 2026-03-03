@@ -15,6 +15,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <unistd.h>
+#include <getopt.h>
 #include "interconnect.h"
 #include "llama.h"
 
@@ -98,13 +99,17 @@ public:
                 auto it = calls_.find(call_id);
                 if (it != calls_.end() && it->second->generating) {
                     std::cout << "🤫 [" << call_id << "] Speech detected — interrupting generation" << std::endl;
-                    log_fwd_.forward("WARN", call_id, "Speech detected — interrupting generation (shut-up)");
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Speech detected — interrupting generation (shut-up)");
                     it->second->generating = false;
                 }
             }
         });
 
         return true;
+    }
+
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
     }
 
     void run() {
@@ -169,12 +174,12 @@ private:
 
             if (interconnect_.is_speech_active(item.call_id)) {
                 std::cout << "⏸️  [" << item.call_id << "] Waiting — speech active, deferring response" << std::endl;
-                log_fwd_.forward("INFO", item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
+                log_fwd_.forward(whispertalk::LogLevel::INFO, item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
                 while (interconnect_.is_speech_active(item.call_id) && running_) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
                 std::cout << "▶️  [" << item.call_id << "] Speech ended, resuming response generation" << std::endl;
-                log_fwd_.forward("INFO", item.call_id, "Speech ended, resuming response generation");
+                log_fwd_.forward(whispertalk::LogLevel::INFO, item.call_id, "Speech ended, resuming response generation");
             }
             if (!running_) break;
 
@@ -296,7 +301,7 @@ private:
 
         call->messages.push_back({"assistant", response});
         std::cout << "🦙 [" << cid << "] DE (" << gen_ms << "ms): " << response << std::endl;
-        log_fwd_.forward("INFO", cid, "Response (%lldms): %s", gen_ms, response.c_str());
+        log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Response (%lldms): %s", gen_ms, response.c_str());
         return response;
     }
 
@@ -319,7 +324,7 @@ private:
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
                 std::cout << "⚠️  [" << cid << "] Kokoro disconnected, discarding response to /dev/null" << std::endl;
-                log_fwd_.forward("WARN", cid, "Kokoro disconnected, discarding response");
+                log_fwd_.forward(whispertalk::LogLevel::WARN, cid, "Kokoro disconnected, discarding response");
             }
         }
     }
@@ -333,7 +338,7 @@ private:
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
         std::cout << "📞 Created conversation context for call_id " << cid << std::endl;
-        log_fwd_.forward("INFO", cid, "Created conversation context");
+        log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created conversation context");
         return call;
     }
 
@@ -345,7 +350,7 @@ private:
             llama_memory_seq_rm(mem, calls_[call_id]->seq_id, -1, -1);
             calls_.erase(call_id);
             std::cout << "🛑 Call " << call_id << " ended, clearing conversation context" << std::endl;
-            log_fwd_.forward("INFO", call_id, "Call ended, clearing conversation context");
+            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, clearing conversation context");
         }
     }
 
@@ -394,6 +399,11 @@ private:
     }
 
     std::string handle_command(const std::string& cmd) {
+        if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = cmd.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
         if (cmd.rfind("TEST_PROMPT:", 0) == 0) {
             std::string prompt = cmd.substr(12);
             uint32_t test_cid = 99999;
@@ -502,13 +512,27 @@ int main(int argc, char** argv) {
         "models";
 #endif
     std::string model_path = models_dir + "/Llama-3.2-1B-Instruct-Q8_0.gguf";
-    if (argc >= 2) model_path = argv[1];
-    
+    std::string log_level = "INFO";
+
+    static struct option long_opts[] = {
+        {"log-level", required_argument, 0, 'L'},
+        {0, 0, 0, 0}
+    };
+    int opt;
+    while ((opt = getopt_long(argc, argv, "L:", long_opts, nullptr)) != -1) {
+        switch (opt) {
+            case 'L': log_level = optarg; break;
+            default: break;
+        }
+    }
+    if (optind < argc) model_path = argv[optind];
+
     try {
         LlamaService service(model_path);
         if (!service.init()) {
             return 1;
         }
+        service.set_log_level(log_level.c_str());
         service.run();
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;

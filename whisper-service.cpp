@@ -38,6 +38,7 @@ static constexpr int WSP_SAMPLES_PER_MS = WSP_SAMPLE_RATE / 1000;
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
     size_t min_speech_samples_ = WSP_SAMPLE_RATE / 2;
+    std::atomic<bool> hallucination_filter_enabled_{false};
 
 public:
     WhisperService(const std::string& model_path, const std::string& language = "de") 
@@ -76,6 +77,10 @@ public:
         });
 
         return true;
+    }
+
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
     }
 
     void run() {
@@ -135,6 +140,24 @@ private:
 
     std::string handle_whisper_command(const std::string& cmd) {
         if (cmd == "PING") return "PONG\n";
+        if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = cmd.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
+        if (cmd == "HALLUCINATION_FILTER:ON") {
+            hallucination_filter_enabled_.store(true);
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Hallucination filter enabled");
+            return "OK:HALLUCINATION_FILTER:ON\n";
+        }
+        if (cmd == "HALLUCINATION_FILTER:OFF") {
+            hallucination_filter_enabled_.store(false);
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Hallucination filter disabled");
+            return "OK:HALLUCINATION_FILTER:OFF\n";
+        }
+        if (cmd == "HALLUCINATION_FILTER:STATUS") {
+            return std::string("HALLUCINATION_FILTER:") + (hallucination_filter_enabled_.load() ? "ON" : "OFF") + "\n";
+        }
         if (cmd == "STATUS") {
             std::string model_file = model_path_;
             size_t slash = model_file.rfind('/');
@@ -142,6 +165,7 @@ private:
             return "MODEL:" + model_file
                 + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
                 + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":HALLUCINATION_FILTER:" + (hallucination_filter_enabled_.load() ? "ON" : "OFF")
                 + "\n";
         }
         return "ERROR:Unknown command\n";
@@ -257,7 +281,7 @@ private:
     // matching whisper-cli default behavior.
     void transcribe_and_send(uint32_t call_id, const float* audio, size_t audio_len) {
         if (audio_len < min_speech_samples_) {
-            log_fwd_.forward("DEBUG", call_id,
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                 "Skipping chunk: %zu samples (%.0fms) below minimum %zu",
                 audio_len, audio_len / (double)WSP_SAMPLES_PER_MS, min_speech_samples_);
             return;
@@ -272,12 +296,12 @@ private:
         }
         float rms = std::sqrt(sum_sq / audio_len);
 
-        log_fwd_.forward("DEBUG", call_id,
+        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
             "Audio chunk: %zu samples (%.0fms) RMS=%.4f peak=%.4f",
             audio_len, audio_len / (double)WSP_SAMPLES_PER_MS, rms, peak);
 
         if (rms < 0.005f) {
-            log_fwd_.forward("DEBUG", call_id,
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                 "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio_len / (double)WSP_SAMPLES_PER_MS);
             return;
         }
@@ -312,64 +336,88 @@ private:
                 text += whisper_full_get_segment_text(ctx_, i);
             }
             if (!text.empty()) {
-                if (is_hallucination(text)) {
-                    log_fwd_.forward("DEBUG", call_id, "Hallucination filtered: %s", text.c_str());
-                    std::cout << "[" << call_id << "] Hallucination filtered: " << text << std::endl;
-                    return;
-                }
+                if (hallucination_filter_enabled_.load(std::memory_order_relaxed)) {
+                    if (is_hallucination(text)) {
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id, "Hallucination filtered: %s", text.c_str());
+                        std::cout << "[" << call_id << "] Hallucination filtered: " << text << std::endl;
+                        return;
+                    }
 
-                std::string cleaned = strip_trailing_hallucinations(text);
-                if (cleaned.empty() || cleaned.size() < 3) {
-                    log_fwd_.forward("DEBUG", call_id, "Stripped to empty: %s", text.c_str());
-                    return;
+                    std::string cleaned = strip_trailing_hallucinations(text);
+                    if (cleaned.empty() || cleaned.size() < 3) {
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id, "Stripped to empty: %s", text.c_str());
+                        return;
+                    }
+                    if (cleaned != text) {
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id, "Stripped hallucination tail: '%s' -> '%s'", text.c_str(), cleaned.c_str());
+                    }
+                    text = cleaned;
                 }
-                if (cleaned != text) {
-                    log_fwd_.forward("DEBUG", call_id, "Stripped hallucination tail: '%s' -> '%s'", text.c_str(), cleaned.c_str());
-                }
-                text = cleaned;
 
                 double audio_dur_ms = audio_len / (double)WSP_SAMPLES_PER_MS;
                 double rtf = whisper_ms / audio_dur_ms;
                 std::cout << "[" << call_id << "] Transcription (" << whisper_ms << "ms, RTF=" 
                           << std::fixed << std::setprecision(2) << rtf << "): " << text << std::endl;
-                log_fwd_.forward("INFO", call_id, "Transcription (%lldms): %s", whisper_ms, text.c_str());
+                log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Transcription (%lldms): %s", whisper_ms, text.c_str());
 
                 whispertalk::Packet pkt(call_id, text.c_str(), text.length());
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 1);
-                if (!interconnect_.send_to_downstream(pkt)) {
-                    if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                        std::cout << "[" << call_id << "] LLaMA disconnected, buffering transcription" << std::endl;
-                        
-                        std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
-                        if (buffered_packets_.size() < MAX_BUFFER_PACKETS) {
-                            buffered_packets_.push_back(pkt);
-                        } else {
-                            buffered_packets_.pop_front();
-                            buffered_packets_.push_back(pkt);
-                        }
-                    }
-                } else {
+                // Snapshot buffer, then send outside the lock to avoid holding
+                // buffer_mutex_ during blocking network I/O.
+                std::vector<whispertalk::Packet> to_drain;
+                {
                     std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
-                    while (!buffered_packets_.empty()) {
-                        auto& buffered = buffered_packets_.front();
-                        if (interconnect_.send_to_downstream(buffered)) {
-                            buffered_packets_.pop_front();
-                        } else {
-                            break;
-                        }
+                    to_drain.assign(std::make_move_iterator(buffered_packets_.begin()),
+                                   std::make_move_iterator(buffered_packets_.end()));
+                    buffered_packets_.clear();
+                }
+                // Drain old buffered packets first (preserves chronological order).
+                size_t drained = 0;
+                for (auto& p : to_drain) {
+                    if (!interconnect_.send_to_downstream(p)) break;
+                    ++drained;
+                }
+                {
+                    std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
+                    // Move unsent remainder back into the deque.
+                    for (size_t i = drained; i < to_drain.size(); ++i) {
+                        buffered_packets_.push_back(std::move(to_drain[i]));
                     }
+                    // If drain failed (buffer still has entries), queue current packet too.
+                    if (!buffered_packets_.empty()) {
+                        if (buffered_packets_.size() >= MAX_BUFFER_PACKETS) {
+                            buffered_packets_.pop_front();
+                        }
+                        buffered_packets_.push_back(pkt);
+                        std::cout << "[" << call_id << "] LLaMA disconnected, buffering transcription ("
+                                  << buffered_packets_.size() << " in queue)" << std::endl;
+                        log_fwd_.forward(whispertalk::LogLevel::WARN, call_id,
+                            "LLaMA disconnected, buffering transcription (%zu in queue)",
+                            buffered_packets_.size());
+                        return;
+                    }
+                }
+                // Buffer empty — send current packet directly.
+                if (!interconnect_.send_to_downstream(pkt)) {
+                    std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
+                    buffered_packets_.push_back(pkt);
+                    std::cout << "[" << call_id << "] LLaMA disconnected, buffering transcription ("
+                              << buffered_packets_.size() << " in queue)" << std::endl;
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, call_id,
+                        "LLaMA disconnected, buffering transcription (%zu in queue)",
+                        buffered_packets_.size());
                 }
             }
         } else {
             std::cerr << "[" << call_id << "] Whisper transcription failed" << std::endl;
-            log_fwd_.forward("ERROR", call_id, "Whisper transcription failed");
+            log_fwd_.forward(whispertalk::LogLevel::ERROR, call_id, "Whisper transcription failed");
         }
     }
 
     void handle_call_end(uint32_t call_id) {
         std::cout << "Call " << call_id << " ended" << std::endl;
-        log_fwd_.forward("INFO", call_id, "Call ended");
+        log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended");
     }
 
     std::atomic<bool> running_;
@@ -409,18 +457,21 @@ int main(int argc, char** argv) {
 
     std::string model_path;
     std::string language = "de";
+    std::string log_level = "INFO";
 
     static struct option long_opts[] = {
-        {"language", required_argument, 0, 'l'},
-        {"model", required_argument, 0, 'm'},
+        {"language",  required_argument, 0, 'l'},
+        {"model",     required_argument, 0, 'm'},
+        {"log-level", required_argument, 0, 'L'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "l:m:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "l:m:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'l': language = optarg; break;
             case 'm': model_path = optarg; break;
+            case 'L': log_level = optarg; break;
             default: break;
         }
     }
@@ -448,6 +499,7 @@ int main(int argc, char** argv) {
         if (!service.init()) {
             return 1;
         }
+        service.set_log_level(log_level.c_str());
         service.run();
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;

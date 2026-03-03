@@ -66,13 +66,23 @@ public:
         srand(time(NULL));
     }
 
+    static constexpr const char* DEFAULT_LINE_NAMES[] = {
+        "alice", "bob", "charlie", "david", "eve", "frank", "george", "helen", "ivan", "julia",
+        "karl", "laura", "max", "nina", "oscar", "petra", "quinn", "rosa", "sam", "tina"
+    };
+
     bool init(const std::string& user, const std::string& server, int port, int num_lines) {
         server_ = server;
         server_port_ = port;
         local_ip_ = "127.0.0.1";
 
         for (int i = 0; i < num_lines; ++i) {
-            std::string line_user = (num_lines == 1) ? user : user + std::to_string(i + 1);
+            std::string line_user;
+            if (num_lines == 1) {
+                line_user = user;
+            } else {
+                line_user = (i < 20) ? DEFAULT_LINE_NAMES[i] : user + std::to_string(i + 1);
+            }
             int idx = create_line(line_user, server, "");
             if (idx < 0) return false;
         }
@@ -116,29 +126,33 @@ public:
         return true;
     }
 
+    void set_log_level(const char* level) {
+        log_fwd_.set_level(level);
+    }
+
     int add_line(const std::string& user, const std::string& server_ip, const std::string& password) {
         std::lock_guard<std::mutex> lock(lines_mutex_);
-        log_fwd_.forward("INFO", 0, "Adding SIP line: user=%s server=%s", user.c_str(), server_ip.c_str());
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Adding SIP line: user=%s server=%s", user.c_str(), server_ip.c_str());
         int idx = create_line(user, server_ip, password);
         if (idx < 0) {
-            log_fwd_.forward("ERROR", 0, "Failed to create SIP line for user %s", user.c_str());
+            log_fwd_.forward(whispertalk::LogLevel::ERROR, 0, "Failed to create SIP line for user %s", user.c_str());
             return -1;
         }
         auto& line = lines_.back();
         line->sip_thread = std::thread(&SipClient::sip_loop, this, line);
         line->reg_thread = std::thread(&SipClient::registration_loop, this, line);
         std::cout << "Added line " << idx << " (" << user << "@" << server_ip << ")" << std::endl;
-        log_fwd_.forward("INFO", 0, "SIP line %d added successfully: user=%s port=%d", idx, user.c_str(), line->local_port);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "SIP line %d added successfully: user=%s port=%d", idx, user.c_str(), line->local_port);
         return idx;
     }
 
     bool remove_line(int index) {
         std::lock_guard<std::mutex> lock(lines_mutex_);
-        log_fwd_.forward("INFO", 0, "Removing SIP line %d", index);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Removing SIP line %d", index);
         auto it = std::find_if(lines_.begin(), lines_.end(),
             [index](const std::shared_ptr<SipLine>& l) { return l->index == index; });
         if (it == lines_.end()) {
-            log_fwd_.forward("WARN", 0, "SIP line %d not found", index);
+            log_fwd_.forward(whispertalk::LogLevel::WARN, 0, "SIP line %d not found", index);
             return false;
         }
 
@@ -147,7 +161,7 @@ public:
         line->line_running = false;
         line->registered = false;
 
-        log_fwd_.forward("INFO", 0, "Shutting down line %d (%s): stopping threads", index, user.c_str());
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Shutting down line %d (%s): stopping threads", index, user.c_str());
         if (line->sip_thread.joinable()) line->sip_thread.join();
         if (line->reg_thread.joinable()) line->reg_thread.join();
 
@@ -158,7 +172,7 @@ public:
             std::lock_guard<std::mutex> clock(calls_mutex_);
             for (auto cit = calls_.begin(); cit != calls_.end(); ) {
                 if (cit->second->line_index == index) {
-                    log_fwd_.forward("INFO", cit->second->id, "Terminating call %d on line %d", cit->second->id, index);
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, cit->second->id, "Terminating call %d on line %d", cit->second->id, index);
                     cit->second->active = false;
                     cit = calls_.erase(cit);
                     terminated_calls++;
@@ -170,7 +184,7 @@ public:
 
         lines_.erase(it);
         std::cout << "Removed line " << index << " (" << user << ")" << std::endl;
-        log_fwd_.forward("INFO", 0, "SIP line %d removed: user=%s terminated_calls=%d", index, user.c_str(), terminated_calls);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "SIP line %d removed: user=%s terminated_calls=%d", index, user.c_str(), terminated_calls);
         return true;
     }
 
@@ -303,7 +317,7 @@ private:
                 line->registered = true;
                 if (!was_registered) {
                     std::cout << "Line " << line->index << " (" << line->user << ") registered successfully" << std::endl;
-                    log_fwd_.forward("INFO", 0, "Line %d (%s) registered successfully", line->index, line->user.c_str());
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Line %d (%s) registered successfully", line->index, line->user.c_str());
                 }
             }
         }
@@ -345,7 +359,7 @@ private:
         uint32_t cid = interconnect_.reserve_call_id(proposed_id);
         if (cid == 0) {
             std::cerr << "Failed to reserve call_id, rejecting call on line " << line->index << std::endl;
-            log_fwd_.forward("ERROR", 0, "Failed to reserve call_id on line %d", line->index);
+            log_fwd_.forward(whispertalk::LogLevel::ERROR, 0, "Failed to reserve call_id on line %d", line->index);
             std::string resp = "SIP/2.0 503 Service Unavailable\r\nCall-ID: " + scid + "\r\n\r\n";
             sendto(line->sip_sock, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
             return;
@@ -396,7 +410,7 @@ private:
         std::string s = resp.str();
         sendto(line->sip_sock, s.c_str(), s.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
         std::cout << "Accepted call " << cid << " on line " << line->index << " port " << session->local_rtp_port << std::endl;
-        log_fwd_.forward("INFO", cid, "Accepted call on line %d port %d", line->index, session->local_rtp_port);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Accepted call on line %d port %d", line->index, session->local_rtp_port);
     }
 
     void handle_bye(const std::string& msg, const struct sockaddr_in& sender, std::shared_ptr<SipLine> line) {
@@ -424,7 +438,7 @@ private:
         for (auto it = calls_.begin(); it != calls_.end(); ++it) {
             if (it->second->id == static_cast<int>(call_id)) {
                 std::cout << "Call " << call_id << " ended, cleaning up" << std::endl;
-                log_fwd_.forward("INFO", call_id, "Call ended, cleaning up");
+                log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up");
                 it->second->active = false;
                 if (it->second->rtp_thread.joinable()) {
                     it->second->rtp_thread.detach();
@@ -572,6 +586,11 @@ private:
         else if (msg == "GET_STATS") {
             return get_stats();
         }
+        else if (msg.rfind("SET_LOG_LEVEL:", 0) == 0) {
+            std::string level = msg.substr(14);
+            log_fwd_.set_level(level.c_str());
+            return "OK\n";
+        }
         else if (msg == "PING") {
             return "PONG\n";
         }
@@ -605,22 +624,25 @@ int main(int argc, char** argv) {
     std::string user, server;
     int port = 5060;
     int lines = 1;
+    std::string log_level = "INFO";
 
     static struct option long_opts[] = {
-        {"lines", required_argument, 0, 'l'},
+        {"lines",     required_argument, 0, 'l'},
+        {"log-level", required_argument, 0, 'L'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "l:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "l:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'l': lines = std::max(1, atoi(optarg)); break;
+            case 'L': log_level = optarg; break;
             default: break;
         }
     }
 
     if (optind + 1 >= argc) {
-        std::cout << "Usage: sip-client [--lines N] <user> <server> [port]" << std::endl;
+        std::cout << "Usage: sip-client [--lines N] [--log-level LEVEL] <user> <server> [port]" << std::endl;
         return 1;
     }
 
@@ -629,6 +651,9 @@ int main(int argc, char** argv) {
     if (optind + 2 < argc) port = atoi(argv[optind + 2]);
 
     SipClient client;
-    if (client.init(user, server, port, lines)) client.run();
+    if (client.init(user, server, port, lines)) {
+        client.set_log_level(log_level.c_str());
+        client.run();
+    }
     return 0;
 }
