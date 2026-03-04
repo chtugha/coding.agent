@@ -257,7 +257,7 @@ private:
         llama_batch single_batch = llama_batch_init(1, 0, 1);
         for (int i = 0; i < MAX_TOKENS; ++i) {
             if (!call->generating) {
-                std::cout << "⚠️  [" << cid << "] Generation interrupted" << std::endl;
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid, "Generation interrupted");
                 break;
             }
 
@@ -299,7 +299,6 @@ private:
         }
 
         call->messages.push_back({"assistant", response});
-        std::cout << "🦙 [" << cid << "] DE (" << gen_ms << "ms): " << response << std::endl;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Response (%lldms): %s", gen_ms, response.c_str());
         return response;
     }
@@ -322,7 +321,6 @@ private:
         pkt.trace.record(whispertalk::ServiceType::LLAMA_SERVICE, 1);
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                std::cout << "⚠️  [" << cid << "] Kokoro disconnected, discarding response to /dev/null" << std::endl;
                 log_fwd_.forward(whispertalk::LogLevel::WARN, cid, "Kokoro disconnected, discarding response");
             }
         }
@@ -336,7 +334,6 @@ private:
         call->seq_id = next_seq_id_.fetch_add(1);
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
-        std::cout << "📞 Created conversation context for call_id " << cid << std::endl;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created conversation context");
         return call;
     }
@@ -348,7 +345,6 @@ private:
             llama_memory_t mem = llama_get_memory(ctx_);
             llama_memory_seq_rm(mem, calls_[call_id]->seq_id, -1, -1);
             calls_.erase(call_id);
-            std::cout << "🛑 Call " << call_id << " ended, clearing conversation context" << std::endl;
             log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, clearing conversation context");
         }
     }
