@@ -5445,6 +5445,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"ok\"}");
     }
 
+    // GET /api/tests/*/history — Returns last 20 test runs from SQLite for a named test.
     void handle_test_history(struct mg_connection *c, struct mg_http_message *hm) {
         std::string uri(hm->uri.buf, hm->uri.len);
         size_t start = strlen("/api/tests/");
@@ -5484,6 +5485,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // GET /api/tests/*/log — Returns stdout/stderr log content of a test's child process.
     void handle_test_log(struct mg_connection *c, struct mg_http_message *hm) {
         std::string uri(hm->uri.buf, hm->uri.len);
         size_t start = strlen("/api/tests/");
@@ -5559,6 +5561,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // POST /api/services/restart — Stop then start a service (500ms sleep between).
     void handle_service_restart(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string name = extract_json_string(body, "service");
@@ -5708,6 +5711,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // GET /api/sip/lines — Returns registered SIP lines via LIST_LINES cmd to SIP client.
     void handle_sip_lines(struct mg_connection *c) {
         std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "LIST_LINES");
         if (resp.empty()) {
@@ -5798,6 +5802,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return result;
     }
 
+    // GET /api/sip/stats — Returns per-call RTP counters via GET_STATS cmd to SIP client.
     void handle_sip_stats(struct mg_connection *c) {
         auto stats = parse_sip_stats();
         if (!stats.valid) {
@@ -6127,6 +6132,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // GET /api/whisper/models — Lists .bin GGML model files in models/ directory.
     void handle_whisper_models(struct mg_connection *c) {
         std::stringstream json;
         json << "{\"models\":[";
@@ -6638,6 +6644,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return rss_kb / 1024;  // Convert KB to MB
     }
 
+    // GET /api/llama/prompts — Returns test prompts from Testfiles/llama_prompts.json.
     void handle_llama_prompts(struct mg_connection *c) {
         std::string prompts_path = "Testfiles/llama_prompts.json";
         FILE* fp = fopen(prompts_path.c_str(), "r");
@@ -6800,6 +6807,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, result);
     }
 
+    // POST /api/llama/shutup_test — Async test: sends a long prompt, then fires
+    // SPEECH_ACTIVE to test interrupt latency. Measures time to abort generation.
     void handle_llama_shutup_test(struct mg_connection *c, struct mg_http_message *hm) {
         struct mg_str json_body = hm->body;
         int plen = 0;
@@ -6856,6 +6865,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, result);
     }
 
+    // POST /api/tests/shutup_pipeline — Full pipeline shut-up test with configurable
+    // scenarios (basic, early, late, rapid). Tests SPEECH_ACTIVE propagation end-to-end.
     void handle_shutup_pipeline_test(struct mg_connection *c, struct mg_http_message *hm) {
         struct mg_str json_body = hm->body;
         std::vector<std::string> scenarios;
@@ -7026,6 +7037,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // POST /api/llama/benchmark — Async LLaMA benchmark: runs N iterations of prompt
+    // generation, measures avg/p50/p95/p99 latency and memory. Stores results in SQLite.
     void handle_llama_benchmark(struct mg_connection *c, struct mg_http_message *hm) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
@@ -7392,6 +7405,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, result);
     }
 
+    // POST /api/kokoro/benchmark — Async Kokoro TTS benchmark: runs N iterations
+    // of synthesis, measures latency percentiles and memory. Stores results in SQLite.
     void handle_kokoro_benchmark(struct mg_connection *c, struct mg_http_message *hm) {
         struct mg_str json_body = hm->body;
         int iterations = (int)mg_json_get_long(json_body, "$.iterations", 5);
@@ -7983,6 +7998,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, json.str());
     }
 
+    // POST /api/tests/multiline_stress — Async multi-line SIP stress test: registers
+    // N concurrent SIP lines and drives calls for duration_s seconds.
     void handle_multiline_stress(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
             mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
@@ -8169,6 +8186,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             "{\"status\":\"started\",\"duration_s\":%d}", duration_s);
     }
 
+    // GET /api/tests/pipeline_stress/progress — Returns running state and per-service
+    // restart counts for the active pipeline stress test.
     void handle_pipeline_stress_progress(struct mg_connection *c, struct mg_http_message *hm) {
         (void)hm;
         std::shared_ptr<PipelineStressProgress> p;
@@ -8217,6 +8236,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // POST /api/tests/pipeline_stress/stop — Signals the running stress test to stop.
     void handle_pipeline_stress_stop(struct mg_connection *c, struct mg_http_message *hm) {
         (void)hm;
         std::shared_ptr<PipelineStressProgress> p;
@@ -8379,6 +8399,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // GET /api/async/status?task_id=N — Poll any async task by ID. Returns
+    // "running" or the final result JSON when complete.
     void handle_async_status(struct mg_connection *c, struct mg_http_message *hm) {
         char id_buf[32] = {0};
         mg_http_get_var(&hm->query, "task_id", id_buf, sizeof(id_buf));
@@ -8666,6 +8688,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // GET /api/whisper/accuracy_results — Returns paginated Whisper accuracy test
+    // results from SQLite, grouped by test_run_id with PASS/WARN/FAIL counts.
     void handle_whisper_accuracy_results(struct mg_connection *c, struct mg_http_message *hm) {
         std::string limit_str = "20";
         if (hm->query.len > 0) {
@@ -8839,6 +8863,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // POST /api/testfiles/scan — Rescan Testfiles/ directory for WAV+TXT sample pairs.
     void handle_testfiles_scan(struct mg_connection *c) {
         scan_testfiles_directory();
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
@@ -9000,6 +9025,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // GET /api/db/schema — Returns all SQLite table names and their CREATE statements.
     void handle_db_schema(struct mg_connection *c) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
@@ -9029,6 +9055,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // GET/POST /api/settings — GET: return all key-value pairs from settings table.
+    // POST: upsert a key-value pair into settings table.
     void handle_settings(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
             if (!db_) {
@@ -9149,6 +9177,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // GET /api/models — Returns all registered models from SQLite, grouped by service type.
     void handle_models_get(struct mg_connection *c) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
@@ -9401,6 +9430,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     }
 
+    // POST /api/models/search — Search HuggingFace Hub for GGML/GGUF model files.
+    // Uses HF API token from settings if available. Returns model metadata.
     void handle_models_search(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string query = extract_json_string(body, "query");
@@ -9463,6 +9494,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
     }
 
+    // POST /api/models/download — Async download of a model file from HuggingFace.
+    // Spawns a background curl process; progress available via handle_models_download_progress.
     void handle_models_download(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string repo_id = extract_json_string(body, "repo_id");
@@ -9635,6 +9668,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             (long long)dl_id, escape_json(filename).c_str(), escape_json(local_path).c_str());
     }
 
+    // GET /api/models/download/progress?id=N — Poll download progress for a model download.
+    // Returns bytes downloaded, total size, completion/failure state.
     void handle_models_download_progress(struct mg_connection *c, struct mg_http_message *hm) {
         char id_buf[32] = {0};
         mg_http_get_var(&hm->query, "id", id_buf, sizeof(id_buf));
@@ -9687,6 +9722,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             escape_json(snap_local_path).c_str());
     }
 
+    // POST /api/models/add — Register a locally-present model file in SQLite.
+    // Verifies file exists on disk before inserting.
     void handle_models_add(struct mg_connection *c, struct mg_http_message *hm) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");

@@ -254,17 +254,32 @@ private:
     }
 
     // Finds the best split point near the max-chunk boundary by locating the
-    // lowest-energy frame in the last smart_split_window_frames_ frames.
-    // frame_energies tracks energy starting from energies_sample_origin (the onset
-    // confirmation frame), not from speech_start (which includes pre-speech context).
+    // lowest-energy frame in the last smart_split_window_frames_ (6) frames.
+    // This avoids cutting mid-word: energy dips correspond to inter-word silence
+    // or weak consonant transitions — natural word boundaries.
+    //
+    // frame_energies[] tracks per-frame mean energy starting from the onset
+    // confirmation frame (energies_sample_origin), NOT from speech_start (which
+    // includes vad_context_frames_ of pre-speech audio). This offset matters
+    // because the split position must be mapped back to an absolute buffer index.
+    //
+    // Algorithm:
+    //   1. Search window: last smart_split_window_frames_ entries in frame_energies[].
+    //   2. Find the frame with the minimum energy (tie → prefer later frame).
+    //   3. Convert frame index → buffer position:
+    //      split = energies_sample_origin + (min_idx + 1) * vad_frame_size_
+    //      The +1 ensures we split AFTER the quiet frame, keeping it in the current chunk.
+    //   4. Safety clamps: split must be within buffer bounds and after speech_start.
     size_t find_smart_split_point(VadCall& call, size_t max_end) {
         if (call.frame_energies.size() < 2) return max_end;
 
+        // Search only the tail of the energy array (last 6 frames = 300ms @ 50ms/frame).
         size_t search_start = 0;
         if (call.frame_energies.size() > smart_split_window_frames_) {
             search_start = call.frame_energies.size() - smart_split_window_frames_;
         }
 
+        // Linear scan for minimum energy frame (prefer later frame on tie via <=).
         float min_energy = call.frame_energies[search_start];
         size_t min_idx = search_start;
         for (size_t i = search_start + 1; i < call.frame_energies.size(); ++i) {
@@ -274,8 +289,9 @@ private:
             }
         }
 
-        // Map energy index back to buffer position using the recorded origin offset.
-        // energies_sample_origin is where frame_energies[0] starts in the buffer.
+        // Map energy index back to absolute buffer position.
+        // energies_sample_origin = buffer position where frame_energies[0] starts.
+        // +1 on min_idx: split at the END of the quiet frame (keep it in this chunk).
         size_t split = call.energies_sample_origin + (min_idx + 1) * vad_frame_size_;
         if (split > call.audio_buffer.size()) split = call.audio_buffer.size();
         if (split <= call.speech_start) split = max_end;
@@ -700,18 +716,18 @@ private:
         }
     }
 
-    // Forwards a speech chunk to Whisper via interconnect.
-    // Applies minimum length and RMS energy filters to reject noise/clicks.
-    // RMS energy check: G.711 codec noise floor is ~0.001 RMS; real speech is
-    // typically >0.01 RMS. Threshold at 0.005 rejects near-silence to prevent
-    // Whisper hallucinations on quiet segments.
-    // pre_sum_sq/pre_count: pre-computed sum-of-squares and sample count from frame
-    // processing. If pre_count > 0, uses these for the RMS gate check to avoid
-    // re-scanning the entire chunk (the chunk may include pre-speech context samples
-    // not tracked by pre_sum_sq, but these are a small fraction and won't affect the
-    // 0.005 RMS gate threshold in practice).
+    // Validates and sends a speech chunk to Whisper via the interconnect.
+    // Three-gate filter before transmission:
+    //   1. Minimum length gate: reject chunks shorter than vad_min_speech_samples_ (500ms)
+    //      to filter out clicks and noise bursts that passed onset detection.
+    //   2. RMS energy gate: reject chunks with RMS < 0.005 (near-silence) to prevent
+    //      Whisper hallucinations on effectively-silent audio that passed VAD.
+    //   3. If both pass, wrap the audio in a Packet and send downstream.
+    // pre_sum_sq/pre_count: pre-computed sum-of-squares from the FSM loop, avoiding
+    // a full rescan of the audio buffer. Falls back to on-the-fly computation if zero.
     void send_chunk_downstream(uint32_t call_id, const std::vector<float>& audio,
                                 float pre_sum_sq = 0.0f, size_t pre_count = 0) {
+        // Gate 1: minimum chunk length (500ms = 8000 samples @ 16kHz).
         if (audio.size() < vad_min_speech_samples_) {
             if (vad_logging_enabled_) {
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
@@ -721,6 +737,8 @@ private:
             return;
         }
 
+        // Gate 2: RMS energy check. Use pre-computed sum-of-squares if available
+        // (accumulated during frame processing), otherwise scan the audio buffer.
         float rms;
         if (pre_count > 0) {
             rms = std::sqrt(pre_sum_sq / static_cast<float>(pre_count));
