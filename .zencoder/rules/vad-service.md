@@ -27,3 +27,12 @@ The **VAD Service** (`vad-service.cpp`) performs Voice Activity Detection on the
 - `--vad-threshold <mult>`: Energy threshold multiplier over noise floor (default: 2.0, range: 0.5-10.0)
 - `--vad-silence-ms <ms>`: Silence duration to trigger speech-end (default: 400ms)
 - `--vad-max-chunk-ms <ms>`: Maximum speech chunk duration (default: 8000ms)
+- `--log-level <LEVEL>`: Initial log verbosity (ERROR/WARN/INFO/DEBUG/TRACE, default: INFO)
+
+## Runtime Commands (cmd port 13117)
+- `PING`: Health check (returns `PONG`)
+- `STATUS`: Returns VAD params, noise floor, active call count, connection state
+- `SET_LOG_LEVEL:<LEVEL>`: Change log verbosity at runtime without restart
+- `SET_VAD_THRESHOLD:<mult>`: Change energy threshold multiplier at runtime
+- `SET_VAD_SILENCE_MS:<ms>`: Change silence duration threshold at runtime
+- `SET_VAD_MAX_CHUNK_MS:<ms>`: Change maximum chunk duration at runtime

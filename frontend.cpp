@@ -1,3 +1,83 @@
+// frontend.cpp — Web UI server, log aggregator, service manager, and test runner.
+//
+// The frontend is the central control plane for the WhisperTalk system. It:
+//   - Serves a single-page web application (SPA) at http://0.0.0.0:8080/
+//   - Manages the lifecycle of all 7 pipeline services (start/stop/restart/config)
+//   - Aggregates structured log entries from all services via UDP on port 22022
+//   - Stores logs in SQLite and exposes them via REST API and SSE stream
+//   - Provides test infrastructure for Whisper ASR accuracy and pipeline WER testing
+//   - Provides the IAP audio quality test (offline G.711 codec round-trip check)
+//
+// HTTP API index (all endpoints on port 8080):
+//
+//   Service management:
+//     GET  /api/services                    — list all managed services + status
+//     POST /api/services/start              — start a service {name, args}
+//     POST /api/services/stop               — stop a service {name}
+//     POST /api/services/restart            — restart a service {name}
+//     GET/POST /api/services/config         — read/write per-service config in SQLite
+//
+//   Logging:
+//     GET  /api/logs                        — paginated log query {limit, offset, service, level}
+//     GET  /api/logs/recent                 — last N log entries from in-memory ring buffer
+//     GET  /api/logs/stream                 — Server-Sent Events (SSE) live log stream
+//     POST /api/settings/log_level          — set per-service log level; propagates to running service
+//
+//   Database:
+//     POST /api/db/query                    — execute arbitrary SELECT query (read-only guard)
+//     POST /api/db/write_mode               — toggle write mode for unsafe queries
+//     GET  /api/db/schema                   — return SQLite schema
+//
+//   Whisper / ASR:
+//     GET  /api/whisper/models              — list available GGML model files in models/
+//     POST /api/whisper/accuracy_test       — run offline Whisper accuracy test on a WAV file
+//     POST /api/whisper/hallucination_filter — enable/disable hallucination filter on running service
+//
+//   VAD:
+//     GET/POST /api/vad/config              — read/write VAD parameters; propagates to running service
+//
+//   SIP:
+//     POST /api/sip/add-line                — register a new SIP account (calls ADD_LINE on service)
+//     POST /api/sip/remove-line             — remove a SIP account
+//     GET  /api/sip/lines                   — list registered SIP lines
+//     GET  /api/sip/stats                   — RTP counters per active call
+//
+//   IAP:
+//     POST /api/iap/quality_test            — offline G.711 round-trip codec quality test
+//
+//   Test files:
+//     GET  /api/testfiles                   — list WAV+TXT sample pairs in Testfiles/
+//     POST /api/testfiles/scan              — rescan Testfiles/ directory
+//
+//   Test infrastructure:
+//     GET  /api/tests                       — list available test binaries
+//     POST /api/tests/start                 — run a test binary
+//     POST /api/tests/stop                  — kill a running test
+//     GET  /api/tests/*/history             — test run history
+//     GET  /api/tests/*/log                 — test stdout/stderr log
+//     GET  /api/test_results                — pipeline WER test results from /tmp/pipeline_results_*.json
+//
+//   Misc:
+//     GET  /api/status                      — system uptime, service health summary
+//
+// Log processing flow:
+//   1. UDP recv on port 22022: run_log_server() reads 4096-byte datagrams.
+//   2. process_log_message() parses "<SERVICE> <LEVEL> <CALL_ID> <message>".
+//      Malformed datagrams are silently dropped (no crash).
+//   3. LogEntry is enqueued to the async SQLite writer thread (enqueue_log()).
+//   4. Writer thread batch-INSERTs into the `logs` table at high throughput.
+//   5. In-memory ring buffer (recent_logs_, MAX_RECENT_LOGS entries) is updated.
+//   6. SSE broadcast notifies all open /api/logs/stream connections.
+//
+// Service start / log-level persistence:
+//   Service configs (args, log level) are stored in SQLite table `service_config`.
+//   start_service() reads log_level_<NAME> from DB and appends --log-level to args.
+//   handle_log_level_settings() writes to DB then sends SET_LOG_LEVEL:<LEVEL> to
+//   the service's cmd port (if running) — no restart needed.
+//
+// LLaMA quality test (score_llama_response):
+//   Scores generated responses by keyword match%, brevity (vs. max_words), and German
+//   language detection. Used by the frontend test panel to evaluate LLM quality.
 #include "interconnect.h"
 #include "mongoose.h"
 #include "sqlite3.h"

@@ -19,3 +19,11 @@ The **Inbound Audio Processor** (`inbound-audio-processor.cpp`) converts telepho
 
 ## Outbound Connections
 - **VAD Service (TCP)**: Streams float32 PCM audio (16kHz) to VAD on ports 13115 (mgmt) and 13116 (data).
+
+## Command-Line Parameters
+- `--log-level <LEVEL>`: Initial log verbosity (ERROR/WARN/INFO/DEBUG/TRACE, default: INFO)
+
+## Runtime Commands (cmd port 13112)
+- `PING`: Health check (returns `PONG`)
+- `STATUS`: Returns active call count, upstream/downstream state, avg/max per-packet latency (µs)
+- `SET_LOG_LEVEL:<LEVEL>`: Change log verbosity at runtime without restart

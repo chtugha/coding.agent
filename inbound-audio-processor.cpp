@@ -1,3 +1,31 @@
+// inbound-audio-processor.cpp — G.711 μ-law decoder + 8kHz→16kHz upsampler.
+//
+// Pipeline position: SIP_CLIENT → [IAP] → VAD
+//
+// Receives raw RTP packets (G.711 μ-law, 8kHz, 20ms frames = 160 bytes payload)
+// from the SIP_CLIENT via the interconnect data channel. For each packet:
+//   1. Strip RTP header (12 bytes).
+//   2. Decode μ-law bytes → float32 using a precomputed 256-entry LUT (ITU-T G.711).
+//      Each byte maps to a float in [-1.0, 1.0]. The LUT is built in init_g711_tables()
+//      using the standard segment/quantization decode formula.
+//   3. Upsample 8kHz→16kHz via polyphase FIR half-band filter (iap_fir_upsample_frame()
+//      from interconnect.h). Each 160-sample input frame produces 320 float32 samples.
+//      Filter: 15-tap Hamming-windowed sinc, cutoff ~3.8kHz, ~40dB stopband attenuation.
+//      State (fir_history) is per-call to avoid contamination between concurrent calls.
+//   4. Forward the 320-sample (20ms @ 16kHz) float32 buffer downstream to VAD.
+//
+// Per-call state (CallState): maintains the FIR history buffer across RTP packets so
+// the filter is continuous across frame boundaries. Inactive calls are cleaned up after
+// 60 seconds with no packets. CALL_END from upstream triggers immediate cleanup.
+//
+// Resilience: If VAD is disconnected, IAP discards audio but keeps processing.
+//   A throttled warning is logged once every DISC_WARN_INTERVAL_S (5s) to avoid log spam.
+//
+// Performance logging: Every 500 packets, logs avg/max per-packet processing latency
+// (μs) at DEBUG level so bottlenecks can be identified without constant log spam.
+//
+// CMD port (IAP base+2 = 13112): accepts PING, STATUS, SET_LOG_LEVEL commands.
+//   STATUS returns active call count, upstream/downstream state, avg/max latency.
 #include <iostream>
 #include <vector>
 #include <string>

@@ -26,9 +26,11 @@ The **Whisper Service** (`whisper-service.cpp`) performs Automatic Speech Recogn
 ## Command-Line Parameters
 - `--language <lang>` / `-l <lang>`: Whisper language code (default: "de")
 - `--model <path>` / `-m <path>`: Path to Whisper GGML model file (default: models/ggml-large-v3-turbo-q5_0.bin)
+- `--log-level <LEVEL>`: Initial log verbosity (ERROR/WARN/INFO/DEBUG/TRACE, default: INFO)
 
 ## Runtime Commands (cmd port 13122)
 - `HALLUCINATION_FILTER:ON` / `HALLUCINATION_FILTER:OFF`: Enable/disable hallucination filtering at runtime (default: OFF)
 - `HALLUCINATION_FILTER:STATUS`: Query current filter state (returns `HALLUCINATION_FILTER:ON` or `HALLUCINATION_FILTER:OFF`)
 - `STATUS`: Returns model name, upstream/downstream connection state, and hallucination filter state
 - `PING`: Health check (returns `PONG`)
+- `SET_LOG_LEVEL:<LEVEL>`: Change log verbosity at runtime without restart

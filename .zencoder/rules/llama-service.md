@@ -21,3 +21,12 @@ The **LLaMA Service** (`llama-service.cpp`) generates intelligent responses base
 
 ## Outbound Connections
 - **Kokoro TTS (TCP)**: Sends generated response text to Kokoro on ports 13140 (mgmt) and 13141 (data).
+
+## Command-Line Parameters
+- `--model <path>` / `-m <path>`: Path to GGUF model file (default: models/Llama-3.2-1B-Instruct-Q8_0.gguf)
+- `--log-level <LEVEL>`: Initial log verbosity (ERROR/WARN/INFO/DEBUG/TRACE, default: INFO)
+
+## Runtime Commands (cmd port 13132)
+- `PING`: Health check (returns `PONG`)
+- `STATUS`: Returns model name, active calls, upstream/downstream state, speech active state
+- `SET_LOG_LEVEL:<LEVEL>`: Change log verbosity at runtime without restart

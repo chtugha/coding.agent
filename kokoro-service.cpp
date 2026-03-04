@@ -1,3 +1,45 @@
+// kokoro-service.cpp — Text-to-Speech (TTS) synthesis stage using Kokoro + espeak-ng.
+//
+// Pipeline position: LLaMA → [Kokoro] → OAP
+//
+// Receives response text from LLaMA and synthesizes 24kHz float32 PCM audio using
+// the Kokoro TTS model (PyTorch TorchScript). Streams audio chunks to the
+// Outbound Audio Processor (OAP) for downsampling and G.711 encoding.
+//
+// Phonemization pipeline:
+//   1. espeak-ng (via libespeak-ng) converts text → IPA phoneme string.
+//      Language selection: German ("de") or English ("en-us") based on detect_german().
+//      A phoneme cache (PHONEME_CACHE_MAX=10000 entries, LRU eviction) avoids re-running
+//      espeak-ng for repeated phrases.
+//   2. KokoroVocab maps phoneme strings → int64 token IDs using a greedy longest-match
+//      scan (up to 4 chars per token, UTF-8 aware) over the vocab.json lookup table.
+//   3. Input is padded to 512 tokens and passed to the duration model.
+//
+// Model architecture (two-stage):
+//   Stage 1 — Duration model: predicts phoneme durations and generates alignment tensors
+//     (pred_dur, d, t_en, s, ref_s). Runs the style encoder over a reference style
+//     embedding from voice.bin.
+//   Stage 2 — Decoder model: generates the audio waveform from the alignment tensors.
+//     On Apple Silicon: uses CoreML ANE (Apple Neural Engine) split decoder when
+//     compiled with -DKOKORO_COREML. Falls back to TorchScript GPU path otherwise.
+//
+// CoreML split decoder (KOKORO_COREML):
+//   CoreMLDurationModel and CoreMLDecoderModel wrap MLModel instances configured with
+//   MLComputeUnitsAll (ANE + GPU + CPU). Tensors are bridged between PyTorch and CoreML
+//   via MLMultiArray memory copies. This path provides ~2-4× speedup on M-series chips
+//   compared to the PyTorch Metal backend for the decoder stage alone.
+//
+// Audio output normalization:
+//   normalize_audio() clips peaks above 0.95 to prevent clipping distortion in the
+//   G.711 encoder. Only scales down — never amplifies — to preserve dynamic range.
+//
+// SPEECH_ACTIVE handling:
+//   If a SPEECH_ACTIVE signal arrives during synthesis (caller starts speaking),
+//   the current synthesis is abandoned immediately and the output buffer is cleared.
+//   This prevents stale TTS audio from playing over the caller's speech.
+//
+// CMD port (Kokoro base+2 = 13142): PING, STATUS, SET_LOG_LEVEL commands.
+//   STATUS returns: model path, upstream/downstream state, active call count.
 #include <torch/script.h>
 #include <espeak-ng/speak_lib.h>
 #include "interconnect.h"

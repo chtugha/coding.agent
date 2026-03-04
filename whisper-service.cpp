@@ -1,4 +1,4 @@
-// Whisper Service — Automatic Speech Recognition using whisper.cpp
+// whisper-service.cpp — Automatic Speech Recognition (ASR) stage.
 //
 // Pipeline position: VAD → [Whisper] → LLaMA
 //
@@ -6,12 +6,34 @@
 // Each chunk is a complete speech segment (typically 1-8 seconds) already validated
 // by VAD — no voice activity detection is performed here.
 //
-// Decoding: GREEDY (not beam search). On short 2-8s segments, greedy is ~3-5x faster
-// than beam_size=5 with negligible accuracy difference. Temperature fallback handles errors.
+// Decoding strategy:
+//   GREEDY (not beam search). On short 2-8s segments, greedy is ~3-5x faster
+//   than beam_size=5 with negligible accuracy difference. Temperature fallback
+//   (temp_inc=0.2) retries on high entropy or failed compression ratio checks.
 //
-// No audio normalization — whisper-cli doesn't normalize and produces correct
-// transcriptions on G.711 round-tripped audio. Normalization changes signal
-// characteristics and confuses the model.
+//   Telephony-optimized parameters:
+//     no_speech_thold=0.9  — prevents early decoder stop on G.711 audio artifacts.
+//     entropy_thold=2.8    — tolerant of codec-induced prediction uncertainty.
+//     No initial_prompt    — prompts cause hallucination artifacts on codec audio.
+//
+// Hallucination filter (default OFF, runtime-toggleable via cmd port or frontend UI):
+//   Exact-match list of known Whisper hallucination strings (e.g. "Untertitel",
+//   "Copyright", "Musik"). Trailing hallucination stripping removes known suffixes
+//   with word-boundary-aware matching. Repetitive-text detection also enabled.
+//   Toggle: "HALLUCINATION_FILTER:ON/OFF" on cmd port 13122.
+//
+// RMS energy check: Rejects chunks with RMS < 0.005 as near-silence to prevent
+//   hallucinations on effectively-silent frames passed by VAD.
+//
+// Packet buffering: If LLaMA is disconnected, buffers up to MAX_BUFFER_PACKETS (64)
+//   transcription packets and drains them atomically on reconnect.
+//
+// Audio normalization: NOT applied. whisper-cli defaults to no normalization and
+//   produces correct transcriptions on G.711 round-tripped audio. Normalization
+//   changes signal characteristics and degrades model accuracy.
+//
+// CMD port (Whisper base+2 = 13122): PING, STATUS, HALLUCINATION_FILTER:ON/OFF/STATUS,
+//   SET_LOG_LEVEL commands. STATUS returns model name, filter state, connection state.
 #include <iostream>
 #include <iomanip>
 #include <vector>

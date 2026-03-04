@@ -1,4 +1,52 @@
 #!/usr/bin/env python3
+# run_pipeline_test.py — Full pipeline WER (Word Error Rate) test script.
+#
+# Usage:
+#   python3 tests/run_pipeline_test.py <MODEL_NAME> [TESTFILES_DIR]
+#
+#   MODEL_NAME:    label for this test run (e.g. "ggml-large-v3-turbo-q5_0"). Used in
+#                  the output filename: /tmp/pipeline_results_<MODEL_NAME>.json
+#   TESTFILES_DIR: directory containing sample_NN.wav + sample_NN.txt pairs
+#                  (default: "Testfiles")
+#
+# Prerequisites:
+#   - All pipeline services must be running (SIP, IAP, VAD, Whisper, LLaMA, Kokoro, OAP).
+#   - Frontend server must be at http://127.0.0.1:8080 (log API).
+#   - TestSipProvider must be at http://127.0.0.1:22011 (audio injection API).
+#   - The "alice" SIP account must be registered with the provider.
+#
+# Test flow for each sample (sample_NN.wav):
+#   1. POST /inject to SipProvider: injects WAV audio into alice's RTP stream.
+#   2. Audio flows through the pipeline: SIP→IAP→VAD→Whisper→LLaMA→Kokoro→OAP→SIP.
+#   3. Poll GET /api/logs on the frontend every 2s to find new transcription entries.
+#      Entries match: "Transcription (Xms): <text>" in the Whisper service logs.
+#   4. Collect ALL transcription chunks until no new chunk appears for 6s (idle timeout).
+#      VAD splits audio into multiple chunks at silence boundaries; all chunks are
+#      concatenated and scored as a single utterance.
+#   5. Wait 3s for silence flush before injecting the next sample.
+#
+# WER computation:
+#   Similarity is computed as character-level Levenshtein distance normalized by the
+#   length of the longer string:  similarity = (1 - dist/max_len) * 100
+#
+#   Pre-processing (normalize()):
+#     - Lowercase, strip punctuation (.,;:!?-—"'«»„"")
+#     - German number words → digits (e.g. "zwanzig" → "20"), compound numbers handled
+#       via a hardcoded lookup table for common test cases.
+#     - Collapse whitespace.
+#
+#   Thresholds:
+#     PASS: similarity >= 99.5%  (essentially perfect transcription)
+#     WARN: similarity >= 90%    (acceptable; triggers manual review / tuning)
+#     FAIL: similarity < 90%     (below acceptable threshold; requires investigation)
+#     TIMEOUT: no transcription received within audio_dur + 20s
+#
+# Results:
+#   - Per-sample: status (PASS/WARN/FAIL/TIMEOUT), similarity%, Whisper inference ms,
+#     chunk count, ground truth, and full concatenated transcription.
+#   - Summary: PASS/WARN/FAIL counts, avg inference time.
+#   - Saved to: /tmp/pipeline_results_<MODEL_NAME>.json
+#   - Also readable via GET /api/test_results in the frontend UI.
 import json, sys, time, re, urllib.request, os
 
 FRONTEND = "http://127.0.0.1:8080"

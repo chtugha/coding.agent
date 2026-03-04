@@ -1,4 +1,39 @@
-// Outbound Audio Processor (Interconnect-based)
+// outbound-audio-processor.cpp — 24kHz→8kHz downsampler + G.711 encoder + RTP scheduler.
+//
+// Pipeline position: Kokoro → [OAP] → SIP_CLIENT
+//
+// Receives 24kHz float32 PCM audio chunks from the Kokoro TTS service and converts
+// them to 160-byte G.711 μ-law frames for transmission to the SIP client.
+//
+// Downsampling pipeline (24kHz → 8kHz, ratio 3:1):
+//   1. Anti-aliasing FIR filter: 15-tap Hamming-windowed sinc, cutoff 3400/12000
+//      (~3400Hz, preserves telephone speech band, attenuates aliases above 4kHz).
+//      Filter coefficients are computed once via get_aa_coeffs() and cached.
+//      Per-call FIR history (fir_history[AA_HALF_TAPS]) preserves state across frames.
+//   2. Decimate by 3: keep every 3rd filtered sample, reducing 24kHz → 8kHz.
+//   3. Clip to [-1, 1] and encode each float32 sample to μ-law via the standard
+//      ITU-T G.711 segment/quantization formula.
+//
+// Output scheduling — constant-rate 20ms timer:
+//   A dedicated sender thread fires every 20ms (hardware timer based on steady_clock).
+//   Each tick sends exactly 160 G.711 bytes to the SIP_CLIENT via the interconnect
+//   data channel. If the TTS buffer is empty (Kokoro silent or not connected), the
+//   sender emits ULAW_SILENCE frames (0xFF) to maintain RTP clock continuity.
+//
+// Per-call state (CallState):
+//   buffer:    raw G.711 byte queue fed by the Kokoro receive thread.
+//   read_pos:  logical read head; compact() reclaims memory when read_pos > 4096.
+//   fir_history: per-call anti-aliasing filter state; avoids cross-call contamination.
+//   ext[]:     pre-allocated extended buffer (history + one input batch) to avoid
+//              per-frame heap allocation.
+//   ulaw_buf[]: per-call scratch buffer for the downsampled/encoded output.
+//
+// SPEECH_ACTIVE handling:
+//   When upstream signals SPEECH_ACTIVE (caller speaking), OAP clears all call buffers
+//   to stop playing stale TTS audio immediately (avoids feedback over the caller).
+//
+// CMD port (OAP base+2 = 13152): PING, STATUS, SET_LOG_LEVEL.
+//   STATUS returns active calls, buffer lengths, upstream/downstream state.
 #include <iostream>
 #include <vector>
 #include <string>

@@ -1,4 +1,40 @@
-// LLaMA Service (Interconnect-based, Apple Silicon optimized)
+// llama-service.cpp — LLM response generation stage using llama.cpp.
+//
+// Pipeline position: Whisper → [LLaMA] → Kokoro
+//
+// Receives transcribed text from Whisper and generates a spoken German reply
+// using Llama-3.2-1B-Instruct (Q8_0 GGUF) via the llama.cpp C API.
+//
+// Inference details:
+//   Model:     Llama-3.2-1B-Instruct Q8_0 — compact enough for real-time use on
+//              Apple Silicon Metal (n_gpu_layers=-1, all layers on GPU).
+//   Template:  llama_chat_apply_template() — uses the model's built-in chat template
+//              for correct role tagging (system/user/assistant). No manual formatting.
+//   Sampling:  Greedy (llama_sampler_init_greedy). Max 64 tokens per response.
+//              Generation stops at sentence-ending punctuation (. ? !) or EOS token.
+//   Context:   2048 tokens, 4 threads. Sequence IDs isolate per-call KV cache.
+//
+// German system prompt:
+//   Enforces: always German, max 1 sentence / 15 words, polite and natural.
+//   Avg quality score ~70% across test prompts, 90% German detection rate.
+//   Avg latency ~320ms on Apple M-series.
+//
+// Session isolation (LlamaCall struct):
+//   Each active call_id gets its own LlamaCall with independent message history,
+//   sequence ID, and n_past KV cache offset. CALL_END clears the session.
+//
+// Shut-up mechanism:
+//   SPEECH_ACTIVE signal from VAD (via interconnect mgmt channel) sets
+//   speech_active_=true. The worker loop checks this flag before and during
+//   generation. Active generation is aborted by setting generating=false on
+//   the current LlamaCall. Interrupt latency: ~5-13ms.
+//
+// Tokenizer resilience:
+//   llama_tokenize() can return negative values if the output buffer is too small.
+//   The service retries with a progressively larger buffer (up to 4× initial size).
+//
+// CMD port (LLaMA base+2 = 13132): PING, STATUS, SET_LOG_LEVEL commands.
+//   STATUS returns: model name, active calls, upstream/downstream state, speech state.
 #include <iostream>
 #include <vector>
 #include <string>

@@ -1,3 +1,47 @@
+// interconnect.h — WhisperTalk shared inter-service communication layer.
+//
+// Architecture overview:
+//   All pipeline services communicate exclusively through this header.
+//   The pipeline is a linear chain of 7 C++ processes:
+//
+//     SIP_CLIENT → IAP → VAD → WHISPER → LLAMA → KOKORO → OAP → SIP_CLIENT (loop)
+//
+//   Every adjacent pair shares two persistent TCP connections:
+//     • mgmt channel (base port +0): carries typed control messages
+//       (CALL_END, SPEECH_ACTIVE/IDLE, PING/PONG, CUSTOM).
+//     • data channel (base port +1): carries binary Packet frames
+//       (audio PCM, text payloads, G.711 frames).
+//
+//   InterconnectNode encapsulates both directions for a single service:
+//     • Listen sockets accept the upstream neighbor's connections.
+//     • Outbound sockets connect to the downstream neighbor's listen ports.
+//     • A background reconnect loop retries downstream connections every
+//       DOWNSTREAM_RECONNECT_MS (200ms) until the neighbor is reachable.
+//
+//   LogForwarder sends structured log entries as UDP datagrams to the
+//   frontend log server (port 22022). Each datagram is a plain-text line:
+//     "<SERVICE> <LEVEL> <CALL_ID> <message>"
+//   The log_level_ gate filters below-threshold messages before send.
+//
+//   Shared utilities (also used by frontend.cpp for the offline IAP quality
+//   test) include the G.711 μ-law → float32 LUT and the polyphase FIR
+//   half-band upsample kernel (iap_fir_upsample_frame).
+//
+// Port map (all on 127.0.0.1):
+//   SIP_CLIENT (13100/13101/13102), IAP (13110/13111/13112)
+//   VAD (13115/13116/13117), WHISPER (13120/13121/13122)
+//   LLAMA (13130/13131/13132), KOKORO (13140/13141/13142)
+//   OAP (13150/13151/13152), FRONTEND (13160/13161/13162)
+//   Log UDP: 22022
+//
+// Usage pattern for a service:
+//   1. Construct InterconnectNode(ServiceType::MY_SERVICE)
+//   2. Call initialize() — binds listen ports and starts background threads.
+//   3. Call connect_to_downstream() — non-blocking; reconnect loop handles retries.
+//   4. Register call_end_handler / speech_signal_handler as needed.
+//   5. In processing loop: recv_from_upstream() / send_to_downstream().
+//   6. On shutdown: call shutdown() (or let destructor do it).
+
 #pragma once
 
 #include <cstdint>
@@ -347,10 +391,26 @@ enum class MgmtMsgType : uint8_t {
     CUSTOM         = 10,  // payload: 2-byte len + string
 };
 
-// Peer-to-peer interconnect node. No master/slave. No heartbeats.
-// Each service listens on 2 fixed TCP ports (mgmt + data) for its upstream neighbor.
-// Each service connects to 2 fixed TCP ports on its downstream neighbor.
-// TCP keepalive + send/recv errors provide instant crash detection.
+// InterconnectNode — per-service TCP communication hub.
+//
+// Lifecycle:
+//   initialize()              → bind listen sockets, start 3 background threads.
+//   connect_to_downstream()   → one-shot attempt; reconnect_loop retries forever.
+//   send_to_downstream(pkt)   → send data packet to next service in pipeline.
+//   recv_from_upstream(pkt)   → blocking receive from previous service (with timeout).
+//   broadcast_call_end(id)    → notify downstream chain that a call has terminated.
+//   broadcast_speech_signal() → propagate VAD SPEECH_ACTIVE/IDLE downstream.
+//   shutdown()                → close all sockets, join threads (idempotent).
+//
+// Thread model (3 background threads per node):
+//   accept_thread_:              waits for upstream to connect on our listen ports;
+//                                polls for dead connections and resets them.
+//   downstream_connect_thread_:  polls downstream state; reconnects every 200ms on failure.
+//   mgmt_recv_thread_:           reads typed messages from upstream mgmt socket;
+//                                dispatches call_end / speech / ping / custom handlers.
+//
+// Safety: All socket accesses are guarded by per-direction mutexes. Sockets are
+// closed with shutdown(SHUT_RDWR) before close() so blocked threads unblock.
 class InterconnectNode {
 public:
     InterconnectNode(ServiceType type) 
@@ -1238,6 +1298,11 @@ private:
     }
 };
 
+// LogLevel controls verbosity per service.
+// Ordered by severity: ERROR(0) < WARN(1) < INFO(2) < DEBUG(3) < TRACE(4).
+// Messages with level > current threshold are dropped before the UDP send.
+// Runtime change: call set_level() or send "SET_LOG_LEVEL:<LEVEL>" to cmd port.
+// Startup: pass --log-level <LEVEL> CLI argument (persisted in frontend DB).
 enum class LogLevel : int {
     ERROR = 0,
     WARN  = 1,
@@ -1267,6 +1332,23 @@ inline LogLevel log_level_from_string(const char* s) {
     return LogLevel::INFO;
 }
 
+// LogForwarder — UDP log sink for all pipeline services.
+//
+// Each service owns one LogForwarder instance. After init(), every call to
+// forward() serializes the message as:
+//   "<SERVICE> <LEVEL> <CALL_ID> <message>\0"
+// and sendto() it to the frontend log server at 127.0.0.1:22022 (FRONTEND_LOG_PORT).
+//
+// The frontend process_log_message() parses this format, stores entries in SQLite,
+// and exposes them via GET /api/logs for the UI and test scripts.
+//
+// Thread safety: forward() is safe to call from any thread. set_level() uses an
+// atomic store so level changes take effect immediately without a lock.
+//
+// Buffer sizing:
+//   msg[2048]: max message body; vsnprintf truncates safely at 2047 + null.
+//   buf[2304]: prefix overhead max 41 bytes + 2047 body = 2088 < 2304.
+//   Frontend recv buffer: 4096 bytes — larger than max datagram (2304).
 class LogForwarder {
 public:
     LogForwarder() : sock_(-1), port_(0), log_level_(static_cast<int>(LogLevel::INFO)) {}

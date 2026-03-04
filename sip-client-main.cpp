@@ -1,4 +1,43 @@
-// SIP Client Module (Interconnect-based, multi-line)
+// sip-client-main.cpp — SIP/RTP gateway bridging the telephone network to the pipeline.
+//
+// Pipeline position: [SIP_CLIENT] ↔ IAP (outbound RTP) / OAP (inbound TTS)
+//
+// This is the entry and exit point of the pipeline for real telephone calls.
+// It implements a minimal SIP stack sufficient for registration + call handling,
+// and raw RTP I/O over UDP sockets.
+//
+// SIP signaling (raw UDP, port 5060 or configured):
+//   Registration: Sends REGISTER with Digest authentication. Re-registers every
+//     60s. Parses WWW-Authenticate challenge for MD5-hash Digest credentials.
+//   INVITE handling: Parses SDP to extract remote IP/port, allocates a local RTP
+//     port, responds with 200 OK + SDP, starts RTP threads.
+//   BYE: Terminates the matching call session; sends CALL_END downstream.
+//   Multi-line: Supports up to N SIP registrations simultaneously (ADD_LINE command),
+//     each with its own SIP UDP socket, registration thread, and RTP thread.
+//
+// RTP routing:
+//   Inbound (network → pipeline): Each active call has an rtp_thread that recvfrom()s
+//     RTP packets from the network and forwards them as Packet frames to the IAP
+//     via interconnect send_to_downstream(). Packet includes the full RTP header
+//     (12 bytes) — IAP strips it.
+//   Outbound (pipeline → network): OAP connects to SIP_CLIENT's listen port (13100/13101)
+//     and pushes 160-byte G.711 frames. SIP_CLIENT wraps them in RTP headers
+//     (seq, ts, ssrc) and sendto() to the remote caller.
+//
+// Session management:
+//   CallSession: tracks call_id, SIP Call-ID, remote IP/port, local RTP socket,
+//     RTP counters (rx/tx packets, bytes, forwarded, discarded), and start time.
+//   Numeric call_id is assigned from a monotonic counter (next_id_++) and passed
+//     through the entire pipeline for session isolation.
+//   Stale calls: hang up automatically if no RTP received for 60s (configurable).
+//
+// CMD port (SIP base+2 = 13102):
+//   ADD_LINE:<user>:<server>:<port>:<password>  — register a new SIP account.
+//   GET_STATS                                   — JSON stats for all active calls.
+//   PING / STATUS                               — health check / status summary.
+//   SET_LOG_LEVEL:<LEVEL>                       — change log verbosity at runtime.
+//
+// RTP port allocation: starts at RTP_PORT_BASE (10000), increments by 2 per call.
 #include <iostream>
 #include <vector>
 #include <string>

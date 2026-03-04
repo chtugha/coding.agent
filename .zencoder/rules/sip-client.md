@@ -26,3 +26,18 @@ The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts
 - **SIP (Network)**: UDP to SIP server.
 - **RTP (Network)**: UDP to remote party.
 - **IAP (TCP)**: Sends RTP packets to Inbound Audio Processor on ports 13110 (mgmt) and 13111 (data).
+
+## Command-Line Parameters
+- `--user <user>`: SIP username for initial line
+- `--server <ip>`: SIP server IP address
+- `--port <port>`: SIP server port (default: 5060)
+- `--password <pass>`: SIP password for Digest auth
+- `--lines <n>`: Number of SIP lines to register
+- `--log-level <LEVEL>`: Initial log verbosity (ERROR/WARN/INFO/DEBUG/TRACE, default: INFO)
+
+## Runtime Commands (cmd port 13102)
+- `ADD_LINE:<user>:<server>:<port>:<password>`: Register a new SIP account dynamically
+- `GET_STATS`: Returns JSON stats (RTP counters) for all active calls
+- `PING`: Health check (returns `PONG`)
+- `STATUS`: Returns registered lines, active call count, connection state
+- `SET_LOG_LEVEL:<LEVEL>`: Change log verbosity at runtime without restart

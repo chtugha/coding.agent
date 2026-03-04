@@ -106,7 +106,8 @@ Run full 1-minute pipeline test, measure WER and latency, find bottlenecks.
 - Files: `vad-service.cpp`, `whisper-service.cpp`, `llama-service.cpp` as needed
 - Also: `tests/run_pipeline_test.py` — add per-stage latency reporting if log data supports it
 
-### [ ] Step: Documentation
+### [x] Step: Documentation
+<!-- chat-id: b5f0104a-8255-41b9-bf36-236de62a0ddd -->
 
 Add thorough inline code documentation to all services and the frontend.
 

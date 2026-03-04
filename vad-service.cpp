@@ -20,6 +20,21 @@
 //
 // Speech signal management: Broadcasts SPEECH_ACTIVE/SPEECH_IDLE signals downstream
 // to coordinate with other services (e.g., Kokoro stops TTS playback on speech detect).
+//
+// VadCall per-call state:
+//   audio_buffer:          ring of incoming float32 PCM samples (16kHz).
+//   in_speech/silence_count/onset_count: FSM tracking speech vs. silence.
+//   noise_floor:           adaptive estimate; updated each frame during silence.
+//   frame_energies:        per-frame RMS² from the confirmed onset frame onward,
+//                          used by smart-split to find a low-energy cut point.
+//   energies_sample_origin: buffer position at which frame_energies[0] starts.
+//   speech_sum_sq / speech_sample_count: running sum-of-squares for RMS check in
+//                          send_chunk_downstream() without rescanning the buffer.
+//
+// CMD port (VAD base+2 = 13117): accepts PING, STATUS, SET_LOG_LEVEL,
+//   SET_VAD_THRESHOLD, SET_VAD_SILENCE_MS, SET_VAD_MAX_CHUNK_MS commands.
+//   STATUS returns: noise_floor, threshold_mult, silence_frames, max_chunk_ms,
+//   active call count, upstream/downstream state.
 #include <iostream>
 #include <iomanip>
 #include <sstream>
