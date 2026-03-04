@@ -605,16 +605,20 @@ private:
     std::string handle_line_command(const std::string& msg) {
         if (msg.substr(0, 9) == "ADD_LINE ") {
             std::istringstream iss(msg.substr(9));
-            std::string user, server_ip, password, port_str;
-            iss >> user >> server_ip >> password >> port_str;
+            std::string user, server_ip, port_str;
+            iss >> user >> server_ip >> port_str;
             if (user.empty() || server_ip.empty()) {
                 return "ERROR Missing user or server_ip";
             }
-            if (password == "-") password.clear();
             int port = 5060;
             if (!port_str.empty()) {
                 try { port = std::stoi(port_str); } catch (...) { port = 5060; }
+                if (port < 1 || port > 65535) port = 5060;
             }
+            std::string password;
+            if (iss.peek() == ' ') iss.get();
+            std::getline(iss, password);
+            if (password == "-") password.clear();
             int idx = add_line(user, server_ip, password, port);
             if (idx < 0) return "ERROR Failed to create line";
             return "LINE_ADDED " + std::to_string(idx);

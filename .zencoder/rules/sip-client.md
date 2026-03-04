@@ -36,7 +36,7 @@ The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts
 - `--log-level <LEVEL>`: Initial log verbosity (ERROR/WARN/INFO/DEBUG/TRACE, default: INFO)
 
 ## Runtime Commands (cmd port 13102)
-- `ADD_LINE <user> <server_ip> <password> <port>`: Register a new SIP account dynamically (password="-" means empty, port defaults to 5060)
+- `ADD_LINE <user> <server_ip> <port> <password>`: Register a new SIP account dynamically (password last to allow spaces, "-" means empty, port 1-65535 defaults to 5060)
 - `REMOVE_LINE <index>`: Remove a SIP line by index
 - `LIST_LINES`: Returns `LINES <idx>:<user>:<registered|unregistered>:<server_ip>:<port> ...`
 - `GET_STATS`: Returns RTP counters for all active calls

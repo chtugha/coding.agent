@@ -2672,6 +2672,8 @@ function sipConnectPbx(){
   var password=document.getElementById('sipPbxPassword').value;
   var status=document.getElementById('sipPbxStatus');
   if(!server||!user){status.innerHTML='<span style="color:var(--wt-danger)">Server and Username required</span>';return;}
+  var portNum=parseInt(port,10);
+  if(isNaN(portNum)||portNum<1||portNum>65535){status.innerHTML='<span style="color:var(--wt-danger)">Port must be 1-65535</span>';return;}
   status.innerHTML='<span style="color:var(--wt-warning)">Connecting...</span>';
   fetch('/api/sip/add-line',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({user:user,server:server,password:password,port:port})
@@ -5765,9 +5767,15 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
+        int port_val = 5060;
+        if (!port_str.empty()) {
+            try { port_val = std::stoi(port_str); } catch (...) { port_val = 5060; }
+            if (port_val < 1 || port_val > 65535) port_val = 5060;
+        }
+
         std::string cmd = "ADD_LINE " + user + " " + (server.empty() ? "127.0.0.1" : server);
+        cmd += " " + std::to_string(port_val);
         cmd += " " + (password.empty() ? "-" : password);
-        cmd += " " + (port_str.empty() ? "5060" : port_str);
 
         std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, cmd);
         if (resp.empty()) {
