@@ -908,7 +908,14 @@ private:
                         if (speech_signal_handler_) {
                             speech_signal_handler_(cid, active);
                         }
-                        send_mgmt_to_downstream(msg_type, cid);
+                        // Speech signals originate at VAD and flow downstream only.
+                        // OAP and SIP_CLIENT are the terminal consumers — forwarding
+                        // beyond OAP would loop signals back through SIP→IAP→VAD→Whisper,
+                        // creating an infinite oscillation at ~40k cycles/second.
+                        if (type_ != ServiceType::OUTBOUND_AUDIO_PROCESSOR &&
+                            type_ != ServiceType::SIP_CLIENT) {
+                            send_mgmt_to_downstream(msg_type, cid);
+                        }
                     }
                     break;
                 }

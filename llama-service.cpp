@@ -64,7 +64,7 @@ public:
         sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
         llama_sampler_chain_add(sampler_, llama_sampler_init_greedy());
         
-        std::cout << "🚀 LLaMA Service optimized for Apple Silicon (Metal) initialized" << std::endl;
+        std::cout << "LLaMA Service optimized for Apple Silicon (Metal) initialized" << std::endl;
     }
 
     ~LlamaService() {
@@ -85,7 +85,7 @@ public:
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::LLAMA_SERVICE);
 
         if (!interconnect_.connect_to_downstream()) {
-            std::cout << "⚠️  Downstream (Kokoro) not available yet - will auto-reconnect" << std::endl;
+            std::cout << "Downstream (Kokoro) not available yet - will auto-reconnect" << std::endl;
         }
 
         interconnect_.register_call_end_handler([this](uint32_t call_id) {
@@ -93,13 +93,14 @@ public:
         });
 
         interconnect_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
-            std::cout << "[" << call_id << "] Speech signal: " << (active ? "ACTIVE" : "IDLE") << std::endl;
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
+                "Speech signal: %s", active ? "ACTIVE" : "IDLE");
             if (active) {
                 std::lock_guard<std::mutex> lock(calls_mutex_);
                 auto it = calls_.find(call_id);
                 if (it != calls_.end() && it->second->generating) {
-                    std::cout << "🤫 [" << call_id << "] Speech detected — interrupting generation" << std::endl;
-                    log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Speech detected — interrupting generation (shut-up)");
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
+                        "Speech detected — interrupting generation (shut-up)");
                     it->second->generating = false;
                 }
             }
@@ -173,13 +174,11 @@ private:
             }
 
             if (interconnect_.is_speech_active(item.call_id)) {
-                std::cout << "⏸️  [" << item.call_id << "] Waiting — speech active, deferring response" << std::endl;
-                log_fwd_.forward(whispertalk::LogLevel::INFO, item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
                 while (interconnect_.is_speech_active(item.call_id) && running_) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
-                std::cout << "▶️  [" << item.call_id << "] Speech ended, resuming response generation" << std::endl;
-                log_fwd_.forward(whispertalk::LogLevel::INFO, item.call_id, "Speech ended, resuming response generation");
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Speech ended, resuming response generation");
             }
             if (!running_) break;
 
@@ -258,7 +257,7 @@ private:
         llama_batch single_batch = llama_batch_init(1, 0, 1);
         for (int i = 0; i < MAX_TOKENS; ++i) {
             if (!call->generating) {
-                std::cout << "⚠️  [" << cid << "] Generation interrupted" << std::endl;
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid, "Generation interrupted");
                 break;
             }
 
@@ -300,7 +299,6 @@ private:
         }
 
         call->messages.push_back({"assistant", response});
-        std::cout << "🦙 [" << cid << "] DE (" << gen_ms << "ms): " << response << std::endl;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Response (%lldms): %s", gen_ms, response.c_str());
         return response;
     }
@@ -323,7 +321,6 @@ private:
         pkt.trace.record(whispertalk::ServiceType::LLAMA_SERVICE, 1);
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                std::cout << "⚠️  [" << cid << "] Kokoro disconnected, discarding response to /dev/null" << std::endl;
                 log_fwd_.forward(whispertalk::LogLevel::WARN, cid, "Kokoro disconnected, discarding response");
             }
         }
@@ -337,7 +334,6 @@ private:
         call->seq_id = next_seq_id_.fetch_add(1);
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
-        std::cout << "📞 Created conversation context for call_id " << cid << std::endl;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created conversation context");
         return call;
     }
@@ -349,7 +345,6 @@ private:
             llama_memory_t mem = llama_get_memory(ctx_);
             llama_memory_seq_rm(mem, calls_[call_id]->seq_id, -1, -1);
             calls_.erase(call_id);
-            std::cout << "🛑 Call " << call_id << " ended, clearing conversation context" << std::endl;
             log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, clearing conversation context");
         }
     }

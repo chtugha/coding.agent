@@ -59,11 +59,11 @@ CONDA_ENV_NAME = 'kokoro_coreml'
 REQUIRED_TORCH = '2.5'
 REQUIRED_COREMLTOOLS = '8.3'
 
-MODEL_URL = 'https://huggingface.co/Thomcle/Kokoro-German/resolve/main/kokoro-german-v1_1-de.pth'
-CONFIG_URL = 'https://huggingface.co/Thomcle/Kokoro-German/resolve/main/config.json'
+MODEL_URL = 'https://huggingface.co/Tundragoon/Kokoro-German/resolve/main/kokoro-german-v1_1-de.pth'
+CONFIG_URL = 'https://huggingface.co/Tundragoon/Kokoro-German/resolve/main/config.json'
 VOICE_URLS = {
-    'df_eva': 'https://huggingface.co/Thomcle/Kokoro-German/resolve/main/voices/df_eva.pt',
-    'dm_bernd': 'https://huggingface.co/Thomcle/Kokoro-German/resolve/main/voices/dm_bernd.pt',
+    'df_eva': 'https://huggingface.co/Tundragoon/Kokoro-German/resolve/main/voices/df_eva.pt',
+    'dm_bernd': 'https://huggingface.co/Tundragoon/Kokoro-German/resolve/main/voices/dm_bernd.pt',
 }
 
 BUCKETS = [

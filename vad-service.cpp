@@ -41,6 +41,7 @@
 
 static constexpr int VAD_SAMPLE_RATE = 16000;
 static constexpr int VAD_SAMPLES_PER_MS = VAD_SAMPLE_RATE / 1000;
+static constexpr int DISC_WARN_INTERVAL_S = 5;
 
 static std::atomic<bool> g_running{true};
 static void sig_handler(int) { g_running = false; }
@@ -97,9 +98,11 @@ class VadService {
     // vad_context_frames_: include 8 frames (400ms) of pre-speech context audio so the
     //   chunk captures the onset of speech including weak initial vowels/consonants.
     int vad_context_frames_ = 8;
-    // vad_onset_frames_: require 3 consecutive above-threshold frames to confirm
-    //   speech onset, preventing single-frame noise spikes from triggering.
-    int vad_onset_frames_ = 3;
+    // vad_onset_frames_: require 2 consecutive above-threshold frames to confirm
+    //   speech onset. Reduced from 3 to detect quiet vowel onsets (e.g. "Abfall-"
+    //   after a comma pause) that may produce only 1 borderline-threshold frame
+    //   before exceeding it. 2 frames still prevents single-frame noise spikes.
+    int vad_onset_frames_ = 2;
     int speech_signal_timeout_s_ = 10;
     // vad_inactivity_flush_ms_: if no new audio arrives for 1000ms while speech is
     //   active, flush the buffer immediately (handles end-of-stream).
@@ -202,7 +205,9 @@ private:
         call.silence_count = 0;
         call.onset_count = 0;
         call.speech_start = 0;
+        call.tentative_speech_start = 0;
         call.energies_sample_origin = 0;
+        call.vad_pos = 0;
         // Reset noise floor to init value (above G.711 codec noise floor) so
         // adaptive tracking restarts cleanly for the next speech segment.
         call.noise_floor = 0.00005f;
@@ -213,8 +218,12 @@ private:
         return was_signaled;
     }
 
-    // Removes `consumed` samples from the front of the audio buffer.
-    // Uses deque::erase for bulk removal (lower overhead than N pop_front() calls).
+    // Removes `consumed` samples from the front of the audio buffer and resets
+    // all position-tracking fields. Also refreshes last_buffer_size and
+    // last_buffer_growth so that the inactivity-flush timer restarts from the
+    // moment of compaction rather than from when audio last arrived — this
+    // prevents a premature inactivity flush on the leftover segment after a
+    // max-length split where no new audio arrives for >1s.
     void compact_buffer(VadCall& call, size_t consumed) {
         if (consumed >= call.audio_buffer.size()) {
             call.audio_buffer.clear();
@@ -224,7 +233,9 @@ private:
         }
         call.vad_pos = 0;
         call.speech_start = 0;
+        call.tentative_speech_start = 0;
         call.last_buffer_size = call.audio_buffer.size();
+        call.last_buffer_growth = std::chrono::steady_clock::now();
     }
 
     // Finds the best split point near the max-chunk boundary by locating the
@@ -453,16 +464,33 @@ private:
 
                         // Silence-triggered speech end: enough consecutive silent frames detected.
                         if (call->in_speech && call->silence_count > vad_silence_frames_) {
-                            to_send.assign(
-                                call->audio_buffer.begin() + call->speech_start,
-                                call->audio_buffer.begin() + pos);
-                            chunk_sum_sq = call->speech_sum_sq;
-                            chunk_sample_count = call->speech_sample_count;
-                            if (vad_logging_enabled_) {
-                                double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
-                                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
-                                    "VAD speech_end (silence) — %zu samples (%.0fms) queued for transcription",
-                                    to_send.size(), dur_ms);
+                            size_t buf_sz = call->audio_buffer.size();
+                            if (call->speech_start <= pos && pos <= buf_sz) {
+                                to_send.assign(
+                                    call->audio_buffer.begin() + call->speech_start,
+                                    call->audio_buffer.begin() + pos);
+                                chunk_sum_sq = call->speech_sum_sq;
+                                chunk_sample_count = call->speech_sample_count;
+                                if (vad_logging_enabled_) {
+                                    double dur_ms = to_send.size() / (double)VAD_SAMPLES_PER_MS;
+                                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
+                                        "VAD speech_end (silence) — %zu samples (%.0fms) queued for transcription",
+                                        to_send.size(), dur_ms);
+                                }
+                            } else {
+                                // Invariant violation: speech_start is out-of-range. Recover
+                                // whatever audio is available from speech_start to buf_sz.
+                                log_fwd_.forward(whispertalk::LogLevel::WARN, call->id,
+                                    "VAD: bounds error at silence end — speech_start=%zu pos=%zu buf=%zu — recovering partial",
+                                    call->speech_start, pos, buf_sz);
+                                if (call->speech_start < buf_sz) {
+                                    to_send.assign(
+                                        call->audio_buffer.begin() + call->speech_start,
+                                        call->audio_buffer.end());
+                                    chunk_sum_sq = call->speech_sum_sq;
+                                    chunk_sample_count = call->speech_sample_count;
+                                }
+                                pos = buf_sz;
                             }
                             compact_buffer(*call, pos);
                             pos = 0;
@@ -471,12 +499,51 @@ private:
                         }
 
                         // Max-length triggered speech end with smart split.
+                        // Guard against size_t underflow: if speech_start > pos (invariant
+                        // violation from state corruption), reset rather than triggering
+                        // spurious max-length splits from the wrap-around value.
+                        if (call->in_speech && call->speech_start > pos) {
+                            size_t buf_sz = call->audio_buffer.size();
+                            log_fwd_.forward(whispertalk::LogLevel::WARN, call->id,
+                                "VAD: speech_start(%zu) > pos(%zu) buf(%zu) — invariant violation, resetting",
+                                call->speech_start, pos, buf_sz);
+                            if (call->speech_start < buf_sz) {
+                                to_send.assign(
+                                    call->audio_buffer.begin() + call->speech_start,
+                                    call->audio_buffer.end());
+                                chunk_sum_sq = call->speech_sum_sq;
+                                chunk_sample_count = call->speech_sample_count;
+                            }
+                            compact_buffer(*call, buf_sz);
+                            pos = 0;
+                            needs_idle_broadcast = reset_call_state(*call);
+                            break;
+                        }
                         size_t speech_len = pos - call->speech_start;
                         if (call->in_speech && speech_len > vad_max_speech_samples_) {
                             size_t split = find_smart_split_point(*call, pos);
-                            to_send.assign(
-                                call->audio_buffer.begin() + call->speech_start,
-                                call->audio_buffer.begin() + split);
+                            size_t buf_sz = call->audio_buffer.size();
+                            if (call->speech_start <= split && split <= buf_sz) {
+                                to_send.assign(
+                                    call->audio_buffer.begin() + call->speech_start,
+                                    call->audio_buffer.begin() + split);
+                            } else {
+                                // Recover: extract from speech_start to min(pos, buf_sz).
+                                log_fwd_.forward(whispertalk::LogLevel::WARN, call->id,
+                                    "VAD: bounds error at max-length split — speech_start=%zu split=%zu buf=%zu — recovering",
+                                    call->speech_start, split, buf_sz);
+                                split = std::min(pos, buf_sz);
+                                if (call->speech_start < split) {
+                                    to_send.assign(
+                                        call->audio_buffer.begin() + call->speech_start,
+                                        call->audio_buffer.begin() + split);
+                                } else if (call->speech_start < buf_sz) {
+                                    to_send.assign(
+                                        call->audio_buffer.begin() + call->speech_start,
+                                        call->audio_buffer.end());
+                                    split = buf_sz;
+                                }
+                            }
                             chunk_sum_sq = call->speech_sum_sq;
                             chunk_sample_count = call->speech_sample_count;
                             if (vad_logging_enabled_) {
@@ -538,7 +605,6 @@ private:
                                         "VAD speech_end (inactivity %dms) — %zu samples (%.0fms) queued",
                                         vad_inactivity_flush_ms_, to_send.size(), dur_ms);
                                 }
-                                std::cout << "[" << call->id << "] Inactivity flush: " << to_send.size() << " samples -> SPEECH_IDLE" << std::endl;
                             }
                         }
                     }
@@ -573,8 +639,8 @@ private:
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
                                 call->last_buffer_size = 0;
-                                std::cout << "[" << call->id
-                                          << "] SPEECH_ACTIVE timeout (" << speech_signal_timeout_s_ << "s) — forcing SPEECH_IDLE" << std::endl;
+                                log_fwd_.forward(whispertalk::LogLevel::WARN, call->id,
+                                    "SPEECH_ACTIVE timeout (%ds) — forcing SPEECH_IDLE", speech_signal_timeout_s_);
                             }
                             needs_idle_broadcast = reset_call_state(*call);
                         }
@@ -586,7 +652,7 @@ private:
                 // speech_signal_time was already set inside the lock at onset detection.
                 if (needs_active_broadcast) {
                     interconnect_.broadcast_speech_signal(call_id, true);
-                    std::cout << "[" << call_id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
+                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id, "SPEECH_ACTIVE broadcast");
                 }
                 if (needs_idle_broadcast) {
                     interconnect_.broadcast_speech_signal(call_id, false);
@@ -658,7 +724,11 @@ private:
         pkt.trace.record(whispertalk::ServiceType::VAD_SERVICE, 1);
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Whisper disconnected, discarding speech chunk");
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - last_disc_warn_).count() >= DISC_WARN_INTERVAL_S) {
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "Whisper disconnected, discarding speech chunk");
+                    last_disc_warn_ = now;
+                }
             }
         }
     }
@@ -696,6 +766,7 @@ private:
     std::mutex data_mutex_;
     std::condition_variable data_cv_;
     std::map<uint32_t, std::shared_ptr<VadCall>> calls_;
+    std::chrono::steady_clock::time_point last_disc_warn_{};
     whispertalk::InterconnectNode interconnect_;
     whispertalk::LogForwarder log_fwd_;
 };

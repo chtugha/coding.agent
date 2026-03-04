@@ -24,6 +24,8 @@ struct CallState {
     float pcm[whispertalk::IAP_ULAW_FRAME * 2];
 };
 
+static constexpr int DISC_WARN_INTERVAL_S = 5;
+
 class InboundAudioProcessor {
 public:
     InboundAudioProcessor() : running_(true), interconnect_(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR) {
@@ -193,7 +195,11 @@ private:
             out_pkt.trace.record(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, 1);
             if (!interconnect_.send_to_downstream(out_pkt)) {
                 if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                    log_fwd_.forward(whispertalk::LogLevel::WARN, pkt.call_id, "Downstream disconnected, discarding");
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_disc_warn_).count() >= DISC_WARN_INTERVAL_S) {
+                        log_fwd_.forward(whispertalk::LogLevel::WARN, pkt.call_id, "Downstream disconnected, discarding audio");
+                        last_disc_warn_ = now;
+                    }
                 }
             }
         }
@@ -243,6 +249,7 @@ private:
     std::atomic<uint64_t> pkt_count_{0};
     std::atomic<double>   latency_sum_{0.0};
     std::atomic<double>   latency_max_{0.0};
+    std::chrono::steady_clock::time_point last_disc_warn_{};
     whispertalk::InterconnectNode interconnect_;
     whispertalk::LogForwarder log_fwd_;
 };
