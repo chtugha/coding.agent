@@ -88,7 +88,7 @@ Test and improve service-pair communication and reconnect behavior.
 - Files: `interconnect.h`, service `.cpp` files as needed
 - Verify: kill/restart each service mid-pipeline; data flow resumes within 500ms
 
-### [ ] Step: Full Pipeline Test — WER & Latency Benchmarking
+### [x] Step: Full Pipeline Test — WER & Latency Benchmarking
 <!-- chat-id: accee2bc-b3af-404d-bf9e-fb153007ffd3 -->
 
 Run full 1-minute pipeline test, measure WER and latency, find bottlenecks.

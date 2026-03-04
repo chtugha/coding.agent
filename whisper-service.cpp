@@ -308,7 +308,7 @@ private:
 
         whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         wparams.language = language_.c_str();
-        wparams.n_threads = 8;
+        wparams.n_threads = 4;
         wparams.no_timestamps = true;
         wparams.single_segment = false;
         wparams.greedy.best_of = 1;
