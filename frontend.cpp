@@ -1623,8 +1623,6 @@ Hallucination Filter</label>
 <button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="sipConnectPbx()">Connect New Line</button>
 <span id="sipPbxStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
-<div style="font-size:12px;font-weight:600;margin-bottom:4px;margin-top:8px">Active Lines</div>
-<div id="sipActiveLines" style="font-size:12px;color:var(--wt-text-secondary)">Loading...</div>
 </div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
@@ -1634,6 +1632,11 @@ Hallucination Filter</label>
 <button class="wt-btn wt-btn-secondary" id="svcRestartBtn" onclick="restartSvcDetail()">&#x21BB; Restart</button>
 <button class="wt-btn wt-btn-secondary" id="svcSaveBtn" onclick="saveSvcConfig()">&#x1F4BE; Save Config</button>
 </div></div>
+<div id="sipActiveLinesCard" class="wt-card hidden">
+<div class="wt-card-header"><span class="wt-card-title">Active Lines</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="sipRefreshActiveLines()">Refresh</button></div>
+<div id="sipActiveLines" style="padding:8px;font-size:12px;color:var(--wt-text-secondary)">Loading...</div>
+</div>
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Live Logs</span>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="clearSvcLog()">Clear</button></div>
@@ -2580,7 +2583,7 @@ function fetchServices(){
         var lines=ld.lines||[];
         if(lines.length===0){el.innerHTML='No active lines';return;}
         var reg=lines.filter(l=>l.registered).length;
-        el.innerHTML=lines.length+' line(s) ('+reg+' registered): '+lines.map(l=>l.user+'@'+l.server+':'+l.port).join(', ');
+        el.innerHTML=lines.length+' line(s) ('+reg+' connected): '+lines.map(l=>l.user+'@'+l.server+':'+l.port).join(', ');
       }).catch(function(){});
     }
   });
@@ -2617,11 +2620,14 @@ function updateSvcDetail(s){
     wc.classList.add('hidden');
   }
   var sc=document.getElementById('sipClientConfig');
+  var slc=document.getElementById('sipActiveLinesCard');
   if(s.name==='SIP_CLIENT'){
     sc.classList.remove('hidden');
+    slc.classList.remove('hidden');
     sipRefreshActiveLines();
   } else {
     sc.classList.add('hidden');
+    slc.classList.add('hidden');
   }
 }
 function loadWhisperConfig(args){
@@ -2697,8 +2703,8 @@ function sipRefreshActiveLines(){
     var html='<div style="display:flex;flex-direction:column;gap:4px">';
     lines.forEach(function(l){
       var regBadge=l.registered
-        ?'<span class="wt-badge wt-badge-success" style="font-size:10px">registered</span>'
-        :'<span class="wt-badge wt-badge-warning" style="font-size:10px">pending</span>';
+        ?'<span class="wt-badge wt-badge-success" style="font-size:10px">connected</span>'
+        :'<span class="wt-badge wt-badge-warning" style="font-size:10px">connecting</span>';
       var serverInfo=l.server?(l.server+':'+l.port):'local';
       html+='<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;background:var(--wt-card-hover)">';
       html+='<span style="font-weight:600;min-width:60px">'+escapeHtml(l.user)+'</span>';
