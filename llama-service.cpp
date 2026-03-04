@@ -64,7 +64,7 @@ public:
         sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
         llama_sampler_chain_add(sampler_, llama_sampler_init_greedy());
         
-        std::cout << "🚀 LLaMA Service optimized for Apple Silicon (Metal) initialized" << std::endl;
+        std::cout << "LLaMA Service optimized for Apple Silicon (Metal) initialized" << std::endl;
     }
 
     ~LlamaService() {
@@ -85,7 +85,7 @@ public:
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::LLAMA_SERVICE);
 
         if (!interconnect_.connect_to_downstream()) {
-            std::cout << "⚠️  Downstream (Kokoro) not available yet - will auto-reconnect" << std::endl;
+            std::cout << "Downstream (Kokoro) not available yet - will auto-reconnect" << std::endl;
         }
 
         interconnect_.register_call_end_handler([this](uint32_t call_id) {
@@ -174,13 +174,11 @@ private:
             }
 
             if (interconnect_.is_speech_active(item.call_id)) {
-                std::cout << "⏸️  [" << item.call_id << "] Waiting — speech active, deferring response" << std::endl;
-                log_fwd_.forward(whispertalk::LogLevel::INFO, item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
                 while (interconnect_.is_speech_active(item.call_id) && running_) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
-                std::cout << "▶️  [" << item.call_id << "] Speech ended, resuming response generation" << std::endl;
-                log_fwd_.forward(whispertalk::LogLevel::INFO, item.call_id, "Speech ended, resuming response generation");
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Speech ended, resuming response generation");
             }
             if (!running_) break;
 

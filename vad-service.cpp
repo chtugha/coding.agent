@@ -639,8 +639,8 @@ private:
                                 call->audio_buffer.clear();
                                 call->vad_pos = 0;
                                 call->last_buffer_size = 0;
-                                std::cout << "[" << call->id
-                                          << "] SPEECH_ACTIVE timeout (" << speech_signal_timeout_s_ << "s) — forcing SPEECH_IDLE" << std::endl;
+                                log_fwd_.forward(whispertalk::LogLevel::WARN, call->id,
+                                    "SPEECH_ACTIVE timeout (%ds) — forcing SPEECH_IDLE", speech_signal_timeout_s_);
                             }
                             needs_idle_broadcast = reset_call_state(*call);
                         }
@@ -652,7 +652,7 @@ private:
                 // speech_signal_time was already set inside the lock at onset detection.
                 if (needs_active_broadcast) {
                     interconnect_.broadcast_speech_signal(call_id, true);
-                    std::cout << "[" << call_id << "] SPEECH_ACTIVE broadcast (VAD)" << std::endl;
+                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id, "SPEECH_ACTIVE broadcast");
                 }
                 if (needs_idle_broadcast) {
                     interconnect_.broadcast_speech_signal(call_id, false);
