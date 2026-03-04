@@ -90,6 +90,7 @@ struct SipLine {
     int index;
     int sip_sock;
     int local_port;
+    int server_port = 5060;
     std::string user;
     std::string server_ip;
     std::string password;
@@ -122,7 +123,7 @@ public:
             } else {
                 line_user = (i < 20) ? DEFAULT_LINE_NAMES[i] : user + std::to_string(i + 1);
             }
-            int idx = create_line(line_user, server, "");
+            int idx = create_line(line_user, server, "", port);
             if (idx < 0) return false;
         }
 
@@ -169,10 +170,10 @@ public:
         log_fwd_.set_level(level);
     }
 
-    int add_line(const std::string& user, const std::string& server_ip, const std::string& password) {
+    int add_line(const std::string& user, const std::string& server_ip, const std::string& password, int port = 5060) {
         std::lock_guard<std::mutex> lock(lines_mutex_);
-        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Adding SIP line: user=%s server=%s", user.c_str(), server_ip.c_str());
-        int idx = create_line(user, server_ip, password);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Adding SIP line: user=%s server=%s port=%d", user.c_str(), server_ip.c_str(), port);
+        int idx = create_line(user, server_ip, password, port);
         if (idx < 0) {
             log_fwd_.forward(whispertalk::LogLevel::ERROR, 0, "Failed to create SIP line for user %s", user.c_str());
             return -1;
@@ -233,7 +234,8 @@ public:
         out << "LINES";
         for (const auto& line : lines_) {
             out << " " << line->index << ":" << line->user
-                << ":" << (line->registered ? "registered" : "unregistered");
+                << ":" << (line->registered ? "registered" : "unregistered")
+                << ":" << line->server_ip << ":" << line->server_port;
         }
         return out.str();
     }
@@ -567,17 +569,18 @@ private:
         req << "Call-ID: reg-" << rand() << "@" << local_ip_ << "\r\nCSeq: 1 REGISTER\r\n";
         req << "Contact: <sip:" << line->user << "@" << local_ip_ << ":" << line->local_port << ">\r\nExpires: 3600\r\n\r\n";
         struct sockaddr_in srv{};
-        srv.sin_family = AF_INET; srv.sin_port = htons(server_port_); srv.sin_addr.s_addr = inet_addr(reg_server.c_str());
+        srv.sin_family = AF_INET; srv.sin_port = htons(line->server_port); srv.sin_addr.s_addr = inet_addr(reg_server.c_str());
         std::string s = req.str();
         sendto(line->sip_sock, s.c_str(), s.length(), 0, (struct sockaddr*)&srv, sizeof(srv));
     }
 
-    int create_line(const std::string& user, const std::string& server_ip, const std::string& password) {
+    int create_line(const std::string& user, const std::string& server_ip, const std::string& password, int port = 5060) {
         auto line = std::make_shared<SipLine>();
         line->index = next_line_index_++;
         line->user = user;
         line->server_ip = server_ip;
         line->password = password;
+        line->server_port = port;
 
         line->sip_sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (line->sip_sock < 0) {
@@ -602,12 +605,17 @@ private:
     std::string handle_line_command(const std::string& msg) {
         if (msg.substr(0, 9) == "ADD_LINE ") {
             std::istringstream iss(msg.substr(9));
-            std::string user, server_ip, password;
-            iss >> user >> server_ip >> password;
+            std::string user, server_ip, password, port_str;
+            iss >> user >> server_ip >> password >> port_str;
             if (user.empty() || server_ip.empty()) {
                 return "ERROR Missing user or server_ip";
             }
-            int idx = add_line(user, server_ip, password);
+            if (password == "-") password.clear();
+            int port = 5060;
+            if (!port_str.empty()) {
+                try { port = std::stoi(port_str); } catch (...) { port = 5060; }
+            }
+            int idx = add_line(user, server_ip, password, port);
             if (idx < 0) return "ERROR Failed to create line";
             return "LINE_ADDED " + std::to_string(idx);
         }

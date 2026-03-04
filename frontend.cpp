@@ -1607,6 +1607,25 @@ Hallucination Filter</label>
 <span id="whisperHalluFilterStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 </div>
+<div id="sipClientConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">PBX Connection</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Server IP</label>
+<input class="wt-input" id="sipPbxServer" placeholder="192.168.1.100" style="font-size:12px"></div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Port</label>
+<input class="wt-input" id="sipPbxPort" placeholder="5060" value="5060" style="font-size:12px"></div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Username</label>
+<input class="wt-input" id="sipPbxUser" placeholder="extension100" style="font-size:12px"></div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Password</label>
+<input class="wt-input" id="sipPbxPassword" type="password" placeholder="password" style="font-size:12px"></div>
+</div>
+<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+<button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="sipConnectPbx()">Connect New Line</button>
+<span id="sipPbxStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+<div style="font-size:12px;font-weight:600;margin-bottom:4px;margin-top:8px">Active Lines</div>
+<div id="sipActiveLines" style="font-size:12px;color:var(--wt-text-secondary)">Loading...</div>
+</div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
 <div style="display:flex;gap:8px">
@@ -2546,11 +2565,23 @@ function fetchServices(){
         +'<div style="font-size:12px;color:var(--wt-text-secondary)">'+eDesc+'</div>'
         +'<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">'+ePath+'</div>'
         +(s.managed?'<div style="font-size:11px;margin-top:4px"><span class="wt-badge wt-badge-warning">Managed by Frontend</span></div>':'')
+        +(s.name==='SIP_CLIENT'?'<div id="sipOverviewLines" style="font-size:11px;margin-top:4px;color:var(--wt-text-secondary)"></div>':'')
         +btns+'</div>';
     }).join('');
     if(currentSvc){
       var s=d.services.find(x=>x.name===currentSvc);
       if(s)updateSvcDetail(s);
+    }
+    var sipSvc=d.services.find(x=>x.name==='SIP_CLIENT');
+    if(sipSvc&&sipSvc.online){
+      fetch('/api/sip/lines').then(r=>r.json()).then(ld=>{
+        var el=document.getElementById('sipOverviewLines');
+        if(!el)return;
+        var lines=ld.lines||[];
+        if(lines.length===0){el.innerHTML='No active lines';return;}
+        var reg=lines.filter(l=>l.registered).length;
+        el.innerHTML=lines.length+' line(s) ('+reg+' registered): '+lines.map(l=>l.user+'@'+l.server+':'+l.port).join(', ');
+      }).catch(function(){});
     }
   });
 }
@@ -2584,6 +2615,13 @@ function updateSvcDetail(s){
     loadHallucinationFilterState();
   } else {
     wc.classList.add('hidden');
+  }
+  var sc=document.getElementById('sipClientConfig');
+  if(s.name==='SIP_CLIENT'){
+    sc.classList.remove('hidden');
+    sipRefreshActiveLines();
+  } else {
+    sc.classList.add('hidden');
   }
 }
 function loadWhisperConfig(args){
@@ -2624,6 +2662,60 @@ function loadHallucinationFilterState(){
     if(d.error){cb.checked=false;statusEl.textContent='(offline)';return;}
     cb.checked=d.enabled;statusEl.textContent=d.enabled?'ON':'OFF';
   }).catch(()=>{cb.checked=false;statusEl.textContent='(offline)';});
+}
+
+var sipLinesRefreshTimer=null;
+function sipConnectPbx(){
+  var server=document.getElementById('sipPbxServer').value.trim();
+  var port=document.getElementById('sipPbxPort').value.trim()||'5060';
+  var user=document.getElementById('sipPbxUser').value.trim();
+  var password=document.getElementById('sipPbxPassword').value;
+  var status=document.getElementById('sipPbxStatus');
+  if(!server||!user){status.innerHTML='<span style="color:var(--wt-danger)">Server and Username required</span>';return;}
+  status.innerHTML='<span style="color:var(--wt-warning)">Connecting...</span>';
+  fetch('/api/sip/add-line',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({user:user,server:server,password:password,port:port})
+  }).then(r=>r.json()).then(d=>{
+    if(d.success){
+      status.innerHTML='<span style="color:var(--wt-success)">Line added</span>';
+      document.getElementById('sipPbxUser').value='';
+      document.getElementById('sipPbxPassword').value='';
+      setTimeout(sipRefreshActiveLines,500);
+    } else {
+      status.innerHTML='<span style="color:var(--wt-danger)">'+(d.error||'Failed')+'</span>';
+    }
+  }).catch(function(e){status.innerHTML='<span style="color:var(--wt-danger)">SIP Client not reachable</span>';});
+}
+function sipRefreshActiveLines(){
+  var container=document.getElementById('sipActiveLines');
+  if(!container)return;
+  fetch('/api/sip/lines').then(r=>r.json()).then(d=>{
+    var lines=d.lines||[];
+    if(lines.length===0){container.innerHTML='No active lines';return;}
+    var html='<div style="display:flex;flex-direction:column;gap:4px">';
+    lines.forEach(function(l){
+      var regBadge=l.registered
+        ?'<span class="wt-badge wt-badge-success" style="font-size:10px">registered</span>'
+        :'<span class="wt-badge wt-badge-warning" style="font-size:10px">pending</span>';
+      var serverInfo=l.server?(l.server+':'+l.port):'local';
+      html+='<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;background:var(--wt-card-hover)">';
+      html+='<span style="font-weight:600;min-width:60px">'+escapeHtml(l.user)+'</span>';
+      html+='<span style="color:var(--wt-text-secondary);font-size:11px;font-family:var(--wt-mono)">'+escapeHtml(serverInfo)+'</span>';
+      html+=regBadge;
+      html+='<span style="flex:1"></span>';
+      html+='<button class="wt-btn wt-btn-danger" style="font-size:10px;padding:1px 6px" onclick="sipHangupLine('+l.index+')">Hangup</button>';
+      html+='</div>';
+    });
+    html+='</div>';
+    container.innerHTML=html;
+  }).catch(function(){container.innerHTML='<span style="color:var(--wt-danger)">SIP Client not reachable</span>';});
+}
+function sipHangupLine(index){
+  fetch('/api/sip/remove-line',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({index:index.toString()})
+  }).then(r=>r.json()).then(function(){
+    setTimeout(sipRefreshActiveLines,300);
+  }).catch(function(){});
 }
 
 function showServicesOverview(){
@@ -5666,6 +5758,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         std::string user = extract_json_string(body, "user");
         std::string server = extract_json_string(body, "server");
         std::string password = extract_json_string(body, "password");
+        std::string port_str = extract_json_string(body, "port");
 
         if (user.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing 'user'\"}");
@@ -5673,7 +5766,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
 
         std::string cmd = "ADD_LINE " + user + " " + (server.empty() ? "127.0.0.1" : server);
-        if (!password.empty()) cmd += " " + password;
+        cmd += " " + (password.empty() ? "-" : password);
+        cmd += " " + (port_str.empty() ? "5060" : port_str);
 
         std::string resp = send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, cmd);
         if (resp.empty()) {
@@ -5730,10 +5824,28 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             size_t p1 = token.find(':');
             size_t p2 = token.find(':', p1 + 1);
             if (p1 == std::string::npos || p2 == std::string::npos) continue;
+            std::string idx_s = token.substr(0, p1);
+            std::string user_s = token.substr(p1 + 1, p2 - p1 - 1);
+            size_t p3 = token.find(':', p2 + 1);
+            std::string status_s, server_s, port_s;
+            if (p3 != std::string::npos) {
+                status_s = token.substr(p2 + 1, p3 - p2 - 1);
+                size_t p4 = token.find(':', p3 + 1);
+                if (p4 != std::string::npos) {
+                    server_s = token.substr(p3 + 1, p4 - p3 - 1);
+                    port_s = token.substr(p4 + 1);
+                } else {
+                    server_s = token.substr(p3 + 1);
+                }
+            } else {
+                status_s = token.substr(p2 + 1);
+            }
             if (!first) json << ",";
-            json << "{\"index\":" << token.substr(0, p1)
-                 << ",\"user\":\"" << token.substr(p1 + 1, p2 - p1 - 1) << "\""
-                 << ",\"registered\":" << (token.substr(p2 + 1) == "registered" ? "true" : "false") << "}";
+            json << "{\"index\":" << idx_s
+                 << ",\"user\":\"" << user_s << "\""
+                 << ",\"registered\":" << (status_s == "registered" ? "true" : "false")
+                 << ",\"server\":\"" << server_s << "\""
+                 << ",\"port\":" << (port_s.empty() ? "5060" : port_s) << "}";
             first = false;
         }
 
