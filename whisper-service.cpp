@@ -214,14 +214,21 @@ private:
 
     static const char* hallucination_patterns_[];
 
+    // Checks if the entire transcription is a known Whisper hallucination.
+    // Steps: (1) trim whitespace, (2) reject very short strings (<3 chars) as noise,
+    // (3) strip trailing punctuation to get "core" text, (4) exact-match against
+    // hallucination_patterns_[] (common Whisper artifacts like "Untertitel", "Copyright"),
+    // (5) detect repetitive text (first half repeated in second half → hallucination loop).
     bool is_hallucination(const std::string& text) {
         if (text.empty()) return false;
+        // Trim leading/trailing whitespace.
         size_t start = 0, end = text.size();
         while (start < end && text[start] == ' ') start++;
         while (end > start && text[end - 1] == ' ') end--;
         if (end - start < 3) return true;
         std::string t = text.substr(start, end - start);
 
+        // Strip trailing punctuation to normalize "Untertitel." → "Untertitel".
         std::string core = t;
         while (!core.empty() && (core.back() == '.' || core.back() == '!' ||
                core.back() == '?' || core.back() == ',')) {
@@ -229,9 +236,12 @@ private:
         }
         while (!core.empty() && core.back() == ' ') core.pop_back();
 
+        // Exact-match against known hallucination strings.
         for (int i = 0; hallucination_patterns_[i]; ++i) {
             if (core == hallucination_patterns_[i]) return true;
         }
+        // Repetition detector: if the first half of the text appears again in the
+        // second half, it's a decoder loop artifact (e.g., "Danke Danke Danke...").
         if (t.size() > 20) {
             std::string half = t.substr(0, t.size() / 2);
             if (t.find(half, half.size()) != std::string::npos) return true;
@@ -239,21 +249,31 @@ private:
         return false;
     }
 
+    // Iteratively strips known hallucination suffixes from the end of a transcription.
+    // Whisper sometimes appends spurious phrases to valid text (e.g., "Guten Tag. Untertitel").
+    // This function repeatedly checks if the text ends with a known pattern at a word
+    // boundary and removes it. The loop continues until no more suffixes match.
+    // Two pattern lists are checked: hallucination_patterns_[] (single words like
+    // "Untertitel") and suffix_patterns[] (multi-word phrases like "Untertitelung des ZDF").
     std::string strip_trailing_hallucinations(const std::string& text) {
         std::string result = text;
         bool changed = true;
         while (changed) {
             changed = false;
+            // Strip trailing punctuation/whitespace before matching.
             std::string trimmed = result;
             while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '.' ||
                    trimmed.back() == '!' || trimmed.back() == '?'))
                 trimmed.pop_back();
 
+            // Pass 1: check against single-word hallucination patterns.
             for (int i = 0; hallucination_patterns_[i]; ++i) {
                 std::string pat = hallucination_patterns_[i];
                 if (trimmed.size() > pat.size() + 2) {
                     size_t boundary = trimmed.size() - pat.size();
                     std::string suffix = trimmed.substr(boundary);
+                    // Word-boundary check: the character before the suffix must be a space
+                    // (or the suffix starts at position 0), ensuring we don't match mid-word.
                     if (suffix == pat && (boundary == 0 || trimmed[boundary - 1] == ' ')) {
                         result = trimmed.substr(0, boundary);
                         while (!result.empty() && (result.back() == ' ' || result.back() == ','))
@@ -264,6 +284,7 @@ private:
                 }
             }
 
+            // Pass 2: check against multi-word suffix patterns (longer, more specific).
             static const char* suffix_patterns[] = {
                 "Untertitelung des ZDF, 2020", "Untertitelung des ZDF, 2021",
                 "Untertitelung des ZDF, 2022", "Untertitelung des ZDF, 2023",

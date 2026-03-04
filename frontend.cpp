@@ -250,6 +250,11 @@ struct LlamaScoreResult {
     bool is_german;
 };
 
+// Scores a LLaMA response on three axes, returning a weighted composite 0-100:
+//   1. Keyword coverage (40%): % of expected keywords found (case-insensitive substring).
+//   2. Brevity (30%): 100 if word_count ≤ max_words, else penalized −5 per excess word (floor 0).
+//   3. German language (30%): binary — 100 if German detected, 0 otherwise.
+// Used by the LLaMA quality test panel to evaluate response quality without human review.
 static LlamaScoreResult score_llama_response(const std::string& response,
         const std::vector<std::string>& keywords, int max_words) {
     LlamaScoreResult r;
@@ -257,9 +262,11 @@ static LlamaScoreResult score_llama_response(const std::string& response,
     r.keywords_found = count_keyword_matches(response, keywords);
     r.is_german = detect_german(response);
     double kw_pct = keywords.empty() ? 100.0 : (r.keywords_found * 100.0 / keywords.size());
+    // Brevity penalty: −5 points per word over max_words, clamped to [0, 100].
     double brevity = (r.word_count <= max_words) ? 100.0 :
         std::max(0.0, 100.0 - (r.word_count - max_words) * 5.0);
     double german = r.is_german ? 100.0 : 0.0;
+    // Weighted composite: keyword relevance (40%) + brevity (30%) + language (30%).
     r.score = kw_pct * 0.4 + brevity * 0.3 + german * 0.3;
     return r;
 }
@@ -1183,6 +1190,8 @@ private:
         sqlite3_exec(db_, sql, nullptr, nullptr, nullptr);
     }
 
+    // GET /api/logs/stream — SSE live log stream. Registers the connection for
+    // push-based log delivery. Max MAX_SSE_CONNECTIONS enforced (503 if exceeded).
     void handle_sse_stream(struct mg_connection *c, struct mg_http_message *hm) {
         {
             std::lock_guard<std::mutex> lock(sse_mutex_);
@@ -5349,6 +5358,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return result;
     }
 
+    // POST /api/tests/start — Start a test binary as a child process. Captures
+    // stdout/stderr to a log file for later retrieval via handle_test_log.
     void handle_test_start(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string test_name = extract_json_string(body, "test");
@@ -5414,6 +5425,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"ok\"}");
     }
 
+    // POST /api/tests/stop — Kill a running test process by name (SIGTERM).
     void handle_test_stop(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string test_name = extract_json_string(body, "test");
@@ -5510,6 +5522,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // POST /api/services/start — Start a pipeline service by name. Reads persisted
+    // log level from SQLite and appends --log-level to args. Side effects: spawns
+    // child process, updates service status in services_ vector.
     void handle_service_start(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string name = extract_json_string(body, "service");
@@ -5527,6 +5542,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // POST /api/services/stop — Stop a running service by sending SIGTERM.
     void handle_service_stop(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string name = extract_json_string(body, "service");
@@ -5564,6 +5580,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // GET/POST /api/services/config — GET: return all service configs (name, binary, args).
+    // POST: update default_args for a service in memory and persist to SQLite.
     void handle_service_config(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
             std::lock_guard<std::mutex> lock(services_mutex_);
@@ -5638,6 +5656,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return std::string(buf, n);
     }
 
+    // POST /api/sip/add-line — Register a new SIP account. Sends ADD_LINE command
+    // to the SIP Client's cmd port (13102). Returns LINE_ADDED on success.
     void handle_sip_add_line(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string user = extract_json_string(body, "user");
@@ -5665,6 +5685,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // POST /api/sip/remove-line — Remove a SIP registration via REMOVE_LINE command.
     void handle_sip_remove_line(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string idx_str = extract_json_string(body, "index");
@@ -6685,6 +6706,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return prompts;
     }
 
+    // POST /api/llama/quality_test — Async LLaMA quality test. Sends each prompt to
+    // LLaMA's data port and scores the response via score_llama_response(). Returns task_id.
     void handle_llama_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
         std::vector<QualityPrompt> prompts = parse_llama_prompts(hm->body);
         if (prompts.empty()) {
@@ -7220,6 +7243,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return result;
     }
 
+    // POST /api/kokoro/quality_test — Async Kokoro TTS quality test. Sends text to
+    // Kokoro, records synthesized audio, measures latency and audio quality metrics.
     void handle_kokoro_quality_test(struct mg_connection *c, struct mg_http_message *hm) {
         struct mg_str json_body = hm->body;
         std::vector<std::string> phrases;
@@ -7472,6 +7497,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, result);
     }
 
+    // POST /api/pipeline/health — Check pipeline connectivity by sending PING to each
+    // service's cmd port and measuring round-trip latency (ms).
     void handle_pipeline_health(struct mg_connection *c, struct mg_http_message *hm) {
         (void)hm;
 
@@ -7543,6 +7570,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // POST /api/tests/tts_roundtrip — End-to-end TTS test: sends text through
+    // LLaMA→Kokoro→OAP→SIP and measures audio output latency and quality.
     void handle_tts_roundtrip(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
             mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
@@ -7749,6 +7778,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, json.str());
     }
 
+    // POST /api/tests/full_loop — Full pipeline loop test: injects audio via SIP
+    // provider, captures Whisper transcription from logs, computes WER similarity.
     void handle_full_loop_test(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
             mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
@@ -8067,6 +8098,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, json.str());
     }
 
+    // POST /api/tests/pipeline_stress — Start a multi-sample pipeline stress test.
+    // Injects multiple audio samples sequentially and collects WER results.
     void handle_pipeline_stress_test(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
             mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
@@ -8368,6 +8401,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // POST /api/whisper/accuracy_test — Run offline Whisper accuracy test on selected
+    // WAV files. Async: returns task_id immediately, test runs in background thread.
+    // Each file is decoded, upsampled, and fed directly to whisper_full() for WER scoring.
     void handle_whisper_accuracy_test(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
 
@@ -8556,6 +8592,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, json.str());
     }
 
+    // GET/POST /api/vad/config — GET: return current VAD params from running service
+    // (via STATUS cmd). POST: send SET_VAD_* commands to the running VAD service.
     void handle_vad_config(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
             std::string body(hm->body.buf, hm->body.len);
@@ -8595,6 +8633,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // POST /api/whisper/hallucination_filter — Toggle hallucination filter on/off
+    // by sending HALLUCINATION_FILTER:ON/OFF to Whisper's cmd port (13122).
     void handle_whisper_hallucination_filter(struct mg_connection *c, struct mg_http_message *hm) {
         int whisper_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::WHISPER_SERVICE);
         std::string err;
@@ -8805,6 +8845,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             "{\"success\":true,\"scanned\":%zu}", testfiles_.size());
     }
 
+    // GET/POST /api/settings/log_level — GET: return per-service log levels from SQLite.
+    // POST: persist level to DB, then send SET_LOG_LEVEL:<LEVEL> to the service's cmd
+    // port if it's running (graceful — no error if service is offline).
     void handle_log_level_settings(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
             if (!db_) {
@@ -8892,6 +8935,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // GET /api/test_results — Returns pipeline WER test results from
+    // /tmp/pipeline_results_*.json files (written by run_pipeline_test.py).
     void handle_test_results(struct mg_connection *c, struct mg_http_message *hm) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
@@ -9062,6 +9107,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // GET /api/status — System health summary: uptime, service count, memory usage.
     void handle_status(struct mg_connection *c) {
         int svc_count = 0;
         {
@@ -9978,6 +10024,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return false;
     }
 
+    // POST /api/db/write_mode — Toggle write mode for the SQL query endpoint.
+    // When disabled (default), only SELECT/EXPLAIN/PRAGMA queries are allowed.
     void handle_db_write_mode(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
@@ -9991,6 +10039,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // POST /api/db/query — Execute a SQL query against the SQLite database.
+    // Read-only by default; write queries require db_write_mode_ to be enabled.
+    // Returns rows as JSON array of column-name→value objects.
     void handle_db_query(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string query = extract_json_string(body, "query");

@@ -409,8 +409,17 @@ private:
                 {
                     std::lock_guard<std::mutex> lock(call->mutex);
 
+                    // --- VAD finite state machine ---
+                    // Each iteration processes one vad_frame_size_ frame (50ms = 800 samples).
+                    // States:  IDLE (in_speech=false, onset_count=0)
+                    //       → ONSET (in_speech=false, onset_count>0)    [energy above threshold]
+                    //       → SPEECH (in_speech=true)                   [onset_count >= vad_onset_frames_]
+                    //       → back to IDLE                              [silence_count > vad_silence_frames_
+                    //                                                    OR speech_len > vad_max_speech_samples_]
+                    // A single below-threshold frame during ONSET resets onset_count to 0 (→ IDLE).
                     size_t pos = call->vad_pos;
                     while (pos + vad_frame_size_ <= call->audio_buffer.size()) {
+                        // Compute mean energy (mean of squared samples) for this frame.
                         float energy = 0;
                         for (size_t i = 0; i < vad_frame_size_; ++i) {
                             float s = call->audio_buffer[pos + i];
@@ -419,18 +428,27 @@ private:
                         energy /= static_cast<float>(vad_frame_size_);
 
                         // Adapt noise floor only when not in speech and no onset pending.
-                        // Uses exponential moving average (alpha=0.05) with a hard minimum
-                        // of 0.000005 to stay above G.711 quantization noise.
+                        // EMA formula: nf = (1-α)·nf_old + α·energy, α=0.05.
+                        //   α=0.05 → time constant ≈ 1/α = 20 frames = 1 second @ 50ms/frame.
+                        //   This is slow enough to not track speech energy up, but fast enough
+                        //   to adapt to changing background noise within a few seconds.
+                        //   Hard floor 0.000005 prevents drift below G.711 quantization noise
+                        //   (G.711 silence ≈ energy 0.00000078).
                         if (!call->in_speech && call->onset_count == 0) {
                             float nf = call->noise_floor * 0.95f + energy * 0.05f;
                             call->noise_floor = std::max(nf, 0.000005f);
                         }
+                        // Speech threshold = max(noise_floor × multiplier, min_energy).
+                        // min_energy (0.00005) acts as absolute floor for very quiet environments.
                         float threshold = std::max(call->noise_floor * vad_threshold_mult_, vad_min_energy_);
 
                         if (energy > threshold) {
+                            // --- ONSET / SPEECH transitions ---
                             if (!call->in_speech) {
                                 call->onset_count++;
                                 if (call->onset_count == 1) {
+                                    // First above-threshold frame: save tentative start including
+                                    // pre-speech context (8 frames = 400ms) for natural boundaries.
                                     size_t context = vad_frame_size_ * vad_context_frames_;
                                     call->tentative_speech_start = (pos > context) ? pos - context : 0;
                                 }
@@ -459,6 +477,8 @@ private:
                             }
                             call->silence_count = 0;
                         } else {
+                            // Below threshold: reset onset (any gap kills the onset sequence),
+                            // and if in speech, count consecutive silent frames toward speech-end.
                             call->onset_count = 0;
                             if (call->in_speech) {
                                 call->silence_count++;

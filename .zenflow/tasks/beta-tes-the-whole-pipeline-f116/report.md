@@ -46,6 +46,19 @@ All source files and supporting documentation have been updated with thorough in
 - **Buffer sizing documented**: `LogForwarder` max message sizes (msg[2048], buf[2304]) and recv buffer compatibility (4096) documented to prevent future regressions.
 - **Port map**: Complete port assignment table added to both `interconnect.h` header and all service `.md` files.
 
+## Follow-up Pass (Code Review Findings)
+
+After the initial documentation pass, a code review identified gaps in inline function-body comments. The following were addressed:
+
+### Inline Function-Body Comments Added
+
+| File | Comment Added |
+|---|---|
+| `vad-service.cpp` | VAD FSM state machine overview (IDLE → ONSET → SPEECH → IDLE transitions), noise floor EMA formula with time constant derivation (α=0.05 → τ=1s), onset detection flow, silence-count logic |
+| `whisper-service.cpp` | `is_hallucination()` — step-by-step algorithm doc (trim → strip punctuation → exact match → repetition detect), `strip_trailing_hallucinations()` — iterative suffix stripping with word-boundary matching, pass 1 vs pass 2 pattern lists |
+| `frontend.cpp` | `score_llama_response()` — three-axis scoring formula (keyword 40%, brevity 30%, German 30%), brevity penalty formula, per-function docstrings on 20+ `handle_*` functions (endpoint path, HTTP method, side effects) |
+| `tests/run_pipeline_test.py` | Converted `#` comment header to proper `"""..."""` module docstring (accessible via `help()`, `pydoc`, IDEs) |
+
 ## Verification
 
-No build required — documentation only. The existing build infrastructure (`cmake .. && make`) is unaffected.
+Build verified: `cmake .. && make` completes cleanly with exit code 0. All 10 targets linked successfully.
