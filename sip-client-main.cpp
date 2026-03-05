@@ -176,7 +176,7 @@ public:
     bool init(const std::string& user, const std::string& server, int port, int num_lines) {
         server_ = server;
         server_port_ = port;
-        local_ip_ = detect_local_ip(server);
+        if (!server.empty()) local_ip_ = detect_local_ip(server);
 
         for (int i = 0; i < num_lines; ++i) {
             std::string line_user;

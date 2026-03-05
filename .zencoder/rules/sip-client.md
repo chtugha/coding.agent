@@ -37,7 +37,7 @@ The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts
 - `--server <ip>`: SIP server IP address
 - `--port <port>`: SIP server port (default: 5060)
 - `--password <pass>`: SIP password for Digest auth
-- `--lines <n>`: Number of SIP lines to register
+- `--lines <n>`: Number of SIP lines to register at startup (**default: 0**; when 0, no positional `<user>` or `<server>` args are required and the client starts with no registered lines)
 - `--log-level <LEVEL>`: Initial log verbosity (ERROR/WARN/INFO/DEBUG/TRACE, default: INFO)
 
 ## Runtime Commands (cmd port 13102)
