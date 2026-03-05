@@ -5430,9 +5430,25 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
     }
 
     static std::string extract_json_string(const std::string& json, const std::string& key) {
+        // Search for the key preceded by '{' or ',' (possibly with whitespace) to
+        // avoid substring-matching a key name that appears inside a JSON value.
         std::string needle = "\"" + key + "\"";
-        size_t pos = json.find(needle);
-        if (pos == std::string::npos) return "";
+        size_t pos = 0;
+        while (true) {
+            pos = json.find(needle, pos);
+            if (pos == std::string::npos) return "";
+            // Verify the character before the key (skipping whitespace) is '{' or ','
+            bool valid = false;
+            if (pos == 0) { valid = true; }
+            else {
+                size_t pre = pos - 1;
+                while (pre > 0 && (json[pre] == ' ' || json[pre] == '\t' || json[pre] == '\n' || json[pre] == '\r')) pre--;
+                char c = json[pre];
+                valid = (c == '{' || c == ',');
+            }
+            if (valid) break;
+            pos += needle.size();
+        }
         pos += needle.size();
         while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':')) pos++;
         if (pos >= json.size() || json[pos] != '"') return "";

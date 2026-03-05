@@ -134,7 +134,7 @@ struct CallSession {
     std::chrono::steady_clock::time_point start_time;
 
     CallSession(int i, int line, std::string scid) : id(i), line_index(line), sip_call_id(scid) {
-        ssrc = rand();
+        ssrc = arc4random();
         start_time = std::chrono::steady_clock::now();
     }
 };
@@ -155,14 +155,17 @@ struct SipLine {
     std::string auth_realm;
     std::string auth_nonce;
     std::atomic<int> reg_cseq{1};
-    std::string from_tag = std::to_string(rand());
+    std::string from_tag = std::to_string(arc4random());
     std::string reg_call_id;
+    // Expires interval granted by the PBX in the REGISTER 200 OK.
+    // Default 3600s; updated from the server response. Re-registration fires
+    // at 2/3 of this value (~2400s by default) to keep the registration alive.
+    std::atomic<int> granted_expires{3600};
 };
 
 class SipClient {
 public:
     SipClient() : running_(true), next_id_(1), interconnect_(whispertalk::ServiceType::SIP_CLIENT) {
-        srand(time(NULL));
     }
 
     static constexpr const char* DEFAULT_LINE_NAMES[] = {
@@ -187,16 +190,15 @@ public:
         }
 
         if (!interconnect_.initialize()) {
-            std::cerr << "Failed to initialize interconnect" << std::endl;
+            std::cerr << "SIP_CLIENT: Failed to initialize interconnect" << std::endl;
             return false;
         }
 
-        std::cout << "Interconnect initialized (peer-to-peer)" << std::endl;
-
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::SIP_CLIENT);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Interconnect initialized");
 
         if (!interconnect_.connect_to_downstream()) {
-            std::cout << "Downstream (IAP) not available yet - will auto-reconnect" << std::endl;
+            log_fwd_.forward(whispertalk::LogLevel::WARN, 0, "Downstream (IAP) not available yet - will auto-reconnect");
         }
 
         interconnect_.register_call_end_handler([this](uint32_t call_id) {
@@ -215,10 +217,10 @@ public:
             if (bind(csock, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
                 listen(csock, 4) < 0) {
                 ::close(csock);
-                std::cerr << "Failed to bind command port " << cmd_port_ << std::endl;
+                log_fwd_.forward(whispertalk::LogLevel::ERROR, 0, "Failed to bind command port %d", cmd_port_);
             } else {
                 cmd_sock_.store(csock);
-                std::cout << "Command port listening on " << cmd_port_ << std::endl;
+                log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Command port listening on %d", cmd_port_);
             }
         }
 
@@ -240,8 +242,7 @@ public:
         auto& line = lines_.back();
         line->sip_thread = std::thread(&SipClient::sip_loop, this, line);
         line->reg_thread = std::thread(&SipClient::registration_loop, this, line);
-        std::cout << "Added line " << idx << " (" << user << "@" << server_ip << ")" << std::endl;
-        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "SIP line %d added successfully: user=%s port=%d", idx, user.c_str(), line->local_port);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "SIP line %d added successfully: user=%s server=%s port=%d", idx, user.c_str(), server_ip.c_str(), line->local_port);
         return idx;
     }
 
@@ -282,7 +283,6 @@ public:
         }
 
         lines_.erase(it);
-        std::cout << "Removed line " << index << " (" << user << ")" << std::endl;
         log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "SIP line %d removed: user=%s terminated_calls=%d", index, user.c_str(), terminated_calls);
         return true;
     }
@@ -464,13 +464,27 @@ private:
                 send_sip_response(msg, "200 OK", sender, line);
             }
             else if (msg.find("SIP/2.0 200") == 0 && cseq_method(msg) == "REGISTER") {
+                // Parse Expires granted by the server; store so registration_loop can
+                // reschedule at 2/3 of the correct interval instead of a fixed 30s.
+                size_t ep = msg.find("\r\nExpires:");
+                if (ep == std::string::npos) ep = msg.find("\r\nexpires:");
+                if (ep != std::string::npos) {
+                    size_t vs = ep + 10; // "\r\nExpires:" length
+                    while (vs < msg.size() && msg[vs] == ' ') vs++;
+                    size_t ve = msg.find_first_of("\r\n", vs);
+                    if (ve != std::string::npos) {
+                        try {
+                            int exp = std::stoi(msg.substr(vs, ve - vs));
+                            if (exp > 0) line->granted_expires = exp;
+                        } catch (...) {}
+                    }
+                }
                 bool was_registered = line->registered;
                 line->registered = true;
                 if (!was_registered) {
                     std::string lip = line->local_ip.empty() ? local_ip_ : line->local_ip;
-                    std::cout << "Line " << line->index << " (" << line->user << ") registered at " << lip << ":" << line->local_port << std::endl;
-                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Line %d (%s) registered successfully (contact=%s:%d)",
-                        line->index, line->user.c_str(), lip.c_str(), line->local_port);
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Line %d (%s) registered successfully (contact=%s:%d expires=%ds)",
+                        line->index, line->user.c_str(), lip.c_str(), line->local_port, line->granted_expires.load());
                 }
             }
             else if ((msg.find("SIP/2.0 401") == 0 || msg.find("SIP/2.0 407") == 0) && cseq_method(msg) == "REGISTER") {
@@ -496,8 +510,17 @@ private:
 
     void registration_loop(std::shared_ptr<SipLine> line) {
         while (running_ && line->line_running) {
-            register_sip(line);
-            for (int i = 0; i < 30 && running_ && line->line_running; ++i) {
+            // Preemptive auth: if we already have credentials from a previous 401
+            // challenge, send them directly instead of waiting for another round-trip.
+            bool preemptive = !line->auth_realm.empty() && !line->auth_nonce.empty()
+                              && !line->password.empty();
+            register_sip(line, preemptive);
+
+            // Re-register at 2/3 of the server-granted Expires interval (RFC 3261).
+            // Minimum 60s to handle very short-lived registrations; checked in 1s
+            // increments so the loop exits quickly when the service shuts down.
+            int sleep_secs = std::max(60, line->granted_expires.load() * 2 / 3);
+            for (int i = 0; i < sleep_secs && running_ && line->line_running; ++i) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         }
@@ -534,7 +557,6 @@ private:
         }
         uint32_t cid = interconnect_.reserve_call_id(proposed_id);
         if (cid == 0) {
-            std::cerr << "Failed to reserve call_id, rejecting call on line " << line->index << std::endl;
             log_fwd_.forward(whispertalk::LogLevel::ERROR, 0, "Failed to reserve call_id on line %d", line->index);
             std::string resp = "SIP/2.0 503 Service Unavailable\r\nCall-ID: " + scid + "\r\n\r\n";
             sendto(line->sip_sock, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
@@ -549,13 +571,25 @@ private:
 
         auto session = std::make_shared<CallSession>(cid, line->index, scid);
 
-        size_t m_pos = msg.find("m=audio ");
-        if (m_pos != std::string::npos) {
-            std::string m_line = msg.substr(m_pos + 8);
-            session->remote_port = std::stoi(m_line.substr(0, m_line.find(' ')));
+        // Parse SDP c= line for the media IP (may differ from the SIP signaling
+        // address when the PBX uses a dedicated media proxy or RTP relay).
+        size_t c_pos = msg.find("\r\nc=IN IP4 ");
+        if (c_pos != std::string::npos) {
+            size_t vs = c_pos + 11; // "\r\nc=IN IP4 " is 11 chars
+            size_t ve = msg.find_first_of("\r\n", vs);
+            if (ve != std::string::npos) session->remote_ip = msg.substr(vs, ve - vs);
+        }
+        // Fall back to the UDP packet source if no c= line is present.
+        if (session->remote_ip.empty()) {
             char rip[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &sender.sin_addr, rip, sizeof(rip));
             session->remote_ip = rip;
+        }
+
+        size_t m_pos = msg.find("m=audio ");
+        if (m_pos != std::string::npos) {
+            std::string m_line = msg.substr(m_pos + 8);
+            try { session->remote_port = std::stoi(m_line.substr(0, m_line.find(' '))); } catch (...) {}
         }
 
         session->local_rtp_port = RTP_PORT_BASE + cid;
@@ -588,7 +622,6 @@ private:
         resp << "Content-Length: " << sdp.str().length() << "\r\n\r\n" << sdp.str();
         std::string s = resp.str();
         sendto(line->sip_sock, s.c_str(), s.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
-        std::cout << "Accepted call " << cid << " on line " << line->index << " port " << session->local_rtp_port << std::endl;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Accepted call on line %d port %d", line->index, session->local_rtp_port);
     }
 
@@ -616,7 +649,6 @@ private:
         std::lock_guard<std::mutex> lock(calls_mutex_);
         for (auto it = calls_.begin(); it != calls_.end(); ++it) {
             if (it->second->id == static_cast<int>(call_id)) {
-                std::cout << "Call " << call_id << " ended, cleaning up" << std::endl;
                 log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up");
                 it->second->active = false;
                 if (it->second->rtp_thread.joinable()) {
@@ -703,12 +735,12 @@ private:
         std::string reg_server = line->server_ip.empty() ? server_ : line->server_ip;
         std::string lip = line->local_ip.empty() ? local_ip_ : line->local_ip;
         if (line->reg_call_id.empty()) {
-            line->reg_call_id = "reg-" + std::to_string(line->index) + "-" + std::to_string(rand()) + "@" + lip;
+            line->reg_call_id = "reg-" + std::to_string(line->index) + "-" + std::to_string(arc4random()) + "@" + lip;
         }
         int cseq = line->reg_cseq++;
         std::ostringstream req;
         req << "REGISTER sip:" << reg_server << " SIP/2.0\r\n";
-        req << "Via: SIP/2.0/UDP " << lip << ":" << line->local_port << ";rport;branch=z9hG4bK" << rand() << "\r\n";
+        req << "Via: SIP/2.0/UDP " << lip << ":" << line->local_port << ";rport;branch=z9hG4bK" << arc4random() << "\r\n";
         req << "Max-Forwards: 70\r\n";
         req << "From: <sip:" << line->user << "@" << reg_server << ">;tag=" << line->from_tag << "\r\n";
         req << "To: <sip:" << line->user << "@" << reg_server << ">\r\n";
@@ -747,7 +779,7 @@ private:
 
         line->sip_sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (line->sip_sock < 0) {
-            std::cerr << "Failed to create SIP socket for line " << line->index << std::endl;
+            log_fwd_.forward(whispertalk::LogLevel::ERROR, 0, "Failed to create SIP socket for line %d", line->index);
             return -1;
         }
         struct sockaddr_in addr{};
@@ -761,8 +793,8 @@ private:
         line->local_port = ntohs(addr.sin_port);
 
         lines_.push_back(line);
-        std::cout << "SIP line " << line->index << " (" << line->user << ") on port " << line->local_port
-                  << " local_ip=" << line->local_ip << std::endl;
+        log_fwd_.forward(whispertalk::LogLevel::DEBUG, 0, "SIP line %d created: user=%s port=%d local_ip=%s",
+            line->index, line->user.c_str(), line->local_port, line->local_ip.c_str());
         return line->index;
     }
 
@@ -780,7 +812,9 @@ private:
                 if (port < 1 || port > 65535) port = 5060;
             }
             std::string password;
-            if (iss.peek() == ' ') iss.get();
+            // Skip exactly one delimiter space between port and password, then
+            // read the rest of the line verbatim (passwords may contain spaces).
+            if (!iss.eof()) iss.ignore(1);
             std::getline(iss, password);
             if (password == "-") password.clear();
             int idx = add_line(user, server_ip, password, port);

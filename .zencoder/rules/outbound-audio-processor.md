@@ -14,7 +14,7 @@ The **Outbound Audio Processor** (`outbound-audio-processor.cpp`) handles the au
 - **G.711 encoding**: Each float32 sample clipped to [-1, 1] and encoded to μ-law using the standard ITU-T G.711 segment/quantization formula.
 - **Scheduling**: Uses a high-precision 20ms timer (steady_clock) to send constant-rate 160-byte G.711 frames back to the SIP Client, filling gaps with ULAW_SILENCE (0xFF) to maintain RTP clock continuity.
 - **Multi-Call**: Manages independent CallState (buffer, FIR history, read_pos) per active call_id. buffer.compact() reclaims memory lazily.
-- **SPEECH_ACTIVE handling**: Clears all call audio buffers immediately when SPEECH_ACTIVE signal arrives, stopping stale TTS audio.
+- **SPEECH_ACTIVE handling**: When a SPEECH_ACTIVE signal arrives, flushes the call's audio buffer — but only if `speech_active_guard_ms_` (default 1500ms, runtime-configurable via `SET_SIDETONE_GUARD_MS`) has elapsed since the last TTS audio was received. This prevents PBX sidetone echo (the outgoing TTS RTP reflected back by the PBX) from spuriously flushing the buffer within ~200-500ms of playback starting. Genuine caller interruptions arrive after the guard window expires.
 
 ## Inbound Connections
 - **Kokoro TTS (TCP)**: Receives float32 PCM audio via interconnect on ports 13150 (mgmt) and 13151 (data).
@@ -27,5 +27,6 @@ The **Outbound Audio Processor** (`outbound-audio-processor.cpp`) handles the au
 
 ## Runtime Commands (cmd port 13152)
 - `PING`: Health check (returns `PONG`)
-- `STATUS`: Returns active call count, buffer lengths, upstream/downstream state
+- `STATUS`: Returns active call count, upstream/downstream state
 - `SET_LOG_LEVEL:<LEVEL>`: Change log verbosity at runtime without restart
+- `SET_SIDETONE_GUARD_MS:<ms>`: Change the sidetone guard holdoff window (0 to disable, default 1500)

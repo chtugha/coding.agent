@@ -77,11 +77,9 @@ static const double* get_aa_coeffs() {
 }
 
 static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 24000;
-// Guard window after new TTS audio arrives: SPEECH_ACTIVE flushes are suppressed during
-// this period to prevent PBX sidetone echo (loopback of TTS audio through the RTP path)
-// from flushing the audio buffer. Sidetone echoes arrive within ~200-500ms; genuine
-// caller interruptions arrive after > 1000ms of sustained listening.
-static constexpr int SPEECH_ACTIVE_GUARD_MS = 1500;
+// Default guard window (ms) suppressing SPEECH_ACTIVE flushes immediately after TTS audio
+// arrives. Configurable at runtime via SET_SIDETONE_GUARD_MS:<ms> on the CMD port.
+static constexpr int SPEECH_ACTIVE_GUARD_MS_DEFAULT = 1500;
 
 struct CallState {
     uint32_t id;
@@ -116,16 +114,15 @@ public:
 
     bool init() {
         if (!interconnect_.initialize()) {
-            std::cerr << "Failed to initialize interconnect" << std::endl;
+            std::cerr << "OAP: Failed to initialize interconnect" << std::endl;
             return false;
         }
 
-        std::cout << "Interconnect initialized (peer-to-peer)" << std::endl;
-
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Interconnect initialized");
 
         if (!interconnect_.connect_to_downstream()) {
-            std::cout << "⚠️  Downstream (SIP) not available yet - will auto-reconnect" << std::endl;
+            log_fwd_.forward(whispertalk::LogLevel::WARN, 0, "Downstream (SIP) not available yet - will auto-reconnect");
         }
 
         interconnect_.register_call_end_handler([this](uint32_t call_id) {
@@ -191,13 +188,13 @@ private:
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = htons(port);
         if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            std::cerr << "OAP cmd: bind port " << port << " failed" << std::endl;
+            log_fwd_.forward(whispertalk::LogLevel::ERROR, 0, "OAP cmd: bind port %d failed", port);
             ::close(sock);
             return;
         }
         listen(sock, 4);
         cmd_sock_.store(sock);
-        std::cout << "OAP command listener on port " << port << std::endl;
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "OAP command listener on port %d", port);
         while (running_) {
             struct pollfd pfd{sock, POLLIN, 0};
             int r = poll(&pfd, 1, 200);
@@ -226,6 +223,15 @@ private:
             std::string level = cmd.substr(14);
             log_fwd_.set_level(level.c_str());
             return "OK\n";
+        }
+        if (cmd.rfind("SET_SIDETONE_GUARD_MS:", 0) == 0) {
+            try {
+                int ms = std::stoi(cmd.substr(21));
+                if (ms < 0) ms = 0;
+                speech_active_guard_ms_ = ms;
+                log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Sidetone guard set to %dms", ms);
+                return "OK\n";
+            } catch (...) { return "ERROR Invalid value\n"; }
         }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
@@ -396,7 +402,6 @@ private:
                     std::lock_guard<std::mutex> sl(it->second->mutex);
                     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count();
                     if (age > 60) {
-                        std::cout << "Stale call " << it->first << " (" << age << "s idle), removing" << std::endl;
                         log_fwd_.forward(whispertalk::LogLevel::WARN, it->first, "Stale call removed after %lds idle", age);
                         it = calls_.erase(it);
                     } else {
@@ -429,7 +434,6 @@ private:
                 pkt.trace.record(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, 1);
                 if (!interconnect_.send_to_downstream(pkt)) {
                     if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                        std::cout << "⚠️  [" << state->id << "] SIP disconnected, discarding audio" << std::endl;
                         log_fwd_.forward(whispertalk::LogLevel::WARN, state->id, "SIP disconnected, discarding audio");
                     }
                 }
@@ -447,7 +451,6 @@ private:
         state->id = cid;
         state->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = state;
-        std::cout << "📞 Created outbound audio state for call_id " << cid << std::endl;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created outbound audio state");
         return state;
     }
@@ -466,10 +469,11 @@ private:
         auto now = std::chrono::steady_clock::now();
         auto ms_since_audio = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - state->last_audio_received).count();
-        if (ms_since_audio < SPEECH_ACTIVE_GUARD_MS) {
+        int guard_ms = speech_active_guard_ms_.load();
+        if (guard_ms > 0 && ms_since_audio < guard_ms) {
             log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                 "SPEECH_ACTIVE suppressed — sidetone guard active (%ldms since last TTS audio, guard=%dms)",
-                (long)ms_since_audio, SPEECH_ACTIVE_GUARD_MS);
+                (long)ms_since_audio, guard_ms);
             return;
         }
 
@@ -477,14 +481,12 @@ private:
         state->buffer.clear();
         state->read_pos = 0;
         std::memset(state->fir_history, 0, sizeof(state->fir_history));
-        std::cout << "SPEECH_ACTIVE [call " << call_id << "] — flushed " << flushed << " bytes of audio buffer" << std::endl;
         log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
     }
 
     void handle_call_end(uint32_t call_id) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         if (calls_.count(call_id)) {
-            std::cout << "🛑 Call " << call_id << " ended, cleaning up outbound audio" << std::endl;
             log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up outbound audio");
             calls_.erase(call_id);
         }
@@ -492,6 +494,9 @@ private:
 
     std::atomic<bool> running_;
     std::atomic<int> cmd_sock_{-1};
+    // Sidetone guard: SPEECH_ACTIVE flushes are suppressed if TTS audio was
+    // received within this many ms. Configurable via SET_SIDETONE_GUARD_MS.
+    std::atomic<int> speech_active_guard_ms_{SPEECH_ACTIVE_GUARD_MS_DEFAULT};
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<CallState>> calls_;
     whispertalk::InterconnectNode interconnect_;
