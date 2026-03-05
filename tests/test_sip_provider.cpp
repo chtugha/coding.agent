@@ -337,6 +337,12 @@ public:
         if (sip_sock_ >= 0) close(sip_sock_);
     }
 
+    void set_wav_recording(bool enabled, const std::string& dir) {
+        std::lock_guard<std::mutex> lock(save_wav_mutex_);
+        save_wav_enabled_ = enabled;
+        save_wav_dir_ = dir;
+    }
+
 private:
     static void http_handler_static(struct mg_connection* c, int ev, void* ev_data) {
         if (ev == MG_EV_HTTP_MSG) {
@@ -610,7 +616,7 @@ private:
     }
 
     void handle_wav_recording_post(struct mg_connection* c, struct mg_http_message* hm) {
-        bool enabled = false;
+        bool enabled = save_wav_enabled_.load();
         mg_json_get_bool(hm->body, "$.enabled", &enabled);
         char* dir_str = mg_json_get_str(hm->body, "$.dir");
 
@@ -1136,10 +1142,18 @@ private:
             if (n <= 0) continue;
 
             if (save_wav_enabled_ && n > 12 && from_idx < call->leg_wav_buffers.size()) {
-                size_t payload_size = std::min<size_t>(static_cast<size_t>(n - 12), 160);
+                static constexpr size_t MAX_WAV_BYTES = 300 * 8000;
                 auto& wav_buf = call->leg_wav_buffers[from_idx];
-                const uint8_t* payload = reinterpret_cast<const uint8_t*>(buf) + 12;
-                wav_buf.insert(wav_buf.end(), payload, payload + payload_size);
+                if (wav_buf.size() < MAX_WAV_BYTES) {
+                    size_t payload_size = std::min<size_t>(static_cast<size_t>(n - 12), 160);
+                    size_t space = MAX_WAV_BYTES - wav_buf.size();
+                    payload_size = std::min(payload_size, space);
+                    const uint8_t* payload = reinterpret_cast<const uint8_t*>(buf) + 12;
+                    wav_buf.insert(wav_buf.end(), payload, payload + payload_size);
+                    if (wav_buf.size() >= MAX_WAV_BYTES) {
+                        std::fprintf(stderr, "WAV capture: leg %zu reached 300s cap — stopping capture for this leg\n", from_idx);
+                    }
+                }
             }
 
             for (size_t i = 0; i < call->legs.size(); i++) {
@@ -1249,11 +1263,9 @@ private:
         }
         if (stats_thread_.joinable()) stats_thread_.join();
 
-        if (save_wav_enabled_) {
-            for (size_t i = 0; i < call_->leg_wav_buffers.size(); i++) {
-                if (!call_->leg_wav_buffers[i].empty()) {
-                    write_leg_wav(call_, i);
-                }
+        for (size_t i = 0; i < call_->leg_wav_buffers.size(); i++) {
+            if (!call_->leg_wav_buffers[i].empty()) {
+                write_leg_wav(call_, i);
             }
         }
 
@@ -1282,13 +1294,6 @@ private:
     std::atomic<bool> save_wav_enabled_{false};
     std::string save_wav_dir_;
     std::mutex save_wav_mutex_;
-
-public:
-    void set_wav_recording(bool enabled, const std::string& dir) {
-        std::lock_guard<std::mutex> lock(save_wav_mutex_);
-        save_wav_enabled_ = enabled;
-        save_wav_dir_ = dir;
-    }
 };
 
 int main(int argc, char* argv[]) {
