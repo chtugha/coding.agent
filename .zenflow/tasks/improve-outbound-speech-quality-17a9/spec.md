@@ -180,7 +180,7 @@ Create `tests/run_stage7.py` — a Python 3 script that:
 5. Enables WAV saving in OAP (`POST http://localhost:8080/api/oap/wav_recording {"enabled":true,"dir":"<output_dir>"}`) — frontend proxy port from existing config
 6. Injects one sample from `Testfiles/` into the active testline (`POST http://localhost:22011/inject {"file":"sample_01.wav","leg":"<user>","no_silence":true}`)
 7. Waits for pipeline completion: polls until injection is no longer active (injecting=false in `/status`) + additional 5s buffer for Kokoro+OAP to finish
-8. Collects logs from frontend API (`GET /api/logs/recent?limit=2000`) and writes to `<output_dir>/run_<n>/pipeline.log`
+8. Collects logs from frontend API (`GET /api/logs?limit=1000`) and writes to `<output_dir>/run_<n>/pipeline.log`
 9. Hangs up the call (`POST http://localhost:22011/hangup`) — WAV files are written on call end
 10. Copies WAV files to `<output_dir>/run_<n>/`
 11. Repeats 10 times with `--iterations N` (default 10), using different sample files if available
