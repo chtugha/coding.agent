@@ -410,6 +410,33 @@ private:
         return msg.substr(sp + 1, eol - sp - 1);
     }
 
+    void send_sip_response(const std::string& request, const char* status, const struct sockaddr_in& sender, std::shared_ptr<SipLine> line) {
+        auto get_hdr = [&](const std::string& h) -> std::string {
+            size_t p = request.find(h + ":");
+            if (p == std::string::npos) return "";
+            size_t s = p + h.length() + 1;
+            while (s < request.size() && request[s] == ' ') s++;
+            size_t e = request.find("\r\n", s);
+            if (e == std::string::npos) e = request.size();
+            return request.substr(s, e - s);
+        };
+        std::string via = get_hdr("Via");
+        std::string from = get_hdr("From");
+        std::string to = get_hdr("To");
+        std::string callid = get_hdr("Call-ID");
+        std::string cseq = get_hdr("CSeq");
+        std::ostringstream resp;
+        resp << "SIP/2.0 " << status << "\r\n";
+        if (!via.empty()) resp << "Via: " << via << "\r\n";
+        if (!from.empty()) resp << "From: " << from << "\r\n";
+        if (!to.empty()) resp << "To: " << to << "\r\n";
+        if (!callid.empty()) resp << "Call-ID: " << callid << "\r\n";
+        if (!cseq.empty()) resp << "CSeq: " << cseq << "\r\n";
+        resp << "Content-Length: 0\r\n\r\n";
+        std::string s = resp.str();
+        sendto(line->sip_sock, s.c_str(), s.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
+    }
+
     void sip_loop(std::shared_ptr<SipLine> line) {
         char buf[4096];
         while (running_ && line->line_running) {
@@ -432,6 +459,9 @@ private:
             else if (msg.find("BYE") == 0) handle_bye(msg, sender, line);
             else if (msg.find("ACK") == 0) {
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, 0, "ACK received on line %d", line->index);
+            }
+            else if (msg.find("NOTIFY") == 0 || msg.find("OPTIONS") == 0 || msg.find("CANCEL") == 0) {
+                send_sip_response(msg, "200 OK", sender, line);
             }
             else if (msg.find("SIP/2.0 200") == 0 && cseq_method(msg) == "REGISTER") {
                 bool was_registered = line->registered;
