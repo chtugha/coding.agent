@@ -4,6 +4,8 @@
 
 Multiple independent changes across 3 files with limited per-change complexity but needing careful integration.
 
+> **Scope note**: The original task has 4 numbered items covering (1) test_sip_provider WAV recording, (2) its frontend config panel, (3) audio injection UI fix, and (4) SIP client default lines. There is no requirement for OAP WAV recording in the original task description.
+
 ---
 
 ## Technical Context
@@ -68,8 +70,8 @@ Expose WAV recording controls in the frontend UI when the TEST_SIP_PROVIDER serv
   - Status span: `id="sipProviderWavStatus"`
 - Update `updateSvcDetail()` JS function: reveal `sipProviderConfig` when `s.name === 'TEST_SIP_PROVIDER'`, hide otherwise
 - Add JS functions:
-  - `loadSipProviderWavConfig()`: `GET http://localhost:22011/wav_recording` → populate checkbox + input
-  - `saveSipProviderWavConfig()`: `POST http://localhost:22011/wav_recording` with current checkbox/dir values
+  - `loadSipProviderWavConfig()`: `GET http://localhost:'+TSP_PORT+'/wav_recording` (use existing `TSP_PORT` JS variable, not hardcoded 22011) → populate checkbox + input
+  - `saveSipProviderWavConfig()`: `POST http://localhost:'+TSP_PORT+'/wav_recording` with current checkbox/dir values
   - Checkbox `onchange` → call `saveSipProviderWavConfig()`
 
 ---
@@ -104,7 +106,12 @@ Expose WAV recording controls in the frontend UI when the TEST_SIP_PROVIDER serv
 
 ### Fix in frontend.cpp
 - Change seed `default_args` for `SIP_CLIENT` from `'--lines 2 alice 127.0.0.1 5060'` to `''`
-- Add migration: `UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args LIKE '%--lines%' OR default_args LIKE '%alice%')`
+- Add migration (exact-match only, avoids false positives on custom args):
+  ```sql
+  UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT'
+    AND (default_args='--lines 1 alice 127.0.0.1 5060'
+         OR default_args='--lines 2 alice 127.0.0.1 5060');
+  ```
 
 ---
 
@@ -137,4 +144,4 @@ Expose WAV recording controls in the frontend UI when the TEST_SIP_PROVIDER serv
 3. Verify `bin/test_sip_provider --save-wav-dir /tmp` starts and `/wav_recording` endpoint responds
 4. Frontend: verify SIP provider config panel appears when selecting TEST_SIP_PROVIDER service
 5. Frontend: verify Audio Injection label change and auto-refresh of testlines on page load
-6. Run: `bin/test_sip_provider_unit` for unit tests
+6. Run: `bin/test_sip_provider_unit` for unit tests (binary only present if compiled with GTest; skip if not available)

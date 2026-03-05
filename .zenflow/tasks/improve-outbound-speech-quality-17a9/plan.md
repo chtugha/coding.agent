@@ -31,7 +31,7 @@ Modify `sip-client-main.cpp`:
 
 Modify `frontend.cpp`:
 - Change DB seed `default_args` for `SIP_CLIENT` from `'--lines 2 alice 127.0.0.1 5060'` to `''`
-- Add migration to reset any existing `--lines N alice ...` args to `''`
+- Add exact-match migration: reset `default_args=''` only where value is exactly `'--lines 1 alice 127.0.0.1 5060'` or `'--lines 2 alice 127.0.0.1 5060'`
 
 Verify: `bin/sip-client` starts with no arguments and exits cleanly (or runs with 0 lines).
 
@@ -59,8 +59,8 @@ Modify `frontend.cpp`:
   - Text input: "Save to directory" (id: `sipProviderWavDir`)
   - Status span: `id="sipProviderWavStatus"`
 - In `updateSvcDetail()` JS: show `sipProviderConfig` when `s.name === 'TEST_SIP_PROVIDER'`; call `loadSipProviderWavConfig()`; hide otherwise
-- Add JS function `loadSipProviderWavConfig()`: GET from `http://localhost:22011/wav_recording`
-- Add JS function `saveSipProviderWavConfig()`: POST to `http://localhost:22011/wav_recording`
+- Add JS function `loadSipProviderWavConfig()`: GET using existing `TSP_PORT` JS variable (`http://localhost:'+TSP_PORT+'/wav_recording`)
+- Add JS function `saveSipProviderWavConfig()`: POST to same URL
 - Wire checkbox `onchange` → `saveSipProviderWavConfig()`
 
 Verify: selecting TEST_SIP_PROVIDER service shows the config panel; checkbox/dir persists via HTTP.
