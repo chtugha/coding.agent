@@ -2706,9 +2706,10 @@ function sipRefreshActiveLines(){
         ?'<span class="wt-badge wt-badge-success" style="font-size:10px">connected</span>'
         :'<span class="wt-badge wt-badge-warning" style="font-size:10px">connecting</span>';
       var serverInfo=l.server?(l.server+':'+l.port):'local';
+      var localInfo=l.local_ip?(' via '+l.local_ip):'';
       html+='<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;background:var(--wt-card-hover)">';
       html+='<span style="font-weight:600;min-width:60px">'+escapeHtml(l.user)+'</span>';
-      html+='<span style="color:var(--wt-text-secondary);font-size:11px;font-family:var(--wt-mono)">'+escapeHtml(serverInfo)+'</span>';
+      html+='<span style="color:var(--wt-text-secondary);font-size:11px;font-family:var(--wt-mono)">'+escapeHtml(serverInfo+localInfo)+'</span>';
       html+=regBadge;
       html+='<span style="flex:1"></span>';
       html+='<button class="wt-btn wt-btn-danger" style="font-size:10px;padding:1px 6px" onclick="sipHangupLine('+l.index+')">Hangup</button>';
@@ -5835,31 +5836,24 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         iss >> token;
         bool first = true;
         while (iss >> token) {
-            size_t p1 = token.find(':');
-            size_t p2 = token.find(':', p1 + 1);
-            if (p1 == std::string::npos || p2 == std::string::npos) continue;
-            std::string idx_s = token.substr(0, p1);
-            std::string user_s = token.substr(p1 + 1, p2 - p1 - 1);
-            size_t p3 = token.find(':', p2 + 1);
-            std::string status_s, server_s, port_s;
-            if (p3 != std::string::npos) {
-                status_s = token.substr(p2 + 1, p3 - p2 - 1);
-                size_t p4 = token.find(':', p3 + 1);
-                if (p4 != std::string::npos) {
-                    server_s = token.substr(p3 + 1, p4 - p3 - 1);
-                    port_s = token.substr(p4 + 1);
-                } else {
-                    server_s = token.substr(p3 + 1);
-                }
-            } else {
-                status_s = token.substr(p2 + 1);
-            }
+            std::vector<std::string> fields;
+            std::string field;
+            std::istringstream fs(token);
+            while (std::getline(fs, field, ':')) fields.push_back(field);
+            if (fields.size() < 3) continue;
+            std::string idx_s = fields[0];
+            std::string user_s = fields[1];
+            std::string status_s = fields[2];
+            std::string server_s = fields.size() > 3 ? fields[3] : "";
+            std::string port_s = fields.size() > 4 ? fields[4] : "5060";
+            std::string local_ip_s = fields.size() > 5 ? fields[5] : "";
             if (!first) json << ",";
             json << "{\"index\":" << idx_s
                  << ",\"user\":\"" << user_s << "\""
                  << ",\"registered\":" << (status_s == "registered" ? "true" : "false")
                  << ",\"server\":\"" << server_s << "\""
-                 << ",\"port\":" << (port_s.empty() ? "5060" : port_s) << "}";
+                 << ",\"port\":" << (port_s.empty() ? "5060" : port_s)
+                 << ",\"local_ip\":\"" << local_ip_s << "\"}";
             first = false;
         }
 

@@ -9,7 +9,9 @@ alwaysApply: true
 The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts as the RTP gateway for the WhisperTalk system. It handles SIP registration, incoming calls (INVITE), and routes audio between the telephony network and the internal processors.
 
 ## Internal Function
-- **SIP Signaling**: Implements basic SIP registration and INVITE/BYE handling using raw UDP sockets.
+- **SIP Signaling**: Implements SIP registration (with Digest MD5 authentication) and INVITE/BYE handling using raw UDP sockets. Sends `100 Trying` before `200 OK` on incoming INVITEs.
+- **Local IP Auto-Detection**: Uses the connected UDP socket trick (`connect()` + `getsockname()`) to determine the local network IP that routes to each PBX. Each line stores its own `local_ip` for multi-PBX scenarios. This IP is used in Contact headers, Via headers, and SDP `c=` lines.
+- **Digest Authentication**: Handles `401 Unauthorized` / `407 Proxy Authentication Required` challenges by parsing `WWW-Authenticate`/`Proxy-Authenticate` headers, computing MD5 digest response (`HA1=MD5(user:realm:password)`, `HA2=MD5(method:uri)`, `response=MD5(HA1:nonce:HA2)`), and re-sending REGISTER with `Authorization` header.
 - **RTP Routing**: 
     - Receives RTP packets from the network and forwards them to the `Inbound Audio Processor` via interconnect TCP.
     - Receives encoded G.711 frames from the `Outbound Audio Processor` via interconnect TCP and sends them as RTP packets to the remote caller.
@@ -38,7 +40,7 @@ The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts
 ## Runtime Commands (cmd port 13102)
 - `ADD_LINE <user> <server_ip> <port> <password>`: Register a new SIP account dynamically (password last to allow spaces, "-" means empty, port 1-65535 defaults to 5060)
 - `REMOVE_LINE <index>`: Remove a SIP line by index
-- `LIST_LINES`: Returns `LINES <idx>:<user>:<registered|unregistered>:<server_ip>:<port> ...`
+- `LIST_LINES`: Returns `LINES <idx>:<user>:<registered|unregistered>:<server_ip>:<port>:<local_ip> ...`
 - `GET_STATS`: Returns RTP counters for all active calls
 - `PING`: Health check (returns `PONG`)
 - `STATUS`: Returns registered lines, active call count, connection state

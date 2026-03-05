@@ -55,7 +55,59 @@
 #include <sstream>
 #include <iomanip>
 #include <getopt.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <CommonCrypto/CommonDigest.h>
 #include "interconnect.h"
+
+static std::string detect_local_ip(const std::string& target_ip) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return "127.0.0.1";
+    struct sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(9);
+    dest.sin_addr.s_addr = inet_addr(target_ip.c_str());
+    if (connect(sock, (struct sockaddr*)&dest, sizeof(dest)) < 0) {
+        close(sock);
+        return "127.0.0.1";
+    }
+    struct sockaddr_in local{};
+    socklen_t len = sizeof(local);
+    getsockname(sock, (struct sockaddr*)&local, &len);
+    close(sock);
+    std::string ip = inet_ntoa(local.sin_addr);
+    if (ip == "0.0.0.0") return "127.0.0.1";
+    return ip;
+}
+
+static std::string md5_hex(const std::string& input) {
+    unsigned char digest[CC_MD5_DIGEST_LENGTH];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CC_MD5(input.c_str(), (CC_LONG)input.length(), digest);
+#pragma clang diagnostic pop
+    char hex[33];
+    for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    hex[32] = '\0';
+    return std::string(hex);
+}
+
+static std::string extract_sip_field(const std::string& header, const std::string& field) {
+    std::string search = field + "=";
+    size_t pos = header.find(search);
+    if (pos == std::string::npos) return "";
+    pos += search.length();
+    if (pos < header.length() && header[pos] == '"') {
+        pos++;
+        size_t end = header.find('"', pos);
+        if (end == std::string::npos) return "";
+        return header.substr(pos, end - pos);
+    }
+    size_t end = header.find(',', pos);
+    if (end == std::string::npos) end = header.length();
+    while (end > pos && (header[end - 1] == ' ' || header[end - 1] == '\r' || header[end - 1] == '\n')) end--;
+    return header.substr(pos, end - pos);
+}
 
 static constexpr int RTP_PORT_BASE = 10000;
 
@@ -93,11 +145,15 @@ struct SipLine {
     int server_port = 5060;
     std::string user;
     std::string server_ip;
+    std::string local_ip;
     std::string password;
     std::thread sip_thread;
     std::thread reg_thread;
     std::atomic<bool> registered{false};
     std::atomic<bool> line_running{true};
+    std::string auth_realm;
+    std::string auth_nonce;
+    std::atomic<int> reg_cseq{1};
 };
 
 class SipClient {
@@ -114,7 +170,7 @@ public:
     bool init(const std::string& user, const std::string& server, int port, int num_lines) {
         server_ = server;
         server_port_ = port;
-        local_ip_ = "127.0.0.1";
+        local_ip_ = detect_local_ip(server);
 
         for (int i = 0; i < num_lines; ++i) {
             std::string line_user;
@@ -235,7 +291,8 @@ public:
         for (const auto& line : lines_) {
             out << " " << line->index << ":" << line->user
                 << ":" << (line->registered ? "registered" : "unregistered")
-                << ":" << line->server_ip << ":" << line->server_port;
+                << ":" << line->server_ip << ":" << line->server_port
+                << ":" << line->local_ip;
         }
         return out.str();
     }
@@ -351,14 +408,42 @@ private:
             if (n <= 0) continue;
             buf[n] = '\0';
             std::string msg(buf);
-            if (msg.find("INVITE") == 0) handle_invite(msg, sender, line);
+            log_fwd_.forward(whispertalk::LogLevel::TRACE, 0, "SIP RX line %d: %.120s", line->index, buf);
+            if (msg.find("INVITE") == 0) {
+                log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "INVITE received on line %d from %s:%d",
+                    line->index, inet_ntoa(sender.sin_addr), ntohs(sender.sin_port));
+                handle_invite(msg, sender, line);
+            }
             else if (msg.find("BYE") == 0) handle_bye(msg, sender, line);
+            else if (msg.find("ACK") == 0) {
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, 0, "ACK received on line %d", line->index);
+            }
             else if (msg.find("SIP/2.0 200") == 0 && msg.find("REGISTER") != std::string::npos) {
                 bool was_registered = line->registered;
                 line->registered = true;
                 if (!was_registered) {
-                    std::cout << "Line " << line->index << " (" << line->user << ") registered successfully" << std::endl;
-                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Line %d (%s) registered successfully", line->index, line->user.c_str());
+                    std::string lip = line->local_ip.empty() ? local_ip_ : line->local_ip;
+                    std::cout << "Line " << line->index << " (" << line->user << ") registered at " << lip << ":" << line->local_port << std::endl;
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Line %d (%s) registered successfully (contact=%s:%d)",
+                        line->index, line->user.c_str(), lip.c_str(), line->local_port);
+                }
+            }
+            else if ((msg.find("SIP/2.0 401") == 0 || msg.find("SIP/2.0 407") == 0) && msg.find("REGISTER") != std::string::npos) {
+                std::string www_auth;
+                size_t ap = msg.find("WWW-Authenticate:");
+                if (ap == std::string::npos) ap = msg.find("Proxy-Authenticate:");
+                if (ap != std::string::npos) {
+                    size_t ae = msg.find("\r\n", ap);
+                    if (ae != std::string::npos) www_auth = msg.substr(ap, ae - ap);
+                }
+                if (!www_auth.empty()) {
+                    line->auth_realm = extract_sip_field(www_auth, "realm");
+                    line->auth_nonce = extract_sip_field(www_auth, "nonce");
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Auth challenge on line %d: realm=%s, sending credentials",
+                        line->index, line->auth_realm.c_str());
+                    register_sip(line, true);
+                } else {
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, 0, "401/407 without WWW-Authenticate on line %d", line->index);
                 }
             }
         }
@@ -391,6 +476,11 @@ private:
         std::string cseq_str = get_header("CSeq");
         int cseq = 0;
         if (!cseq_str.empty()) cseq = std::stoi(cseq_str.substr(0, cseq_str.find(' ')));
+
+        {
+            std::string trying = "SIP/2.0 100 Trying\r\nVia: " + via + "\r\nFrom: " + from + "\r\nTo: " + to + "\r\nCall-ID: " + scid + "\r\nCSeq: " + std::to_string(cseq) + " INVITE\r\nContent-Length: 0\r\n\r\n";
+            sendto(line->sip_sock, trying.c_str(), trying.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
+        }
 
         uint32_t proposed_id;
         {
@@ -440,12 +530,13 @@ private:
 
         session->rtp_thread = std::thread(&SipClient::rtp_receiver_loop, this, session);
 
+        std::string lip = line->local_ip.empty() ? local_ip_ : line->local_ip;
         std::ostringstream resp;
         resp << "SIP/2.0 200 OK\r\nVia: " << via << "\r\nFrom: " << from << "\r\nTo: " << to << ";tag=whisper" << cid << "\r\n";
-        resp << "Call-ID: " << scid << "\r\nCSeq: " << cseq << " INVITE\r\nContact: <sip:" << line->user << "@" << local_ip_ << ":" << line->local_port << ">\r\n";
+        resp << "Call-ID: " << scid << "\r\nCSeq: " << cseq << " INVITE\r\nContact: <sip:" << line->user << "@" << lip << ":" << line->local_port << ">\r\n";
         resp << "Content-Type: application/sdp\r\n";
         std::ostringstream sdp;
-        sdp << "v=0\r\no=whisper 123 456 IN IP4 " << local_ip_ << "\r\ns=-\r\nc=IN IP4 " << local_ip_ << "\r\nt=0 0\r\n";
+        sdp << "v=0\r\no=whisper 123 456 IN IP4 " << lip << "\r\ns=-\r\nc=IN IP4 " << lip << "\r\nt=0 0\r\n";
         sdp << "m=audio " << session->local_rtp_port << " RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
         resp << "Content-Length: " << sdp.str().length() << "\r\n\r\n" << sdp.str();
         std::string s = resp.str();
@@ -561,13 +652,34 @@ private:
         }
     }
 
-    void register_sip(std::shared_ptr<SipLine> line) {
+    void register_sip(std::shared_ptr<SipLine> line, bool with_auth = false) {
         std::string reg_server = line->server_ip.empty() ? server_ : line->server_ip;
+        std::string lip = line->local_ip.empty() ? local_ip_ : line->local_ip;
+        int cseq = line->reg_cseq++;
         std::ostringstream req;
-        req << "REGISTER sip:" << reg_server << " SIP/2.0\r\nVia: SIP/2.0/UDP " << local_ip_ << ":" << line->local_port << "\r\n";
-        req << "From: <sip:" << line->user << "@" << reg_server << ">\r\nTo: <sip:" << line->user << "@" << reg_server << ">\r\n";
-        req << "Call-ID: reg-" << rand() << "@" << local_ip_ << "\r\nCSeq: 1 REGISTER\r\n";
-        req << "Contact: <sip:" << line->user << "@" << local_ip_ << ":" << line->local_port << ">\r\nExpires: 3600\r\n\r\n";
+        req << "REGISTER sip:" << reg_server << " SIP/2.0\r\n";
+        req << "Via: SIP/2.0/UDP " << lip << ":" << line->local_port << ";rport;branch=z9hG4bK" << rand() << "\r\n";
+        req << "Max-Forwards: 70\r\n";
+        req << "From: <sip:" << line->user << "@" << reg_server << ">;tag=" << rand() << "\r\n";
+        req << "To: <sip:" << line->user << "@" << reg_server << ">\r\n";
+        req << "Call-ID: reg-" << line->index << "@" << lip << "\r\n";
+        req << "CSeq: " << cseq << " REGISTER\r\n";
+        req << "Contact: <sip:" << line->user << "@" << lip << ":" << line->local_port << ">\r\n";
+        req << "Expires: 3600\r\n";
+        req << "User-Agent: WhisperTalk/1.0\r\n";
+        if (with_auth && !line->auth_nonce.empty() && !line->password.empty()) {
+            std::string uri = "sip:" + reg_server;
+            std::string ha1 = md5_hex(line->user + ":" + line->auth_realm + ":" + line->password);
+            std::string ha2 = md5_hex("REGISTER:" + uri);
+            std::string response = md5_hex(ha1 + ":" + line->auth_nonce + ":" + ha2);
+            req << "Authorization: Digest username=\"" << line->user << "\","
+                << "realm=\"" << line->auth_realm << "\","
+                << "nonce=\"" << line->auth_nonce << "\","
+                << "uri=\"" << uri << "\","
+                << "response=\"" << response << "\","
+                << "algorithm=MD5\r\n";
+        }
+        req << "Content-Length: 0\r\n\r\n";
         struct sockaddr_in srv{};
         srv.sin_family = AF_INET; srv.sin_port = htons(line->server_port); srv.sin_addr.s_addr = inet_addr(reg_server.c_str());
         std::string s = req.str();
@@ -581,6 +693,7 @@ private:
         line->server_ip = server_ip;
         line->password = password;
         line->server_port = port;
+        line->local_ip = server_ip.empty() ? local_ip_ : detect_local_ip(server_ip);
 
         line->sip_sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (line->sip_sock < 0) {
@@ -598,7 +711,8 @@ private:
         line->local_port = ntohs(addr.sin_port);
 
         lines_.push_back(line);
-        std::cout << "SIP line " << line->index << " (" << line->user << ") on port " << line->local_port << std::endl;
+        std::cout << "SIP line " << line->index << " (" << line->user << ") on port " << line->local_port
+                  << " local_ip=" << line->local_ip << std::endl;
         return line->index;
     }
 
