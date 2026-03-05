@@ -403,12 +403,11 @@ private:
     static std::string cseq_method(const std::string& msg) {
         size_t p = msg.find("CSeq:");
         if (p == std::string::npos) return "";
-        size_t sp = msg.find(' ', p + 5);
-        if (sp == std::string::npos) return "";
-        while (sp < msg.size() && msg[sp] == ' ') sp++;
-        size_t end = msg.find_first_of("\r\n", sp);
-        if (end == std::string::npos) end = msg.size();
-        return msg.substr(sp, end - sp);
+        size_t eol = msg.find_first_of("\r\n", p);
+        if (eol == std::string::npos) eol = msg.size();
+        size_t sp = msg.rfind(' ', eol);
+        if (sp == std::string::npos || sp <= p) return "";
+        return msg.substr(sp + 1, eol - sp - 1);
     }
 
     void sip_loop(std::shared_ptr<SipLine> line) {
