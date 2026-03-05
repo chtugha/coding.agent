@@ -2670,7 +2670,6 @@ function loadHallucinationFilterState(){
   }).catch(()=>{cb.checked=false;statusEl.textContent='(offline)';});
 }
 
-var sipLinesRefreshTimer=null;
 function sipConnectPbx(){
   var server=document.getElementById('sipPbxServer').value.trim();
   var port=document.getElementById('sipPbxPort').value.trim()||'5060';

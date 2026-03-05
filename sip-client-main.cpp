@@ -75,9 +75,10 @@ static std::string detect_local_ip(const std::string& target_ip) {
     socklen_t len = sizeof(local);
     getsockname(sock, (struct sockaddr*)&local, &len);
     close(sock);
-    std::string ip = inet_ntoa(local.sin_addr);
-    if (ip == "0.0.0.0") return "127.0.0.1";
-    return ip;
+    char addr_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &local.sin_addr, addr_str, sizeof(addr_str));
+    if (strcmp(addr_str, "0.0.0.0") == 0) return "127.0.0.1";
+    return std::string(addr_str);
 }
 
 static std::string md5_hex(const std::string& input) {
@@ -154,6 +155,8 @@ struct SipLine {
     std::string auth_realm;
     std::string auth_nonce;
     std::atomic<int> reg_cseq{1};
+    std::string from_tag = std::to_string(rand());
+    std::string reg_call_id;
 };
 
 class SipClient {
@@ -397,6 +400,17 @@ private:
         }
     }
 
+    static std::string cseq_method(const std::string& msg) {
+        size_t p = msg.find("CSeq:");
+        if (p == std::string::npos) return "";
+        size_t sp = msg.find(' ', p + 5);
+        if (sp == std::string::npos) return "";
+        while (sp < msg.size() && msg[sp] == ' ') sp++;
+        size_t end = msg.find_first_of("\r\n", sp);
+        if (end == std::string::npos) end = msg.size();
+        return msg.substr(sp, end - sp);
+    }
+
     void sip_loop(std::shared_ptr<SipLine> line) {
         char buf[4096];
         while (running_ && line->line_running) {
@@ -410,15 +424,17 @@ private:
             std::string msg(buf);
             log_fwd_.forward(whispertalk::LogLevel::TRACE, 0, "SIP RX line %d: %.120s", line->index, buf);
             if (msg.find("INVITE") == 0) {
+                char sender_ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &sender.sin_addr, sender_ip, sizeof(sender_ip));
                 log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "INVITE received on line %d from %s:%d",
-                    line->index, inet_ntoa(sender.sin_addr), ntohs(sender.sin_port));
+                    line->index, sender_ip, ntohs(sender.sin_port));
                 handle_invite(msg, sender, line);
             }
             else if (msg.find("BYE") == 0) handle_bye(msg, sender, line);
             else if (msg.find("ACK") == 0) {
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, 0, "ACK received on line %d", line->index);
             }
-            else if (msg.find("SIP/2.0 200") == 0 && msg.find("REGISTER") != std::string::npos) {
+            else if (msg.find("SIP/2.0 200") == 0 && cseq_method(msg) == "REGISTER") {
                 bool was_registered = line->registered;
                 line->registered = true;
                 if (!was_registered) {
@@ -428,7 +444,7 @@ private:
                         line->index, line->user.c_str(), lip.c_str(), line->local_port);
                 }
             }
-            else if ((msg.find("SIP/2.0 401") == 0 || msg.find("SIP/2.0 407") == 0) && msg.find("REGISTER") != std::string::npos) {
+            else if ((msg.find("SIP/2.0 401") == 0 || msg.find("SIP/2.0 407") == 0) && cseq_method(msg) == "REGISTER") {
                 std::string www_auth;
                 size_t ap = msg.find("WWW-Authenticate:");
                 if (ap == std::string::npos) ap = msg.find("Proxy-Authenticate:");
@@ -508,7 +524,9 @@ private:
         if (m_pos != std::string::npos) {
             std::string m_line = msg.substr(m_pos + 8);
             session->remote_port = std::stoi(m_line.substr(0, m_line.find(' ')));
-            session->remote_ip = inet_ntoa(sender.sin_addr);
+            char rip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &sender.sin_addr, rip, sizeof(rip));
+            session->remote_ip = rip;
         }
 
         session->local_rtp_port = RTP_PORT_BASE + cid;
@@ -655,14 +673,17 @@ private:
     void register_sip(std::shared_ptr<SipLine> line, bool with_auth = false) {
         std::string reg_server = line->server_ip.empty() ? server_ : line->server_ip;
         std::string lip = line->local_ip.empty() ? local_ip_ : line->local_ip;
+        if (line->reg_call_id.empty()) {
+            line->reg_call_id = "reg-" + std::to_string(line->index) + "-" + std::to_string(rand()) + "@" + lip;
+        }
         int cseq = line->reg_cseq++;
         std::ostringstream req;
         req << "REGISTER sip:" << reg_server << " SIP/2.0\r\n";
         req << "Via: SIP/2.0/UDP " << lip << ":" << line->local_port << ";rport;branch=z9hG4bK" << rand() << "\r\n";
         req << "Max-Forwards: 70\r\n";
-        req << "From: <sip:" << line->user << "@" << reg_server << ">;tag=" << rand() << "\r\n";
+        req << "From: <sip:" << line->user << "@" << reg_server << ">;tag=" << line->from_tag << "\r\n";
         req << "To: <sip:" << line->user << "@" << reg_server << ">\r\n";
-        req << "Call-ID: reg-" << line->index << "@" << lip << "\r\n";
+        req << "Call-ID: " << line->reg_call_id << "\r\n";
         req << "CSeq: " << cseq << " REGISTER\r\n";
         req << "Contact: <sip:" << line->user << "@" << lip << ":" << line->local_port << ">\r\n";
         req << "Expires: 3600\r\n";
