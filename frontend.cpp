@@ -10274,6 +10274,42 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGPIPE, SIG_IGN);
 
+    {
+        std::string exe_path = argv[0];
+        size_t slash = exe_path.rfind('/');
+        if (slash != std::string::npos) {
+            std::string exe_dir = exe_path.substr(0, slash);
+            if (!exe_dir.empty() && exe_dir != ".") {
+                std::string parent = exe_dir;
+                size_t ps = parent.rfind('/');
+                if (ps != std::string::npos && parent.substr(ps + 1) == "bin") {
+                    parent = parent.substr(0, ps);
+                    if (chdir(parent.c_str()) == 0) {
+                        std::cout << "Working directory: " << parent << "\n";
+                    }
+                } else {
+                    if (chdir(exe_dir.c_str()) == 0) {
+                        std::cout << "Working directory: " << exe_dir << "\n";
+                    }
+                }
+            }
+        }
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd))) {
+            struct stat st;
+            if (stat("bin/frontend", &st) != 0) {
+                std::string try_parent = std::string(cwd);
+                size_t ps = try_parent.rfind('/');
+                if (ps != std::string::npos && try_parent.substr(ps + 1) == "bin") {
+                    std::string p = try_parent.substr(0, ps);
+                    if (chdir(p.c_str()) == 0) {
+                        std::cout << "Working directory (corrected): " << p << "\n";
+                    }
+                }
+            }
+        }
+    }
+
     uint16_t port = 8080;
     if (argc > 2 && strcmp(argv[1], "--port") == 0) {
         port = static_cast<uint16_t>(atoi(argv[2]));
