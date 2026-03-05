@@ -77,6 +77,11 @@ static const double* get_aa_coeffs() {
 }
 
 static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 24000;
+// Guard window after new TTS audio arrives: SPEECH_ACTIVE flushes are suppressed during
+// this period to prevent PBX sidetone echo (loopback of TTS audio through the RTP path)
+// from flushing the audio buffer. Sidetone echoes arrive within ~200-500ms; genuine
+// caller interruptions arrive after > 1000ms of sustained listening.
+static constexpr int SPEECH_ACTIVE_GUARD_MS = 1500;
 
 struct CallState {
     uint32_t id;
@@ -84,6 +89,10 @@ struct CallState {
     std::vector<uint8_t> buffer;
     size_t read_pos = 0;
     std::chrono::steady_clock::time_point last_activity;
+    // Set each time new TTS audio is received from Kokoro. Used by the SPEECH_ACTIVE
+    // guard to distinguish sidetone echo (arrives <500ms after playback starts) from
+    // genuine caller interruption (arrives >1500ms after last audio chunk).
+    std::chrono::steady_clock::time_point last_audio_received{};
     float fir_history[AA_HALF_TAPS] = {};
     float ext[AA_HALF_TAPS + OAP_MAX_PREALLOC_SAMPLES];
     uint8_t ulaw_buf[OAP_MAX_PREALLOC_SAMPLES / DOWNSAMPLE_RATIO];
@@ -368,7 +377,9 @@ private:
             const float* pcm_buf = reinterpret_cast<const float*>(pkt.payload.data() + sizeof(int32_t));
 
             std::lock_guard<std::mutex> lock(state->mutex);
-            state->last_activity = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            state->last_activity = now;
+            state->last_audio_received = now;
             downsample_and_encode_into(pcm_buf, sample_count, *state, state->buffer);
         }
     }
@@ -447,6 +458,21 @@ private:
         if (it == calls_.end()) return;
         auto& state = it->second;
         std::lock_guard<std::mutex> sl(state->mutex);
+
+        // Suppress flushes that arrive within SPEECH_ACTIVE_GUARD_MS of new TTS audio.
+        // PBX sidetone (loopback of outgoing audio back into the RTP stream) causes
+        // spurious SPEECH_ACTIVE signals within 200-500ms of playback start.
+        // Genuine caller interruptions arrive well after 1500ms.
+        auto now = std::chrono::steady_clock::now();
+        auto ms_since_audio = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - state->last_audio_received).count();
+        if (ms_since_audio < SPEECH_ACTIVE_GUARD_MS) {
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
+                "SPEECH_ACTIVE suppressed — sidetone guard active (%ldms since last TTS audio, guard=%dms)",
+                (long)ms_since_audio, SPEECH_ACTIVE_GUARD_MS);
+            return;
+        }
+
         size_t flushed = state->buffer.size() - state->read_pos;
         state->buffer.clear();
         state->read_pos = 0;
