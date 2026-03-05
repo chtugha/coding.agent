@@ -1,69 +1,87 @@
 # Spec and build
 
 ## Configuration
-- **Artifacts Path**: {@artifacts_path} → `.zenflow/tasks/{task_id}`
+- **Artifacts Path**: `.zenflow/tasks/improve-outbound-speech-quality-17a9`
 
 ---
 
 ## Agent Instructions
 
-Ask the user questions when anything is unclear or needs their input. This includes:
-- Ambiguous or incomplete requirements
-- Technical decisions that affect architecture or user experience
-- Trade-offs that require business context
-
-Do not make assumptions on important decisions — get clarification first.
-
-If you are blocked and need user clarification, mark the current step with `[!]` in plan.md before stopping.
+Ask the user questions when anything is unclear or needs their input.
+If blocked, mark the step with `[!]` before stopping.
 
 ---
 
 ## Workflow Steps
 
-### [ ] Step: Technical Specification
+### [x] Step: Technical Specification
 
-Assess the task's difficulty, as underestimating it leads to poor outcomes.
-- easy: Straightforward implementation, trivial bug fix or feature
-- medium: Moderate complexity, some edge cases or caveats to consider
-- hard: Complex logic, many caveats, architectural considerations, or high-risk changes
+See spec at `.zenflow/tasks/improve-outbound-speech-quality-17a9/spec.md`.
 
-Create a technical specification for the task that is appropriate for the complexity level:
-- Review the existing codebase architecture and identify reusable components.
-- Define the implementation approach based on established patterns in the project.
-- Identify all source code files that will be created or modified.
-- Define any necessary data model, API, or interface changes.
-- Describe verification steps using the project's test and lint commands.
-
-Save the output to `{@artifacts_path}/spec.md` with:
-- Technical context (language, dependencies)
-- Implementation approach
-- Source code structure changes
-- Data model / API / interface changes
-- Verification approach
-
-If the task is complex enough, create a detailed implementation plan based on `{@artifacts_path}/spec.md`:
-- Break down the work into concrete tasks (incrementable, testable milestones)
-- Each task should reference relevant contracts and include verification steps
-- Replace the Implementation step below with the planned tasks
-
-Rule of thumb for step size: each step should represent a coherent unit of work (e.g., implement a component, add an API endpoint, write tests for a module). Avoid steps that are too granular (single function).
-
-Important: unit tests must be part of each implementation task, not separate tasks. Each task should implement the code and its tests together, if relevant.
-
-Save to `{@artifacts_path}/plan.md`. If the feature is trivial and doesn't warrant this breakdown, keep the Implementation step below as is.
+Difficulty: **medium** — 4 independent changes across 3 files.
 
 ---
 
-### [ ] Step: Implementation
+### [ ] Step: SIP client starts without default lines
 
-Implement the task according to the technical specification and general engineering best practices.
+Modify `sip-client-main.cpp`:
+- Remove `std::max(1, atoi(optarg))` enforcement → allow `--lines 0`
+- Change `main()` arg validation: positional `<user> <server>` only required when `lines > 0`
+- Update usage string
 
-1. Break the task into steps where possible.
-2. Implement the required changes in the codebase
-3. If relevant, write unit tests alongside each change.
-4. Run relevant tests and linters in the end of each step.
-5. Perform basic manual verification if applicable.
-6. After completion, write a report to `{@artifacts_path}/report.md` describing:
-   - What was implemented
-   - How the solution was tested
-   - The biggest issues or challenges encountered
+Modify `frontend.cpp`:
+- Change DB seed `default_args` for `SIP_CLIENT` from `'--lines 2 alice 127.0.0.1 5060'` to `''`
+- Add migration to reset any existing `--lines N alice ...` args to `''`
+
+Verify: `bin/sip-client` starts with no arguments and exits cleanly (or runs with 0 lines).
+
+---
+
+### [ ] Step: WAV recording in test_sip_provider
+
+Modify `tests/test_sip_provider.cpp`:
+- Add `--save-wav-dir <dir>` CLI flag (default: empty = disabled)
+- Add `save_wav_enabled_` (atomic bool), `save_wav_dir_` (string), `save_wav_mutex_`
+- Add per-leg receive buffer in `ActiveCall`: `std::vector<std::vector<uint8_t>> leg_wav_buffers`
+- In `conference_relay_thread`: when enabled, extract 160-byte μ-law payload (skip 12-byte RTP header) and append to `leg_wav_buffers[from_idx]`
+- In `shutdown_call()`: write per-leg WAV files (μ-law → int16 PCM → RIFF WAV at 8kHz mono)
+- Add HTTP endpoints: `GET /wav_recording` and `POST /wav_recording {"enabled":bool,"dir":"string"}`
+
+Verify: build succeeds; endpoint responds; test that setting enabled=true then starting a call produces WAV files.
+
+---
+
+### [ ] Step: Frontend SIP provider config panel
+
+Modify `frontend.cpp`:
+- Add `div#sipProviderConfig` HTML block (parallel to `sipClientConfig`):
+  - Checkbox: "Save incoming audio as WAV" (id: `sipProviderSaveWav`)
+  - Text input: "Save to directory" (id: `sipProviderWavDir`)
+  - Status span: `id="sipProviderWavStatus"`
+- In `updateSvcDetail()` JS: show `sipProviderConfig` when `s.name === 'TEST_SIP_PROVIDER'`; call `loadSipProviderWavConfig()`; hide otherwise
+- Add JS function `loadSipProviderWavConfig()`: GET from `http://localhost:22011/wav_recording`
+- Add JS function `saveSipProviderWavConfig()`: POST to `http://localhost:22011/wav_recording`
+- Wire checkbox `onchange` → `saveSipProviderWavConfig()`
+
+Verify: selecting TEST_SIP_PROVIDER service shows the config panel; checkbox/dir persists via HTTP.
+
+---
+
+### [ ] Step: Fix audio injection UI on beta-testing page
+
+Modify `frontend.cpp`:
+- Change label "Inject into Leg (username)" → "Inject into active testline"
+- Replace hardcoded `<option value="a">Leg A (first)</option>` / `<option value="b">Leg B (second)</option>` with a single disabled placeholder: `<option value="" disabled>-- No active testlines --</option>`
+- Update `refreshInjectLegs()` fallback: when no active call/legs, render only the disabled placeholder
+- Add `refreshInjectLegs()` to beta-testing page load handlers (two locations: line ~2426 and ~5198)
+
+Verify: on page load the dropdown shows active testlines (or the placeholder); label is updated.
+
+---
+
+### [ ] Step: Build and verify
+
+- Run full build: `cd coding.agent && mkdir -p build && cd build && cmake .. && make -j4`
+- Fix any compilation errors
+- Run unit tests: `bin/test_sip_provider_unit` (if it exists in bin/)
+- Write report to `.zenflow/tasks/improve-outbound-speech-quality-17a9/report.md`
