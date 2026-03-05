@@ -9,9 +9,12 @@ alwaysApply: true
 The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts as the RTP gateway for the WhisperTalk system. It handles SIP registration, incoming calls (INVITE), and routes audio between the telephony network and the internal processors.
 
 ## Internal Function
-- **SIP Signaling**: Implements SIP registration (with Digest MD5 authentication) and INVITE/BYE handling using raw UDP sockets. Sends `100 Trying` before `200 OK` on incoming INVITEs.
-- **Local IP Auto-Detection**: Uses the connected UDP socket trick (`connect()` + `getsockname()`) to determine the local network IP that routes to each PBX. Each line stores its own `local_ip` for multi-PBX scenarios. This IP is used in Contact headers, Via headers, and SDP `c=` lines.
+- **SIP Signaling**: Implements SIP registration (with Digest MD5 authentication) and INVITE/BYE handling using raw UDP sockets. Sends `100 Trying` before `200 OK` on incoming INVITEs. NOTIFY/OPTIONS/CANCEL get `200 OK` responses to satisfy PBX keepalive probes.
+- **Re-Registration**: `registration_loop` fires at `max(60s, granted_expires * 2/3)` (typically ~2400s for a 3600s Expires). The `Expires:` value is parsed from the REGISTER 200 OK and stored in `SipLine::granted_expires`. On each re-registration, preemptive auth is attempted if credentials are already known (avoids a 401 round-trip); if the stored nonce has expired the PBX issues a fresh 401 and the challenge handler automatically retries.
+- **Local IP Auto-Detection**: Uses the connected UDP socket trick (`connect()` + `getsockname()`) to determine the local network IP that routes to each PBX. Each line stores its own `local_ip` for multi-PBX scenarios. This IP is used in Contact headers, Via headers, and SDP `c=` lines sent in 200 OK responses to INVITE.
 - **Digest Authentication**: Handles `401 Unauthorized` / `407 Proxy Authentication Required` challenges by parsing `WWW-Authenticate`/`Proxy-Authenticate` headers, computing MD5 digest response (`HA1=MD5(user:realm:password)`, `HA2=MD5(method:uri)`, `response=MD5(HA1:nonce:HA2)`), and re-sending REGISTER with `Authorization` header.
+- **SDP Media IP Parsing**: Parses the `c=IN IP4 <addr>` line from INVITE SDP to determine `remote_ip` for outgoing RTP. Falls back to the UDP sender address if no `c=` line is present (handles PBX media proxies correctly).
+- **Unique SIP IDs**: Via branch tags, registration Call-IDs, and RTP SSRCs use `arc4random()` (OS-seeded CSPRNG) for guaranteed global uniqueness across process restarts, satisfying RFC 3261 §8.1.1.7.
 - **RTP Routing**: 
     - Receives RTP packets from the network and forwards them to the `Inbound Audio Processor` via interconnect TCP.
     - Receives encoded G.711 frames from the `Outbound Audio Processor` via interconnect TCP and sends them as RTP packets to the remote caller.

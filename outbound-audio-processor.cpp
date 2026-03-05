@@ -226,7 +226,7 @@ private:
         }
         if (cmd.rfind("SET_SIDETONE_GUARD_MS:", 0) == 0) {
             try {
-                int ms = std::stoi(cmd.substr(21));
+                int ms = std::stoi(cmd.substr(22));
                 if (ms < 0) ms = 0;
                 speech_active_guard_ms_ = ms;
                 log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Sidetone guard set to %dms", ms);

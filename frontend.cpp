@@ -5443,8 +5443,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             else {
                 size_t pre = pos - 1;
                 while (pre > 0 && (json[pre] == ' ' || json[pre] == '\t' || json[pre] == '\n' || json[pre] == '\r')) pre--;
+                // re-check index 0 after the loop (loop exits before testing it)
                 char c = json[pre];
-                valid = (c == '{' || c == ',');
+                valid = (c == '{' || c == ',' || (pre == 0 && (c == ' ' || c == '\t' || c == '\n' || c == '\r')));
             }
             if (valid) break;
             pos += needle.size();

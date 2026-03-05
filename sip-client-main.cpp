@@ -511,7 +511,10 @@ private:
     void registration_loop(std::shared_ptr<SipLine> line) {
         while (running_ && line->line_running) {
             // Preemptive auth: if we already have credentials from a previous 401
-            // challenge, send them directly instead of waiting for another round-trip.
+            // challenge, send them directly to avoid a round-trip. If the cached
+            // nonce has since expired, the PBX will respond with 401 stale=true and
+            // the sip_loop 401 handler will transparently retry with the fresh nonce
+            // — so this always degrades gracefully to a normal challenge cycle.
             bool preemptive = !line->auth_realm.empty() && !line->auth_nonce.empty()
                               && !line->password.empty();
             register_sip(line, preemptive);
