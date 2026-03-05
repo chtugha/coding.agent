@@ -875,7 +875,7 @@ private:
 int main(int argc, char** argv) {
     std::string user, server;
     int port = 5060;
-    int lines = 1;
+    int lines = 0;
     std::string log_level = "INFO";
 
     static struct option long_opts[] = {
@@ -887,20 +887,23 @@ int main(int argc, char** argv) {
     int opt;
     while ((opt = getopt_long(argc, argv, "l:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
-            case 'l': lines = std::max(1, atoi(optarg)); break;
+            case 'l': lines = atoi(optarg); if (lines < 0) lines = 0; break;
             case 'L': log_level = optarg; break;
             default: break;
         }
     }
 
-    if (optind + 1 >= argc) {
-        std::cout << "Usage: sip-client [--lines N] [--log-level LEVEL] <user> <server> [port]" << std::endl;
+    if (lines > 0 && optind + 1 >= argc) {
+        std::cout << "Usage: sip-client [--lines N] [--log-level LEVEL] [<user> <server> [port]]" << std::endl;
+        std::cout << "       When --lines 0 (default), starts with no registered lines." << std::endl;
         return 1;
     }
 
-    user = argv[optind];
-    server = argv[optind + 1];
-    if (optind + 2 < argc) port = atoi(argv[optind + 2]);
+    if (lines > 0) {
+        user = argv[optind];
+        server = argv[optind + 1];
+        if (optind + 2 < argc) port = atoi(argv[optind + 2]);
+    }
 
     SipClient client;
     if (client.init(user, server, port, lines)) {

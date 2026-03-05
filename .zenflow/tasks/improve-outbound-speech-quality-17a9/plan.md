@@ -22,7 +22,8 @@ Difficulty: **hard** — 6 infrastructure changes across 4 files + an iterative 
 
 ---
 
-### [ ] Step: SIP client starts without default lines
+### [x] Step: SIP client starts without default lines
+<!-- chat-id: 44d50f9e-ab73-4466-bf2c-90b454a9c101 -->
 
 Modify `sip-client-main.cpp`:
 - Remove `std::max(1, atoi(optarg))` enforcement → allow `--lines 0`

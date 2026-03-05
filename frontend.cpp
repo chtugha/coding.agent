@@ -669,7 +669,7 @@ private:
 
         const char* seed = R"(
             INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
-                ('SIP_CLIENT', 'bin/sip-client', '--lines 2 alice 127.0.0.1 5060', 'SIP client / RTP gateway'),
+                ('SIP_CLIENT', 'bin/sip-client', '', 'SIP client / RTP gateway'),
                 ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
                 ('VAD_SERVICE', 'bin/vad-service', '', 'Voice Activity Detection + speech segmentation'),
                 ('WHISPER_SERVICE', 'bin/whisper-service', '--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (Metal)'),
@@ -679,7 +679,7 @@ private:
                 ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'default');
             UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
-            UPDATE service_config SET default_args='--lines 2 alice 127.0.0.1 5060' WHERE service='SIP_CLIENT' AND default_args='--lines 1 alice 127.0.0.1 5060';
+            UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args='--lines 1 alice 127.0.0.1 5060' OR default_args='--lines 2 alice 127.0.0.1 5060');
         )";
         sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
 
