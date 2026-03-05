@@ -126,8 +126,13 @@ Allow saving the downsampled 8kHz PCM audio (the exact audio sent to the caller'
   - `std::string save_wav_dir_` protected by `save_wav_mutex_`
   - `std::mutex save_wav_mutex_`
 - Add `std::vector<int16_t> wav_samples` field to `CallState`
-- In `downsample_and_encode_into()`: after computing each `int16_t s16` (clipped 8kHz PCM), when `save_wav_enabled_`, append it to `state->wav_samples`
-- In `handle_call_end()`: if enabled and `wav_samples` non-empty, write `oap_call_<id>_<timestamp>.wav` (8kHz mono 16-bit PCM RIFF/WAVE); clear `wav_samples` after writing
+- In `downsample_and_encode_into()`: after computing each `int16_t s16` (clipped 8kHz PCM), when `save_wav_enabled_`, append it to `state.wav_samples` (note: `state` is a `CallState&` reference, not a pointer)
+- In `handle_call_end()`: use explicit ordering to avoid destroying `wav_samples` before the WAV is written:
+  1. Lock `calls_mutex_`
+  2. Look up shared_ptr: `auto state_copy = calls_[call_id];` (shared_ptr keeps CallState alive after erase)
+  3. Call `calls_.erase(call_id)`
+  4. Release lock (end of scope or explicit unlock)
+  5. Outside the lock: if `save_wav_enabled_` and `state_copy->wav_samples` non-empty, write `oap_call_<id>_<timestamp>.wav` (8kHz mono 16-bit PCM RIFF/WAVE)
 - Add cmd-port commands in `handle_command()` (consistent with `SET_SIDETONE_GUARD_MS` pattern):
   - `SAVE_WAV:ON` → set `save_wav_enabled_ = true`, return `OK\n`
   - `SAVE_WAV:OFF` → set `save_wav_enabled_ = false`, return `OK\n`
@@ -168,14 +173,14 @@ Automate a 10-run diagnostic loop that captures WAV output + logs at each stage,
 ### Sub-step A: Implement the collection script
 
 Create `tests/run_stage7.py` — a Python 3 script that:
-1. Starts all 7 services + test_sip_provider via the frontend HTTP API (`POST /api/service/start`)
+1. Starts all 7 services + test_sip_provider via the frontend HTTP API (`POST /api/services/start`)
 2. Waits 10 seconds for warmup
 3. Connects 1 line from sip-client to test_sip_provider via test_sip_provider `/conference` endpoint (using the first registered SIP user from `/users`)
 4. Enables WAV saving in test_sip_provider (`POST http://localhost:22011/wav_recording {"enabled":true,"dir":"<output_dir>"}`)
 5. Enables WAV saving in OAP (`POST http://localhost:8080/api/oap/wav_recording {"enabled":true,"dir":"<output_dir>"}`) — frontend proxy port from existing config
 6. Injects one sample from `Testfiles/` into the active testline (`POST http://localhost:22011/inject {"file":"sample_01.wav","leg":"<user>","no_silence":true}`)
 7. Waits for pipeline completion: polls until injection is no longer active (injecting=false in `/status`) + additional 5s buffer for Kokoro+OAP to finish
-8. Collects logs from frontend API (`GET /api/logs?limit=500`) and writes to `<output_dir>/run_<n>/pipeline.log`
+8. Collects logs from frontend API (`GET /api/logs/recent?limit=2000`) and writes to `<output_dir>/run_<n>/pipeline.log`
 9. Hangs up the call (`POST http://localhost:22011/hangup`) — WAV files are written on call end
 10. Copies WAV files to `<output_dir>/run_<n>/`
 11. Repeats 10 times with `--iterations N` (default 10), using different sample files if available

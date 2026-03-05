@@ -57,8 +57,8 @@ Modify `outbound-audio-processor.cpp`:
 - Add `--save-wav-dir <dir>` CLI flag (default: empty = disabled)
 - Add `save_wav_enabled_`, `save_wav_dir_`, `save_wav_mutex_` to `OutboundAudioProcessor`
 - Add `std::vector<int16_t> wav_samples` to `CallState`
-- In `downsample_and_encode_into()`: when enabled, append each computed `int16_t s16` to `state->wav_samples`
-- In `handle_call_end()`: write `oap_call_<id>_<timestamp>.wav` (8kHz mono 16-bit RIFF/WAVE); clear buffer after write
+- In `downsample_and_encode_into()`: when enabled, append each computed `int16_t s16` to `state.wav_samples` (`state` is a `CallState&` reference)
+- In `handle_call_end()`: take a local `shared_ptr` copy of the CallState, erase from `calls_` map, release the lock, then write `oap_call_<id>_<timestamp>.wav` outside the lock using the local copy (prevents `wav_samples` being destroyed before write)
 - Add cmd-port commands in `handle_command()`: `SAVE_WAV:ON`, `SAVE_WAV:OFF`, `SAVE_WAV:STATUS`, `SET_SAVE_WAV_DIR:<dir>`
 
 Modify `frontend.cpp` (C++ backend):
