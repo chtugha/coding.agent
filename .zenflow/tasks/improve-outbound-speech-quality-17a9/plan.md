@@ -18,7 +18,7 @@ If blocked, mark the step with `[!]` before stopping.
 
 See spec at `.zenflow/tasks/improve-outbound-speech-quality-17a9/spec.md`.
 
-Difficulty: **medium** — 6 independent changes across 4 files.
+Difficulty: **hard** — 6 infrastructure changes across 4 files + an iterative diagnostic/fix cycle for audio quality.
 
 ---
 
@@ -30,10 +30,10 @@ Modify `sip-client-main.cpp`:
 - Update usage string
 
 Modify `frontend.cpp`:
-- Change DB seed `default_args` for `SIP_CLIENT` from `'--lines 2 alice 127.0.0.1 5060'` to `''`
-- Add exact-match migration: reset `default_args=''` only where value is exactly `'--lines 1 alice 127.0.0.1 5060'` or `'--lines 2 alice 127.0.0.1 5060'`
+- Change DB seed `default_args` for `SIP_CLIENT` to `''`
+- Add exact-match migration: reset only where value is exactly `'--lines 1 alice 127.0.0.1 5060'` or `'--lines 2 alice 127.0.0.1 5060'`
 
-Verify: `bin/sip-client` starts with no arguments and exits cleanly (or runs with 0 lines).
+Verify: `bin/sip-client` starts with no arguments and runs with 0 lines.
 
 ---
 
@@ -41,13 +41,13 @@ Verify: `bin/sip-client` starts with no arguments and exits cleanly (or runs wit
 
 Modify `tests/test_sip_provider.cpp`:
 - Add `--save-wav-dir <dir>` CLI flag (default: empty = disabled)
-- Add `save_wav_enabled_` (atomic bool), `save_wav_dir_` (string), `save_wav_mutex_`
-- Add per-leg receive buffer in `ActiveCall`: `std::vector<std::vector<uint8_t>> leg_wav_buffers`
+- Add `save_wav_enabled_`, `save_wav_dir_`, `save_wav_mutex_` to `TestSipProvider`
+- Add `std::vector<std::vector<uint8_t>> leg_wav_buffers` to `ActiveCall` (one per leg)
 - In `conference_relay_thread`: when enabled, extract 160-byte μ-law payload (skip 12-byte RTP header) and append to `leg_wav_buffers[from_idx]`
-- In `shutdown_call()`: write per-leg WAV files (μ-law → int16 PCM → RIFF WAV at 8kHz mono)
-- Add HTTP endpoints: `GET /wav_recording` and `POST /wav_recording {"enabled":bool,"dir":"string"}`
+- In `shutdown_call()`: write per-leg WAV files (μ-law → int16 PCM → 8kHz mono RIFF/WAVE), filename prefix `tsp_call_`
+- Add HTTP `GET /wav_recording` and `POST /wav_recording` endpoints
 
-Verify: build succeeds; endpoint responds correctly.
+Verify: build succeeds; endpoint responds; WAV files created on call hangup when enabled.
 
 ---
 
@@ -55,19 +55,19 @@ Verify: build succeeds; endpoint responds correctly.
 
 Modify `outbound-audio-processor.cpp`:
 - Add `--save-wav-dir <dir>` CLI flag (default: empty = disabled)
-- Add `save_wav_enabled_` (atomic bool), `save_wav_dir_` (string), `save_wav_mutex_` to `OutboundAudioProcessor`
+- Add `save_wav_enabled_`, `save_wav_dir_`, `save_wav_mutex_` to `OutboundAudioProcessor`
 - Add `std::vector<int16_t> wav_samples` to `CallState`
-- In `downsample_and_encode_into()`: when enabled, capture each computed `int16_t s16` (8kHz PCM) into `state->wav_samples`
-- In `handle_call_end()`: if enabled and `wav_samples` non-empty, write `oap_call_<id>_<timestamp>.wav` (8kHz mono 16-bit PCM RIFF/WAVE)
+- In `downsample_and_encode_into()`: when enabled, append each computed `int16_t s16` to `state->wav_samples`
+- In `handle_call_end()`: write `oap_call_<id>_<timestamp>.wav` (8kHz mono 16-bit RIFF/WAVE); clear buffer after write
 - Add cmd-port commands in `handle_command()`: `SAVE_WAV:ON`, `SAVE_WAV:OFF`, `SAVE_WAV:STATUS`, `SET_SAVE_WAV_DIR:<dir>`
 
-Modify `frontend.cpp` (backend C++ part):
-- Add `handle_oap_wav_recording()` handler (mirrors `handle_whisper_hallucination_filter()` pattern)
-  - GET: sends `SAVE_WAV:STATUS` to OAP cmd port (13152) via `tcp_command()`, returns JSON
-  - POST: sends `SAVE_WAV:ON/OFF` and `SET_SAVE_WAV_DIR:<dir>` as needed
-- Register `/api/oap/wav_recording` in the HTTP route dispatch
+Modify `frontend.cpp` (C++ backend):
+- Add `handle_oap_wav_recording()` handler (mirrors `handle_whisper_hallucination_filter()`)
+  - GET: sends `SAVE_WAV:STATUS` to port 13152 via `tcp_command()`, returns JSON
+  - POST: sends `SET_SAVE_WAV_DIR:<dir>` + `SAVE_WAV:ON/OFF`, returns JSON
+- Register `/api/oap/wav_recording` in HTTP route dispatch
 
-Verify: build succeeds; `SAVE_WAV:STATUS` command responds; `/api/oap/wav_recording` endpoint responds.
+Verify: build succeeds; `SAVE_WAV:STATUS` responds on port 13152; `/api/oap/wav_recording` responds.
 
 ---
 
@@ -75,31 +75,31 @@ Verify: build succeeds; `SAVE_WAV:STATUS` command responds; `/api/oap/wav_record
 
 Modify `frontend.cpp` (HTML + JS):
 - Add `div#sipProviderConfig` HTML block (parallel to `sipClientConfig`):
-  - Checkbox: "Save incoming audio as WAV" (id: `sipProviderSaveWav`)
-  - Text input: "Save to directory" (id: `sipProviderWavDir`)
-  - Status span: `id="sipProviderWavStatus"`
-- In `updateSvcDetail()` JS: show `sipProviderConfig` when `s.name === 'TEST_SIP_PROVIDER'`; call `loadSipProviderWavConfig()`; hide otherwise
-- Add JS function `loadSipProviderWavConfig()`: GET using existing `TSP_PORT` JS variable
-- Add JS function `saveSipProviderWavConfig()`: POST to same URL
+  - Checkbox "Save incoming audio as WAV" (id: `sipProviderSaveWav`)
+  - Text input "Save to directory" (id: `sipProviderWavDir`)
+  - Status span `id="sipProviderWavStatus"`
+- In `updateSvcDetail()` JS: show `sipProviderConfig` + call `loadSipProviderWavConfig()` when `s.name === 'TEST_SIP_PROVIDER'`; hide otherwise
+- Add JS `loadSipProviderWavConfig()`: GET from `'http://localhost:'+TSP_PORT+'/wav_recording'`
+- Add JS `saveSipProviderWavConfig()`: POST to same URL
 - Wire checkbox `onchange` → `saveSipProviderWavConfig()`
 
-Verify: selecting TEST_SIP_PROVIDER service shows the config panel; checkbox/dir persists via HTTP.
+Verify: selecting TEST_SIP_PROVIDER service shows config panel; checkbox/dir persists.
 
 ---
 
 ### [ ] Step: Frontend OAP config panel
 
 Modify `frontend.cpp` (HTML + JS):
-- Add `div#oapConfig` HTML block (parallel to `sipClientConfig` and `whisperConfig`):
-  - Checkbox: "Save outgoing audio as WAV" (id: `oapSaveWav`)
-  - Text input: "Save to directory" (id: `oapWavDir`)
-  - Status span: `id="oapWavStatus"`
-- In `updateSvcDetail()` JS: show `oapConfig` when `s.name === 'OUTBOUND_AUDIO_PROCESSOR'`; call `loadOapWavConfig()`; hide otherwise
-- Add JS function `loadOapWavConfig()`: `GET /api/oap/wav_recording`
-- Add JS function `saveOapWavConfig()`: `POST /api/oap/wav_recording`
+- Add `div#oapConfig` HTML block (parallel to `sipClientConfig`, `whisperConfig`):
+  - Checkbox "Save outgoing audio as WAV" (id: `oapSaveWav`)
+  - Text input "Save to directory" (id: `oapWavDir`)
+  - Status span `id="oapWavStatus"`
+- In `updateSvcDetail()` JS: show `oapConfig` + call `loadOapWavConfig()` when `s.name === 'OUTBOUND_AUDIO_PROCESSOR'`; hide otherwise
+- Add JS `loadOapWavConfig()`: GET from `/api/oap/wav_recording`
+- Add JS `saveOapWavConfig()`: POST to `/api/oap/wav_recording`
 - Wire checkbox `onchange` → `saveOapWavConfig()`
 
-Verify: selecting OUTBOUND_AUDIO_PROCESSOR service shows the config panel.
+Verify: selecting OUTBOUND_AUDIO_PROCESSOR service shows config panel.
 
 ---
 
@@ -107,17 +107,42 @@ Verify: selecting OUTBOUND_AUDIO_PROCESSOR service shows the config panel.
 
 Modify `frontend.cpp`:
 - Change label "Inject into Leg (username)" → "Inject into active testline"
-- Replace hardcoded `<option value="a">Leg A (first)</option>` / `<option value="b">Leg B (second)</option>` with a single disabled placeholder: `<option value="" disabled>-- No active testlines --</option>`
-- Update `refreshInjectLegs()` fallback: when no active call/legs, render only the disabled placeholder
-- Add `refreshInjectLegs()` to beta-testing page load handlers (two locations: line ~2426 and ~5198)
+- Replace hardcoded `<option value="a">Leg A (first)</option>` / `<option value="b">Leg B (second)</option>` with: `<option value="" disabled>-- No active testlines --</option>`
+- Update `refreshInjectLegs()` fallback to render only the disabled placeholder when no call is active
+- Add `refreshInjectLegs()` to both beta-testing page load handlers (~line 2426 and ~line 5198)
 
-Verify: on page load the dropdown shows active testlines (or the placeholder); label is updated.
+Verify: label updated; dropdown shows active testlines on page load (or placeholder when none).
 
 ---
 
-### [ ] Step: Build and verify
+### [ ] Step: Stage 7a — Implement diagnostic collection script
 
-- Run full build: `cd coding.agent && mkdir -p build && cd build && cmake .. && make -j4`
-- Fix any compilation errors
-- Run unit tests: `bin/test_sip_provider_unit` (only present if compiled with GTest; skip if not available)
-- Write report to `.zenflow/tasks/improve-outbound-speech-quality-17a9/report.md`
+Create `tests/run_stage7.py`:
+- Start all 7 services + test_sip_provider via frontend API
+- Wait 10s for warmup
+- Connect 1 line via test_sip_provider `/conference`
+- Enable WAV saving in test_sip_provider and OAP
+- Inject 1 sample (no_silence=true)
+- Poll until injection complete + 5s buffer for Kokoro/OAP finish
+- Collect logs from frontend API
+- Hang up (WAV files are written on hangup)
+- Copy WAV files to run output directory
+- Repeat 10 times (configurable via `--iterations N`)
+- Output: `stage7_output/run_N/pipeline.log`, `tsp_call_*.wav`, `oap_call_*.wav`
+
+Verify: script runs end-to-end and produces WAV + log files.
+
+---
+
+### [ ] Step: Stage 7b — Build, run collection, diagnose and fix audio quality
+
+1. Build everything: `cd coding.agent && mkdir -p build && cd build && cmake .. && make -j4`
+2. Run `python3 tests/run_stage7.py` to collect 10 data samples
+3. Inspect OAP WAV files to isolate the distortion stage:
+   - OAP WAV clean → problem is in G.711 encode, RTP framing, or sip-client re-encode
+   - OAP WAV distorted → problem is in Kokoro output, OAP downsampler, or scheduler timing
+4. Inspect TSP WAV files and compare with OAP WAV
+5. Analyze logs for buffer underruns, timing jitter, chunk size anomalies
+6. Fix identified issues (suspects: OAP scheduler drift, FIR filter coefficients, Kokoro normalization, buffer fragmentation at chunk boundaries, G.711 bias)
+7. Rebuild and re-run Stage 7 until OAP and TSP WAV files contain clean, natural speech
+8. Write report to `.zenflow/tasks/improve-outbound-speech-quality-17a9/report.md`
