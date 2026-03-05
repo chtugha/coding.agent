@@ -61,7 +61,17 @@ struct ActiveCall {
     std::atomic<uint64_t> total_pkts{0};
     std::atomic<uint64_t> total_bytes{0};
     std::chrono::steady_clock::time_point started_at;
+    std::vector<std::vector<uint8_t>> leg_wav_buffers;
 };
+
+static int16_t ulaw_to_linear(uint8_t u) {
+    u = ~u;
+    int sign = u & 0x80;
+    int exponent = (u >> 4) & 0x07;
+    int mantissa = u & 0x0F;
+    int sample = ((mantissa << 3) + 0x84) << exponent;
+    return sign ? (int16_t)(0x84 - sample) : (int16_t)(sample - 0x84);
+}
 
 static uint8_t linear_to_ulaw(int16_t sample) {
     const int BIAS = 0x84;
@@ -357,6 +367,14 @@ private:
             handle_conference(c, hm);
         } else if (mg_strcmp(hm->uri, mg_str("/hangup")) == 0) {
             handle_hangup(c);
+        } else if (mg_strcmp(hm->uri, mg_str("/wav_recording")) == 0) {
+            if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+                handle_wav_recording_get(c);
+            } else if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
+                handle_wav_recording_post(c, hm);
+            } else {
+                mg_http_reply(c, 405, CORS_HEADERS, "{\"error\":\"Method not allowed\"}");
+            }
         } else {
             mg_http_reply(c, 404, CORS_HEADERS, "{\"error\":\"Not found\"}");
         }
@@ -576,6 +594,92 @@ private:
         }
         json << "}";
         mg_http_reply(c, 200, CORS_HEADERS, "%s", json.str().c_str());
+    }
+
+    void handle_wav_recording_get(struct mg_connection* c) {
+        std::lock_guard<std::mutex> lock(save_wav_mutex_);
+        std::string dir_escaped;
+        for (char ch : save_wav_dir_) {
+            if (ch == '"' || ch == '\\') dir_escaped += '\\';
+            dir_escaped += ch;
+        }
+        mg_http_reply(c, 200, CORS_HEADERS,
+                      "{\"enabled\":%s,\"dir\":\"%s\"}",
+                      save_wav_enabled_.load() ? "true" : "false",
+                      dir_escaped.c_str());
+    }
+
+    void handle_wav_recording_post(struct mg_connection* c, struct mg_http_message* hm) {
+        bool enabled = false;
+        mg_json_get_bool(hm->body, "$.enabled", &enabled);
+        char* dir_str = mg_json_get_str(hm->body, "$.dir");
+
+        {
+            std::lock_guard<std::mutex> lock(save_wav_mutex_);
+            save_wav_enabled_ = enabled;
+            if (dir_str) {
+                save_wav_dir_ = dir_str;
+            }
+        }
+        free(dir_str);
+
+        mg_http_reply(c, 200, CORS_HEADERS, "{\"success\":true}");
+    }
+
+    void write_leg_wav(const std::shared_ptr<ActiveCall>& call, size_t leg_idx) {
+        const auto& ulaw_buf = call->leg_wav_buffers[leg_idx];
+        if (ulaw_buf.empty()) return;
+
+        std::string dir;
+        {
+            std::lock_guard<std::mutex> lock(save_wav_mutex_);
+            dir = save_wav_dir_;
+        }
+        if (dir.empty()) dir = ".";
+
+        time_t now = time(nullptr);
+        std::string username = (leg_idx < call->legs.size()) ? call->legs[leg_idx].user : "leg" + std::to_string(leg_idx);
+        std::string filename = dir + "/tsp_call_" + std::to_string(call->id) + "_" + username + "_" + std::to_string(now) + ".wav";
+
+        std::vector<int16_t> pcm;
+        pcm.reserve(ulaw_buf.size());
+        for (uint8_t b : ulaw_buf) {
+            pcm.push_back(ulaw_to_linear(b));
+        }
+
+        std::ofstream f(filename, std::ios::binary);
+        if (!f) {
+            std::fprintf(stderr, "WAV write: cannot open %s: %s\n", filename.c_str(), strerror(errno));
+            return;
+        }
+
+        uint32_t data_size = static_cast<uint32_t>(pcm.size() * 2);
+        uint32_t file_size = 36 + data_size;
+        uint32_t sample_rate = 8000;
+        uint16_t channels = 1;
+        uint16_t bits_per_sample = 16;
+        uint16_t audio_format = 1;
+        uint32_t byte_rate = sample_rate * channels * bits_per_sample / 8;
+        uint16_t block_align = channels * bits_per_sample / 8;
+
+        f.write("RIFF", 4);
+        f.write(reinterpret_cast<const char*>(&file_size), 4);
+        f.write("WAVE", 4);
+        f.write("fmt ", 4);
+        uint32_t fmt_size = 16;
+        f.write(reinterpret_cast<const char*>(&fmt_size), 4);
+        f.write(reinterpret_cast<const char*>(&audio_format), 2);
+        f.write(reinterpret_cast<const char*>(&channels), 2);
+        f.write(reinterpret_cast<const char*>(&sample_rate), 4);
+        f.write(reinterpret_cast<const char*>(&byte_rate), 4);
+        f.write(reinterpret_cast<const char*>(&block_align), 2);
+        f.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
+        f.write("data", 4);
+        f.write(reinterpret_cast<const char*>(&data_size), 4);
+        f.write(reinterpret_cast<const char*>(pcm.data()), data_size);
+
+        std::printf("WAV saved: %s (%zu samples, %.1fs)\n",
+                    filename.c_str(), pcm.size(), pcm.size() / 8000.0);
     }
 
     void handle_calls(struct mg_connection* c) {
@@ -896,6 +1000,8 @@ private:
             call_->legs.push_back(std::move(leg));
         }
 
+        call_->leg_wav_buffers.resize(participants.size());
+
         for (auto& leg : call_->legs) {
             send_invite(leg);
         }
@@ -1029,6 +1135,13 @@ private:
                                  (struct sockaddr*)&sender, &slen);
             if (n <= 0) continue;
 
+            if (save_wav_enabled_ && n > 12 && from_idx < call->leg_wav_buffers.size()) {
+                size_t payload_size = std::min<size_t>(static_cast<size_t>(n - 12), 160);
+                auto& wav_buf = call->leg_wav_buffers[from_idx];
+                const uint8_t* payload = reinterpret_cast<const uint8_t*>(buf) + 12;
+                wav_buf.insert(wav_buf.end(), payload, payload + payload_size);
+            }
+
             for (size_t i = 0; i < call->legs.size(); i++) {
                 if (i == from_idx) continue;
                 struct sockaddr_in dest{};
@@ -1136,6 +1249,14 @@ private:
         }
         if (stats_thread_.joinable()) stats_thread_.join();
 
+        if (save_wav_enabled_) {
+            for (size_t i = 0; i < call_->leg_wav_buffers.size(); i++) {
+                if (!call_->leg_wav_buffers[i].empty()) {
+                    write_leg_wav(call_, i);
+                }
+            }
+        }
+
         for (auto& leg : call_->legs) {
             if (leg.relay_sock >= 0) close(leg.relay_sock);
             if (leg.inject_sock >= 0) close(leg.inject_sock);
@@ -1157,6 +1278,17 @@ private:
     std::mutex call_mutex_;
     std::shared_ptr<ActiveCall> call_;
     std::thread stats_thread_;
+
+    std::atomic<bool> save_wav_enabled_{false};
+    std::string save_wav_dir_;
+    std::mutex save_wav_mutex_;
+
+public:
+    void set_wav_recording(bool enabled, const std::string& dir) {
+        std::lock_guard<std::mutex> lock(save_wav_mutex_);
+        save_wav_enabled_ = enabled;
+        save_wav_dir_ = dir;
+    }
 };
 
 int main(int argc, char* argv[]) {
@@ -1169,38 +1301,44 @@ int main(int argc, char* argv[]) {
     int http_port = 22011;
     std::string ip = "127.0.0.1";
     std::string testfiles_dir = "Testfiles";
+    std::string save_wav_dir;
 
     static struct option long_opts[] = {
         {"port",          required_argument, 0, 'p'},
         {"ip",            required_argument, 0, 'b'},
         {"http-port",     required_argument, 0, 'H'},
         {"testfiles-dir", required_argument, 0, 't'},
+        {"save-wav-dir",  required_argument, 0, 'w'},
         {"help",          no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:b:H:t:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:b:H:t:w:h", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'p': port = atoi(optarg); break;
             case 'b': ip = optarg; break;
             case 'H': http_port = atoi(optarg); break;
             case 't': testfiles_dir = optarg; break;
+            case 'w': save_wav_dir = optarg; break;
             case 'h':
                 std::printf("Usage: test_sip_provider [OPTIONS]\n\n");
                 std::printf("  -p, --port PORT           SIP listen port (default: 5060)\n");
                 std::printf("  -b, --ip ADDR             Local IP address (default: 127.0.0.1)\n");
                 std::printf("  -H, --http-port PORT      HTTP control port (default: 22011)\n");
                 std::printf("  -t, --testfiles-dir DIR   Testfiles directory (default: Testfiles)\n");
+                std::printf("  -w, --save-wav-dir DIR    Enable WAV recording; save files to DIR\n");
                 std::printf("  -h, --help                Show this help\n\n");
                 std::printf("HTTP Endpoints:\n");
-                std::printf("  GET  /files       List WAV files in testfiles directory\n");
-                std::printf("  GET  /users       List registered SIP users\n");
-                std::printf("  POST /conference  Start conference: {\"users\":[\"alice1\",\"bob2\"]}\n");
-                std::printf("  POST /hangup      End current call\n");
-                std::printf("  POST /inject      Inject audio: {\"file\":\"sample.wav\",\"leg\":\"alice1\"}\n");
-                std::printf("  GET  /status      Call status and relay stats\n");
-                std::printf("  GET  /calls       List active calls with per-leg detail\n\n");
+                std::printf("  GET  /files            List WAV files in testfiles directory\n");
+                std::printf("  GET  /users            List registered SIP users\n");
+                std::printf("  POST /conference       Start conference: {\"users\":[\"alice1\",\"bob2\"]}\n");
+                std::printf("  POST /hangup           End current call\n");
+                std::printf("  POST /inject           Inject audio: {\"file\":\"sample.wav\",\"leg\":\"alice1\"}\n");
+                std::printf("  GET  /status           Call status and relay stats\n");
+                std::printf("  GET  /calls            List active calls with per-leg detail\n");
+                std::printf("  GET  /wav_recording    Get WAV recording config\n");
+                std::printf("  POST /wav_recording    Set WAV recording config: {\"enabled\":bool,\"dir\":\"path\"}\n\n");
                 std::printf("Max lines: %d\n\n", MAX_LINES);
                 return 0;
             default: break;
@@ -1216,6 +1354,10 @@ int main(int argc, char* argv[]) {
 
     TestSipProvider provider;
     if (!provider.init(port, ip, testfiles_dir, http_port)) return 1;
+    if (!save_wav_dir.empty()) {
+        provider.set_wav_recording(true, save_wav_dir);
+        std::printf("  WAV Recording: enabled (dir: %s)\n\n", save_wav_dir.c_str());
+    }
     provider.run();
 
     return 0;

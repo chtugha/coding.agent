@@ -38,7 +38,7 @@ Verify: `bin/sip-client` starts with no arguments and runs with 0 lines.
 
 ---
 
-### [ ] Step: WAV recording in test_sip_provider
+### [x] Step: WAV recording in test_sip_provider
 <!-- chat-id: 99fadc9d-7628-44be-944d-ff1e1a743f8d -->
 
 Modify `tests/test_sip_provider.cpp`:
