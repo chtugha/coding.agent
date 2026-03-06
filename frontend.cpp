@@ -2694,7 +2694,6 @@ function loadSipProviderWavConfig(){
   var dirEl=document.getElementById('sipProviderWavDir');
   var statusEl=document.getElementById('sipProviderWavStatus');
   fetch('http://localhost:'+TSP_PORT+'/wav_recording').then(r=>r.json()).then(d=>{
-    if(d.error){cb.checked=false;statusEl.textContent='(offline)';return;}
     cb.checked=d.enabled;
     dirEl.value=d.dir||'';
     statusEl.textContent=d.enabled?'ON':'OFF';
@@ -2707,10 +2706,7 @@ function saveSipProviderWavConfig(){
   statusEl.textContent='...';
   fetch('http://localhost:'+TSP_PORT+'/wav_recording',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({enabled:cb.checked,dir:dirEl.value})
-  }).then(r=>r.json()).then(d=>{
-    if(d.error){statusEl.textContent='(offline)';return;}
-    statusEl.textContent=cb.checked?'ON':'OFF';
-  }).catch(()=>{statusEl.textContent='(error)';});
+  }).then(()=>loadSipProviderWavConfig()).catch(()=>{statusEl.textContent='(error)';});
 }
 
 function sipConnectPbx(){
