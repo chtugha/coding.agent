@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """Stage 7 Diagnostic Collection Script.
 
-Automates 10 test runs that each:
+Automates N test runs that each:
   1. Start all services (if not already running)
-  2. Wait 10s for warmup
+  2. Wait for warmup
   3. Connect 1 testline to test_sip_provider
   4. Enable WAV recording in test_sip_provider and OAP
   5. Inject a sample file into the testline
   6. Wait for pipeline completion
-  7. Collect logs
-  8. Hang up (triggers WAV file write)
-  9. Copy WAV files to run output directory
+  7. Hang up (triggers WAV file write)
+  8. Collect logs (after hangup so CALL_END events are captured)
+  9. Wait for OAP WAV write + copy WAV files to run output directory
 
 Usage:
     python3 tests/run_stage7.py [--output-dir stage7_output] [--iterations 10]
                                 [--testfiles-dir Testfiles] [--no-start-services]
+                                [--warmup 10]
 """
 import argparse
 import glob
 import json
 import os
 import shutil
+import signal
 import sys
 import time
 import urllib.request
@@ -40,15 +42,14 @@ PIPELINE_SERVICES = [
 ]
 TSP_SERVICE = "TEST_SIP_PROVIDER"
 
+LOG_PAGE_LIMIT = 1000
 
-def fetch_json(url, data=None, method=None):
+
+def fetch_json(url, data=None):
     req = urllib.request.Request(url)
     if data is not None:
-        body = json.dumps(data).encode()
         req.add_header("Content-Type", "application/json")
-        req.data = body
-    if method:
-        req.method = method
+        req.data = json.dumps(data).encode()
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read())
@@ -70,17 +71,27 @@ def get_services():
 
 
 def start_service(name):
-    r = post_json(f"{FRONTEND}/api/services/start", {"service": name})
-    return r
+    return post_json(f"{FRONTEND}/api/services/start", {"service": name})
 
 
-def stop_service(name):
-    r = post_json(f"{FRONTEND}/api/services/stop", {"service": name})
-    return r
-
-
-def get_logs(limit=2000):
-    return fetch_json(f"{FRONTEND}/api/logs?limit={limit}")
+def get_all_logs():
+    """Fetch all available logs via pagination (backend caps each page at 1000)."""
+    all_logs = []
+    offset = 0
+    while True:
+        data = fetch_json(f"{FRONTEND}/api/logs?limit={LOG_PAGE_LIMIT}&offset={offset}")
+        if "error" in data:
+            print(f"    WARNING: log fetch error at offset {offset}: {data['error']}",
+                  file=sys.stderr)
+            break
+        page = data.get("logs", [])
+        if not page:
+            break
+        all_logs.extend(page)
+        if len(page) < LOG_PAGE_LIMIT:
+            break
+        offset += LOG_PAGE_LIMIT
+    return all_logs
 
 
 def start_all_services():
@@ -88,7 +99,7 @@ def start_all_services():
     svcs = get_services()
     running = {s["name"] for s in svcs.get("services", []) if s.get("running")}
 
-    for name in PIPELINE_SERVICES:
+    for name in PIPELINE_SERVICES + [TSP_SERVICE]:
         if name in running:
             print(f"    {name}: already running")
         else:
@@ -98,15 +109,6 @@ def start_all_services():
             else:
                 print(f"    {name}: started")
 
-    if TSP_SERVICE in running:
-        print(f"    {TSP_SERVICE}: already running")
-    else:
-        r = start_service(TSP_SERVICE)
-        if "error" in r:
-            print(f"    {TSP_SERVICE}: FAILED to start — {r['error']}", file=sys.stderr)
-        else:
-            print(f"    {TSP_SERVICE}: started")
-
 
 def wait_for_warmup(seconds=10):
     print(f"  Waiting {seconds}s for services to warm up...")
@@ -115,6 +117,8 @@ def wait_for_warmup(seconds=10):
 
 def get_registered_users():
     r = fetch_json(f"{SIP_PROVIDER}/users")
+    if "error" in r:
+        return []
     return [u["username"] for u in r.get("users", [])]
 
 
@@ -124,11 +128,10 @@ def connect_testline(username):
     if calls.get("calls"):
         call = calls["calls"][0]
         legs = call.get("legs", [])
-        if isinstance(legs, list) and len(legs) >= 1:
+        if isinstance(legs, list) and legs:
             print(f"    Call already active with {len(legs)} leg(s) — reusing")
-            return legs[0].get("user", username) if legs else username
-        leg_count = legs if isinstance(legs, int) else 1
-        print(f"    Call already active ({leg_count} leg(s)) — reusing")
+            return legs[0].get("user", username)
+        print(f"    Call already active — reusing")
         return username
 
     r = post_json(f"{SIP_PROVIDER}/conference", {"users": [username]})
@@ -140,7 +143,7 @@ def connect_testline(username):
 
 
 def wait_for_registration(timeout=60):
-    print(f"  Waiting for a SIP user to register with test_sip_provider (max {timeout}s)...")
+    print(f"  Waiting for a SIP user to register (max {timeout}s)...")
     deadline = time.time() + timeout
     while time.time() < deadline:
         users = get_registered_users()
@@ -152,17 +155,16 @@ def wait_for_registration(timeout=60):
 
 
 def enable_wav_recording(output_dir):
-    print(f"  Enabling WAV recording in test_sip_provider -> {output_dir}")
+    print(f"  Enabling WAV recording -> {output_dir}")
     r = post_json(f"{SIP_PROVIDER}/wav_recording", {"enabled": True, "dir": output_dir})
     if "error" in r:
-        print(f"    WARNING: test_sip_provider wav_recording failed: {r['error']}", file=sys.stderr)
+        print(f"    WARNING: test_sip_provider wav_recording: {r['error']}", file=sys.stderr)
     else:
         print(f"    test_sip_provider: {r}")
 
-    print(f"  Enabling WAV recording in OAP -> {output_dir}")
     r = post_json(f"{FRONTEND}/api/oap/wav_recording", {"enabled": True, "dir": output_dir})
     if "error" in r:
-        print(f"    WARNING: OAP wav_recording failed: {r['error']}", file=sys.stderr)
+        print(f"    WARNING: OAP wav_recording: {r['error']}", file=sys.stderr)
     else:
         print(f"    OAP: {r}")
 
@@ -173,7 +175,7 @@ def disable_wav_recording():
 
 
 def inject_sample(sample_file, leg_username):
-    print(f"  Injecting sample '{sample_file}' into leg '{leg_username}'...")
+    print(f"  Injecting '{sample_file}' into leg '{leg_username}'...")
     r = post_json(f"{SIP_PROVIDER}/inject", {
         "file": sample_file,
         "leg": leg_username,
@@ -181,7 +183,7 @@ def inject_sample(sample_file, leg_username):
     })
     if "error" in r:
         raise RuntimeError(f"Injection failed: {r['error']}")
-    print(f"    Inject response: {r}")
+    print(f"    Inject: {r}")
     return r
 
 
@@ -190,8 +192,11 @@ def wait_for_injection_complete(timeout=120):
     deadline = time.time() + timeout
     while time.time() < deadline:
         status = fetch_json(f"{SIP_PROVIDER}/status")
+        if "error" in status:
+            time.sleep(1)
+            continue
         if status.get("injecting") is None:
-            print("    Injection complete (injecting=null)")
+            print("    Injection complete")
             return
         time.sleep(1)
     print("  WARNING: injection did not complete within timeout", file=sys.stderr)
@@ -202,27 +207,54 @@ def wait_for_pipeline(extra_buffer=5):
     time.sleep(extra_buffer)
 
 
-def collect_logs(log_file, limit=2000):
-    print(f"  Collecting logs -> {log_file}")
-    data = get_logs(limit=limit)
-    logs = data.get("logs", [])
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+def hangup():
+    print("  Hanging up call...")
+    r = post_json(f"{SIP_PROVIDER}/hangup", {})
+    print(f"    Hangup: {r}")
+
+
+def wait_for_wav_files(wav_dir, timeout=10):
+    """Poll until at least one OAP WAV file appears (written on CALL_END)."""
+    print(f"  Waiting for WAV files to be written (max {timeout}s)...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        oap_wavs = glob.glob(os.path.join(wav_dir, "oap_call_*.wav"))
+        if oap_wavs:
+            print(f"    Found {len(oap_wavs)} OAP WAV file(s)")
+            return
+        time.sleep(1)
+    print("  WARNING: OAP WAV file not found after timeout — CALL_END may not have propagated",
+          file=sys.stderr)
+
+
+def collect_logs(run_dir, logs):
+    """Write logs (oldest-first) and extract LLaMA responses."""
+    os.makedirs(run_dir, exist_ok=True)
+
+    log_file = os.path.join(run_dir, "pipeline.log")
     with open(log_file, "w", encoding="utf-8") as f:
-        for entry in logs:
+        for entry in reversed(logs):
             ts = entry.get("timestamp", "")
             svc = entry.get("service", "")
             lvl = entry.get("level", "")
             msg = entry.get("message", "")
             f.write(f"[{ts}] [{svc}] [{lvl}] {msg}\n")
-    print(f"    {len(logs)} log entries saved")
-    return logs
+    print(f"    {len(logs)} log entries -> {log_file}")
 
+    llama_file = os.path.join(run_dir, "llama_response.txt")
+    llama_lines = [
+        entry.get("message", "")
+        for entry in reversed(logs)
+        if entry.get("service", "").upper() in ("LLAMA_SERVICE", "LLAMA")
+    ]
+    if llama_lines:
+        with open(llama_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(llama_lines) + "\n")
+        print(f"    {len(llama_lines)} LLaMA entries -> {llama_file}")
+    else:
+        print("    No LLaMA log entries found")
 
-def hangup():
-    print("  Hanging up call...")
-    r = post_json(f"{SIP_PROVIDER}/hangup", {})
-    print(f"    Hangup: {r}")
-    time.sleep(1)
+    return log_file
 
 
 def copy_wav_files(src_dir, dst_dir):
@@ -235,16 +267,15 @@ def copy_wav_files(src_dir, dst_dir):
             copied.append(dst)
             print(f"    Copied: {os.path.basename(fpath)}")
     if not copied:
-        print("    WARNING: no WAV files found to copy", file=sys.stderr)
+        print("    WARNING: no WAV files found", file=sys.stderr)
     return copied
 
 
-def get_sample_files(testfiles_dir, iteration):
+def get_sample_file(testfiles_dir, iteration):
     samples = sorted(glob.glob(os.path.join(testfiles_dir, "sample_*.wav")))
     if not samples:
         raise RuntimeError(f"No sample_*.wav files found in {testfiles_dir}")
-    idx = (iteration - 1) % len(samples)
-    return os.path.basename(samples[idx])
+    return os.path.basename(samples[(iteration - 1) % len(samples)])
 
 
 def main():
@@ -260,11 +291,23 @@ def main():
     output_dir = os.path.abspath(args.output_dir)
     testfiles_dir = os.path.abspath(args.testfiles_dir)
 
-    print(f"=== Stage 7 Diagnostic Collection ===")
+    print("=== Stage 7 Diagnostic Collection ===")
     print(f"Output directory : {output_dir}")
     print(f"Iterations       : {args.iterations}")
     print(f"Test files       : {testfiles_dir}")
     print()
+
+    active_call = [False]
+
+    def cleanup(signum=None, frame=None):
+        print("\n[Cleanup] Disabling WAV recording and hanging up...", file=sys.stderr)
+        disable_wav_recording()
+        if active_call[0]:
+            hangup()
+        sys.exit(1)
+
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
 
     if not args.no_start_services:
         print("[Setup] Starting services...")
@@ -288,44 +331,53 @@ def main():
         print(f"{'='*60}")
 
         run_dir = os.path.join(output_dir, f"run_{run_n:02d}")
-        wav_staging_dir = os.path.join(run_dir, "wav_staging")
-        os.makedirs(wav_staging_dir, exist_ok=True)
+        os.makedirs(run_dir, exist_ok=True)
 
-        sample_file = get_sample_files(testfiles_dir, run_n)
+        try:
+            sample_file = get_sample_file(testfiles_dir, run_n)
+        except RuntimeError as e:
+            print(f"  FATAL: {e}", file=sys.stderr)
+            break
+
         print(f"  Sample: {sample_file}")
 
         try:
             active_user = connect_testline(leg_user)
+            active_call[0] = True
         except RuntimeError as e:
             print(f"  SKIP run {run_n}: {e}", file=sys.stderr)
             continue
 
-        enable_wav_recording(wav_staging_dir)
+        enable_wav_recording(run_dir)
 
         try:
             inject_sample(sample_file, active_user)
         except RuntimeError as e:
             print(f"  SKIP run {run_n}: {e}", file=sys.stderr)
             disable_wav_recording()
+            active_call[0] = False
             continue
 
         wait_for_injection_complete(timeout=120)
         wait_for_pipeline(extra_buffer=5)
 
-        log_file = os.path.join(run_dir, "pipeline.log")
-        logs = collect_logs(log_file)
-
         hangup()
-        time.sleep(2)
+        active_call[0] = False
 
-        wav_files = copy_wav_files(wav_staging_dir, run_dir)
+        wait_for_wav_files(run_dir, timeout=10)
+
+        print("  Collecting logs...")
+        logs = get_all_logs()
+        log_file = collect_logs(run_dir, logs)
+
+        wav_files = copy_wav_files(run_dir, run_dir)
         disable_wav_recording()
 
         collected.append({
             "run": run_n,
             "sample": sample_file,
             "log_file": log_file,
-            "wav_files": wav_files,
+            "wav_files": [w for w in wav_files if os.path.dirname(w) == run_dir],
             "log_entries": len(logs),
         })
 
@@ -336,14 +388,14 @@ def main():
             time.sleep(3)
 
             users = get_registered_users()
-            if not users:
+            if users:
+                leg_user = users[0]
+            else:
                 print("  Waiting for re-registration...")
                 try:
                     leg_user = wait_for_registration(timeout=60)
                 except RuntimeError as e:
                     print(f"  WARNING: {e}", file=sys.stderr)
-            else:
-                leg_user = users[0]
 
     print(f"\n{'='*60}")
     print("SUMMARY")
@@ -352,7 +404,8 @@ def main():
     print()
     for c in collected:
         wavs = [os.path.basename(w) for w in c["wav_files"]]
-        print(f"  Run {c['run']:02d}: {c['sample']} | {len(c['wav_files'])} WAV(s): {wavs}")
+        print(f"  Run {c['run']:02d}: {c['sample']} | {len(c['wav_files'])} WAV(s): {wavs} | "
+              f"{c['log_entries']} log entries")
     print()
     print(f"Output written to: {output_dir}")
 
