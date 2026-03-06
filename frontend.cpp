@@ -8855,7 +8855,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     "{\"error\":\"%s\"}", err.c_str());
                 return;
             }
-            bool confirmed = resp.find(":ON") != std::string::npos;
+            bool confirmed = resp.find("SAVE_WAV:ON") != std::string::npos;
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
                 "{\"success\":true,\"enabled\":%s}", confirmed ? "true" : "false");
         } else {
@@ -8865,7 +8865,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     "{\"error\":\"%s\",\"enabled\":false,\"dir\":\"\"}", err.c_str());
                 return;
             }
-            bool enabled = resp.find(":ON") != std::string::npos;
+            bool enabled = resp.find("SAVE_WAV:ON") != std::string::npos;
             std::string dir;
             size_t dir_pos = resp.find(":DIR:");
             if (dir_pos != std::string::npos) {
@@ -8874,7 +8874,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     dir.pop_back();
             }
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                "{\"enabled\":%s,\"dir\":\"%s\"}", enabled ? "true" : "false", dir.c_str());
+                "{\"enabled\":%s,\"dir\":\"%s\"}", enabled ? "true" : "false",
+                escape_json(dir).c_str());
         }
     }
 

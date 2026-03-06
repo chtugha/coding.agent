@@ -532,7 +532,9 @@ private:
         if (samples.empty()) return;
         std::time_t now = std::time(nullptr);
         char ts[32];
-        std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&now));
+        struct tm tm_buf{};
+        localtime_r(&now, &tm_buf);
+        std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
         std::string path = dir + "/oap_call_" + std::to_string(call_id) + "_" + ts + ".wav";
 
         std::ofstream f(path, std::ios::binary);
@@ -592,8 +594,12 @@ private:
             wav_dir = save_wav_dir_;
         }
         if (state_copy && wav_enabled && !wav_dir.empty()) {
-            std::lock_guard<std::mutex> sl(state_copy->mutex);
-            write_wav_file(call_id, state_copy->wav_samples, wav_dir);
+            std::vector<int16_t> samples;
+            {
+                std::lock_guard<std::mutex> sl(state_copy->mutex);
+                samples = std::move(state_copy->wav_samples);
+            }
+            write_wav_file(call_id, samples, wav_dir);
         }
     }
 
