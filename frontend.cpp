@@ -2743,7 +2743,7 @@ function saveOapWavConfig(){
   var statusEl=document.getElementById('oapWavStatus');
   statusEl.textContent='...';
   fetch('/api/oap/wav_recording',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({enabled:cb.checked,dir:dirEl.value})
+    body:JSON.stringify({enabled:cb.checked?'true':'false',dir:dirEl.value})
   }).then(()=>loadOapWavConfig()).catch(()=>{statusEl.textContent='(error)';});
 }
 
