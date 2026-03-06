@@ -1637,6 +1637,17 @@ Save incoming audio as WAV</label>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
 <input class="wt-input" id="sipProviderWavDir" placeholder="/tmp/wav_recordings" style="font-size:12px" onchange="saveSipProviderWavConfig()"></div>
 </div>
+<div id="oapConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">Outbound Audio Processor Configuration</div>
+<div class="wt-field" style="margin-top:8px;margin-bottom:6px;display:flex;align-items:center;gap:8px">
+<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
+<input type="checkbox" id="oapSaveWav" onchange="saveOapWavConfig()" style="width:16px;height:16px;cursor:pointer">
+Save outgoing audio as WAV</label>
+<span id="oapWavStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
+<input class="wt-input" id="oapWavDir" placeholder="/tmp/wav_recordings" style="font-size:12px" onchange="saveOapWavConfig()"></div>
+</div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
 <div style="display:flex;gap:8px">
@@ -2649,6 +2660,13 @@ function updateSvcDetail(s){
   } else {
     spc.classList.add('hidden');
   }
+  var oc=document.getElementById('oapConfig');
+  if(s.name==='OUTBOUND_AUDIO_PROCESSOR'){
+    oc.classList.remove('hidden');
+    loadOapWavConfig();
+  } else {
+    oc.classList.add('hidden');
+  }
 }
 function loadWhisperConfig(args){
   fetch('/api/whisper/models').then(r=>r.json()).then(d=>{
@@ -2707,6 +2725,26 @@ function saveSipProviderWavConfig(){
   fetch('http://localhost:'+TSP_PORT+'/wav_recording',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({enabled:cb.checked,dir:dirEl.value})
   }).then(()=>loadSipProviderWavConfig()).catch(()=>{statusEl.textContent='(error)';});
+}
+function loadOapWavConfig(){
+  var cb=document.getElementById('oapSaveWav');
+  var dirEl=document.getElementById('oapWavDir');
+  var statusEl=document.getElementById('oapWavStatus');
+  fetch('/api/oap/wav_recording').then(r=>r.json()).then(d=>{
+    if(d.error){cb.checked=false;statusEl.textContent='(offline)';return;}
+    cb.checked=d.enabled;
+    dirEl.value=d.dir||'';
+    statusEl.textContent=d.enabled?'ON':'OFF';
+  }).catch(()=>{cb.checked=false;statusEl.textContent='(offline)';});
+}
+function saveOapWavConfig(){
+  var cb=document.getElementById('oapSaveWav');
+  var dirEl=document.getElementById('oapWavDir');
+  var statusEl=document.getElementById('oapWavStatus');
+  statusEl.textContent='...';
+  fetch('/api/oap/wav_recording',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:cb.checked,dir:dirEl.value})
+  }).then(()=>loadOapWavConfig()).catch(()=>{statusEl.textContent='(error)';});
 }
 
 function sipConnectPbx(){

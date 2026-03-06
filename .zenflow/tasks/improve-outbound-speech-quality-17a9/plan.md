@@ -91,7 +91,8 @@ Verify: selecting TEST_SIP_PROVIDER service shows config panel; checkbox/dir per
 
 ---
 
-### [ ] Step: Frontend OAP config panel
+### [x] Step: Frontend OAP config panel
+<!-- chat-id: 99759371-e623-408a-b925-866710469b69 -->
 
 Modify `frontend.cpp` (HTML + JS):
 - Add `div#oapConfig` HTML block (parallel to `sipClientConfig`, `whisperConfig`):
