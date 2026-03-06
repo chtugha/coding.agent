@@ -3178,6 +3178,7 @@ function injectAudio(){
   var file=document.getElementById('injectFileSelect').value;
   var leg=document.getElementById('injectLeg').value;
   if(!file){alert('Please select a test file');return;}
+  if(!leg){alert('No active testline selected');return;}
   var status=document.getElementById('injectionStatus');
   status.innerHTML='<span style="color:var(--wt-accent)">Injecting audio...</span>';
   fetch('http://localhost:'+TSP_PORT+'/inject',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -5274,7 +5275,7 @@ function loadAccuracyTrendChart(){
   }).catch(e=>console.error('Failed to load accuracy trend:',e));
 }
 
-if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();refreshInjectLegs();}
+if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
 )JS";
         return js;
     }
