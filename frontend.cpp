@@ -1626,6 +1626,17 @@ Hallucination Filter</label>
 <span id="sipPbxStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 </div>
+<div id="sipProviderConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">SIP Provider Configuration</div>
+<div class="wt-field" style="margin-top:8px;margin-bottom:6px;display:flex;align-items:center;gap:8px">
+<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
+<input type="checkbox" id="sipProviderSaveWav" onchange="saveSipProviderWavConfig()" style="width:16px;height:16px;cursor:pointer">
+Save incoming audio as WAV</label>
+<span id="sipProviderWavStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
+<input class="wt-input" id="sipProviderWavDir" placeholder="/tmp/wav_recordings" style="font-size:12px" onchange="saveSipProviderWavConfig()"></div>
+</div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
 <div style="display:flex;gap:8px">
@@ -2631,6 +2642,13 @@ function updateSvcDetail(s){
     sc.classList.add('hidden');
     slc.classList.add('hidden');
   }
+  var spc=document.getElementById('sipProviderConfig');
+  if(s.name==='TEST_SIP_PROVIDER'){
+    spc.classList.remove('hidden');
+    loadSipProviderWavConfig();
+  } else {
+    spc.classList.add('hidden');
+  }
 }
 function loadWhisperConfig(args){
   fetch('/api/whisper/models').then(r=>r.json()).then(d=>{
@@ -2670,6 +2688,25 @@ function loadHallucinationFilterState(){
     if(d.error){cb.checked=false;statusEl.textContent='(offline)';return;}
     cb.checked=d.enabled;statusEl.textContent=d.enabled?'ON':'OFF';
   }).catch(()=>{cb.checked=false;statusEl.textContent='(offline)';});
+}
+function loadSipProviderWavConfig(){
+  var cb=document.getElementById('sipProviderSaveWav');
+  var dirEl=document.getElementById('sipProviderWavDir');
+  var statusEl=document.getElementById('sipProviderWavStatus');
+  fetch('http://localhost:'+TSP_PORT+'/wav_recording').then(r=>r.json()).then(d=>{
+    cb.checked=d.enabled;
+    dirEl.value=d.dir||'';
+    statusEl.textContent=d.enabled?'ON':'OFF';
+  }).catch(()=>{cb.checked=false;statusEl.textContent='(offline)';});
+}
+function saveSipProviderWavConfig(){
+  var cb=document.getElementById('sipProviderSaveWav');
+  var dirEl=document.getElementById('sipProviderWavDir');
+  var statusEl=document.getElementById('sipProviderWavStatus');
+  statusEl.textContent='...';
+  fetch('http://localhost:'+TSP_PORT+'/wav_recording',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:cb.checked,dir:dirEl.value})
+  }).then(()=>loadSipProviderWavConfig()).catch(()=>{statusEl.textContent='(error)';});
 }
 
 function sipConnectPbx(){

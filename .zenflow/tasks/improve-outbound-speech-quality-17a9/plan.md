@@ -74,7 +74,8 @@ Verify: build succeeds; `SAVE_WAV:STATUS` responds on port 13152; `/api/oap/wav_
 
 ---
 
-### [ ] Step: Frontend SIP provider config panel
+### [x] Step: Frontend SIP provider config panel
+<!-- chat-id: 40219fe1-81be-48fc-baed-3da454e9eb26 -->
 
 Modify `frontend.cpp` (HTML + JS):
 - Add `div#sipProviderConfig` HTML block (parallel to `sipClientConfig`):
