@@ -108,7 +108,8 @@ Verify: selecting OUTBOUND_AUDIO_PROCESSOR service shows config panel.
 
 ---
 
-### [ ] Step: Fix audio injection UI on beta-testing page
+### [x] Step: Fix audio injection UI on beta-testing page
+<!-- chat-id: ae07705c-03ad-47ec-bcca-f179d27d6610 -->
 
 Modify `frontend.cpp`:
 - Change label "Inject into Leg (username)" → "Inject into active testline"

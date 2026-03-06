@@ -1769,10 +1769,9 @@ Save outgoing audio as WAV</label>
 </select>
 </div>
 <div class="wt-field">
-<label>Inject into Leg (username)</label>
+<label>Inject into active testline</label>
 <select class="wt-select" id="injectLeg" style="width:100%;padding:8px">
-<option value="a">Leg A (first)</option>
-<option value="b">Leg B (second)</option>
+<option value="" disabled>-- No active testlines --</option>
 </select>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshInjectLegs()" style="margin-top:4px">&#x21BB; Refresh Legs</button>
 </div>
@@ -2447,7 +2446,7 @@ function showPage(p){
   currentPage=p;
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
-  if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();}
+  if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
   if(p==='models'){loadModels();loadModelComparison();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
@@ -3160,16 +3159,19 @@ function saveAllLogLevels(){
 }
 
 function refreshInjectLegs(){
+  var sel=document.getElementById('injectLeg');
   fetch('http://localhost:'+TSP_PORT+'/calls').then(r=>r.json()).then(d=>{
-    var sel=document.getElementById('injectLeg');
-    sel.innerHTML='<option value="a">Leg A (first)</option><option value="b">Leg B (second)</option>';
-    if(d.calls&&d.calls.length>0&&d.calls[0].legs){
+    if(d.calls&&d.calls.length>0&&d.calls[0].legs&&d.calls[0].legs.length>0){
       sel.innerHTML='';
       d.calls[0].legs.forEach(function(l){
         sel.innerHTML+='<option value="'+escapeHtml(l.user)+'">'+escapeHtml(l.user)+(l.answered?' (connected)':' (pending)')+'</option>';
       });
+    }else{
+      sel.innerHTML='<option value="" disabled>-- No active testlines --</option>';
     }
-  }).catch(function(){});
+  }).catch(function(){
+    sel.innerHTML='<option value="" disabled>-- No active testlines --</option>';
+  });
 }
 
 function injectAudio(){
@@ -5272,7 +5274,7 @@ function loadAccuracyTrendChart(){
   }).catch(e=>console.error('Failed to load accuracy trend:',e));
 }
 
-if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();}
+if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();refreshInjectLegs();}
 )JS";
         return js;
     }
