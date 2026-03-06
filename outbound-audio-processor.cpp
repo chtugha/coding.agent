@@ -32,7 +32,7 @@
 //   When upstream signals SPEECH_ACTIVE (caller speaking), OAP clears all call buffers
 //   to stop playing stale TTS audio immediately (avoids feedback over the caller).
 //
-// CMD port (OAP base+2 = 13152): PING, STATUS, SET_LOG_LEVEL.
+// CMD port (OAP base+2 = 13152): PING, STATUS, SET_LOG_LEVEL, SAVE_WAV:ON/OFF/STATUS, SET_SAVE_WAV_DIR.
 //   STATUS returns active calls, buffer lengths, upstream/downstream state.
 #include <iostream>
 #include <vector>
@@ -44,6 +44,9 @@
 #include <chrono>
 #include <cstring>
 #include <cmath>
+#include <fstream>
+#include <ctime>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -94,6 +97,7 @@ struct CallState {
     float fir_history[AA_HALF_TAPS] = {};
     float ext[AA_HALF_TAPS + OAP_MAX_PREALLOC_SAMPLES];
     uint8_t ulaw_buf[OAP_MAX_PREALLOC_SAMPLES / DOWNSAMPLE_RATIO];
+    std::vector<int16_t> wav_samples;
 
     void compact() {
         if (read_pos > 4096 && read_pos > buffer.size() / 2) {
@@ -110,6 +114,16 @@ public:
 
     void set_log_level(const char* level) {
         log_fwd_.set_level(level);
+    }
+
+    void set_save_wav_dir(const std::string& dir) {
+        std::lock_guard<std::mutex> wl(save_wav_mutex_);
+        save_wav_dir_ = dir;
+        if (!dir.empty()) mkdir(dir.c_str(), 0755);
+    }
+
+    void enable_save_wav(bool enabled) {
+        save_wav_enabled_.store(enabled);
     }
 
     bool init() {
@@ -233,6 +247,34 @@ private:
                 return "OK\n";
             } catch (...) { return "ERROR Invalid value\n"; }
         }
+        if (cmd == "SAVE_WAV:ON") {
+            save_wav_enabled_.store(true);
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "WAV recording enabled");
+            return "SAVE_WAV:ON\n";
+        }
+        if (cmd == "SAVE_WAV:OFF") {
+            save_wav_enabled_.store(false);
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "WAV recording disabled");
+            return "SAVE_WAV:OFF\n";
+        }
+        if (cmd == "SAVE_WAV:STATUS") {
+            std::lock_guard<std::mutex> wl(save_wav_mutex_);
+            std::string status = save_wav_enabled_.load() ? "SAVE_WAV:ON" : "SAVE_WAV:OFF";
+            status += ":DIR:" + save_wav_dir_ + "\n";
+            return status;
+        }
+        if (cmd.rfind("SET_SAVE_WAV_DIR:", 0) == 0) {
+            std::string dir = cmd.substr(17);
+            while (!dir.empty() && (dir.back() == '\n' || dir.back() == '\r' || dir.back() == ' '))
+                dir.pop_back();
+            {
+                std::lock_guard<std::mutex> wl(save_wav_mutex_);
+                save_wav_dir_ = dir;
+            }
+            if (!dir.empty()) mkdir(dir.c_str(), 0755);
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "WAV save dir set to: %s", dir.c_str());
+            return "OK\n";
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             std::string result = "ACTIVE_CALLS:" + std::to_string(calls_.size());
@@ -308,6 +350,7 @@ private:
             ulaw = ulaw_heap.data();
         }
 
+        bool do_wav = save_wav_enabled_.load();
         for (size_t i = 0; i < out_len; i++) {
             size_t src_pos = i * DOWNSAMPLE_RATIO + AA_HALF_TAPS;
             double filtered = 0;
@@ -318,6 +361,7 @@ private:
             }
             int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
             ulaw[i] = linear_to_ulaw(s16);
+            if (do_wav) state.wav_samples.push_back(s16);
         }
 
         if (in_samples >= (size_t)AA_HALF_TAPS) {
@@ -484,11 +528,72 @@ private:
         log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
     }
 
+    void write_wav_file(uint32_t call_id, const std::vector<int16_t>& samples, const std::string& dir) {
+        if (samples.empty()) return;
+        std::time_t now = std::time(nullptr);
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&now));
+        std::string path = dir + "/oap_call_" + std::to_string(call_id) + "_" + ts + ".wav";
+
+        std::ofstream f(path, std::ios::binary);
+        if (!f) {
+            log_fwd_.forward(whispertalk::LogLevel::ERROR, call_id, "WAV write failed: cannot open %s", path.c_str());
+            return;
+        }
+
+        uint32_t sample_rate = 8000;
+        uint16_t num_channels = 1;
+        uint16_t bits_per_sample = 16;
+        uint32_t data_size = static_cast<uint32_t>(samples.size() * sizeof(int16_t));
+        uint32_t byte_rate = sample_rate * num_channels * (bits_per_sample / 8);
+        uint16_t block_align = num_channels * (bits_per_sample / 8);
+        uint32_t chunk_size = 36 + data_size;
+
+        auto write32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+        auto write16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+
+        f.write("RIFF", 4);
+        write32(chunk_size);
+        f.write("WAVE", 4);
+        f.write("fmt ", 4);
+        write32(16);
+        write16(1);
+        write16(num_channels);
+        write32(sample_rate);
+        write32(byte_rate);
+        write16(block_align);
+        write16(bits_per_sample);
+        f.write("data", 4);
+        write32(data_size);
+        f.write(reinterpret_cast<const char*>(samples.data()), data_size);
+        f.close();
+
+        log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
+            "WAV saved: %s (%zu samples, %.2fs)", path.c_str(), samples.size(),
+            (double)samples.size() / sample_rate);
+    }
+
     void handle_call_end(uint32_t call_id) {
-        std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(call_id)) {
-            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up outbound audio");
-            calls_.erase(call_id);
+        std::shared_ptr<CallState> state_copy;
+        std::string wav_dir;
+        bool wav_enabled;
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            auto it = calls_.find(call_id);
+            if (it != calls_.end()) {
+                log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up outbound audio");
+                state_copy = it->second;
+                calls_.erase(it);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> wl(save_wav_mutex_);
+            wav_enabled = save_wav_enabled_.load();
+            wav_dir = save_wav_dir_;
+        }
+        if (state_copy && wav_enabled && !wav_dir.empty()) {
+            std::lock_guard<std::mutex> sl(state_copy->mutex);
+            write_wav_file(call_id, state_copy->wav_samples, wav_dir);
         }
     }
 
@@ -501,19 +606,25 @@ private:
     std::map<uint32_t, std::shared_ptr<CallState>> calls_;
     whispertalk::InterconnectNode interconnect_;
     whispertalk::LogForwarder log_fwd_;
+    std::atomic<bool> save_wav_enabled_{false};
+    std::mutex save_wav_mutex_;
+    std::string save_wav_dir_;
 };
 
 int main(int argc, char** argv) {
     std::string log_level = "INFO";
+    std::string save_wav_dir;
 
     static struct option long_opts[] = {
-        {"log-level", required_argument, 0, 'L'},
+        {"log-level",     required_argument, 0, 'L'},
+        {"save-wav-dir",  required_argument, 0, 'W'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "L:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "L:W:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'L': log_level = optarg; break;
+            case 'W': save_wav_dir = optarg; break;
             default: break;
         }
     }
@@ -523,6 +634,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     proc.set_log_level(log_level.c_str());
+    if (!save_wav_dir.empty()) {
+        proc.set_save_wav_dir(save_wav_dir);
+        proc.enable_save_wav(true);
+    }
     proc.run();
     return 0;
 }

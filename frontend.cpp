@@ -1337,6 +1337,8 @@ private:
                 handle_whisper_accuracy_test(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/hallucination_filter")) == 0) {
                 handle_whisper_hallucination_filter(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/oap/wav_recording")) == 0) {
+                handle_oap_wav_recording(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/vad/config")) == 0) {
                 handle_vad_config(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_results")) == 0) {
@@ -8821,6 +8823,58 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             bool enabled = resp.find(":ON") != std::string::npos;
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
                 "{\"enabled\":%s}", enabled ? "true" : "false");
+        }
+    }
+
+    // GET /api/oap/wav_recording — Query WAV recording state of OAP.
+    // POST /api/oap/wav_recording — Enable/disable WAV recording and set save directory.
+    void handle_oap_wav_recording(struct mg_connection *c, struct mg_http_message *hm) {
+        uint16_t oap_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+        std::string err;
+
+        if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
+            std::string body(hm->body.buf, hm->body.len);
+            std::string enabled_str = extract_json_string(body, "enabled");
+            std::string dir = extract_json_string(body, "dir");
+            bool enable = (enabled_str == "true" || enabled_str == "1");
+
+            if (!dir.empty()) {
+                std::string dir_cmd = "SET_SAVE_WAV_DIR:" + dir + "\n";
+                tcp_command(oap_cmd_port, dir_cmd, err, 3);
+                if (!err.empty()) {
+                    mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                        "{\"error\":\"%s\"}", err.c_str());
+                    return;
+                }
+            }
+
+            std::string cmd = enable ? "SAVE_WAV:ON\n" : "SAVE_WAV:OFF\n";
+            std::string resp = tcp_command(oap_cmd_port, cmd, err, 3);
+            if (!err.empty()) {
+                mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                    "{\"error\":\"%s\"}", err.c_str());
+                return;
+            }
+            bool confirmed = resp.find(":ON") != std::string::npos;
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"success\":true,\"enabled\":%s}", confirmed ? "true" : "false");
+        } else {
+            std::string resp = tcp_command(oap_cmd_port, "SAVE_WAV:STATUS\n", err, 3);
+            if (!err.empty()) {
+                mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                    "{\"error\":\"%s\",\"enabled\":false,\"dir\":\"\"}", err.c_str());
+                return;
+            }
+            bool enabled = resp.find(":ON") != std::string::npos;
+            std::string dir;
+            size_t dir_pos = resp.find(":DIR:");
+            if (dir_pos != std::string::npos) {
+                dir = resp.substr(dir_pos + 5);
+                while (!dir.empty() && (dir.back() == '\n' || dir.back() == '\r'))
+                    dir.pop_back();
+            }
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"enabled\":%s,\"dir\":\"%s\"}", enabled ? "true" : "false", dir.c_str());
         }
     }
 

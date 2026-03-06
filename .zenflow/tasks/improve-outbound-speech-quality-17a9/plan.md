@@ -53,7 +53,8 @@ Verify: build succeeds; endpoint responds; WAV files created on call hangup when
 
 ---
 
-### [ ] Step: WAV recording in OAP
+### [x] Step: WAV recording in OAP
+<!-- chat-id: f03e860e-6600-4f38-a254-927be3a41e68 -->
 
 Modify `outbound-audio-processor.cpp`:
 - Add `--save-wav-dir <dir>` CLI flag (default: empty = disabled)
