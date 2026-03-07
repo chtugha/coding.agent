@@ -10,7 +10,7 @@ Automates N test runs that each:
   6. Wait for pipeline completion
   7. Hang up (triggers WAV file write)
   8. Collect logs (after hangup so CALL_END events are captured)
-  9. Wait for OAP WAV write + copy WAV files to run output directory
+  9. Wait for OAP WAV write, then inventory WAV files in run directory
 
 Usage:
     python3 tests/run_stage7.py [--output-dir stage7_output] [--iterations 10]
