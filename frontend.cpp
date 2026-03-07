@@ -8914,7 +8914,18 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             std::string body(hm->body.buf, hm->body.len);
             std::string enabled_str = extract_json_string(body, "enabled");
             std::string dir = extract_json_string(body, "dir");
-            bool enable = (enabled_str == "true" || enabled_str == "1");
+            bool enable;
+            if (!enabled_str.empty()) {
+                enable = (enabled_str == "true" || enabled_str == "1");
+            } else {
+                auto pos = body.find("\"enabled\"");
+                if (pos != std::string::npos) {
+                    pos = body.find_first_not_of(" \t\r\n:", pos + 9);
+                    enable = (pos != std::string::npos && body.substr(pos, 4) == "true");
+                } else {
+                    enable = false;
+                }
+            }
 
             if (!dir.empty()) {
                 std::string dir_cmd = "SET_SAVE_WAV_DIR:" + dir + "\n";
