@@ -359,11 +359,11 @@ private:
                 int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
                 if (idx >= 0 && idx < static_cast<int>(ext_len))
                     filtered += ext[idx] * coeffs[t];
-                // Tail note: for the last output sample(s) of the chunk, indices beyond
-                // ext_len are clamped to zero (up to AA_HALF_TAPS-1 = 30 future samples
-                // are unknown). This only affects the final output sample per chunk and
-                // is compensated by fir_history carrying the real samples into the next
-                // call, so there is no discontinuity in the reconstructed stream.
+                // Tail boundary: for the last output sample per chunk, up to 29 future input
+                // samples (beyond ext) are unavailable and treated as zero. fir_history carries
+                // the true past samples into the next chunk, keeping filter state continuous.
+                // At typical chunk sizes (thousands of samples) this single-sample tail artifact
+                // is inaudible.
             }
             int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
             ulaw[i] = linear_to_ulaw(s16);
