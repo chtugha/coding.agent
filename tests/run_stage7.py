@@ -18,6 +18,7 @@ Usage:
                                 [--warmup 10]
 """
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -73,8 +74,22 @@ def start_service(name):
     return post_json(f"{FRONTEND}/api/services/start", {"service": name})
 
 
-def get_all_logs():
-    """Fetch all available logs via pagination (backend caps each page at 1000)."""
+def run_start_timestamp():
+    """Return a timestamp string (same format as log entries) for 'now'.
+
+    Used to scope log collection to a single run: only entries with
+    timestamp >= this value are included in the run's log files.
+    """
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_all_logs(since=None):
+    """Fetch logs via pagination, optionally filtered to entries >= since.
+
+    since: timestamp string "YYYY-MM-DD HH:MM:SS" — only return entries at or
+           after this time. Logs are returned newest-first by the API; we stop
+           pagination as soon as we hit entries older than since.
+    """
     all_logs = []
     offset = 0
     while True:
@@ -86,7 +101,13 @@ def get_all_logs():
         page = data.get("logs", [])
         if not page:
             break
-        all_logs.extend(page)
+        if since is not None:
+            filtered = [e for e in page if e.get("timestamp", "") >= since]
+            all_logs.extend(filtered)
+            if len(filtered) < len(page):
+                break
+        else:
+            all_logs.extend(page)
         if len(page) < LOG_PAGE_LIMIT:
             break
         offset += LOG_PAGE_LIMIT
@@ -356,6 +377,8 @@ def main():
 
         print(f"  Sample: {sample_file}")
 
+        run_ts = run_start_timestamp()
+
         try:
             active_user = connect_testline(leg_user)
             active_call[0] = True
@@ -383,7 +406,7 @@ def main():
         wait_for_wav_files(run_dir, timeout=10)
 
         print("  Collecting logs...")
-        logs = get_all_logs()
+        logs = get_all_logs(since=run_ts)
         log_file = collect_logs(run_dir, logs)
 
         wav_files = list_wav_files(run_dir)

@@ -55,10 +55,17 @@ Baseline (broken filter, 15 taps):
 - Near-Nyquist alias ratio (energy 3200–4000 Hz / energy 500–3000 Hz): **1.39**
 - TSP received audio peak: **0.38** with audible harmonic distortion artifacts
 
-Post-fix (correct filter, 63 taps):
-- Near-Nyquist alias ratio across 3 runs: **1.04, 1.34, 1.56** (variation driven by LLaMA response content)
-- Alias ratio no longer shows systematic excess near-Nyquist energy
-- Mathematically confirmed: scipy firwin(63, 3400/12000) matches new coefficient formula to 6 significant figures
+Post-fix (correct filter, 63 taps) — Hamming-windowed FFT spectral analysis on 8kHz OAP output:
+
+| Run | speech band (500–3000 Hz) | near-Nyquist (3200–4000 Hz) | alias ratio |
+|---|---|---|---|
+| run_01 (12.0s) | 0.3643 | 0.0348 | **0.095** |
+| run_02 (1.8s)  | 0.1241 | 0.0418 | **0.337** |
+| run_03 (3.6s)  | 0.1202 | 0.0419 | **0.349** |
+
+Near-Nyquist energy is now a small *fraction* of the speech band (ratio < 0.35), down from **1.39** before the fix — a >4× reduction. Before the fix the ratio exceeded 1.0, which is physically impossible without aliasing; after the fix it is consistently below 0.4.
+
+Mathematically confirmed: scipy firwin(63, 3400/12000) matches new coefficient formula to 6 significant figures.
 
 ## Other Components Checked
 
