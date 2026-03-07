@@ -213,17 +213,26 @@ def hangup():
 
 
 def wait_for_wav_files(wav_dir, timeout=10):
-    """Poll until at least one OAP WAV file appears (written on CALL_END)."""
+    """Poll until OAP writes both _input.wav and _output.wav (written on CALL_END)."""
     print(f"  Waiting for WAV files to be written (max {timeout}s)...")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        oap_wavs = glob.glob(os.path.join(wav_dir, "oap_call_*.wav"))
-        if oap_wavs:
-            print(f"    Found {len(oap_wavs)} OAP WAV file(s)")
+        input_wavs = glob.glob(os.path.join(wav_dir, "oap_call_*_input.wav"))
+        output_wavs = glob.glob(os.path.join(wav_dir, "oap_call_*_output.wav"))
+        if input_wavs and output_wavs:
+            print(f"    Found {len(input_wavs)} OAP input WAV(s), {len(output_wavs)} OAP output WAV(s)")
             return
         time.sleep(1)
-    print("  WARNING: OAP WAV file not found after timeout — CALL_END may not have propagated",
-          file=sys.stderr)
+    present = (
+        glob.glob(os.path.join(wav_dir, "oap_call_*_input.wav")) +
+        glob.glob(os.path.join(wav_dir, "oap_call_*_output.wav"))
+    )
+    if present:
+        print(f"  WARNING: only partial OAP WAV set found ({[os.path.basename(p) for p in present]})"
+              " — CALL_END may not have fully propagated", file=sys.stderr)
+    else:
+        print("  WARNING: no OAP WAV files found after timeout — CALL_END may not have propagated",
+              file=sys.stderr)
 
 
 def collect_logs(run_dir, logs):
@@ -257,9 +266,18 @@ def collect_logs(run_dir, logs):
 
 
 def list_wav_files(wav_dir):
-    """Return paths of all tsp/oap WAV files already present in wav_dir."""
+    """Return paths of all tsp/oap WAV files already present in wav_dir.
+
+    OAP produces two files per call:
+      oap_call_<id>_<ts>_input.wav  — 24kHz raw Kokoro output (pre-OAP)
+      oap_call_<id>_<ts>_output.wav — 8kHz post-downsample signal to SIP client
+    TSP produces one file per leg:
+      tsp_call_<id>_<user>_<ts>.wav — 8kHz audio received back at the test provider
+    """
     found = []
-    for pattern in ["tsp_call_*.wav", "oap_call_*.wav"]:
+    for pattern in ["tsp_call_*.wav",
+                    "oap_call_*_input.wav",
+                    "oap_call_*_output.wav"]:
         found.extend(sorted(glob.glob(os.path.join(wav_dir, pattern))))
     for fpath in found:
         print(f"    Found: {os.path.basename(fpath)}")
