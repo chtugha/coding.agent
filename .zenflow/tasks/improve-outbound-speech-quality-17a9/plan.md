@@ -121,7 +121,8 @@ Verify: label updated; dropdown shows active testlines on page load (or placehol
 
 ---
 
-### [ ] Step: Stage 7a — Implement diagnostic collection script
+### [x] Step: Stage 7a — Implement diagnostic collection script
+<!-- chat-id: 8c2af3a2-aa63-407f-a6e6-ca4b213f8ddb -->
 
 Create `tests/run_stage7.py`:
 - Start all 7 services + test_sip_provider via frontend API
