@@ -98,6 +98,7 @@ struct CallState {
     float ext[AA_HALF_TAPS + OAP_MAX_PREALLOC_SAMPLES];
     uint8_t ulaw_buf[OAP_MAX_PREALLOC_SAMPLES / DOWNSAMPLE_RATIO];
     std::vector<int16_t> wav_samples;
+    std::vector<int16_t> wav_input_samples;
 
     void compact() {
         if (read_pos > 4096 && read_pos > buffer.size() / 2) {
@@ -430,6 +431,13 @@ private:
             auto now = std::chrono::steady_clock::now();
             state->last_activity = now;
             state->last_audio_received = now;
+            if (save_wav_enabled_.load()) {
+                state->wav_input_samples.reserve(state->wav_input_samples.size() + sample_count);
+                for (size_t i = 0; i < sample_count; i++) {
+                    float s = std::max(-1.0f, std::min(1.0f, pcm_buf[i]));
+                    state->wav_input_samples.push_back(static_cast<int16_t>(s * 32767.0f));
+                }
+            }
             downsample_and_encode_into(pcm_buf, sample_count, *state, state->buffer);
         }
     }
@@ -528,14 +536,18 @@ private:
         log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
     }
 
-    void write_wav_file(uint32_t call_id, const std::vector<int16_t>& samples, const std::string& dir) {
+    void write_wav_file(uint32_t call_id, const std::vector<int16_t>& samples, const std::string& dir,
+                        uint32_t sample_rate = 8000, const std::string& suffix = "") {
         if (samples.empty()) return;
         std::time_t now = std::time(nullptr);
         char ts[32];
         struct tm tm_buf{};
         localtime_r(&now, &tm_buf);
         std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
-        std::string path = dir + "/oap_call_" + std::to_string(call_id) + "_" + ts + ".wav";
+        std::string fname = "oap_call_" + std::to_string(call_id) + "_" + ts;
+        if (!suffix.empty()) fname += "_" + suffix;
+        fname += ".wav";
+        std::string path = dir + "/" + fname;
 
         std::ofstream f(path, std::ios::binary);
         if (!f) {
@@ -543,7 +555,6 @@ private:
             return;
         }
 
-        uint32_t sample_rate = 8000;
         uint16_t num_channels = 1;
         uint16_t bits_per_sample = 16;
         uint32_t data_size = static_cast<uint32_t>(samples.size() * sizeof(int16_t));
@@ -594,12 +605,14 @@ private:
             wav_dir = save_wav_dir_;
         }
         if (state_copy && wav_enabled && !wav_dir.empty()) {
-            std::vector<int16_t> samples;
+            std::vector<int16_t> out_samples, in_samples;
             {
                 std::lock_guard<std::mutex> sl(state_copy->mutex);
-                samples = std::move(state_copy->wav_samples);
+                out_samples = std::move(state_copy->wav_samples);
+                in_samples = std::move(state_copy->wav_input_samples);
             }
-            write_wav_file(call_id, samples, wav_dir);
+            write_wav_file(call_id, out_samples, wav_dir, 8000, "output");
+            write_wav_file(call_id, in_samples, wav_dir, 24000, "input");
         }
     }
 
