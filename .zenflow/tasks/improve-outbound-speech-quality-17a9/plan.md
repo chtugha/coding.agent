@@ -141,7 +141,8 @@ Verify: script runs end-to-end and produces WAV + log files.
 
 ---
 
-### [ ] Step: Stage 7b — Build, run collection, diagnose and fix audio quality
+### [x] Step: Stage 7b — Build, run collection, diagnose and fix audio quality
+<!-- chat-id: ff334b97-e61e-4b3d-a93b-7956f48866eb -->
 
 1. Build everything: `cd coding.agent && mkdir -p build && cd build && cmake .. && make -j4`
 2. Run `python3 tests/run_stage7.py` to collect 10 data samples

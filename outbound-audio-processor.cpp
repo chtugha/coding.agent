@@ -6,8 +6,8 @@
 // them to 160-byte G.711 μ-law frames for transmission to the SIP client.
 //
 // Downsampling pipeline (24kHz → 8kHz, ratio 3:1):
-//   1. Anti-aliasing FIR filter: 15-tap Hamming-windowed sinc, cutoff 3400/12000
-//      (~3400Hz, preserves telephone speech band, attenuates aliases above 4kHz).
+//   1. Anti-aliasing FIR filter: 63-tap Hamming-windowed sinc, cutoff 3400/12000
+//      (~3400Hz, preserves telephone speech band, ~43dB stopband attenuation above 4kHz).
 //      Filter coefficients are computed once via get_aa_coeffs() and cached.
 //      Per-call FIR history (fir_history[AA_HALF_TAPS]) preserves state across frames.
 //   2. Decimate by 3: keep every 3rd filtered sample, reducing 24kHz → 8kHz.
@@ -54,7 +54,7 @@
 #include <getopt.h>
 #include "interconnect.h"
 
-static constexpr int AA_FILTER_TAPS = 15;
+static constexpr int AA_FILTER_TAPS = 63;
 static constexpr int AA_HALF_TAPS = AA_FILTER_TAPS / 2;
 static constexpr double AA_CUTOFF = 3400.0 / 12000.0;
 static constexpr int DOWNSAMPLE_RATIO = 3;
@@ -69,8 +69,8 @@ static const double* get_aa_coeffs() {
         for (int n = 0; n < AA_FILTER_TAPS; n++) {
             int k = n - AA_HALF_TAPS;
             double hamming = 0.54 - 0.46 * std::cos(2.0 * M_PI * n / (AA_FILTER_TAPS - 1));
-            double sinc_val = (k == 0) ? 1.0 : std::sin(M_PI * AA_CUTOFF * k) / (M_PI * k);
-            coeffs[n] = sinc_val * hamming * AA_CUTOFF;
+            double sinc_val = (k == 0) ? AA_CUTOFF : std::sin(M_PI * AA_CUTOFF * k) / (M_PI * k);
+            coeffs[n] = sinc_val * hamming;
             sum += coeffs[n];
         }
         for (int n = 0; n < AA_FILTER_TAPS; n++) coeffs[n] /= sum;
