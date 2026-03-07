@@ -537,13 +537,8 @@ private:
     }
 
     void write_wav_file(uint32_t call_id, const std::vector<int16_t>& samples, const std::string& dir,
-                        uint32_t sample_rate = 8000, const std::string& suffix = "") {
+                        uint32_t sample_rate, const std::string& suffix, const std::string& ts) {
         if (samples.empty()) return;
-        std::time_t now = std::time(nullptr);
-        char ts[32];
-        struct tm tm_buf{};
-        localtime_r(&now, &tm_buf);
-        std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
         std::string fname = "oap_call_" + std::to_string(call_id) + "_" + ts;
         if (!suffix.empty()) fname += "_" + suffix;
         fname += ".wav";
@@ -611,8 +606,14 @@ private:
                 out_samples = std::move(state_copy->wav_samples);
                 in_samples = std::move(state_copy->wav_input_samples);
             }
-            write_wav_file(call_id, out_samples, wav_dir, 8000, "output");
-            write_wav_file(call_id, in_samples, wav_dir, 24000, "input");
+            std::time_t now = std::time(nullptr);
+            char ts_buf[32];
+            struct tm tm_buf{};
+            localtime_r(&now, &tm_buf);
+            std::strftime(ts_buf, sizeof(ts_buf), "%Y%m%d_%H%M%S", &tm_buf);
+            std::string ts(ts_buf);
+            write_wav_file(call_id, out_samples, wav_dir, 8000, "output", ts);
+            write_wav_file(call_id, in_samples, wav_dir, 24000, "input", ts);
         }
     }
 
