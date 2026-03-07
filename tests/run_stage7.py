@@ -21,7 +21,6 @@ import argparse
 import glob
 import json
 import os
-import shutil
 import signal
 import sys
 import time
@@ -257,18 +256,16 @@ def collect_logs(run_dir, logs):
     return log_file
 
 
-def copy_wav_files(src_dir, dst_dir):
-    os.makedirs(dst_dir, exist_ok=True)
-    copied = []
+def list_wav_files(wav_dir):
+    """Return paths of all tsp/oap WAV files already present in wav_dir."""
+    found = []
     for pattern in ["tsp_call_*.wav", "oap_call_*.wav"]:
-        for fpath in glob.glob(os.path.join(src_dir, pattern)):
-            dst = os.path.join(dst_dir, os.path.basename(fpath))
-            shutil.copy2(fpath, dst)
-            copied.append(dst)
-            print(f"    Copied: {os.path.basename(fpath)}")
-    if not copied:
+        found.extend(sorted(glob.glob(os.path.join(wav_dir, pattern))))
+    for fpath in found:
+        print(f"    Found: {os.path.basename(fpath)}")
+    if not found:
         print("    WARNING: no WAV files found", file=sys.stderr)
-    return copied
+    return found
 
 
 def get_sample_file(testfiles_dir, iteration):
@@ -355,6 +352,7 @@ def main():
         except RuntimeError as e:
             print(f"  SKIP run {run_n}: {e}", file=sys.stderr)
             disable_wav_recording()
+            hangup()
             active_call[0] = False
             continue
 
@@ -370,14 +368,14 @@ def main():
         logs = get_all_logs()
         log_file = collect_logs(run_dir, logs)
 
-        wav_files = copy_wav_files(run_dir, run_dir)
+        wav_files = list_wav_files(run_dir)
         disable_wav_recording()
 
         collected.append({
             "run": run_n,
             "sample": sample_file,
             "log_file": log_file,
-            "wav_files": [w for w in wav_files if os.path.dirname(w) == run_dir],
+            "wav_files": wav_files,
             "log_entries": len(logs),
         })
 
