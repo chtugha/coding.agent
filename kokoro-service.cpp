@@ -75,13 +75,13 @@ static const int KOKORO_SAMPLE_RATE = 24000;
 static const size_t MAX_AUDIO_SAMPLES = 10 * KOKORO_SAMPLE_RATE;
 static const size_t PHONEME_CACHE_MAX = 10000;
 
-static float normalize_audio(std::vector<float>& samples, float ceiling = 0.95f) {
+static float normalize_audio(std::vector<float>& samples, float ceiling = 0.90f) {
     float peak = 0.0f;
     for (float s : samples) {
         float a = std::abs(s);
         if (a > peak) peak = a;
     }
-    if (peak > 1.0f) {
+    if (peak > 0.03f) {
         float scale = ceiling / peak;
         for (float& s : samples) s *= scale;
     }
@@ -1082,11 +1082,28 @@ private:
             log_fwd_.set_level(level.c_str());
             return "OK\n";
         }
+        if (cmd.rfind("SET_SPEED:", 0) == 0) {
+            float v = std::stof(cmd.substr(10));
+            if (v < 0.5f) v = 0.5f;
+            if (v > 2.0f) v = 2.0f;
+            speed_.store(v);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "SPEED:%.2f\n", v);
+            return buf;
+        }
+        if (cmd == "GET_SPEED") {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "SPEED:%.2f\n", speed_.load());
+            return buf;
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
+            char spd[16];
+            std::snprintf(spd, sizeof(spd), "%.2f", speed_.load());
             return "ACTIVE_CALLS:" + std::to_string(calls_.size())
                 + ":UPSTREAM:" + (node_.upstream_state() == ConnectionState::CONNECTED ? "connected" : "disconnected")
                 + ":DOWNSTREAM:" + (node_.downstream_state() == ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":SPEED:" + spd
                 + "\n";
         }
         return "ERROR:Unknown command\n";
@@ -1140,7 +1157,7 @@ private:
             auto start = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                samples = pipeline_.synthesize(text);
+                samples = pipeline_.synthesize(text, speed_.load());
             }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
@@ -1250,6 +1267,7 @@ private:
     std::atomic<int> cmd_sock_{-1};
     std::map<uint32_t, std::shared_ptr<CallContext>> calls_;
     std::mutex calls_mutex_;
+    std::atomic<float> speed_{1.0f};
 };
 
 static KokoroService* g_service = nullptr;

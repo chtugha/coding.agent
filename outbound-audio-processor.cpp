@@ -79,6 +79,15 @@ static const double* get_aa_coeffs() {
     return coeffs;
 }
 
+// High-shelf biquad for presence boost: +3 dB at 2500 Hz, 24 kHz input.
+// Coefficients computed via Audio EQ Cookbook (Robert Bristow-Johnson), S=1.
+// DC gain = 1.0 (no bass change), Nyquist gain = 1.413 (+3 dB).
+static constexpr float PRES_B0 =  1.30829f;
+static constexpr float PRES_B1 = -1.53650f;
+static constexpr float PRES_B2 =  0.55845f;
+static constexpr float PRES_A1 = -1.03951f;
+static constexpr float PRES_A2 =  0.36942f;
+
 static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 24000;
 // Default guard window (ms) suppressing SPEECH_ACTIVE flushes immediately after TTS audio
 // arrives. Configurable at runtime via SET_SIDETONE_GUARD_MS:<ms> on the CMD port.
@@ -99,6 +108,7 @@ struct CallState {
     uint8_t ulaw_buf[OAP_MAX_PREALLOC_SAMPLES / DOWNSAMPLE_RATIO];
     std::vector<int16_t> wav_samples;
     std::vector<int16_t> wav_input_samples;
+    float pres_x1=0,pres_x2=0,pres_y1=0,pres_y2=0;
 
     void compact() {
         if (read_pos > 4096 && read_pos > buffer.size() / 2) {
@@ -264,6 +274,19 @@ private:
             status += ":DIR:" + save_wav_dir_ + "\n";
             return status;
         }
+        if (cmd == "PRESENCE_BOOST:ON") {
+            presence_enabled_.store(true);
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Presence boost enabled (+3dB @ 2.5kHz)");
+            return "PRESENCE_BOOST:ON\n";
+        }
+        if (cmd == "PRESENCE_BOOST:OFF") {
+            presence_enabled_.store(false);
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Presence boost disabled");
+            return "PRESENCE_BOOST:OFF\n";
+        }
+        if (cmd == "PRESENCE_BOOST:STATUS") {
+            return std::string(presence_enabled_.load() ? "PRESENCE_BOOST:ON\n" : "PRESENCE_BOOST:OFF\n");
+        }
         if (cmd.rfind("SET_SAVE_WAV_DIR:", 0) == 0) {
             std::string dir = cmd.substr(17);
             while (!dir.empty() && (dir.back() == '\n' || dir.back() == '\r' || dir.back() == ' '))
@@ -340,7 +363,18 @@ private:
             ext = ext_heap.data();
         }
         std::memcpy(ext, state.fir_history, AA_HALF_TAPS * sizeof(float));
-        std::memcpy(ext + AA_HALF_TAPS, input, in_samples * sizeof(float));
+        if (presence_enabled_.load()) {
+            for (size_t i = 0; i < in_samples; i++) {
+                float x = input[i];
+                float y = PRES_B0*x + PRES_B1*state.pres_x1 + PRES_B2*state.pres_x2
+                          - PRES_A1*state.pres_y1 - PRES_A2*state.pres_y2;
+                state.pres_x2 = state.pres_x1; state.pres_x1 = x;
+                state.pres_y2 = state.pres_y1; state.pres_y1 = std::max(-1.0f, std::min(1.0f, y));
+                ext[AA_HALF_TAPS + i] = state.pres_y1;
+            }
+        } else {
+            std::memcpy(ext + AA_HALF_TAPS, input, in_samples * sizeof(float));
+        }
 
         uint8_t* ulaw;
         std::vector<uint8_t> ulaw_heap;
@@ -370,12 +404,20 @@ private:
             if (do_wav) state.wav_samples.push_back(s16);
         }
 
+        // Update FIR history from the signal that was actually fed to the AA filter
+        // (presence-boosted when enabled, raw when disabled) so the filter is
+        // continuous across chunks regardless of boost state.
+        const float* hist_src = presence_enabled_.load()
+                                ? (ext + in_samples)            // boosted values from ext[]
+                                : (input + in_samples - AA_HALF_TAPS); // raw values
         if (in_samples >= (size_t)AA_HALF_TAPS) {
-            std::memcpy(state.fir_history, input + in_samples - AA_HALF_TAPS, AA_HALF_TAPS * sizeof(float));
+            std::memcpy(state.fir_history, hist_src, AA_HALF_TAPS * sizeof(float));
         } else {
             size_t keep = AA_HALF_TAPS - in_samples;
             std::memmove(state.fir_history, state.fir_history + in_samples, keep * sizeof(float));
-            std::memcpy(state.fir_history + keep, input, in_samples * sizeof(float));
+            std::memcpy(state.fir_history + keep,
+                        presence_enabled_.load() ? (ext + AA_HALF_TAPS) : input,
+                        in_samples * sizeof(float));
         }
 
         out_ulaw.insert(out_ulaw.end(), ulaw, ulaw + out_len);
@@ -634,6 +676,7 @@ private:
     std::atomic<bool> save_wav_enabled_{false};
     std::mutex save_wav_mutex_;
     std::string save_wav_dir_;
+    std::atomic<bool> presence_enabled_{false};
 };
 
 int main(int argc, char** argv) {

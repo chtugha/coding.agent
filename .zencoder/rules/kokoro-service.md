@@ -16,7 +16,7 @@ The **Kokoro TTS Service** (`kokoro-service.cpp`) is a high-fidelity Text-to-Spe
 - **Language Support**: Specifically optimized for German and English using espeak-ng for phonemization.
 - **Streaming**: Streams synthesized audio chunks directly to the `Outbound Audio Processor`.
 - **CoreML Split Decoder**: Uses CoreML Apple Neural Engine acceleration (MLComputeUnitsAll) for the decoder portion of the model when compiled with -DKOKORO_COREML. Provides ~2-4× speedup on M-series chips.
-- **Output normalization**: Peaks clipped to 0.95 ceiling to prevent G.711 clipping. Only scales down, never amplifies.
+- **Output normalization**: Always normalizes to a 0.90 peak ceiling. Scales both up and down — signals quieter than peak 0.90 are amplified to use the full G.711 dynamic range. Signals with peak < 0.03 (silence) are left untouched to avoid boosting noise.
 - **SPEECH_ACTIVE handling**: Abandons synthesis and clears output buffer immediately when caller speech is detected.
 
 ## Inbound Connections
@@ -33,5 +33,7 @@ The **Kokoro TTS Service** (`kokoro-service.cpp`) is a high-fidelity Text-to-Spe
 
 ## Runtime Commands (cmd port 13142)
 - `PING`: Health check (returns `PONG`)
-- `STATUS`: Returns model path, upstream/downstream state, active call count
+- `STATUS`: Returns model path, upstream/downstream state, active call count, current speed
 - `SET_LOG_LEVEL:<LEVEL>`: Change log verbosity at runtime without restart
+- `SET_SPEED:<val>`: Change TTS speed multiplier (0.5–2.0, default 1.0). Higher = faster/lighter voice.
+- `GET_SPEED`: Returns current speed as `SPEED:<val>`
