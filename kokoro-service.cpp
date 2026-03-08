@@ -927,7 +927,7 @@ private:
             auto start = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                samples = pipeline_.synthesize(text);
+                samples = pipeline_.synthesize(text, speed_.load());
             }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
@@ -972,7 +972,7 @@ private:
                 auto t0 = std::chrono::steady_clock::now();
                 {
                     std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                    samples = pipeline_.synthesize(text);
+                    samples = pipeline_.synthesize(text, speed_.load());
                 }
                 auto ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -1018,7 +1018,7 @@ private:
             auto start = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                samples = pipeline_.synthesize(text);
+                samples = pipeline_.synthesize(text, speed_.load());
             }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
@@ -1083,13 +1083,15 @@ private:
             return "OK\n";
         }
         if (cmd.rfind("SET_SPEED:", 0) == 0) {
-            float v = std::stof(cmd.substr(10));
-            if (v < 0.5f) v = 0.5f;
-            if (v > 2.0f) v = 2.0f;
-            speed_.store(v);
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "SPEED:%.2f\n", v);
-            return buf;
+            try {
+                float v = std::stof(cmd.substr(10));
+                if (v < 0.5f) v = 0.5f;
+                if (v > 2.0f) v = 2.0f;
+                speed_.store(v);
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "SPEED:%.2f\n", v);
+                return buf;
+            } catch (...) { return "ERROR:Invalid speed value\n"; }
         }
         if (cmd == "GET_SPEED") {
             char buf[64];

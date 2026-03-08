@@ -369,8 +369,8 @@ private:
                 float y = PRES_B0*x + PRES_B1*state.pres_x1 + PRES_B2*state.pres_x2
                           - PRES_A1*state.pres_y1 - PRES_A2*state.pres_y2;
                 state.pres_x2 = state.pres_x1; state.pres_x1 = x;
-                state.pres_y2 = state.pres_y1; state.pres_y1 = std::max(-1.0f, std::min(1.0f, y));
-                ext[AA_HALF_TAPS + i] = state.pres_y1;
+                state.pres_y2 = state.pres_y1; state.pres_y1 = y;
+                ext[AA_HALF_TAPS + i] = std::max(-1.0f, std::min(1.0f, y));
             }
         } else {
             std::memcpy(ext + AA_HALF_TAPS, input, in_samples * sizeof(float));
