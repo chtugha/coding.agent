@@ -88,6 +88,8 @@ static constexpr float PRES_B2 =  0.55845f;
 static constexpr float PRES_A1 = -1.03951f;
 static constexpr float PRES_A2 =  0.36942f;
 
+static constexpr float DC_BLOCK_ALPHA = 0.9947697f;
+
 static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 24000;
 // Default guard window (ms) suppressing SPEECH_ACTIVE flushes immediately after TTS audio
 // arrives. Configurable at runtime via SET_SIDETONE_GUARD_MS:<ms> on the CMD port.
@@ -104,11 +106,13 @@ struct CallState {
     // genuine caller interruption (arrives >1500ms after last audio chunk).
     std::chrono::steady_clock::time_point last_audio_received{};
     float fir_history[AA_HALF_TAPS] = {};
+    bool first_chunk = true;
     float ext[AA_HALF_TAPS + OAP_MAX_PREALLOC_SAMPLES];
     uint8_t ulaw_buf[OAP_MAX_PREALLOC_SAMPLES / DOWNSAMPLE_RATIO];
     std::vector<int16_t> wav_samples;
     std::vector<int16_t> wav_input_samples;
     float pres_x1=0,pres_x2=0,pres_y1=0,pres_y2=0;
+    float dc_x_prev=0, dc_y_prev=0;
 
     void compact() {
         if (read_pos > 4096 && read_pos > buffer.size() / 2) {
@@ -363,17 +367,27 @@ private:
             ext = ext_heap.data();
         }
         std::memcpy(ext, state.fir_history, AA_HALF_TAPS * sizeof(float));
+        if (state.first_chunk && in_samples > 0) {
+            float dc = input[0];
+            for (int i = 0; i < AA_HALF_TAPS; i++) ext[i] = dc;
+            state.first_chunk = false;
+        }
+        for (size_t i = 0; i < in_samples; i++) {
+            float x = input[i];
+            float y = x - state.dc_x_prev + DC_BLOCK_ALPHA * state.dc_y_prev;
+            state.dc_x_prev = x;
+            state.dc_y_prev = y;
+            ext[AA_HALF_TAPS + i] = y;
+        }
         if (presence_enabled_.load()) {
             for (size_t i = 0; i < in_samples; i++) {
-                float x = input[i];
+                float x = ext[AA_HALF_TAPS + i];
                 float y = PRES_B0*x + PRES_B1*state.pres_x1 + PRES_B2*state.pres_x2
                           - PRES_A1*state.pres_y1 - PRES_A2*state.pres_y2;
                 state.pres_x2 = state.pres_x1; state.pres_x1 = x;
                 state.pres_y2 = state.pres_y1; state.pres_y1 = y;
                 ext[AA_HALF_TAPS + i] = std::max(-1.0f, std::min(1.0f, y));
             }
-        } else {
-            std::memcpy(ext + AA_HALF_TAPS, input, in_samples * sizeof(float));
         }
 
         uint8_t* ulaw;
@@ -404,20 +418,12 @@ private:
             if (do_wav) state.wav_samples.push_back(s16);
         }
 
-        // Update FIR history from the signal that was actually fed to the AA filter
-        // (presence-boosted when enabled, raw when disabled) so the filter is
-        // continuous across chunks regardless of boost state.
-        const float* hist_src = presence_enabled_.load()
-                                ? (ext + in_samples)            // boosted values from ext[]
-                                : (input + in_samples - AA_HALF_TAPS); // raw values
         if (in_samples >= (size_t)AA_HALF_TAPS) {
-            std::memcpy(state.fir_history, hist_src, AA_HALF_TAPS * sizeof(float));
+            std::memcpy(state.fir_history, ext + in_samples, AA_HALF_TAPS * sizeof(float));
         } else {
             size_t keep = AA_HALF_TAPS - in_samples;
             std::memmove(state.fir_history, state.fir_history + in_samples, keep * sizeof(float));
-            std::memcpy(state.fir_history + keep,
-                        presence_enabled_.load() ? (ext + AA_HALF_TAPS) : input,
-                        in_samples * sizeof(float));
+            std::memcpy(state.fir_history + keep, ext + AA_HALF_TAPS, in_samples * sizeof(float));
         }
 
         out_ulaw.insert(out_ulaw.end(), ulaw, ulaw + out_len);
@@ -580,6 +586,10 @@ private:
         state->buffer.clear();
         state->read_pos = 0;
         std::memset(state->fir_history, 0, sizeof(state->fir_history));
+        state->first_chunk = true;
+        state->dc_x_prev = 0.0f;
+        state->dc_y_prev = 0.0f;
+        state->pres_x1 = state->pres_x2 = state->pres_y1 = state->pres_y2 = 0.0f;
         log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
     }
 
