@@ -81,11 +81,18 @@ static float normalize_audio(std::vector<float>& samples, float ceiling = 0.90f)
         float a = std::abs(s);
         if (a > peak) peak = a;
     }
-    if (peak > 0.03f) {
+    if (peak > 0.01f && std::abs(peak - ceiling) > 0.001f) {
         float scale = ceiling / peak;
         for (float& s : samples) s *= scale;
     }
     return peak;
+}
+
+static void apply_fade_in(std::vector<float>& samples, int fade_samples = 48) {
+    int n = std::min(fade_samples, (int)samples.size());
+    for (int i = 0; i < n; i++) {
+        samples[i] *= static_cast<float>(i) / static_cast<float>(n);
+    }
 }
 
 #ifndef ESPEAK_NG_DATA_DIR
@@ -532,6 +539,22 @@ public:
         return false;
 #endif
 
+        std::string f0n_path = base_dir + "/kokoro_f0n_predictor.pt";
+        struct stat st_f0n;
+        if (stat(f0n_path.c_str(), &st_f0n) == 0) {
+            try {
+                f0n_predictor_ = torch::jit::load(f0n_path);
+                f0n_predictor_.eval();
+                f0n_available_ = true;
+                std::printf("F0/N predictor loaded from %s (%.1f MB)\n",
+                           f0n_path.c_str(), st_f0n.st_size / 1e6);
+            } catch (const c10::Error& e) {
+                std::fprintf(stderr, "Failed to load F0/N predictor: %s\n", e.what());
+            }
+        } else {
+            std::fprintf(stderr, "WARNING: F0/N predictor not found at %s — F0/noise will be zero (degraded quality)\n", f0n_path.c_str());
+        }
+
         std::string espeak_data = resolve_espeak_data_dir();
         if (espeak_data.empty()) {
             std::fprintf(stderr, "Cannot find espeak-ng-data directory. "
@@ -696,21 +719,42 @@ public:
         auto t_en_cpu = t_en.squeeze(0).contiguous().cpu();
         int t_en_dim = static_cast<int>(t_en_cpu.size(0));
         auto asr = torch::zeros({1, t_en_dim, total_frames});
+
+        auto d_cpu = dur_out.d.squeeze(0).contiguous().cpu();
+        int d_dim = static_cast<int>(d_cpu.size(1));
+        auto d_aligned = torch::zeros({1, d_dim, total_frames});
+
         int64_t pos = 0;
         for (int i = 0; i < actual_len && i < pred_dur.size(0); i++) {
             int64_t dur = dur_acc[i];
             if (dur <= 0) continue;
-            auto col = t_en_cpu.select(1, i);
+            auto t_col = t_en_cpu.select(1, i);
+            auto d_col = d_cpu.select(0, i);
             for (int64_t j = 0; j < dur && (pos + j) < total_frames; j++) {
-                asr[0].select(1, pos + j) = col;
+                asr[0].select(1, pos + j) = t_col;
+                d_aligned[0].select(1, pos + j) = d_col;
             }
             pos += dur;
         }
 
         int64_t f0_frames = total_frames * 2;
         result.asr = asr;
-        result.f0_pred = torch::zeros({1, f0_frames});
-        result.n_pred = torch::zeros({1, f0_frames});
+
+        if (f0n_available_) {
+            try {
+                torch::NoGradGuard no_grad;
+                auto f0n_out = f0n_predictor_.forward({d_aligned, dur_out.s}).toTuple();
+                result.f0_pred = f0n_out->elements()[0].toTensor();
+                result.n_pred = f0n_out->elements()[1].toTensor();
+            } catch (const c10::Error& e) {
+                std::fprintf(stderr, "F0/N prediction failed: %s — falling back to zeros\n", e.what());
+                result.f0_pred = torch::zeros({1, f0_frames});
+                result.n_pred = torch::zeros({1, f0_frames});
+            }
+        } else {
+            result.f0_pred = torch::zeros({1, f0_frames});
+            result.n_pred = torch::zeros({1, f0_frames});
+        }
         result.ref_s_dec = dur_out.ref_s_out.slice(1, 0, 128);
         if (!result.ref_s_dec.defined() || result.ref_s_dec.size(1) < 128) {
             result.ref_s_dec = ref_s.slice(1, 0, 128);
@@ -776,6 +820,8 @@ private:
     std::unordered_map<std::string, std::string> phoneme_cache_;
     std::mutex cache_mutex_;
     bool coreml_available_ = false;
+    torch::jit::script::Module f0n_predictor_;
+    bool f0n_available_ = false;
 #ifdef KOKORO_COREML
     std::unique_ptr<CoreMLDurationModel> coreml_duration_;
     std::unique_ptr<CoreMLSplitDecoder> coreml_split_decoder_;
@@ -1179,13 +1225,12 @@ private:
             }
 
             float raw_peak = normalize_audio(samples);
+            apply_fade_in(samples);
 
-            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
-                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak,
-                        raw_peak > 1.0f ? " -> normalized" : "");
-            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f%s)",
-                             samples.size(), (long long)elapsed, raw_peak,
-                             raw_peak > 1.0f ? " -> normalized" : "");
+            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f -> 0.90)\n",
+                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak);
+            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f -> 0.90)",
+                             samples.size(), (long long)elapsed, raw_peak);
 
             send_audio_to_downstream(ctx->call_id, samples);
         }
@@ -1197,26 +1242,38 @@ private:
             return;
         }
 
-        Packet audio_pkt;
-        audio_pkt.call_id = call_id;
-
+        static constexpr size_t CHUNK_SAMPLES = 4800;
         size_t header_size = sizeof(int32_t);
-        audio_pkt.payload_size = static_cast<uint32_t>(header_size + samples.size() * sizeof(float));
-        audio_pkt.payload.resize(audio_pkt.payload_size);
+        size_t total_sent = 0;
 
-        int32_t sr = KOKORO_SAMPLE_RATE;
-        std::memcpy(audio_pkt.payload.data(), &sr, sizeof(int32_t));
-        std::memcpy(audio_pkt.payload.data() + header_size, samples.data(),
-                   samples.size() * sizeof(float));
+        for (size_t offset = 0; offset < samples.size(); offset += CHUNK_SAMPLES) {
+            size_t count = std::min(CHUNK_SAMPLES, samples.size() - offset);
 
-        audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 0);
-        audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 1);
-        if (node_.send_to_downstream(audio_pkt)) {
-            std::printf("Sent %zu samples @ %d Hz for call %u to OAP\n",
-                       samples.size(), KOKORO_SAMPLE_RATE, call_id);
-        } else {
-            std::fprintf(stderr, "Failed to send audio for call %u\n", call_id);
-            log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio to OAP");
+            Packet audio_pkt;
+            audio_pkt.call_id = call_id;
+            audio_pkt.payload_size = static_cast<uint32_t>(header_size + count * sizeof(float));
+            audio_pkt.payload.resize(audio_pkt.payload_size);
+
+            int32_t sr = KOKORO_SAMPLE_RATE;
+            std::memcpy(audio_pkt.payload.data(), &sr, sizeof(int32_t));
+            std::memcpy(audio_pkt.payload.data() + header_size,
+                       samples.data() + offset, count * sizeof(float));
+
+            audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 0);
+            audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 1);
+            if (node_.send_to_downstream(audio_pkt)) {
+                total_sent += count;
+            } else {
+                std::fprintf(stderr, "Failed to send audio chunk for call %u at offset %zu\n", call_id, offset);
+                log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio chunk to OAP");
+                break;
+            }
+        }
+
+        if (total_sent > 0) {
+            std::printf("Sent %zu samples @ %d Hz for call %u to OAP (%zu chunks)\n",
+                       total_sent, KOKORO_SAMPLE_RATE, call_id,
+                       (total_sent + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES);
         }
     }
 
