@@ -18,9 +18,17 @@ Do not make assumptions on important decisions — get clarification first.
 
 ## Workflow Steps
 
-### [ ] Step: Implementation
+### [x] Step: Implementation
+<!-- chat-id: fd8fb863-e6bf-485b-961a-faf0ed5274ac -->
 
-**Debug requests, questions, and investigations:** answer or investigate first. Do not create a plan upfront — the user needs an answer, not a plan. A plan may become relevant later once the investigation reveals what needs to change.
+**Scope**: Large — 4 deliverables across install, build config, build scripts, and testing.
+
+**Plan**:
+- [x] Investigate existing repo structure, install.sh, build scripts, CMakeLists, docs
+- [x] Create `runmetoinstalleverythingfirst` shell script
+- [x] Create `.zencoder/rules/build.md` build guide
+- [x] Create `runmetobuildeverything` shell script
+- [x] Test scripts (syntax validation, help flags, preflight checks)
 
 **For all other tasks**, before writing any code, assess the scope of the actual change (not the prompt length — a one-sentence prompt can describe a large feature). Scale your approach:
 

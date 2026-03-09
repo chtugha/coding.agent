@@ -1,0 +1,201 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+step()  { echo -e "\n${BLUE}==============================${NC}"; echo -e "${BLUE} $1${NC}"; echo -e "${BLUE}==============================${NC}"; }
+
+NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+FORCE_REBUILD=0
+SKIP_DEPS=0
+BUILD_TESTS=ON
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force)      FORCE_REBUILD=1; shift ;;
+        --skip-deps)  SKIP_DEPS=1; shift ;;
+        --no-tests)   BUILD_TESTS=OFF; shift ;;
+        -h|--help)
+            echo "WhisperTalk - Build Everything"
+            echo ""
+            echo "Usage: ./runmetobuildeverything [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --force       Force rebuild even if libraries already exist"
+            echo "  --skip-deps   Skip building whisper.cpp and llama.cpp"
+            echo "  --no-tests    Skip building tests"
+            echo "  -h, --help    Show this help"
+            echo ""
+            echo "Build order:"
+            echo "  1. whisper.cpp (CoreML + Metal, static libs)"
+            echo "  2. llama.cpp (Metal, static libs)"
+            echo "  3. WhisperTalk main project (all services)"
+            echo ""
+            echo "Prerequisites: run ./runmetoinstalleverythingfirst"
+            exit 0
+            ;;
+        *) error "Unknown option: $1. Use --help for usage." ;;
+    esac
+done
+
+preflight_check() {
+    step "Preflight checks"
+
+    if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+        error "macOS Apple Silicon required"
+    fi
+
+    if ! command -v cmake &> /dev/null; then
+        error "cmake not found. Run ./runmetoinstalleverythingfirst first."
+    fi
+
+    if [ ! -d "whisper-cpp/.git" ]; then
+        error "whisper-cpp not found. Run ./runmetoinstalleverythingfirst first."
+    fi
+
+    if [ ! -d "llama-cpp/.git" ]; then
+        error "llama-cpp not found. Run ./runmetoinstalleverythingfirst first."
+    fi
+
+    info "All prerequisites OK"
+}
+
+build_whisper_cpp() {
+    step "Building whisper.cpp"
+
+    local lib="whisper-cpp/build/src/libwhisper.a"
+    if [ -f "$lib" ] && [ "$FORCE_REBUILD" != "1" ]; then
+        info "whisper.cpp already built (use --force to rebuild)"
+        return
+    fi
+
+    info "Configuring whisper.cpp (CoreML + Metal, static, Release)..."
+    cmake -S whisper-cpp -B whisper-cpp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DWHISPER_COREML=ON \
+        -DWHISPER_METAL=ON \
+        -DWHISPER_CCACHE=OFF \
+        -DWHISPER_BUILD_TESTS=OFF \
+        -DWHISPER_BUILD_EXAMPLES=OFF
+
+    info "Building whisper.cpp (-j${NCPU})..."
+    cmake --build whisper-cpp/build --config Release -j"${NCPU}"
+
+    if [ -f "$lib" ]; then
+        info "whisper.cpp built: $lib"
+    else
+        error "whisper.cpp build failed: $lib not found"
+    fi
+}
+
+build_llama_cpp() {
+    step "Building llama.cpp"
+
+    local lib="llama-cpp/build/src/libllama.a"
+    if [ -f "$lib" ] && [ "$FORCE_REBUILD" != "1" ]; then
+        info "llama.cpp already built (use --force to rebuild)"
+        return
+    fi
+
+    info "Configuring llama.cpp (Metal, static, Release)..."
+    cmake -S llama-cpp -B llama-cpp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DLLAMA_METAL=ON
+
+    info "Building llama.cpp (-j${NCPU})..."
+    cmake --build llama-cpp/build --config Release -j"${NCPU}"
+
+    if [ -f "$lib" ]; then
+        info "llama.cpp built: $lib"
+    else
+        error "llama.cpp build failed: $lib not found"
+    fi
+}
+
+build_main_project() {
+    step "Building WhisperTalk"
+
+    eval "$(conda shell.zsh hook)" 2>/dev/null || true
+    conda activate whispertalk 2>/dev/null || true
+
+    info "Configuring WhisperTalk (CoreML, Release, tests=${BUILD_TESTS})..."
+    cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DKOKORO_COREML=ON \
+        -DBUILD_TESTS="${BUILD_TESTS}"
+
+    info "Building WhisperTalk (-j${NCPU})..."
+    cmake --build build --config Release -j"${NCPU}"
+
+    info "WhisperTalk build complete"
+}
+
+verify_binaries() {
+    step "Verifying binaries"
+
+    SERVICES=(
+        "bin/sip-client"
+        "bin/inbound-audio-processor"
+        "bin/vad-service"
+        "bin/outbound-audio-processor"
+        "bin/whisper-service"
+        "bin/llama-service"
+        "bin/kokoro-service"
+        "bin/frontend"
+    )
+
+    ALL_OK=true
+    for svc in "${SERVICES[@]}"; do
+        if [ -f "$svc" ]; then
+            info "  $svc ($(du -h "$svc" | cut -f1))"
+        else
+            warn "  MISSING: $svc"
+            ALL_OK=false
+        fi
+    done
+
+    echo ""
+    if $ALL_OK; then
+        echo -e "${GREEN}===============================================${NC}"
+        echo -e "${GREEN} Build Complete - All binaries ready!${NC}"
+        echo -e "${GREEN}===============================================${NC}"
+        echo ""
+        info "Start with: cd bin && ./frontend"
+        info "Web UI: http://localhost:8080"
+        if [ "$BUILD_TESTS" = "ON" ]; then
+            echo ""
+            info "Run tests: cd build && ctest --output-on-failure"
+        fi
+    else
+        echo -e "${YELLOW}===============================================${NC}"
+        echo -e "${YELLOW} Build finished with missing binaries${NC}"
+        echo -e "${YELLOW}===============================================${NC}"
+        warn "Some binaries are missing. Check warnings above."
+    fi
+}
+
+preflight_check
+
+if [ "$SKIP_DEPS" != "1" ]; then
+    build_whisper_cpp
+    build_llama_cpp
+else
+    info "Skipping dependency builds (--skip-deps)"
+fi
+
+build_main_project
+verify_binaries

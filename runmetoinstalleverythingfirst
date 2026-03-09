@@ -1,0 +1,387 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+step()  { echo -e "\n${BLUE}==============================${NC}"; echo -e "${BLUE} $1${NC}"; echo -e "${BLUE}==============================${NC}"; }
+
+NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+check_macos() {
+    step "Checking macOS / Apple Silicon"
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        error "This script is designed for macOS only (Apple Silicon required)"
+    fi
+    if [[ "$(uname -m)" != "arm64" ]]; then
+        error "Apple Silicon (arm64) required. Found: $(uname -m)"
+    fi
+    info "macOS $(sw_vers -productVersion) on Apple Silicon"
+}
+
+check_and_install_homebrew() {
+    step "Checking Homebrew"
+    if ! command -v brew &> /dev/null; then
+        warn "Homebrew not found. Installing..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+        echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zshrc
+        info "Homebrew installed"
+    else
+        info "Homebrew: $(brew --version | head -1)"
+    fi
+}
+
+install_system_deps() {
+    step "Installing system dependencies"
+    DEPS=("cmake" "wget" "git" "espeak-ng" "ccache")
+    for dep in "${DEPS[@]}"; do
+        if ! brew list "$dep" &> /dev/null; then
+            info "Installing $dep..."
+            brew install "$dep"
+        else
+            info "$dep already installed"
+        fi
+    done
+}
+
+check_and_install_python() {
+    step "Checking Python / Miniconda"
+    if ! command -v conda &> /dev/null; then
+        warn "Miniconda not found. Installing..."
+        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh"
+        curl -fsSL -o /tmp/miniconda.sh "$MINICONDA_URL"
+        bash /tmp/miniconda.sh -b -p "$HOME/miniconda3"
+        rm /tmp/miniconda.sh
+        eval "$($HOME/miniconda3/bin/conda shell.zsh hook)"
+        echo 'eval "$($HOME/miniconda3/bin/conda shell.zsh hook)"' >> ~/.zshrc
+        info "Miniconda installed"
+    else
+        info "Miniconda: $(conda --version)"
+    fi
+    eval "$(conda shell.zsh hook)" 2>/dev/null || true
+}
+
+setup_python_env() {
+    step "Setting up Python environment (whispertalk)"
+    eval "$(conda shell.zsh hook)" 2>/dev/null || true
+
+    if ! conda env list | grep -q "^whispertalk "; then
+        info "Creating whispertalk conda environment..."
+        conda create -n whispertalk python=3.12 -y
+    else
+        info "whispertalk environment already exists"
+    fi
+
+    conda activate whispertalk
+
+    info "Installing Python dependencies..."
+    pip install --quiet --upgrade pip
+    pip install --quiet torch torchvision torchaudio
+    pip install --quiet coremltools ane_transformers
+    pip install --quiet openai-whisper
+    pip install --quiet huggingface-hub
+    info "Python environment ready"
+}
+
+clone_or_update_repo() {
+    local name="$1"
+    local url="$2"
+    local dir="$3"
+
+    if [ -d "$dir/.git" ]; then
+        info "$name: updating existing clone..."
+        cd "$dir"
+        git fetch origin
+        git pull origin "$(git rev-parse --abbrev-ref HEAD)" || git pull origin main || git pull origin master
+        cd "$SCRIPT_DIR"
+    elif [ -d "$dir" ]; then
+        if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            rmdir "$dir"
+            info "$name: cloning from $url..."
+            git clone "$url" "$dir"
+        else
+            warn "$name: directory exists but is not a git repo. Backing up and re-cloning..."
+            mv "$dir" "${dir}.bak.$(date +%s)"
+            git clone "$url" "$dir"
+        fi
+    else
+        info "$name: cloning from $url..."
+        git clone "$url" "$dir"
+    fi
+}
+
+setup_whisper_cpp() {
+    step "Setting up whisper.cpp"
+    clone_or_update_repo "whisper.cpp" "https://github.com/ggerganov/whisper.cpp.git" "$SCRIPT_DIR/whisper-cpp"
+    info "whisper.cpp ready at whisper-cpp/"
+}
+
+setup_llama_cpp() {
+    step "Setting up llama.cpp"
+    clone_or_update_repo "llama.cpp" "https://github.com/ggerganov/llama.cpp.git" "$SCRIPT_DIR/llama-cpp"
+    info "llama.cpp ready at llama-cpp/"
+}
+
+setup_kokoro() {
+    step "Checking Kokoro dependencies"
+    eval "$(conda shell.zsh hook)" 2>/dev/null || true
+    conda activate whispertalk
+
+    if ! python3 -c "import kokoro" 2>/dev/null; then
+        info "Installing kokoro package..."
+        pip install --quiet kokoro
+    else
+        info "kokoro package already installed"
+    fi
+    info "Kokoro dependencies ready"
+}
+
+download_whisper_models() {
+    step "Downloading Whisper models"
+    mkdir -p bin/models
+
+    if [ -f "bin/models/ggml-large-v3-turbo-q5_0.bin" ]; then
+        info "ggml-large-v3-turbo-q5_0.bin already exists"
+    else
+        info "Downloading ggml-large-v3-turbo-q5_0.bin (~547 MB)..."
+        wget -q --show-progress \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin" \
+            -O bin/models/ggml-large-v3-turbo-q5_0.bin
+    fi
+
+    if [ -f "bin/models/ggml-large-v3-q5_0.bin" ]; then
+        info "ggml-large-v3-q5_0.bin already exists"
+    else
+        info "Downloading ggml-large-v3-q5_0.bin (~1.0 GB)..."
+        wget -q --show-progress \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin" \
+            -O bin/models/ggml-large-v3-q5_0.bin
+    fi
+
+    info "Whisper models downloaded"
+}
+
+generate_whisper_coreml_encoder() {
+    local model_name="$1"
+    local encoder_name="ggml-${model_name}-encoder.mlmodelc"
+
+    if [ -d "bin/models/${encoder_name}" ]; then
+        info "CoreML encoder for ${model_name} already exists"
+        return
+    fi
+
+    eval "$(conda shell.zsh hook)" 2>/dev/null || true
+    conda activate whispertalk
+
+    cd whisper-cpp
+
+    if [ ! -f "models/ggml-${model_name}.bin" ]; then
+        info "Downloading full ${model_name} model for CoreML conversion..."
+        bash models/download-ggml-model.sh "${model_name}"
+    fi
+
+    info "Converting ${model_name} to CoreML (this may take 5-10 minutes)..."
+    python3 models/convert-whisper-to-coreml.py \
+        --model "${model_name}" \
+        --encoder-only True \
+        --optimize-ane True
+
+    info "Compiling CoreML model for ${model_name}..."
+    xcrun coremlcompiler compile \
+        "models/coreml-encoder-${model_name}.mlpackage" \
+        models/
+
+    if [ -d "models/coreml-encoder-${model_name}.mlmodelc" ]; then
+        mv "models/coreml-encoder-${model_name}.mlmodelc" "models/${encoder_name}"
+    fi
+
+    if [ -d "models/${encoder_name}" ]; then
+        cp -r "models/${encoder_name}" "$SCRIPT_DIR/bin/models/"
+        info "CoreML encoder for ${model_name} generated"
+    else
+        warn "CoreML encoder compilation for ${model_name} may have failed"
+    fi
+
+    cd "$SCRIPT_DIR"
+}
+
+generate_whisper_coreml() {
+    step "Generating Whisper CoreML encoders"
+    generate_whisper_coreml_encoder "large-v3"
+    generate_whisper_coreml_encoder "large-v3-turbo"
+}
+
+download_llama_model() {
+    step "Downloading LLaMA model"
+    mkdir -p bin/models
+
+    if [ -f "bin/models/Llama-3.2-1B-Instruct-Q8_0.gguf" ]; then
+        info "LLaMA model already exists"
+        return
+    fi
+
+    eval "$(conda shell.zsh hook)" 2>/dev/null || true
+    conda activate whispertalk
+
+    info "Downloading Llama-3.2-1B-Instruct-Q8_0.gguf (~1.2 GB)..."
+    if command -v huggingface-cli &> /dev/null; then
+        huggingface-cli download bartowski/Llama-3.2-1B-Instruct-GGUF \
+            Llama-3.2-1B-Instruct-Q8_0.gguf \
+            --local-dir bin/models/ \
+            --local-dir-use-symlinks False
+    else
+        wget -q --show-progress \
+            "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q8_0.gguf" \
+            -O bin/models/Llama-3.2-1B-Instruct-Q8_0.gguf
+    fi
+
+    info "LLaMA model downloaded"
+}
+
+export_kokoro_models() {
+    step "Exporting Kokoro TTS models"
+
+    if [ -d "bin/models/kokoro-german/coreml/kokoro_duration.mlmodelc" ] && \
+       [ -d "bin/models/kokoro-german/decoder_variants" ]; then
+        info "Kokoro models already exist"
+        return
+    fi
+
+    eval "$(conda shell.zsh hook)" 2>/dev/null || true
+    conda activate whispertalk
+
+    info "Running Kokoro export script (this may take 10-15 minutes)..."
+    python3 scripts/export_kokoro_models.py
+
+    info "Kokoro models exported"
+}
+
+verify_installation() {
+    step "Verifying installation"
+
+    ALL_OK=true
+
+    for item in \
+        "whisper-cpp/.git:whisper.cpp clone" \
+        "llama-cpp/.git:llama.cpp clone"; do
+        path="${item%%:*}"
+        name="${item##*:}"
+        if [ -d "$path" ]; then
+            info "  $name"
+        else
+            warn "  MISSING: $name"
+            ALL_OK=false
+        fi
+    done
+
+    for item in \
+        "bin/models/ggml-large-v3-turbo-q5_0.bin:Whisper turbo model" \
+        "bin/models/ggml-large-v3-q5_0.bin:Whisper large-v3 model" \
+        "bin/models/Llama-3.2-1B-Instruct-Q8_0.gguf:LLaMA model"; do
+        path="${item%%:*}"
+        name="${item##*:}"
+        if [ -f "$path" ]; then
+            info "  $name ($(du -h "$path" | cut -f1))"
+        else
+            warn "  MISSING: $name"
+            ALL_OK=false
+        fi
+    done
+
+    for item in \
+        "bin/models/ggml-large-v3-encoder.mlmodelc:Whisper large-v3 CoreML encoder" \
+        "bin/models/ggml-large-v3-turbo-encoder.mlmodelc:Whisper turbo CoreML encoder" \
+        "bin/models/kokoro-german/coreml/kokoro_duration.mlmodelc:Kokoro duration model" \
+        "bin/models/kokoro-german/decoder_variants:Kokoro decoder variants"; do
+        path="${item%%:*}"
+        name="${item##*:}"
+        if [ -e "$path" ]; then
+            info "  $name"
+        else
+            warn "  MISSING: $name"
+            ALL_OK=false
+        fi
+    done
+
+    echo ""
+    if $ALL_OK; then
+        echo -e "${GREEN}===============================================${NC}"
+        echo -e "${GREEN} Installation Complete!${NC}"
+        echo -e "${GREEN}===============================================${NC}"
+        echo ""
+        info "Next step: run ./runmetobuildeverything to build all binaries"
+    else
+        echo -e "${YELLOW}===============================================${NC}"
+        echo -e "${YELLOW} Installation finished with warnings${NC}"
+        echo -e "${YELLOW}===============================================${NC}"
+        echo ""
+        warn "Some components are missing. Check the warnings above."
+        warn "You may still try: ./runmetobuildeverything"
+    fi
+}
+
+main() {
+    echo -e "${BLUE}===============================================${NC}"
+    echo -e "${BLUE} WhisperTalk - Full Installation${NC}"
+    echo -e "${BLUE}===============================================${NC}"
+
+    check_macos
+    check_and_install_homebrew
+    install_system_deps
+    check_and_install_python
+    setup_python_env
+
+    setup_whisper_cpp
+    setup_llama_cpp
+    setup_kokoro
+
+    mkdir -p bin/models
+
+    download_whisper_models
+    generate_whisper_coreml
+    download_llama_model
+    export_kokoro_models
+
+    verify_installation
+}
+
+if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
+    echo "WhisperTalk - Full Installation Script"
+    echo ""
+    echo "Usage: ./runmetoinstalleverythingfirst"
+    echo ""
+    echo "This script will:"
+    echo "  1. Check macOS + Apple Silicon"
+    echo "  2. Install Homebrew (if not present)"
+    echo "  3. Install system deps (cmake, wget, git, espeak-ng, ccache)"
+    echo "  4. Install Miniconda (if not present)"
+    echo "  5. Create Python environment with PyTorch, CoreML tools"
+    echo "  6. Clone/update whisper.cpp from GitHub (latest)"
+    echo "  7. Clone/update llama.cpp from GitHub (latest)"
+    echo "  8. Check Kokoro dependencies"
+    echo "  9. Download Whisper models (large-v3-q5_0, large-v3-turbo-q5_0)"
+    echo "  10. Generate Whisper CoreML encoders (large-v3, large-v3-turbo)"
+    echo "  11. Download LLaMA model (Llama-3.2-1B-Instruct-Q8_0)"
+    echo "  12. Export Kokoro TTS models (CoreML duration + decoder)"
+    echo ""
+    echo "Requirements:"
+    echo "  - macOS (Apple Silicon M1/M2/M3/M4)"
+    echo "  - ~15 GB free disk space"
+    echo "  - Internet connection"
+    echo ""
+    echo "After installation, run: ./runmetobuildeverything"
+    exit 0
+fi
+
+main
