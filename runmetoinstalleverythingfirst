@@ -299,9 +299,13 @@ export_kokoro_models() {
 
     eval "$(conda shell.zsh hook)" 2>/dev/null || eval "$(conda shell.bash hook)" 2>/dev/null || true
 
+    if ! command -v conda &> /dev/null; then
+        error "conda is required for Kokoro model export. Run the install steps first."
+    fi
+
     info "Running Kokoro export script (this may take 10-15 minutes)..."
     info "The export script manages its own conda env (kokoro_coreml) with pinned versions."
-    python3 scripts/export_kokoro_models.py
+    conda run --no-banner -n base python3 scripts/export_kokoro_models.py
 
     info "Kokoro models exported"
 }
