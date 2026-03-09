@@ -586,6 +586,10 @@ private:
         state->buffer.clear();
         state->read_pos = 0;
         std::memset(state->fir_history, 0, sizeof(state->fir_history));
+        state->first_chunk = true;
+        state->dc_x_prev = 0.0f;
+        state->dc_y_prev = 0.0f;
+        state->pres_x1 = state->pres_x2 = state->pres_y1 = state->pres_y2 = 0.0f;
         log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
     }
 

@@ -1072,6 +1072,7 @@ private:
             if (samples.empty()) return "ERROR:synthesis failed\n";
 
             normalize_audio(samples);
+            apply_fade_in(samples);
 
             std::ofstream out(path, std::ios::binary);
             if (!out.is_open()) return "ERROR:cannot open " + path + "\n";
@@ -1227,10 +1228,12 @@ private:
             float raw_peak = normalize_audio(samples);
             apply_fade_in(samples);
 
-            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f -> 0.90)\n",
-                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak);
-            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f -> 0.90)",
-                             samples.size(), (long long)elapsed, raw_peak);
+            const char* norm_tag = (raw_peak > 0.01f && std::abs(raw_peak - 0.90f) > 0.001f)
+                                   ? " -> normalized" : "";
+            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
+                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak, norm_tag);
+            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f%s)",
+                             samples.size(), (long long)elapsed, raw_peak, norm_tag);
 
             send_audio_to_downstream(ctx->call_id, samples);
         }
