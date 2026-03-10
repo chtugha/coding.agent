@@ -113,6 +113,13 @@ def download_models():
     os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(os.path.join(MODELS_DIR, 'voices'), exist_ok=True)
 
+    hf_token = os.environ.get('HF_TOKEN', '')
+    auth_header = f'-H "Authorization: Bearer {hf_token}"' if hf_token else ''
+    if not hf_token:
+        print("  NOTE: HF_TOKEN not set. If downloads fail with 401, set it:")
+        print("    export HF_TOKEN=hf_...")
+        print("    (get a token at https://huggingface.co/settings/tokens)")
+
     downloads = [
         (MODEL_PATH, MODEL_URL),
         (CONFIG_PATH, CONFIG_URL),
@@ -121,13 +128,18 @@ def download_models():
         downloads.append((os.path.join(MODELS_DIR, 'voices', f'{voice_name}.pt'), url))
 
     for path, url in downloads:
-        if os.path.exists(path):
+        if os.path.exists(path) and os.path.getsize(path) > 1000:
             print(f"  Already exists: {os.path.basename(path)}")
             continue
+        if os.path.exists(path) and os.path.getsize(path) <= 1000:
+            os.remove(path)
         print(f"  Downloading {os.path.basename(path)}...")
-        run_cmd(f'curl -L -o "{path}" "{url}"')
+        run_cmd(f'curl -L {auth_header} -o "{path}" "{url}"')
         if not os.path.exists(path) or os.path.getsize(path) < 1000:
             print(f"  FAILED: {path} is missing or too small")
+            if not hf_token:
+                print(f"  The HuggingFace repo may require authentication.")
+                print(f"  Set HF_TOKEN and retry: export HF_TOKEN=hf_...")
             sys.exit(1)
         print(f"  OK ({os.path.getsize(path) / 1e6:.1f} MB)")
 
