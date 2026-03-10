@@ -59,12 +59,7 @@ CONDA_ENV_NAME = 'kokoro_coreml'
 REQUIRED_TORCH = '2.5'
 REQUIRED_COREMLTOOLS = '8.3'
 
-MODEL_URL = 'https://huggingface.co/Tundragoon/Kokoro-German/resolve/main/kokoro-german-v1_1-de.pth'
-CONFIG_URL = 'https://huggingface.co/Tundragoon/Kokoro-German/resolve/main/config.json'
-VOICE_URLS = {
-    'df_eva': 'https://huggingface.co/Tundragoon/Kokoro-German/resolve/main/voices/df_eva.pt',
-    'dm_bernd': 'https://huggingface.co/Tundragoon/Kokoro-German/resolve/main/voices/dm_bernd.pt',
-}
+HF_REPO_ID = 'Tundragoon/Kokoro-German'
 
 BUCKETS = [
     {"name": "3s",  "asr_frames": 72,  "f0_frames": 144},
@@ -108,52 +103,63 @@ def ensure_conda_env():
     return conda_python
 
 
+def _ensure_huggingface_hub():
+    try:
+        import huggingface_hub
+        return huggingface_hub
+    except ImportError:
+        print("  Installing huggingface_hub...")
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'huggingface_hub'],
+                       check=True)
+        import huggingface_hub
+        return huggingface_hub
+
+
 def download_models():
     print("\n=== Downloading models ===")
     os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(os.path.join(MODELS_DIR, 'voices'), exist_ok=True)
+
+    hf = _ensure_huggingface_hub()
 
     hf_token = os.environ.get('HF_TOKEN', '')
     if not hf_token:
         print("  HF_TOKEN not set. The Kokoro model repo may require authentication.")
         print("  Get a token at: https://huggingface.co/settings/tokens")
         hf_token = input("  Paste your HuggingFace token (or press Enter to try without): ").strip()
-    auth_header = f'-H "Authorization: Bearer {hf_token}"' if hf_token else ''
+    token = hf_token if hf_token else None
 
-    downloads = [
-        (MODEL_PATH, MODEL_URL),
-        (CONFIG_PATH, CONFIG_URL),
+    files = [
+        ('kokoro-german-v1_1-de.pth', MODEL_PATH),
+        ('config.json', CONFIG_PATH),
+        ('voices/df_eva.pt', os.path.join(MODELS_DIR, 'voices', 'df_eva.pt')),
+        ('voices/dm_bernd.pt', os.path.join(MODELS_DIR, 'voices', 'dm_bernd.pt')),
     ]
-    for voice_name, url in VOICE_URLS.items():
-        downloads.append((os.path.join(MODELS_DIR, 'voices', f'{voice_name}.pt'), url))
 
-    for path, url in downloads:
-        if os.path.exists(path) and os.path.getsize(path) > 1000:
-            print(f"  Already exists: {os.path.basename(path)}")
+    for repo_path, local_path in files:
+        if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
+            print(f"  Already exists: {os.path.basename(local_path)}")
             continue
-        if os.path.exists(path) and os.path.getsize(path) <= 1000:
-            os.remove(path)
-        print(f"  Downloading {os.path.basename(path)}...")
-        result = run_cmd(f'curl --fail -L -S {auth_header} -o "{path}" "{url}"', check=False)
-        if result.returncode != 0:
-            print(f"  FAILED: curl exit code {result.returncode}")
-            print(f"  {result.stderr.strip()}")
-            if os.path.exists(path):
-                os.remove(path)
-            if '401' in result.stderr or '403' in result.stderr:
-                print(f"  Authentication failed. Check your token and ensure you have")
-                print(f"  accepted the model license at: https://huggingface.co/Tundragoon/Kokoro-German")
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        print(f"  Downloading {repo_path}...")
+        try:
+            downloaded = hf.hf_hub_download(
+                repo_id=HF_REPO_ID,
+                filename=repo_path,
+                token=token,
+                local_dir=None,
+            )
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            shutil.copy2(downloaded, local_path)
+            print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
+        except Exception as e:
+            print(f"  FAILED: {e}")
+            if '401' in str(e) or '403' in str(e) or 'Access' in str(e):
+                print(f"  You may need to accept the license at:")
+                print(f"    https://huggingface.co/{HF_REPO_ID}")
+                print(f"  Then re-run with a valid token.")
             sys.exit(1)
-        if not os.path.exists(path) or os.path.getsize(path) < 1000:
-            if os.path.exists(path):
-                with open(path, 'r', errors='replace') as f:
-                    content = f.read(500)
-                print(f"  FAILED: Server returned error: {content}")
-                os.remove(path)
-            else:
-                print(f"  FAILED: {path} not created")
-            sys.exit(1)
-        print(f"  OK ({os.path.getsize(path) / 1e6:.1f} MB)")
 
 
 def load_kokoro_model(disable_complex=True):
