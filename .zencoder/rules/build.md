@@ -66,13 +66,13 @@ Key flags:
 cmake -S llama-cpp -B llama-cpp/build \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
-    -DLLAMA_METAL=ON
+    -DGGML_METAL=ON
 
 cmake --build llama-cpp/build --config Release -j$(sysctl -n hw.ncpu)
 ```
 
 Key flags:
-- `DLLAMA_METAL=ON` — enables Metal GPU acceleration
+- `DGGML_METAL=ON` — enables Metal GPU acceleration (replaces deprecated `DLLAMA_METAL`)
 - `DBUILD_SHARED_LIBS=OFF` — produces static `libllama.a`
 - `DCMAKE_BUILD_TYPE=Release` — always use Release
 

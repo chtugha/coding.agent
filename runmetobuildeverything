@@ -114,7 +114,7 @@ build_llama_cpp() {
     cmake -S llama-cpp -B llama-cpp/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
-        -DLLAMA_METAL=ON
+        -DGGML_METAL=ON
 
     info "Building llama.cpp (-j${NCPU})..."
     cmake --build llama-cpp/build --config Release -j"${NCPU}"
