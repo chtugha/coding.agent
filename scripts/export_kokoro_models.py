@@ -292,12 +292,52 @@ def patch_rsqrt(model):
             module.forward = types.MethodType(_patched_forward, module)
 
 
+def _register_missing_coreml_ops():
+    from coremltools.converters.mil.frontend.torch.torch_op_registry import _TORCH_OPS_REGISTRY, register_torch_op
+    from coremltools.converters.mil.frontend.torch.ops import _get_inputs
+    from coremltools.converters.mil import Builder as mb
+
+    if "new_ones" not in _TORCH_OPS_REGISTRY:
+        @register_torch_op
+        def new_ones(context, node):
+            inputs = _get_inputs(context, node)
+            shape = inputs[1]
+            dtype = inputs[2] if len(inputs) > 2 else None
+            is_bool = False
+            if dtype is not None and hasattr(dtype, 'val') and dtype.val == 11:
+                is_bool = True
+
+            is_scalar = False
+            if isinstance(shape, list):
+                if len(shape) == 0:
+                    is_scalar = True
+            elif hasattr(shape, 'shape') and len(shape.shape) == 1 and shape.shape[0] == 0:
+                is_scalar = True
+
+            if is_scalar:
+                val = True if is_bool else 1.0
+                context.add(mb.const(val=val, name=node.name))
+                return
+
+            if isinstance(shape, list):
+                shape = mb.concat(values=shape, axis=0)
+            else:
+                shape = mb.cast(x=shape, dtype="int32")
+
+            result = mb.fill(shape=shape, value=1.0, name=node.name + "_fill" if is_bool else node.name)
+            if is_bool:
+                result = mb.cast(x=result, dtype="bool", name=node.name)
+            context.add(result)
+
+
 def export_duration_model(kmodel):
     import torch
     import torch.nn as nn
     import numpy as np
     import coremltools as ct
     from kokoro.modules import AdaLayerNorm
+
+    _register_missing_coreml_ops()
 
     print("\n=== Exporting Duration Model (CoreML) ===")
 
