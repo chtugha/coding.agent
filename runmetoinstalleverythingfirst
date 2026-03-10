@@ -305,7 +305,7 @@ export_kokoro_models() {
 
     info "Running Kokoro export script (this may take 10-15 minutes)..."
     info "The export script manages its own conda env (kokoro_coreml) with pinned versions."
-    conda run --no-banner -n base python3 scripts/export_kokoro_models.py
+    python3 scripts/export_kokoro_models.py
 
     info "Kokoro models exported"
 }
