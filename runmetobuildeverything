@@ -131,12 +131,6 @@ build_llama_cpp() {
 build_main_project() {
     step "Building WhisperTalk"
 
-    eval "$(conda shell.zsh hook)" 2>/dev/null || eval "$(conda shell.bash hook)" 2>/dev/null || true
-    conda activate whispertalk 2>/dev/null || {
-        warn "Could not activate whispertalk conda env. libtorch detection may fail."
-        warn "If kokoro-service fails to build, run: conda activate whispertalk && ./runmetobuildeverything --skip-deps"
-    }
-
     info "Configuring WhisperTalk (CoreML, Release, tests=${BUILD_TESTS})..."
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \

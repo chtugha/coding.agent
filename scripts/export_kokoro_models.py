@@ -609,6 +609,22 @@ def export_split_decoder(kmodel):
             har_traced.save(har_path)
             print(f"  Saved HAR: {har_path} ({os.path.getsize(har_path) / 1024:.0f} KB)")
 
+        if name == "3s":
+            import struct as _struct
+            gen = decoder.generator
+            _w = gen.m_source.l_linear.weight.detach().cpu().numpy().flatten()
+            _b = gen.m_source.l_linear.bias.detach().cpu().numpy().flatten()
+            _real = har_traced.stft.weight_forward_real.detach().cpu().numpy().squeeze(1)
+            _imag = har_traced.stft.weight_forward_imag.detach().cpu().numpy().squeeze(1)
+            har_bin_path = os.path.join(DECODER_DIR, "har_weights.bin")
+            with open(har_bin_path, 'wb') as _f:
+                _f.write(b'HAR1')
+                _f.write(_struct.pack('9f', *_w))
+                _f.write(_struct.pack('f', _b[0]))
+                _f.write(_struct.pack('220f', *_real.flatten()))
+                _f.write(_struct.pack('220f', *_imag.flatten()))
+            print(f"  Saved HAR weights: {har_bin_path} ({os.path.getsize(har_bin_path)} bytes)")
+
         print("  Exporting CoreML split decoder...")
         wrapper = DecoderNoSourceWrapper(decoder)
         wrapper.eval()

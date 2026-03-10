@@ -1,4 +1,5 @@
-#include <torch/script.h>
+#include "../ktensor.h"
+#include "../har_source.h"
 #include <espeak-ng/speak_lib.h>
 #include <cstdio>
 #include <cstring>
@@ -211,23 +212,20 @@ int main() {
         }
     }
 
-    torch::Tensor voice_pack;
+    KTensor voice_pack;
     int voice_entries = 0;
 
     std::printf("\n[TEST 4] Voice pack loading (bin format)\n");
     {
         std::string bin_path = base_dir + "/df_eva_voice.bin";
-        std::string pt_path = base_dir + "/df_eva_embedding.pt";
         struct stat st;
         if (stat(bin_path.c_str(), &st) == 0) {
             std::ifstream f(bin_path, std::ios::binary);
             size_t file_size = static_cast<size_t>(st.st_size);
             size_t num_floats = file_size / sizeof(float);
             voice_entries = static_cast<int>(num_floats / 256);
-            std::vector<float> raw(num_floats);
-            f.read(reinterpret_cast<char*>(raw.data()), file_size);
-            voice_pack = torch::from_blob(raw.data(),
-                                          {voice_entries, 256}, torch::kFloat32).clone();
+            voice_pack = KTensor::zeros({(int64_t)voice_entries, 256});
+            f.read(reinterpret_cast<char*>(voice_pack.ptr()), file_size);
             std::printf("  Loaded from bin: [%d, 256]\n", voice_entries);
             if (voice_entries > 100) {
                 passed++;
@@ -236,31 +234,9 @@ int main() {
                 failed++;
                 std::printf("  FAIL: too few voice entries\n");
             }
-        } else if (stat(pt_path.c_str(), &st) == 0) {
-            try {
-                std::ifstream f(pt_path, std::ios::binary);
-                std::vector<char> data((std::istreambuf_iterator<char>(f)),
-                                      std::istreambuf_iterator<char>());
-                auto loaded = torch::jit::pickle_load(data).toTensor().to(torch::kFloat32);
-                voice_pack = loaded.squeeze(1);
-                voice_entries = static_cast<int>(voice_pack.size(0));
-                std::printf("  Loaded from pt (fallback): [%d, %lld]\n",
-                           voice_entries, voice_pack.size(1));
-                if (voice_entries > 100) {
-                    passed++;
-                    std::printf("  PASS\n");
-                } else {
-                    failed++;
-                    std::printf("  FAIL: unexpected shape\n");
-                }
-            } catch (const c10::Error& e) {
-                failed++;
-                std::printf("  FAIL: %s\n", e.what());
-                goto done;
-            }
         } else {
             failed++;
-            std::printf("  FAIL: no voice file found\n");
+            std::printf("  FAIL: no voice file found at %s\n", bin_path.c_str());
             goto done;
         }
     }
@@ -298,8 +274,7 @@ int main() {
                         initWithShape:ref_shape dataType:MLMultiArrayDataTypeFloat32 error:&error];
                     float* ref_ptr = (float*)ref_s_arr.dataPointer;
                     if (voice_pack.defined() && voice_entries > 0) {
-                        auto accessor = voice_pack.index({0}).contiguous().data_ptr<float>();
-                        std::memcpy(ref_ptr, accessor, 256 * sizeof(float));
+                        std::memcpy(ref_ptr, voice_pack.ptr(), 256 * sizeof(float));
                     }
 
                     NSArray<NSNumber*>* speed_shape = @[@1];
@@ -371,7 +346,6 @@ int main() {
                 };
 
                 std::map<std::string, MLModel*> cml_models;
-                std::map<std::string, torch::jit::script::Module> har_models;
                 for (auto& b : cml_buckets) {
                     std::string p = variants_dir + "/kokoro_decoder_split_" + std::string(b.name) + ".mlmodelc";
                     struct stat st2;
@@ -380,23 +354,17 @@ int main() {
                     NSError* err = nil;
                     MLModel* m = [MLModel modelWithContentsOfURL:[NSURL fileURLWithPath:ns_p] configuration:cfg error:&err];
                     if (m && !err) cml_models[b.name] = m;
-
-                    std::string hp = variants_dir + "/kokoro_har_" + std::string(b.name) + ".pt";
-                    struct stat st3;
-                    if (stat(hp.c_str(), &st3) == 0) {
-                        try {
-                            auto hm = torch::jit::load(hp);
-                            hm.eval();
-                            har_models[b.name] = std::move(hm);
-                        } catch (...) {}
-                    }
                 }
 
-                if (cml_models.empty() || har_models.empty()) {
-                    std::printf("  SKIP: CoreML split models or HAR models not loaded\n");
+                HarSource har_source;
+                std::string har_path = variants_dir + "/har_weights.bin";
+                bool har_ok = har_source.load(har_path);
+
+                if (cml_models.empty() || !har_ok) {
+                    std::printf("  SKIP: CoreML split models or HAR weights not loaded\n");
                 } else {
-                    std::printf("  Loaded %zu decoder buckets, %zu HAR models\n",
-                               cml_models.size(), har_models.size());
+                    std::printf("  Loaded %zu decoder buckets, HAR source from binary weights\n",
+                               cml_models.size());
 
                     std::vector<std::string> bench_texts = {
                         "Hallo Welt",
@@ -410,19 +378,14 @@ int main() {
 
                         auto& bk = cml_buckets[0];
                         auto cml_it = cml_models.find(bk.name);
-                        auto har_it = har_models.find(bk.name);
-                        if (cml_it == cml_models.end() || har_it == har_models.end()) continue;
+                        if (cml_it == cml_models.end()) continue;
 
-                        torch::Tensor f0_t = torch::zeros({1, bk.f0});
+                        std::vector<float> f0_data(bk.f0, 0.0f);
 
                         for (int r = 0; r < 4; r++) {
                             auto t0 = std::chrono::steady_clock::now();
 
-                            torch::Tensor har;
-                            {
-                                torch::NoGradGuard ng;
-                                har = har_it->second.forward({f0_t}).toTensor();
-                            }
+                            auto har = har_source.compute(f0_data.data(), bk.f0);
 
                             NSError* err = nil;
                             auto make_arr = [&](NSArray<NSNumber*>* shape, const float* data, size_t count) -> MLMultiArray* {
@@ -434,19 +397,16 @@ int main() {
                             };
 
                             std::vector<float> asr_data(512 * bk.asr, 0.0f);
-                            std::vector<float> f0_data(bk.f0, 0.0f);
                             std::vector<float> refs_data(256, 0.0f);
                             if (voice_pack.defined()) {
-                                auto vp = voice_pack.index({0}).contiguous().data_ptr<float>();
-                                std::memcpy(refs_data.data(), vp, 256 * sizeof(float));
+                                std::memcpy(refs_data.data(), voice_pack.ptr(), 256 * sizeof(float));
                             }
-                            auto har_data = har.contiguous().data_ptr<float>();
 
                             auto asr_a = make_arr(@[@1, @512, @(bk.asr)], asr_data.data(), asr_data.size());
                             auto f0_a = make_arr(@[@1, @(bk.f0)], f0_data.data(), f0_data.size());
                             auto n_a = make_arr(@[@1, @(bk.f0)], f0_data.data(), f0_data.size());
                             auto refs_a = make_arr(@[@1, @256], refs_data.data(), 256);
-                            auto har_a = make_arr(@[@1, @(bk.harc * 2), @(bk.hart)], har_data, har.numel());
+                            auto har_a = make_arr(@[@1, @(bk.harc * 2), @(bk.hart)], har.data(), har.size());
 
                             NSDictionary* dict = @{@"asr": asr_a, @"F0_pred": f0_a, @"N_pred": n_a,
                                                    @"ref_s": refs_a, @"har": har_a};
@@ -487,10 +447,10 @@ int main() {
             if (stat(p.c_str(), &st) == 0) {
                 cml_total += 102 * 1024 * 1024;
             }
-            std::string hp = variants_dir + "/kokoro_har_" + std::string(name) + ".pt";
-            if (stat(hp.c_str(), &st) == 0) cml_total += st.st_size;
         }
-        std::printf("  CoreML split decoder models: %.1f MB (3 buckets + HAR)\n", cml_total / 1e6);
+        std::string har_bin = variants_dir + "/har_weights.bin";
+        if (stat(har_bin.c_str(), &st) == 0) cml_total += st.st_size;
+        std::printf("  CoreML split decoder models: %.1f MB (3 buckets + HAR weights)\n", cml_total / 1e6);
 
         std::string dur_path = base_dir + "/coreml/kokoro_duration.mlmodelc";
         if (stat(dur_path.c_str(), &st) == 0) {

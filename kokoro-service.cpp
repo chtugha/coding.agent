@@ -3,7 +3,7 @@
 // Pipeline position: LLaMA → [Kokoro] → OAP
 //
 // Receives response text from LLaMA and synthesizes 24kHz float32 PCM audio using
-// the Kokoro TTS model (PyTorch TorchScript). Streams audio chunks to the
+// the Kokoro TTS model (CoreML). Streams audio chunks to the
 // Outbound Audio Processor (OAP) for downsampling and G.711 encoding.
 //
 // Phonemization pipeline:
@@ -25,9 +25,9 @@
 //
 // CoreML split decoder (KOKORO_COREML):
 //   CoreMLDurationModel and CoreMLDecoderModel wrap MLModel instances configured with
-//   MLComputeUnitsAll (ANE + GPU + CPU). Tensors are bridged between PyTorch and CoreML
+//   MLComputeUnitsAll (ANE + GPU + CPU). Data is bridged to CoreML
 //   via MLMultiArray memory copies. This path provides ~2-4× speedup on M-series chips
-//   compared to the PyTorch Metal backend for the decoder stage alone.
+//   compared to CPU-only inference for the decoder stage alone.
 //
 // Audio output normalization:
 //   normalize_audio() clips peaks above 0.95 to prevent clipping distortion in the
@@ -40,7 +40,8 @@
 //
 // CMD port (Kokoro base+2 = 13142): PING, STATUS, SET_LOG_LEVEL commands.
 //   STATUS returns: model path, upstream/downstream state, active call count.
-#include <torch/script.h>
+#include "ktensor.h"
+#include "har_source.h"
 #include <espeak-ng/speak_lib.h>
 #include "interconnect.h"
 #include <atomic>
@@ -224,15 +225,13 @@ public:
     }
 
     struct DurationOutput {
-        torch::Tensor pred_dur;
-        torch::Tensor d;
-        torch::Tensor t_en;
-        torch::Tensor s;
-        torch::Tensor ref_s_out;
+        std::vector<int64_t> pred_dur;
+        KTensor t_en;
+        KTensor ref_s_out;
     };
 
     bool predict(const std::vector<int32_t>& input_ids_vec,
-                 const torch::Tensor& ref_s_tensor,
+                 const KTensor& ref_s_tensor,
                  float speed_val,
                  const std::vector<int32_t>& attention_mask_vec,
                  DurationOutput& output) {
@@ -254,9 +253,7 @@ public:
             MLMultiArray* ref_s_arr = [[MLMultiArray alloc]
                 initWithShape:ref_shape dataType:MLMultiArrayDataTypeFloat32 error:&error];
             if (error) return false;
-            float* ref_ptr = (float*)ref_s_arr.dataPointer;
-            auto ref_accessor = ref_s_tensor.contiguous().cpu().data_ptr<float>();
-            std::memcpy(ref_ptr, ref_accessor, 256 * sizeof(float));
+            std::memcpy((float*)ref_s_arr.dataPointer, ref_s_tensor.ptr(), 256 * sizeof(float));
 
             NSArray<NSNumber*>* speed_shape = @[@1];
             MLMultiArray* speed_arr = [[MLMultiArray alloc]
@@ -288,33 +285,26 @@ public:
                 return false;
             }
 
-            auto extract = [&](NSString* name, std::vector<int64_t> shape) -> torch::Tensor {
+            auto extract = [&](NSString* name, std::initializer_list<int64_t> shape) -> KTensor {
                 MLMultiArray* arr = [result featureValueForName:name].multiArrayValue;
                 if (!arr) return {};
-                auto t = torch::zeros(shape);
-                int64_t n = 1;
-                for (auto s : shape) n *= s;
-                std::memcpy(t.data_ptr<float>(), (float*)arr.dataPointer, n * sizeof(float));
+                auto t = KTensor::zeros(shape);
+                std::memcpy(t.ptr(), (float*)arr.dataPointer, t.numel() * sizeof(float));
                 return t;
             };
 
-            auto extract_int = [&](NSString* name, std::vector<int64_t> shape) -> torch::Tensor {
-                MLMultiArray* arr = [result featureValueForName:name].multiArrayValue;
-                if (!arr) return {};
-                auto t = torch::zeros(shape, torch::kInt32);
-                int64_t n = 1;
-                for (auto s : shape) n *= s;
-                std::memcpy(t.data_ptr<int32_t>(), (int32_t*)arr.dataPointer, n * sizeof(int32_t));
-                return t.to(torch::kLong);
-            };
+            {
+                MLMultiArray* arr = [result featureValueForName:@"pred_dur"].multiArrayValue;
+                if (!arr) return false;
+                output.pred_dur.resize(512);
+                int32_t* src = (int32_t*)arr.dataPointer;
+                for (int i = 0; i < 512; i++) output.pred_dur[i] = src[i];
+            }
 
-            output.pred_dur = extract_int(@"pred_dur", {1, 512});
-            output.d = extract(@"d", {1, 512, 640});
             output.t_en = extract(@"t_en", {1, 512, 512});
-            output.s = extract(@"s", {1, 128});
             output.ref_s_out = extract(@"ref_s_out", {1, 256});
 
-            return output.pred_dur.defined() && output.t_en.defined();
+            return !output.pred_dur.empty() && output.t_en.defined();
         }
     }
 
@@ -380,22 +370,12 @@ public:
 
             if (buckets_.empty()) return false;
 
-            for (auto& b : buckets_) {
-                std::string har_path = variants_dir + "/kokoro_har_" + b.name + ".pt";
-                struct stat st2;
-                if (stat(har_path.c_str(), &st2) != 0) {
-                    std::fprintf(stderr, "HAR model not found: %s\n", har_path.c_str());
-                    continue;
-                }
-                try {
-                    auto har = torch::jit::load(har_path);
-                    har.eval();
-                    har_models_[b.name] = std::move(har);
-                    std::printf("HAR model loaded: %s\n", b.name.c_str());
-                } catch (const c10::Error& e) {
-                    std::fprintf(stderr, "Failed to load HAR model %s: %s\n", b.name.c_str(), e.what());
-                }
+            std::string har_path = variants_dir + "/har_weights.bin";
+            if (!har_source_.load(har_path)) {
+                std::fprintf(stderr, "HAR weights not found: %s\n", har_path.c_str());
+                return false;
             }
+            std::printf("HAR source loaded from %s\n", har_path.c_str());
 
             available_ = true;
             return true;
@@ -410,28 +390,28 @@ public:
     }
 
     std::vector<float> decode(const BucketInfo& bucket,
-                               const torch::Tensor& asr,
-                               const torch::Tensor& f0_pred,
-                               const torch::Tensor& n_pred,
-                               const torch::Tensor& ref_s,
-                               const torch::Tensor& har) {
+                               const KTensor& asr,
+                               const KTensor& f0_pred,
+                               const KTensor& n_pred,
+                               const KTensor& ref_s,
+                               const std::vector<float>& har) {
         @autoreleasepool {
             NSError* error = nil;
 
-            auto make_array = [&](NSArray<NSNumber*>* shape, const torch::Tensor& t) -> MLMultiArray* {
+            auto make_array = [&](NSArray<NSNumber*>* shape, const float* src, int64_t count) -> MLMultiArray* {
                 MLMultiArray* arr = [[MLMultiArray alloc] initWithShape:shape
                     dataType:MLMultiArrayDataTypeFloat32 error:&error];
                 if (error) return nil;
-                auto src = t.contiguous().cpu().data_ptr<float>();
-                std::memcpy((float*)arr.dataPointer, src, t.numel() * sizeof(float));
+                std::memcpy((float*)arr.dataPointer, src, count * sizeof(float));
                 return arr;
             };
 
-            auto asr_arr = make_array(@[@1, @512, @(bucket.asr_frames)], asr);
-            auto f0_arr = make_array(@[@1, @(bucket.f0_frames)], f0_pred);
-            auto n_arr = make_array(@[@1, @(bucket.f0_frames)], n_pred);
-            auto refs_arr = make_array(@[@1, @256], ref_s);
-            auto har_arr = make_array(@[@1, @(bucket.har_channels * 2), @(bucket.har_time)], har);
+            auto asr_arr = make_array(@[@1, @512, @(bucket.asr_frames)], asr.ptr(), asr.numel());
+            auto f0_arr = make_array(@[@1, @(bucket.f0_frames)], f0_pred.ptr(), f0_pred.numel());
+            auto n_arr = make_array(@[@1, @(bucket.f0_frames)], n_pred.ptr(), n_pred.numel());
+            auto refs_arr = make_array(@[@1, @256], ref_s.ptr(), ref_s.numel());
+            int64_t har_total = (int64_t)(bucket.har_channels * 2) * bucket.har_time;
+            auto har_arr = make_array(@[@1, @(bucket.har_channels * 2), @(bucket.har_time)], har.data(), har_total);
 
             if (!asr_arr || !f0_arr || !n_arr || !refs_arr || !har_arr) return {};
 
@@ -459,11 +439,8 @@ public:
         }
     }
 
-    torch::Tensor compute_har(const std::string& bucket_name, const torch::Tensor& f0) {
-        auto it = har_models_.find(bucket_name);
-        if (it == har_models_.end()) return {};
-        torch::NoGradGuard no_grad;
-        return it->second.forward({f0}).toTensor();
+    std::vector<float> compute_har(const float* f0, int f0_frames) {
+        return har_source_.compute(f0, f0_frames);
     }
 
     bool is_available() const { return available_; }
@@ -476,16 +453,16 @@ public:
 
 private:
     std::vector<BucketInfo> buckets_;
-    std::map<std::string, torch::jit::script::Module> har_models_;
+    HarSource har_source_;
     bool available_ = false;
 };
 #endif
 
 struct AlignedIntermediates {
-    torch::Tensor asr;
-    torch::Tensor f0_pred;
-    torch::Tensor n_pred;
-    torch::Tensor ref_s_dec;
+    KTensor asr;
+    KTensor f0_pred;
+    KTensor n_pred;
+    KTensor ref_s_dec;
     bool valid = false;
 };
 
@@ -495,7 +472,6 @@ public:
         std::string base_dir = models_dir + "/kokoro-german";
         std::string vocab_path = base_dir + "/vocab.json";
         std::string voice_path = base_dir + "/" + voice_name + "_voice.bin";
-        std::string voice_fallback = base_dir + "/" + voice_name + "_embedding.pt";
         std::string variants_dir = base_dir + "/decoder_variants";
 
         if (!vocab_.load(vocab_path)) {
@@ -504,7 +480,7 @@ public:
         }
         std::printf("Loaded vocab: %zu entries\n", vocab_.phoneme_to_id.size());
 
-        if (!load_voice_pack(voice_path, voice_fallback, voice_name)) {
+        if (!load_voice_pack(voice_path, "", voice_name)) {
             return false;
         }
 
@@ -538,22 +514,6 @@ public:
         std::fprintf(stderr, "FATAL: kokoro-service requires CoreML (macOS). Build with KOKORO_COREML=ON\n");
         return false;
 #endif
-
-        std::string f0n_path = base_dir + "/kokoro_f0n_predictor.pt";
-        struct stat st_f0n;
-        if (stat(f0n_path.c_str(), &st_f0n) == 0) {
-            try {
-                f0n_predictor_ = torch::jit::load(f0n_path);
-                f0n_predictor_.eval();
-                f0n_available_ = true;
-                std::printf("F0/N predictor loaded from %s (%.1f MB)\n",
-                           f0n_path.c_str(), st_f0n.st_size / 1e6);
-            } catch (const c10::Error& e) {
-                std::fprintf(stderr, "Failed to load F0/N predictor: %s\n", e.what());
-            }
-        } else {
-            std::fprintf(stderr, "WARNING: F0/N predictor not found at %s — F0/noise will be zero (degraded quality)\n", f0n_path.c_str());
-        }
 
         std::string espeak_data = resolve_espeak_data_dir();
         if (espeak_data.empty()) {
@@ -615,7 +575,7 @@ public:
         int voice_idx = std::min(phoneme_count - 1, voice_entries_ - 1);
         voice_idx = std::max(0, voice_idx);
 
-        auto ref_s = voice_pack_.index({voice_idx}).unsqueeze(0);
+        auto ref_s = KTensor::from_data(voice_pack_.ptr() + voice_idx * 256, {1, 256});
 
 #ifdef KOKORO_COREML
         return synthesize_coreml(ids, ref_s, speed);
@@ -627,7 +587,7 @@ public:
 
 #ifdef KOKORO_COREML
     std::vector<float> synthesize_coreml(const std::vector<int64_t>& ids,
-                                          const torch::Tensor& ref_s,
+                                          const KTensor& ref_s,
                                           float speed) {
         if (!coreml_available_ || !coreml_split_decoder_) return {};
 
@@ -644,47 +604,43 @@ public:
         int asr_frames = sb->asr_frames;
         int f0_frames = sb->f0_frames;
 
-        auto f0_padded = torch::zeros({1, f0_frames});
-        auto n_padded = torch::zeros({1, f0_frames});
+        auto f0_padded = KTensor::zeros({1, (int64_t)f0_frames});
+        auto n_padded = KTensor::zeros({1, (int64_t)f0_frames});
         int f0_actual = std::min(f0_len, f0_frames);
-        f0_padded.slice(1, 0, f0_actual) = intermediates.f0_pred.slice(1, 0, f0_actual);
-        n_padded.slice(1, 0, f0_actual) = intermediates.n_pred.slice(1, 0, f0_actual);
+        std::memcpy(f0_padded.ptr(), intermediates.f0_pred.ptr(), f0_actual * sizeof(float));
+        std::memcpy(n_padded.ptr(), intermediates.n_pred.ptr(), f0_actual * sizeof(float));
 
-        torch::Tensor har;
-        try {
-            har = coreml_split_decoder_->compute_har(sb->name, f0_padded);
-        } catch (const c10::Error& e) {
-            std::fprintf(stderr, "HAR computation exception for bucket %s: %s\n", sb->name.c_str(), e.what());
-            return {};
-        }
-        if (!har.defined() || har.numel() == 0) {
+        auto har = coreml_split_decoder_->compute_har(f0_padded.ptr(), f0_frames);
+        if (har.empty()) {
             std::fprintf(stderr, "HAR computation failed for bucket %s\n", sb->name.c_str());
             return {};
         }
 
-        auto asr_padded = torch::zeros({1, 512, asr_frames});
+        auto asr_padded = KTensor::zeros({1, 512, (int64_t)asr_frames});
         int asr_actual = std::min((int)intermediates.asr.size(2), asr_frames);
-        asr_padded.slice(2, 0, asr_actual) = intermediates.asr.slice(2, 0, asr_actual);
+        for (int ch = 0; ch < 512; ch++) {
+            for (int t = 0; t < asr_actual; t++) {
+                asr_padded.at3(0, ch, t) = intermediates.asr.at3(0, ch, t);
+            }
+        }
 
         int har_time = sb->har_time;
         int har_channels = sb->har_channels * 2;
-        auto har_padded = torch::zeros({1, har_channels, har_time});
-        int har_actual_t = std::min((int)har.size(2), har_time);
-        int har_actual_c = std::min((int)har.size(1), har_channels);
-        har_padded.slice(1, 0, har_actual_c).slice(2, 0, har_actual_t) =
-            har.slice(1, 0, har_actual_c).slice(2, 0, har_actual_t);
-
-        try {
-            return coreml_split_decoder_->decode(*sb, asr_padded, f0_padded, n_padded,
-                                                  intermediates.ref_s_dec, har_padded);
-        } catch (const c10::Error& e) {
-            std::fprintf(stderr, "Decoder exception for bucket %s: %s\n", sb->name.c_str(), e.what());
-            return {};
+        int64_t har_expected = (int64_t)har_channels * har_time;
+        std::vector<float> har_padded(har_expected, 0.0f);
+        int har_actual_frames = std::min((int)(har.size() / har_channels), har_time);
+        for (int c = 0; c < har_channels; c++) {
+            std::memcpy(har_padded.data() + c * har_time,
+                       har.data() + c * har_actual_frames,
+                       har_actual_frames * sizeof(float));
         }
+
+        return coreml_split_decoder_->decode(*sb, asr_padded, f0_padded, n_padded,
+                                              intermediates.ref_s_dec, har_padded);
     }
 
     AlignedIntermediates run_duration_and_align(const std::vector<int64_t>& ids,
-                                                 const torch::Tensor& ref_s,
+                                                 const KTensor& ref_s,
                                                  float speed) {
         AlignedIntermediates result;
         if (!coreml_duration_ || !coreml_duration_->is_available()) return result;
@@ -702,62 +658,41 @@ public:
         for (int i = 0; i < actual_len; i++) mask_vec[i] = 1;
 
         CoreMLDurationModel::DurationOutput dur_out;
-        if (!coreml_duration_->predict(ids_vec, ref_s.squeeze(0), speed, mask_vec, dur_out)) {
+        KTensor ref_s_flat = KTensor::from_data(ref_s.ptr(), {256});
+        if (!coreml_duration_->predict(ids_vec, ref_s_flat, speed, mask_vec, dur_out)) {
             return result;
         }
 
-        auto pred_dur = dur_out.pred_dur.squeeze(0).to(torch::kLong);
-        auto t_en = dur_out.t_en;
-
         int64_t total_frames = 0;
-        auto dur_acc = pred_dur.accessor<int64_t, 1>();
-        for (int i = 0; i < actual_len && i < pred_dur.size(0); i++) {
-            total_frames += dur_acc[i];
+        for (int i = 0; i < actual_len && i < 512; i++) {
+            total_frames += dur_out.pred_dur[i];
         }
         if (total_frames <= 0) return result;
 
-        auto t_en_cpu = t_en.squeeze(0).contiguous().cpu();
-        int t_en_dim = static_cast<int>(t_en_cpu.size(0));
-        auto asr = torch::zeros({1, t_en_dim, total_frames});
-
-        auto d_cpu = dur_out.d.squeeze(0).contiguous().cpu();
-        int d_dim = static_cast<int>(d_cpu.size(1));
-        auto d_aligned = torch::zeros({1, d_dim, total_frames});
+        int t_en_dim = 512;
+        auto asr = KTensor::zeros({1, (int64_t)t_en_dim, total_frames});
 
         int64_t pos = 0;
-        for (int i = 0; i < actual_len && i < pred_dur.size(0); i++) {
-            int64_t dur = dur_acc[i];
+        for (int i = 0; i < actual_len && i < 512; i++) {
+            int64_t dur = dur_out.pred_dur[i];
             if (dur <= 0) continue;
-            auto t_col = t_en_cpu.select(1, i);
-            auto d_col = d_cpu.select(0, i);
             for (int64_t j = 0; j < dur && (pos + j) < total_frames; j++) {
-                asr[0].select(1, pos + j) = t_col;
-                d_aligned[0].select(1, pos + j) = d_col;
+                for (int d = 0; d < t_en_dim; d++) {
+                    asr.at3(0, d, pos + j) = dur_out.t_en.at3(0, d, i);
+                }
             }
             pos += dur;
         }
 
         int64_t f0_frames = total_frames * 2;
-        result.asr = asr;
+        result.asr = std::move(asr);
 
-        if (f0n_available_) {
-            try {
-                torch::NoGradGuard no_grad;
-                auto f0n_out = f0n_predictor_.forward({d_aligned, dur_out.s}).toTuple();
-                result.f0_pred = f0n_out->elements()[0].toTensor();
-                result.n_pred = f0n_out->elements()[1].toTensor();
-            } catch (const c10::Error& e) {
-                std::fprintf(stderr, "F0/N prediction failed: %s — falling back to zeros\n", e.what());
-                result.f0_pred = torch::zeros({1, f0_frames});
-                result.n_pred = torch::zeros({1, f0_frames});
-            }
-        } else {
-            result.f0_pred = torch::zeros({1, f0_frames});
-            result.n_pred = torch::zeros({1, f0_frames});
-        }
-        result.ref_s_dec = dur_out.ref_s_out.slice(1, 0, 128);
+        result.f0_pred = KTensor::zeros({1, f0_frames});
+        result.n_pred = KTensor::zeros({1, f0_frames});
+
+        result.ref_s_dec = KTensor::from_data(dur_out.ref_s_out.ptr(), {1, 128});
         if (!result.ref_s_dec.defined() || result.ref_s_dec.size(1) < 128) {
-            result.ref_s_dec = ref_s.slice(1, 0, 128);
+            result.ref_s_dec = KTensor::from_data(ref_s.ptr(), {1, 128});
         }
         result.valid = true;
         return result;
@@ -769,6 +704,7 @@ public:
 private:
     bool load_voice_pack(const std::string& bin_path, const std::string& pt_fallback,
                           const std::string& voice_name) {
+        (void)pt_fallback;
         struct stat st;
         if (stat(bin_path.c_str(), &st) == 0) {
             std::ifstream f(bin_path, std::ios::binary);
@@ -779,49 +715,23 @@ private:
             size_t file_size = static_cast<size_t>(st.st_size);
             size_t num_floats = file_size / sizeof(float);
             voice_entries_ = static_cast<int>(num_floats / 256);
-            std::vector<float> raw(num_floats);
-            f.read(reinterpret_cast<char*>(raw.data()), file_size);
-            voice_pack_ = torch::from_blob(raw.data(),
-                                           {voice_entries_, 256}, torch::kFloat32).clone();
+            voice_pack_ = KTensor::zeros({(int64_t)voice_entries_, 256});
+            f.read(reinterpret_cast<char*>(voice_pack_.ptr()), file_size);
             std::printf("Loaded voice '%s' from bin: [%d, 256]\n", voice_name.c_str(), voice_entries_);
             return true;
         }
 
-        if (stat(pt_fallback.c_str(), &st) == 0) {
-            try {
-                std::ifstream f(pt_fallback, std::ios::binary);
-                if (!f.is_open()) {
-                    std::fprintf(stderr, "Failed to open voice: %s\n", pt_fallback.c_str());
-                    return false;
-                }
-                std::vector<char> data((std::istreambuf_iterator<char>(f)),
-                                      std::istreambuf_iterator<char>());
-                auto loaded = torch::jit::pickle_load(data).toTensor().to(torch::kFloat32);
-                voice_pack_ = loaded.squeeze(1);
-                voice_entries_ = static_cast<int>(voice_pack_.size(0));
-                std::printf("Loaded voice '%s' from pt: [%d, %lld]\n",
-                           voice_name.c_str(), voice_entries_, voice_pack_.size(1));
-                return true;
-            } catch (const c10::Error& e) {
-                std::fprintf(stderr, "Failed to load voice pt: %s\n", e.what());
-                return false;
-            }
-        }
-
-        std::fprintf(stderr, "No voice file found: %s or %s\n",
-                    bin_path.c_str(), pt_fallback.c_str());
+        std::fprintf(stderr, "Voice file not found: %s\n", bin_path.c_str());
         return false;
     }
 
-    torch::Tensor voice_pack_;
+    KTensor voice_pack_;
     int voice_entries_ = 0;
     KokoroVocab vocab_;
     std::mutex espeak_mutex_;
     std::unordered_map<std::string, std::string> phoneme_cache_;
     std::mutex cache_mutex_;
     bool coreml_available_ = false;
-    torch::jit::script::Module f0n_predictor_;
-    bool f0n_available_ = false;
 #ifdef KOKORO_COREML
     std::unique_ptr<CoreMLDurationModel> coreml_duration_;
     std::unique_ptr<CoreMLSplitDecoder> coreml_split_decoder_;

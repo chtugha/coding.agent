@@ -114,10 +114,11 @@ Key flags:
 
 ### Auto-detected Dependencies
 
-- **libtorch**: detected via `python3 -c "import torch; print(torch.utils.cmake_prefix_path)"`
 - **espeak-ng library**: searched at `/opt/homebrew/lib`, `/usr/local/lib`
 - **espeak-ng headers**: searched at `/opt/homebrew/include`, `/usr/local/include`
 - **espeak-ng data**: searched at `/opt/homebrew/share/espeak-ng-data`, `/usr/local/share/espeak-ng-data`
+
+Note: PyTorch/libtorch is **not** required at build or runtime. Kokoro TTS uses a pure C++ HAR source implementation (ktensor.h + har_source.h) with CoreML for inference.
 
 ### macOS Frameworks (linked automatically)
 
