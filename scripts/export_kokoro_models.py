@@ -114,11 +114,11 @@ def download_models():
     os.makedirs(os.path.join(MODELS_DIR, 'voices'), exist_ok=True)
 
     hf_token = os.environ.get('HF_TOKEN', '')
-    auth_header = f'-H "Authorization: Bearer {hf_token}"' if hf_token else ''
     if not hf_token:
-        print("  NOTE: HF_TOKEN not set. If downloads fail with 401, set it:")
-        print("    export HF_TOKEN=hf_...")
-        print("    (get a token at https://huggingface.co/settings/tokens)")
+        print("  HF_TOKEN not set. The Kokoro model repo may require authentication.")
+        print("  Get a token at: https://huggingface.co/settings/tokens")
+        hf_token = input("  Paste your HuggingFace token (or press Enter to try without): ").strip()
+    auth_header = f'-H "Authorization: Bearer {hf_token}"' if hf_token else ''
 
     downloads = [
         (MODEL_PATH, MODEL_URL),
