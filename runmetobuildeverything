@@ -86,8 +86,8 @@ build_whisper_cpp() {
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
         -DWHISPER_COREML=ON \
-        -DWHISPER_METAL=ON \
-        -DWHISPER_CCACHE=OFF \
+        -DGGML_METAL=ON \
+        -DGGML_CCACHE=OFF \
         -DWHISPER_BUILD_TESTS=OFF \
         -DWHISPER_BUILD_EXAMPLES=OFF
 
