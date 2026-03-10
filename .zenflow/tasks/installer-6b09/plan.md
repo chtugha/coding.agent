@@ -18,7 +18,7 @@ Do not make assumptions on important decisions — get clarification first.
 
 ## Workflow Steps
 
-### [x] Step: Implementation
+### [x] Step: Implementation (OpenMP fix committed and pushed)
 <!-- chat-id: fd8fb863-e6bf-485b-961a-faf0ed5274ac -->
 
 **Scope**: Large — 4 deliverables across install, build config, build scripts, and testing.
