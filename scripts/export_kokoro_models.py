@@ -134,12 +134,24 @@ def download_models():
         if os.path.exists(path) and os.path.getsize(path) <= 1000:
             os.remove(path)
         print(f"  Downloading {os.path.basename(path)}...")
-        run_cmd(f'curl -L {auth_header} -o "{path}" "{url}"')
+        result = run_cmd(f'curl --fail -L -S {auth_header} -o "{path}" "{url}"', check=False)
+        if result.returncode != 0:
+            print(f"  FAILED: curl exit code {result.returncode}")
+            print(f"  {result.stderr.strip()}")
+            if os.path.exists(path):
+                os.remove(path)
+            if '401' in result.stderr or '403' in result.stderr:
+                print(f"  Authentication failed. Check your token and ensure you have")
+                print(f"  accepted the model license at: https://huggingface.co/Tundragoon/Kokoro-German")
+            sys.exit(1)
         if not os.path.exists(path) or os.path.getsize(path) < 1000:
-            print(f"  FAILED: {path} is missing or too small")
-            if not hf_token:
-                print(f"  The HuggingFace repo may require authentication.")
-                print(f"  Set HF_TOKEN and retry: export HF_TOKEN=hf_...")
+            if os.path.exists(path):
+                with open(path, 'r', errors='replace') as f:
+                    content = f.read(500)
+                print(f"  FAILED: Server returned error: {content}")
+                os.remove(path)
+            else:
+                print(f"  FAILED: {path} not created")
             sys.exit(1)
         print(f"  OK ({os.path.getsize(path) / 1e6:.1f} MB)")
 
