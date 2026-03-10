@@ -88,6 +88,7 @@ build_whisper_cpp() {
         -DWHISPER_COREML=ON \
         -DGGML_METAL=ON \
         -DGGML_CCACHE=OFF \
+        -DGGML_OPENMP=OFF \
         -DWHISPER_BUILD_TESTS=OFF \
         -DWHISPER_BUILD_EXAMPLES=OFF
 
@@ -114,7 +115,8 @@ build_llama_cpp() {
     cmake -S llama-cpp -B llama-cpp/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
-        -DGGML_METAL=ON
+        -DGGML_METAL=ON \
+        -DGGML_OPENMP=OFF
 
     info "Building llama.cpp (-j${NCPU})..."
     cmake --build llama-cpp/build --config Release -j"${NCPU}"

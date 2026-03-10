@@ -30,6 +30,7 @@ cmake -S whisper-cpp -B whisper-cpp/build \
     -DWHISPER_COREML=ON \
     -DGGML_METAL=ON \
     -DGGML_CCACHE=OFF \
+    -DGGML_OPENMP=OFF \
     -DWHISPER_BUILD_TESTS=OFF \
     -DWHISPER_BUILD_EXAMPLES=OFF
 
@@ -40,6 +41,7 @@ Key flags:
 - `DWHISPER_COREML=ON` — enables CoreML ANE acceleration for the encoder
 - `DGGML_METAL=ON` — enables Metal GPU fallback (replaces deprecated `DWHISPER_METAL`)
 - `DGGML_CCACHE=OFF` — disables ccache (replaces deprecated `DWHISPER_CCACHE`)
+- `DGGML_OPENMP=OFF` — disables OpenMP (avoids linker errors when statically linking libggml-cpu.a)
 - `DBUILD_SHARED_LIBS=OFF` — produces static `libwhisper.a` (required by main CMakeLists.txt)
 - `DCMAKE_BUILD_TYPE=Release` — optimized build, always use for production
 
@@ -66,13 +68,15 @@ Key flags:
 cmake -S llama-cpp -B llama-cpp/build \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
-    -DGGML_METAL=ON
+    -DGGML_METAL=ON \
+    -DGGML_OPENMP=OFF
 
 cmake --build llama-cpp/build --config Release -j$(sysctl -n hw.ncpu)
 ```
 
 Key flags:
 - `DGGML_METAL=ON` — enables Metal GPU acceleration (replaces deprecated `DLLAMA_METAL`)
+- `DGGML_OPENMP=OFF` — disables OpenMP (avoids linker errors when statically linking libggml-cpu.a)
 - `DBUILD_SHARED_LIBS=OFF` — produces static `libllama.a`
 - `DCMAKE_BUILD_TYPE=Release` — always use Release
 
