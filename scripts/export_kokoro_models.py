@@ -682,8 +682,18 @@ def main():
 
     if not args.no_install:
         conda_python = ensure_conda_env()
-        print(f"\n  NOTE: If this script fails, re-run with the conda python directly:")
-        print(f"  {conda_python} {__file__} --no-install")
+        if os.path.realpath(sys.executable) != os.path.realpath(conda_python):
+            print(f"\n  Re-launching with conda python: {conda_python}")
+            relaunch_args = [conda_python, __file__, '--no-install']
+            if args.no_download:
+                relaunch_args.append('--no-download')
+            if args.duration_only:
+                relaunch_args.append('--duration-only')
+            if args.decoder_only:
+                relaunch_args.append('--decoder-only')
+            if args.voices_only:
+                relaunch_args.append('--voices-only')
+            os.execv(conda_python, relaunch_args)
 
     if not args.no_download:
         download_models()
