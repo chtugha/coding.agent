@@ -120,6 +120,33 @@ def download_models():
     os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(os.path.join(MODELS_DIR, 'voices'), exist_ok=True)
 
+    local_models_dir = os.path.join(ROOT_DIR, 'models')
+
+    files = [
+        ('kokoro-german-v1_1-de.pth', MODEL_PATH),
+        ('config.json', CONFIG_PATH),
+        ('voices/df_eva.pt', os.path.join(MODELS_DIR, 'voices', 'df_eva.pt')),
+        ('voices/dm_bernd.pt', os.path.join(MODELS_DIR, 'voices', 'dm_bernd.pt')),
+    ]
+
+    missing = []
+    for repo_path, local_path in files:
+        if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
+            print(f"  Already exists: {os.path.basename(local_path)}")
+            continue
+        fallback = os.path.join(local_models_dir, repo_path)
+        if os.path.exists(fallback) and os.path.getsize(fallback) > 100:
+            print(f"  Copying from models/{repo_path}...")
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            shutil.copy2(fallback, local_path)
+            print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
+            continue
+        missing.append((repo_path, local_path))
+
+    if not missing:
+        return
+
+    print(f"  {len(missing)} file(s) need to be downloaded from HuggingFace.")
     hf = _ensure_huggingface_hub()
 
     hf_token = os.environ.get('HF_TOKEN', '')
@@ -129,18 +156,8 @@ def download_models():
         hf_token = input("  Paste your HuggingFace token (or press Enter to try without): ").strip()
     token = hf_token if hf_token else None
 
-    files = [
-        ('kokoro-german-v1_1-de.pth', MODEL_PATH),
-        ('config.json', CONFIG_PATH),
-        ('voices/df_eva.pt', os.path.join(MODELS_DIR, 'voices', 'df_eva.pt')),
-        ('voices/dm_bernd.pt', os.path.join(MODELS_DIR, 'voices', 'dm_bernd.pt')),
-    ]
-
-    for repo_path, local_path in files:
-        if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
-            print(f"  Already exists: {os.path.basename(local_path)}")
-            continue
-        if os.path.exists(local_path):
+    for repo_path, local_path in missing:
+        if os.path.exists(local_path) and os.path.getsize(local_path) <= 1000:
             os.remove(local_path)
         print(f"  Downloading {repo_path}...")
         try:
@@ -155,10 +172,10 @@ def download_models():
             print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
         except Exception as e:
             print(f"  FAILED: {e}")
-            if '401' in str(e) or '403' in str(e) or 'Access' in str(e):
-                print(f"  You may need to accept the license at:")
-                print(f"    https://huggingface.co/{HF_REPO_ID}")
-                print(f"  Then re-run with a valid token.")
+            if '401' in str(e) or '403' in str(e) or 'Access' in str(e) or '404' in str(e):
+                print(f"  The HuggingFace repo may be private. You can manually place files in:")
+                print(f"    models/{repo_path}")
+                print(f"  Then re-run this script.")
             sys.exit(1)
 
 
