@@ -154,6 +154,7 @@ verify_binaries() {
         "bin/whisper-service"
         "bin/llama-service"
         "bin/kokoro-service"
+        "bin/neutts-service"
         "bin/frontend"
     )
 

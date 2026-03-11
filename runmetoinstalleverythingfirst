@@ -23,6 +23,8 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  10. Generate Whisper CoreML encoders (large-v3, large-v3-turbo)"
     echo "  11. Download LLaMA model (Llama-3.2-1B-Instruct-Q8_0)"
     echo "  12. Export Kokoro TTS models (CoreML duration + decoder)"
+    echo "  13. Download NeuTTS Nano German model (GGUF + NeuCodec ONNX→CoreML)"
+    echo "  14. Prepare NeuTTS reference voice (encode audio + phonemize text)"
     echo ""
     echo "Requirements:"
     echo "  - macOS (Apple Silicon M1/M2/M3/M4)"
@@ -310,6 +312,207 @@ export_kokoro_models() {
     info "Kokoro models exported"
 }
 
+download_neutts_models() {
+    step "Downloading NeuTTS Nano German models"
+    local neutts_dir="bin/models/neutts-nano-german"
+    mkdir -p "$neutts_dir"
+
+    if [ -f "$neutts_dir/neutts-nano-german-Q4_0.gguf" ]; then
+        info "NeuTTS GGUF backbone already exists"
+    else
+        info "Downloading NeuTTS Nano German Q4_0 GGUF (~185 MB)..."
+        if command -v huggingface-cli &> /dev/null; then
+            huggingface-cli download neuphonic/neutts-nano-german-q4-gguf \
+                neutts-nano-german-Q4_0.gguf \
+                --local-dir "$neutts_dir/" \
+                --local-dir-use-symlinks False
+        else
+            curl -L -o "$neutts_dir/neutts-nano-german-Q4_0.gguf" \
+                "https://huggingface.co/neuphonic/neutts-nano-german-q4-gguf/resolve/main/neutts-nano-german-Q4_0.gguf"
+        fi
+        info "NeuTTS backbone downloaded"
+    fi
+
+    if [ -f "$neutts_dir/neucodec_decoder.onnx" ]; then
+        info "NeuCodec ONNX decoder already exists"
+    else
+        info "Downloading NeuCodec ONNX decoder (~3.4 GB)..."
+        if command -v huggingface-cli &> /dev/null; then
+            huggingface-cli download neuphonic/neucodec-onnx-decoder \
+                model.onnx \
+                --local-dir "$neutts_dir/" \
+                --local-dir-use-symlinks False
+            mv "$neutts_dir/model.onnx" "$neutts_dir/neucodec_decoder.onnx" 2>/dev/null || true
+        else
+            curl -L -o "$neutts_dir/neucodec_decoder.onnx" \
+                "https://huggingface.co/neuphonic/neucodec-onnx-decoder/resolve/main/model.onnx"
+        fi
+        info "NeuCodec decoder downloaded"
+    fi
+}
+
+convert_neucodec_to_coreml() {
+    step "Converting NeuCodec ONNX → CoreML"
+    local neutts_dir="bin/models/neutts-nano-german"
+
+    if [ -d "$neutts_dir/neucodec_decoder.mlmodelc" ]; then
+        info "NeuCodec CoreML model already exists"
+        return
+    fi
+
+    if [ ! -f "$neutts_dir/neucodec_decoder.onnx" ]; then
+        error "NeuCodec ONNX decoder not found at $neutts_dir/neucodec_decoder.onnx"
+    fi
+
+    activate_conda_env whispertalk
+
+    python3 -c "import coremltools" 2>/dev/null || {
+        info "Installing coremltools..."
+        pip install coremltools onnx 2>/dev/null || true
+    }
+
+    info "Converting ONNX to CoreML mlpackage..."
+    python3 << 'PYEOF'
+import coremltools as ct
+import numpy as np
+import os
+
+neutts_dir = "bin/models/neutts-nano-german"
+onnx_path = os.path.join(neutts_dir, "neucodec_decoder.onnx")
+mlpackage_path = os.path.join(neutts_dir, "neucodec_decoder.mlpackage")
+
+print(f"Loading ONNX model from {onnx_path}")
+model = ct.converters.convert(
+    onnx_path,
+    inputs=[ct.TensorType(name="codes", shape=(1, 1, ct.RangeDim(1, 1500)), dtype=np.int32)],
+    minimum_deployment_target=ct.target.macOS14,
+    compute_precision=ct.precision.FLOAT32,
+)
+
+print(f"Saving mlpackage to {mlpackage_path}")
+model.save(mlpackage_path)
+print("CoreML conversion complete")
+PYEOF
+
+    if [ ! -d "$neutts_dir/neucodec_decoder.mlpackage" ]; then
+        error "CoreML conversion failed"
+    fi
+
+    info "Compiling mlpackage → mlmodelc..."
+    xcrun coremlc compile "$neutts_dir/neucodec_decoder.mlpackage" "$neutts_dir/"
+
+    if [ -d "$neutts_dir/neucodec_decoder.mlmodelc" ]; then
+        info "NeuCodec CoreML model ready"
+        rm -rf "$neutts_dir/neucodec_decoder.mlpackage"
+    else
+        warn "CoreML compilation may have failed"
+    fi
+}
+
+prepare_neutts_reference() {
+    step "Preparing NeuTTS reference voice"
+    local neutts_dir="bin/models/neutts-nano-german"
+
+    if [ -f "$neutts_dir/ref_codes.bin" ] && [ -f "$neutts_dir/ref_text.txt" ]; then
+        info "Reference voice files already exist"
+        return
+    fi
+
+    mkdir -p "$neutts_dir"
+
+    if [ ! -f "$neutts_dir/greta.wav" ]; then
+        info "Downloading German reference audio (greta.wav)..."
+        curl -L -o "$neutts_dir/greta.wav" \
+            "https://raw.githubusercontent.com/neuphonic/neutts/main/samples/greta.wav"
+    fi
+
+    local ref_text="Es wurde eine Untersuchung zur Aufklärung des Unfalls eingeleitet."
+
+    activate_conda_env whispertalk
+
+    python3 -c "import neucodec" 2>/dev/null || {
+        info "Installing neucodec, librosa..."
+        pip install neucodec librosa 2>/dev/null || true
+    }
+
+    info "Encoding reference audio → ref_codes.bin..."
+    python3 << PYEOF
+import torch
+import numpy as np
+from librosa import load
+from neucodec import NeuCodec
+import struct
+import os
+
+neutts_dir = "bin/models/neutts-nano-german"
+
+codec = NeuCodec.from_pretrained("neuphonic/neucodec")
+codec.eval().to("cpu")
+
+wav, _ = load(os.path.join(neutts_dir, "greta.wav"), sr=16000, mono=True)
+wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)
+ref_codes = codec.encode_code(audio_or_path=wav_tensor).squeeze(0).squeeze(0)
+
+codes_np = ref_codes.numpy().astype(np.int32)
+codes_path = os.path.join(neutts_dir, "ref_codes.bin")
+with open(codes_path, "wb") as f:
+    f.write(codes_np.tobytes())
+print(f"Saved {len(codes_np)} reference codes to {codes_path}")
+PYEOF
+
+    info "Phonemizing reference text → ref_text.txt..."
+    python3 << PYEOF
+import subprocess
+import os
+
+ref_text = "$ref_text"
+neutts_dir = "bin/models/neutts-nano-german"
+
+try:
+    from phonemizer import phonemize
+    phones = phonemize(ref_text, language='de', backend='espeak', strip=True, preserve_punctuation=True)
+except ImportError:
+    import ctypes
+    import ctypes.util
+
+    lib_path = ctypes.util.find_library("espeak-ng")
+    if not lib_path:
+        for p in ["/opt/homebrew/lib/libespeak-ng.dylib", "/usr/local/lib/libespeak-ng.dylib"]:
+            if os.path.exists(p):
+                lib_path = p
+                break
+
+    if lib_path:
+        lib = ctypes.CDLL(lib_path)
+        lib.espeak_Initialize(1, 0, None, 0)
+        lib.espeak_SetVoiceByName(b"de")
+        text_ptr = ctypes.c_char_p(ref_text.encode('utf-8'))
+        text_ptr_ptr = ctypes.pointer(text_ptr)
+        lib.espeak_TextToPhonemes.restype = ctypes.c_char_p
+        phones = ""
+        while text_ptr.value:
+            ph = lib.espeak_TextToPhonemes(text_ptr_ptr, 1, 2)
+            if ph:
+                phones += ph.decode('utf-8')
+    else:
+        result = subprocess.run(
+            ["espeak-ng", "-v", "de", "--ipa", "-q", ref_text],
+            capture_output=True, text=True)
+        phones = result.stdout.strip()
+
+ref_text_path = os.path.join(neutts_dir, "ref_text.txt")
+with open(ref_text_path, "w") as f:
+    f.write(phones)
+print(f"Saved phonemized reference text: {phones}")
+PYEOF
+
+    if [ -f "$neutts_dir/ref_codes.bin" ] && [ -f "$neutts_dir/ref_text.txt" ]; then
+        info "Reference voice prepared"
+    else
+        warn "Reference voice preparation may have failed"
+    fi
+}
+
 verify_installation() {
     step "Verifying installation"
 
@@ -331,7 +534,8 @@ verify_installation() {
     for item in \
         "bin/models/ggml-large-v3-turbo-q5_0.bin:Whisper turbo model" \
         "bin/models/ggml-large-v3-q5_0.bin:Whisper large-v3 model" \
-        "bin/models/Llama-3.2-1B-Instruct-Q8_0.gguf:LLaMA model"; do
+        "bin/models/Llama-3.2-1B-Instruct-Q8_0.gguf:LLaMA model" \
+        "bin/models/neutts-nano-german/neutts-nano-german-Q4_0.gguf:NeuTTS Nano German backbone"; do
         path="${item%%:*}"
         name="${item##*:}"
         if [ -f "$path" ]; then
@@ -346,7 +550,10 @@ verify_installation() {
         "bin/models/ggml-large-v3-encoder.mlmodelc:Whisper large-v3 CoreML encoder" \
         "bin/models/ggml-large-v3-turbo-encoder.mlmodelc:Whisper turbo CoreML encoder" \
         "bin/models/kokoro-german/coreml/kokoro_duration.mlmodelc:Kokoro duration model" \
-        "bin/models/kokoro-german/decoder_variants:Kokoro decoder variants"; do
+        "bin/models/kokoro-german/decoder_variants:Kokoro decoder variants" \
+        "bin/models/neutts-nano-german/neucodec_decoder.mlmodelc:NeuCodec CoreML decoder" \
+        "bin/models/neutts-nano-german/ref_codes.bin:NeuTTS reference codes" \
+        "bin/models/neutts-nano-german/ref_text.txt:NeuTTS reference phonemes"; do
         path="${item%%:*}"
         name="${item##*:}"
         if [ -e "$path" ]; then
@@ -396,6 +603,9 @@ main() {
     generate_whisper_coreml
     download_llama_model
     export_kokoro_models
+    download_neutts_models
+    convert_neucodec_to_coreml
+    prepare_neutts_reference
 
     verify_installation
 }
