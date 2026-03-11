@@ -753,6 +753,12 @@ public:
     KokoroService() : node_(ServiceType::KOKORO_SERVICE) {}
 
     bool initialize(const std::string& voice_name) {
+        if (!check_tts_exclusion()) {
+            std::fprintf(stderr, "Another TTS service is already running on port %d\n",
+                        whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE));
+            return false;
+        }
+
         if (!node_.initialize()) {
             std::fprintf(stderr, "Failed to initialize interconnect node\n");
             return false;
@@ -829,6 +835,38 @@ public:
     }
 
 private:
+    bool check_tts_exclusion() {
+        uint16_t cmd_port = whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE);
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return true;
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(cmd_port);
+
+        struct timeval tv{1, 0};
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            const char* ping = "PING\n";
+            send(sock, ping, strlen(ping), 0);
+            char buf[64];
+            int n = (int)recv(sock, buf, sizeof(buf) - 1, 0);
+            ::close(sock);
+            if (n > 0) {
+                buf[n] = '\0';
+                if (strstr(buf, "PONG")) {
+                    return false;
+                }
+            }
+            return false;
+        }
+        ::close(sock);
+        return true;
+    }
+
     void command_listener_loop() {
         uint16_t port = whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE);
         int sock = socket(AF_INET, SOCK_STREAM, 0);
