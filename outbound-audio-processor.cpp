@@ -54,15 +54,25 @@
 #include <getopt.h>
 #include "interconnect.h"
 
-static constexpr int AA_FILTER_TAPS = 63;
-static constexpr int AA_HALF_TAPS = AA_FILTER_TAPS / 2;
-static constexpr double AA_CUTOFF = 3400.0 / 12000.0;
-static constexpr int DOWNSAMPLE_RATIO = 3;
-static constexpr size_t ULAW_FRAME_SIZE = 160;
-static constexpr uint8_t ULAW_SILENCE = 0xFF;
+static constexpr int    AA_FILTER_TAPS    = 63;
+static constexpr int    AA_HALF_TAPS      = AA_FILTER_TAPS / 2;
+static constexpr double AA_CUTOFF         = 3400.0 / 12000.0;
+static constexpr int    DOWNSAMPLE_RATIO  = 3;
+static constexpr size_t ULAW_FRAME_SIZE   = 160;
+static constexpr uint8_t ULAW_SILENCE     = 0xFF;
 
-static const double* get_aa_coeffs() {
-    static double coeffs[AA_FILTER_TAPS];
+static constexpr int    OUTPUT_SAMPLE_RATE = 8000;
+static constexpr int    INPUT_SAMPLE_RATE  = 24000;
+static constexpr float  PCM_SCALE          = 32767.0f;
+static constexpr int    ULAW_BIAS          = 132;  // ITU-T G.711 μ-law bias (0x84)
+static constexpr int    ULAW_CLIP          = 32767;
+static constexpr int    FRAME_PERIOD_MS    = ULAW_FRAME_SIZE * 1000 / OUTPUT_SAMPLE_RATE;  // 20ms
+static constexpr int    STALE_CALL_TIMEOUT_S   = 60;
+static constexpr int    CLEANUP_INTERVAL_S     = 10;
+static constexpr int    SCHEDULER_RESYNC_THRESHOLD_MS = 100;
+
+static const float* get_aa_coeffs() {
+    static float coeffs[AA_FILTER_TAPS];
     static bool init = false;
     if (!init) {
         double sum = 0;
@@ -70,10 +80,10 @@ static const double* get_aa_coeffs() {
             int k = n - AA_HALF_TAPS;
             double hamming = 0.54 - 0.46 * std::cos(2.0 * M_PI * n / (AA_FILTER_TAPS - 1));
             double sinc_val = (k == 0) ? AA_CUTOFF : std::sin(M_PI * AA_CUTOFF * k) / (M_PI * k);
-            coeffs[n] = sinc_val * hamming;
+            coeffs[n] = static_cast<float>(sinc_val * hamming);
             sum += coeffs[n];
         }
-        for (int n = 0; n < AA_FILTER_TAPS; n++) coeffs[n] /= sum;
+        for (int n = 0; n < AA_FILTER_TAPS; n++) coeffs[n] = static_cast<float>(coeffs[n] / sum);
         init = true;
     }
     return coeffs;
@@ -88,9 +98,12 @@ static constexpr float PRES_B2 =  0.55845f;
 static constexpr float PRES_A1 = -1.03951f;
 static constexpr float PRES_A2 =  0.36942f;
 
+// DC-blocking first-order high-pass: α = 1 − 2π·fc/fs ≈ 1 − 2π·20/24000 ≈ 0.994764
 static constexpr float DC_BLOCK_ALPHA = 0.9947697f;
 
-static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 24000;
+// Max samples per Kokoro chunk (Kokoro sends CHUNK_SAMPLES = 4800 @ 24kHz = 200ms).
+// 6000 gives 25 % headroom without preallocating 5× too much per call.
+static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 6000;
 // Default guard window (ms) suppressing SPEECH_ACTIVE flushes immediately after TTS audio
 // arrives. Configurable at runtime via SET_SIDETONE_GUARD_MS:<ms> on the CMD port.
 static constexpr int SPEECH_ACTIVE_GUARD_MS_DEFAULT = 1500;
@@ -191,19 +204,16 @@ public:
     }
 
 private:
-    uint8_t linear_to_ulaw(int16_t pcm) {
-        int mask = 0x7FFF;
+    uint8_t linear_to_ulaw(int16_t pcm_in) {
+        int pcm = static_cast<int>(pcm_in);
         int sign = 0;
-        if (pcm < 0) {
-            pcm = -pcm;
-            sign = 0x80;
-        }
-        pcm += 128 + 4;
-        if (pcm > mask) pcm = mask;
+        if (pcm < 0) { pcm = -pcm; sign = 0x80; }
+        if (pcm > ULAW_CLIP) pcm = ULAW_CLIP;
+        pcm += ULAW_BIAS;
         int exponent = 7;
         for (int exp_mask = 0x4000; (pcm & exp_mask) == 0 && exponent > 0; exp_mask >>= 1) exponent--;
         int mantissa = (pcm >> (exponent + 3)) & 0x0F;
-        return ~(sign | (exponent << 4) | mantissa);
+        return static_cast<uint8_t>(~(sign | (exponent << 4) | mantissa));
     }
 
     void command_listener_loop() {
@@ -324,11 +334,10 @@ private:
                 freq = std::max(100, std::min(4000, std::atoi(cmd.substr(12).c_str())));
             }
 
-            static constexpr int in_rate = 24000;
-            size_t in_samples = (size_t)(in_rate * dur_ms / 1000);
+            size_t in_samples = (size_t)(INPUT_SAMPLE_RATE * dur_ms / 1000);
             std::vector<float> input(in_samples);
             for (size_t i = 0; i < in_samples; i++) {
-                input[i] = 0.8f * std::sin(2.0 * M_PI * freq * i / in_rate);
+                input[i] = 0.8f * std::sinf(2.0f * static_cast<float>(M_PI) * freq * i / INPUT_SAMPLE_RATE);
             }
 
             auto t0 = std::chrono::steady_clock::now();
@@ -339,8 +348,8 @@ private:
 
             double ulaw_rms = 0;
             for (auto v : ulaw) {
-                int16_t decoded = ulaw_to_linear(v);
-                ulaw_rms += (double)decoded * decoded;
+                double decoded = static_cast<double>(ulaw_to_linear(v));
+                ulaw_rms += decoded * decoded;
             }
             ulaw_rms = std::sqrt(ulaw_rms / out_len) / 32768.0;
 
@@ -354,7 +363,7 @@ private:
 
     void downsample_and_encode_into(const float* input, size_t in_samples,
                                     CallState& state, std::vector<uint8_t>& out_ulaw) {
-        const double* coeffs = get_aa_coeffs();
+        const float* coeffs = get_aa_coeffs();
         size_t out_len = in_samples / DOWNSAMPLE_RATIO;
 
         size_t ext_len = AA_HALF_TAPS + in_samples;
@@ -402,7 +411,7 @@ private:
         bool do_wav = save_wav_enabled_.load();
         for (size_t i = 0; i < out_len; i++) {
             size_t src_pos = i * DOWNSAMPLE_RATIO + AA_HALF_TAPS;
-            double filtered = 0;
+            float filtered = 0.0f;
             for (int t = 0; t < AA_FILTER_TAPS; t++) {
                 int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
                 if (idx >= 0 && idx < static_cast<int>(ext_len))
@@ -413,7 +422,7 @@ private:
                 // At typical chunk sizes (thousands of samples) this single-sample tail artifact
                 // is inaudible.
             }
-            int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
+            int16_t s16 = static_cast<int16_t>(std::max(-1.0f, std::min(1.0f, filtered)) * PCM_SCALE);
             ulaw[i] = linear_to_ulaw(s16);
             if (do_wav) state.wav_samples.push_back(s16);
         }
@@ -430,23 +439,30 @@ private:
     }
 
     std::vector<uint8_t> downsample_and_encode(const float* input, size_t in_samples) {
-        const double* coeffs = get_aa_coeffs();
+        const float* coeffs = get_aa_coeffs();
         size_t out_len = in_samples / DOWNSAMPLE_RATIO;
+        size_t ext_len = AA_HALF_TAPS + in_samples;
 
-        std::vector<float> ext(AA_HALF_TAPS + in_samples, 0.0f);
-        std::memcpy(ext.data() + AA_HALF_TAPS, input, in_samples * sizeof(float));
+        std::vector<float> ext(ext_len, 0.0f);
+        // Apply DC blocking inline (fresh state, matching production signal chain)
+        float dc_x = 0.0f, dc_y = 0.0f;
+        for (size_t i = 0; i < in_samples; i++) {
+            float x = input[i];
+            float y = x - dc_x + DC_BLOCK_ALPHA * dc_y;
+            dc_x = x; dc_y = y;
+            ext[AA_HALF_TAPS + i] = y;
+        }
 
         std::vector<uint8_t> ulaw(out_len);
-        size_t ext_len = ext.size();
         for (size_t i = 0; i < out_len; i++) {
             size_t src_pos = i * DOWNSAMPLE_RATIO + AA_HALF_TAPS;
-            double filtered = 0;
+            float filtered = 0.0f;
             for (int t = 0; t < AA_FILTER_TAPS; t++) {
                 int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
                 if (idx >= 0 && idx < static_cast<int>(ext_len))
                     filtered += ext[idx] * coeffs[t];
             }
-            int16_t s16 = static_cast<int16_t>(std::max(-1.0, std::min(1.0, filtered)) * 32767.0);
+            int16_t s16 = static_cast<int16_t>(std::max(-1.0f, std::min(1.0f, filtered)) * PCM_SCALE);
             ulaw[i] = linear_to_ulaw(s16);
         }
         return ulaw;
@@ -454,10 +470,11 @@ private:
 
     int16_t ulaw_to_linear(uint8_t u) {
         u = ~u;
-        int sign = (u & 0x80) ? -1 : 1;
+        int sign     = (u & 0x80) ? -1 : 1;
         int exponent = (u >> 4) & 0x07;
         int mantissa = u & 0x0F;
-        int16_t sample = static_cast<int16_t>(((mantissa << 1) + 33) << (exponent + 2)) - 132;
+        // ITU-T G.711: y = sign * [((mantissa | 0x10) << (exp + 3)) − ULAW_BIAS]
+        int sample = ((mantissa | 0x10) << (exponent + 3)) - ULAW_BIAS;
         return static_cast<int16_t>(sign * sample);
     }
 
@@ -500,13 +517,25 @@ private:
         auto last_cleanup = std::chrono::steady_clock::now();
         while (running_) {
             auto now = std::chrono::steady_clock::now();
-            if (now - last_cleanup > std::chrono::seconds(10)) {
+
+            // Resync if the schedule has drifted more than SCHEDULER_RESYNC_THRESHOLD_MS behind
+            // real time (e.g. after a system sleep or heavy load spike). Without this, the
+            // scheduler would fire in a tight burst to "catch up", flooding the SIP client
+            // with back-to-back frames and causing audible distortion.
+            if (next < now - std::chrono::milliseconds(SCHEDULER_RESYNC_THRESHOLD_MS)) {
+                log_fwd_.forward(whispertalk::LogLevel::WARN, 0,
+                    "Scheduler drift detected — resyncing timer (was %lldms behind)",
+                    (long long)std::chrono::duration_cast<std::chrono::milliseconds>(now - next).count());
+                next = now;
+            }
+
+            if (now - last_cleanup > std::chrono::seconds(CLEANUP_INTERVAL_S)) {
                 last_cleanup = now;
                 std::lock_guard<std::mutex> lock(calls_mutex_);
                 for (auto it = calls_.begin(); it != calls_.end(); ) {
                     std::lock_guard<std::mutex> sl(it->second->mutex);
                     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count();
-                    if (age > 60) {
+                    if (age > STALE_CALL_TIMEOUT_S) {
                         log_fwd_.forward(whispertalk::LogLevel::WARN, it->first, "Stale call removed after %lds idle", age);
                         it = calls_.erase(it);
                     } else {
@@ -544,7 +573,7 @@ private:
                 }
             }
 
-            next += std::chrono::milliseconds(20);
+            next += std::chrono::milliseconds(FRAME_PERIOD_MS);
             std::this_thread::sleep_until(next);
         }
     }
