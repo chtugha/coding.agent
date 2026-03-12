@@ -653,6 +653,36 @@ verify_installation() {
     fi
 }
 
+install_git_hooks() {
+    step "Installing git hooks"
+    local hooks_dir
+    hooks_dir="$(git rev-parse --git-dir 2>/dev/null)/hooks" || return 0
+
+    mkdir -p "$hooks_dir"
+
+    cat > "$hooks_dir/post-merge" << 'HOOKEOF'
+#!/bin/bash
+echo "[post-merge] Local main synced with remote."
+HOOKEOF
+    chmod +x "$hooks_dir/post-merge"
+
+    cat > "$hooks_dir/pre-push" << 'HOOKEOF'
+#!/bin/bash
+(
+    sleep 2
+    git fetch origin 2>/dev/null
+    CURRENT=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ "$CURRENT" = "main" ]; then
+        git merge --ff-only origin/main 2>/dev/null && \
+            echo "[post-push] Local main synced with remote." || true
+    fi
+) &
+HOOKEOF
+    chmod +x "$hooks_dir/pre-push"
+
+    info "Git hooks installed (post-merge, pre-push with background sync)"
+}
+
 main() {
     echo -e "${BLUE}===============================================${NC}"
     echo -e "${BLUE} WhisperTalk - Full Installation${NC}"
@@ -678,6 +708,7 @@ main() {
     convert_neucodec_to_coreml
     prepare_neutts_reference
 
+    install_git_hooks
     verify_installation
 }
 
