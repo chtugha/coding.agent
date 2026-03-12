@@ -368,9 +368,9 @@ convert_neucodec_to_coreml() {
 
     activate_conda_env whispertalk
 
-    python3 -c "import coremltools; import onnx" 2>/dev/null || {
-        info "Installing coremltools and onnx..."
-        pip install coremltools onnx || error "Failed to install coremltools/onnx"
+    python3 -c "import coremltools; import onnx; import onnx2torch; import torch" 2>/dev/null || {
+        info "Installing coremltools, onnx, onnx2torch..."
+        pip install coremltools onnx onnx2torch || error "Failed to install coremltools/onnx/onnx2torch"
     }
 
     info "Introspecting ONNX model and converting to CoreML mlpackage..."
@@ -378,6 +378,8 @@ convert_neucodec_to_coreml() {
 import coremltools as ct
 import numpy as np
 import onnx
+import onnx2torch
+import torch
 import os
 import sys
 
@@ -389,7 +391,8 @@ print(f"Introspecting ONNX model: {onnx_path}")
 onnx_model = onnx.load(onnx_path)
 inputs = onnx_model.graph.input
 print(f"  ONNX inputs ({len(inputs)}):")
-ct_inputs = []
+
+input_shapes = []
 for inp in inputs:
     name = inp.name
     elem_type = inp.type.tensor_type.elem_type
@@ -397,23 +400,37 @@ for inp in inputs:
     type_map = {1: "float32", 2: "uint8", 3: "int8", 5: "int16", 6: "int32", 7: "int64", 11: "float64"}
     dtype_str = type_map.get(elem_type, f"unknown({elem_type})")
     print(f"    {name}: shape={dims}, dtype={dtype_str}")
+    input_shapes.append((name, dims, dtype_str))
 
-    np_dtype = {"float32": np.float32, "int32": np.int32, "int64": np.int64, "float64": np.float64}.get(dtype_str)
+print(f"Converting ONNX → PyTorch via onnx2torch...")
+torch_model = onnx2torch.convert(onnx_model)
+torch_model.eval()
+
+example_inputs = []
+ct_inputs = []
+for name, dims, dtype_str in input_shapes:
+    np_dtype = {"float32": np.float32, "int32": np.int32, "int64": np.int64}.get(dtype_str)
     if np_dtype is None:
         print(f"  ERROR: Unsupported dtype '{dtype_str}' for input '{name}'")
         sys.exit(1)
-
+    torch_dtype = {"float32": torch.float32, "int32": torch.int32, "int64": torch.int64}.get(dtype_str)
+    concrete_dims = [d if isinstance(d, int) and d > 0 else 10 for d in dims]
+    example_inputs.append(torch.zeros(concrete_dims, dtype=torch_dtype))
     shape = []
-    for d in inp.type.tensor_type.shape.dim:
-        if d.dim_value > 0:
-            shape.append(d.dim_value)
+    for d in dims:
+        if isinstance(d, int) and d > 0:
+            shape.append(d)
         else:
             shape.append(ct.RangeDim(1, 1500))
     ct_inputs.append(ct.TensorType(name=name, shape=ct.Shape(shape), dtype=np_dtype))
 
-print(f"Converting {onnx_path} → CoreML")
+print(f"Tracing PyTorch model...")
+with torch.no_grad():
+    traced = torch.jit.trace(torch_model, example_inputs if len(example_inputs) > 1 else example_inputs[0])
+
+print(f"Converting PyTorch → CoreML")
 model = ct.convert(
-    onnx_model,
+    traced,
     inputs=ct_inputs,
     minimum_deployment_target=ct.target.macOS14,
     compute_precision=ct.precision.FLOAT32,
