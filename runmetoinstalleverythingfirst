@@ -412,8 +412,8 @@ for inp in inputs:
     ct_inputs.append(ct.TensorType(name=name, shape=ct.Shape(shape), dtype=np_dtype))
 
 print(f"Converting {onnx_path} → CoreML")
-model = ct.converters.convert(
-    onnx_path,
+model = ct.convert(
+    onnx_model,
     inputs=ct_inputs,
     minimum_deployment_target=ct.target.macOS14,
     compute_precision=ct.precision.FLOAT32,
