@@ -76,8 +76,7 @@ cmake --build build -j
 | Option | Default | Description |
 |--------|---------|-------------|
 | `KOKORO_COREML` | `ON` | Enable CoreML ANE acceleration for Kokoro decoder |
-| `NEUTTS_COREML` | `ON` | Enable CoreML NeuCodec decoder for NeuTTS |
-| `BUILD_TESTS` | `OFF` | Build unit/integration tests (requires GoogleTest) |
+| `BUILD_TESTS` | `ON` | Build unit/integration tests (requires GoogleTest); disable with `-DBUILD_TESTS=OFF` |
 | `ESPEAK_NG_DATA_DIR` | auto-detected | Path to espeak-ng-data directory |
 
 ## Models
@@ -159,16 +158,16 @@ RTP gateway and SIP stack. Handles SIP registration with Digest authentication, 
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `[--lines N] [<user> <server>]` | 0 lines | Lines to register at startup; positional args only needed when `lines > 0` |
-| `--port <port>` | `5060` | SIP server port |
-| `--password <pass>` | - | SIP password for Digest auth |
+| `[--lines N] [<user> <server> [port]]` | 0 lines | Lines to register at startup; positional args only needed when `lines > 0` |
 | `--log-level <LEVEL>` | `INFO` | Log verbosity: ERROR, WARN, INFO, DEBUG, TRACE |
 
 **Runtime Commands (cmd port 13102):**
 
 | Command | Description |
 |---------|-------------|
-| `ADD_LINE:<user>:<server>:<port>:<password>` | Register a new SIP account dynamically |
+| `ADD_LINE <user> <server> <port> <password>` | Register a new SIP account dynamically (space-delimited; use `-` for no password) |
+| `REMOVE_LINE <index>` | Unregister and remove a SIP line by index |
+| `LIST_LINES` | List all registered SIP lines |
 | `GET_STATS` | JSON RTP counters for all active calls (rx/tx packets, bytes, forwarded, discarded) |
 | `PING` | Health check → `PONG` |
 | `STATUS` | Registered lines, active calls, connection state |
@@ -327,7 +326,7 @@ Text-to-speech using the Kokoro model. Receives response text from LLaMA and str
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model-dir <path>` | `models/kokoro-german` | Directory containing CoreML models and voice files |
+| `--voice <NAME>` | `df_eva` | Voice to use (`df_eva`, `dm_bernd`) |
 | `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (cmd port 13142):**
@@ -374,6 +373,7 @@ Alternative TTS engine using the NeuTTS Nano German model. Occupies the same pip
 | `PING` | Health check → `PONG` |
 | `STATUS` | Active calls, upstream/downstream state |
 | `TEST_SYNTH:<text>` | Synthesize and return timing stats |
+| `SYNTH_WAV:<path>\|<text>` | Synthesize text to a WAV file at the given path |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
 ---
@@ -546,9 +546,11 @@ Starts all services, connects test calls, enables WAV recording, injects samples
 ### Unit/Integration Tests
 
 ```bash
-./runmetobuildeverything --build-tests
+./runmetobuildeverything
 cd build && ctest --output-on-failure
 ```
+
+Tests are built by default (`BUILD_TESTS=ON`). To skip them: `./runmetobuildeverything --no-tests`
 
 Test binaries: `test_sanity`, `test_interconnect`, `test_kokoro_cpp`, `test_integration`.
 
