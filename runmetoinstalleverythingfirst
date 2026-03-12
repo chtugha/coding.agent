@@ -675,7 +675,7 @@ fi
 HOOKEOF
     chmod +x "$hooks_dir/post-merge"
 
-    git -C "$top_level" config alias.pushsync '!f() { git push "$@" && git fetch origin && git merge --ff-only origin/main 2>/dev/null && echo "[pushsync] Local main synced with remote." || echo "[pushsync] Push succeeded. Run git pull to sync if needed."; }; f'
+    git -C "$top_level" config alias.pushsync '!f() { git push "$@" && git fetch origin && git merge --ff-only origin/main && echo "[pushsync] Local main synced with remote." || echo "[pushsync] Push succeeded. Run git pull to sync if needed."; }; f'
     info "Git alias 'git pushsync' installed (pushes then fast-forward merges remote)"
 
     cat > "$hooks_dir/post-commit" << 'HOOKEOF'
