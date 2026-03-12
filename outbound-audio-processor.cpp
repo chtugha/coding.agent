@@ -65,7 +65,7 @@ static constexpr int    OUTPUT_SAMPLE_RATE = 8000;
 static constexpr int    INPUT_SAMPLE_RATE  = 24000;
 static constexpr float  PCM_SCALE          = 32767.0f;
 static constexpr int    ULAW_BIAS          = 132;  // ITU-T G.711 μ-law bias (0x84)
-static constexpr int    ULAW_CLIP          = 32767;
+static constexpr int    ULAW_CLIP          = 32635;
 static constexpr int    FRAME_PERIOD_MS    = ULAW_FRAME_SIZE * 1000 / OUTPUT_SAMPLE_RATE;  // 20ms
 static constexpr int    STALE_CALL_TIMEOUT_S   = 60;
 static constexpr int    CLEANUP_INTERVAL_S     = 10;
@@ -473,8 +473,8 @@ private:
         int sign     = (u & 0x80) ? -1 : 1;
         int exponent = (u >> 4) & 0x07;
         int mantissa = u & 0x0F;
-        // ITU-T G.711: y = sign * [((mantissa | 0x10) << (exp + 3)) − ULAW_BIAS]
-        int sample = ((mantissa | 0x10) << (exponent + 3)) - ULAW_BIAS;
+        int sample = ((mantissa << 1) + 33) << (exponent + 2);
+        sample -= ULAW_BIAS;
         return static_cast<int16_t>(sign * sample);
     }
 
