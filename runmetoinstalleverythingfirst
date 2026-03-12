@@ -385,46 +385,45 @@ download_neutts_models() {
     fi
 }
 
-download_onnxruntime() {
-    step "Downloading ONNX Runtime"
-    local ORT_VERSION="1.24.3"
-    local ORT_DIR="$SCRIPT_DIR/third_party/onnxruntime"
+convert_neucodec_to_coreml() {
+    step "Converting NeuCodec ONNX → CoreML mlpackage"
+    local neutts_dir="$SCRIPT_DIR/bin/models/neutts-nano-german"
+    local onnx_path="$neutts_dir/neucodec_decoder.onnx"
+    local mlmodelc_path="$neutts_dir/neucodec_decoder.mlmodelc"
 
-    if [ -f "$ORT_DIR/lib/libonnxruntime.dylib" ]; then
-        info "ONNX Runtime already present at third_party/onnxruntime/"
-        cp -n "$ORT_DIR/lib/libonnxruntime.dylib" "$SCRIPT_DIR/bin/" 2>/dev/null || true
+    if [ -d "$mlmodelc_path" ]; then
+        info "NeuCodec CoreML model already compiled at $mlmodelc_path"
         return
     fi
 
-    mkdir -p "$SCRIPT_DIR/third_party"
-    local tarball="/tmp/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
-    local url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
-
-    info "Downloading ONNX Runtime ${ORT_VERSION} for macOS arm64..."
-    curl -L --progress-bar -o "$tarball" "$url" || error "Failed to download ONNX Runtime from $url"
-
-    info "Extracting ONNX Runtime..."
-    tar -xzf "$tarball" -C "$SCRIPT_DIR/third_party/"
-    rm -f "$tarball"
-
-    local extracted_dir="$SCRIPT_DIR/third_party/onnxruntime-osx-arm64-${ORT_VERSION}"
-    if [ ! -d "$extracted_dir" ]; then
-        error "ONNX Runtime extraction failed: $extracted_dir not found"
-    fi
-    mv "$extracted_dir" "$ORT_DIR"
-
-    if [ ! -f "$ORT_DIR/lib/libonnxruntime.dylib" ]; then
-        error "ONNX Runtime install failed: libonnxruntime.dylib not found in $ORT_DIR/lib/"
+    if [ ! -f "$onnx_path" ]; then
+        error "NeuCodec ONNX not found at $onnx_path — run download_neutts_models first"
     fi
 
-    info "Copying ONNX Runtime dylib to bin/ for runtime loading..."
-    mkdir -p "$SCRIPT_DIR/bin"
-    cp "$ORT_DIR/lib/libonnxruntime.dylib" "$SCRIPT_DIR/bin/"
-    for versioned in "$ORT_DIR/lib/libonnxruntime."*.dylib; do
-        [ -f "$versioned" ] && [ "$versioned" != "$ORT_DIR/lib/libonnxruntime.dylib" ] && cp "$versioned" "$SCRIPT_DIR/bin/" || true
-    done
+    local mlpackage_path="$neutts_dir/neucodec_decoder.mlpackage"
 
-    info "ONNX Runtime ${ORT_VERSION} ready at third_party/onnxruntime/"
+    if [ ! -d "$mlpackage_path" ]; then
+        info "Running graph surgery + CoreML conversion (this may take 5-10 minutes)..."
+        info "The conversion script manages its own conda env (neucodec_coreml) with pinned versions."
+        "$WHISPERTALK_PYTHON" "$SCRIPT_DIR/scripts/convert_neucodec_to_coreml.py" \
+            "$onnx_path" "$neutts_dir" || error "NeuCodec CoreML conversion failed"
+    else
+        info "mlpackage already exists, skipping conversion"
+    fi
+
+    if [ ! -d "$mlpackage_path" ]; then
+        error "NeuCodec mlpackage not found after conversion: $mlpackage_path"
+    fi
+
+    info "Compiling mlpackage → mlmodelc..."
+    xcrun coremlcompiler compile "$mlpackage_path" "$neutts_dir" \
+        || error "xcrun coremlcompiler failed for NeuCodec"
+
+    if [ ! -d "$mlmodelc_path" ]; then
+        error "mlmodelc not found after compilation: $mlmodelc_path"
+    fi
+
+    info "NeuCodec CoreML model ready: $mlmodelc_path"
 }
 
 prepare_neutts_reference() {
@@ -620,10 +619,9 @@ verify_installation() {
         "bin/models/kokoro-german/coreml/kokoro_f0n_3s.mlmodelc:Kokoro F0/N predictor (3s)" \
         "bin/models/kokoro-german/decoder_variants:Kokoro decoder variants" \
         "bin/models/neutts-nano-german/neucodec_decoder.onnx:NeuCodec ONNX decoder" \
+        "bin/models/neutts-nano-german/neucodec_decoder.mlmodelc:NeuCodec CoreML model" \
         "bin/models/neutts-nano-german/ref_codes.bin:NeuTTS reference codes" \
-        "bin/models/neutts-nano-german/ref_text.txt:NeuTTS reference phonemes" \
-        "third_party/onnxruntime/lib/libonnxruntime.dylib:ONNX Runtime dylib" \
-        "bin/libonnxruntime.dylib:ONNX Runtime dylib (bin/)"; do
+        "bin/models/neutts-nano-german/ref_text.txt:NeuTTS reference phonemes"; do
         path="${item%%:*}"
         name="${item##*:}"
         if [ -e "$path" ]; then
@@ -714,7 +712,7 @@ main() {
     download_llama_model
     export_kokoro_models
     download_neutts_models
-    download_onnxruntime
+    convert_neucodec_to_coreml
     prepare_neutts_reference
 
     install_git_hooks

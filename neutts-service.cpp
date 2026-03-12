@@ -3,7 +3,7 @@
 // Pipeline position: LLaMA → [NeuTTS] → OAP
 //
 // Alternative TTS service using NeuTTS Nano German model.
-// Uses llama.cpp for backbone inference and ONNX Runtime NeuCodec for audio decoding (CoreML EP).
+// Uses llama.cpp for backbone inference and CoreML NeuCodec for audio decoding.
 // Occupies the KOKORO_SERVICE pipeline slot (ports 13140-13142).
 // Only one TTS service (kokoro-service OR neutts-service) can run at a time.
 //
@@ -15,7 +15,7 @@
 //   4. Sample autoregressively: temperature=1.0, top_k=50
 //   5. Extract speech codes from <|speech_N|> tokens
 //   6. Stop at <|SPEECH_GENERATION_END|> or EOS
-//   7. Decode speech codes through NeuCodec (CoreML) → 24kHz float32 PCM
+//   7. Decode speech codes through NeuCodec (CoreML mlmodelc) → 24kHz float32 PCM
 //   8. Normalize + fade-in, send to OAP
 //
 // Reference voice:
@@ -46,8 +46,8 @@
 #include <getopt.h>
 #include <cmath>
 
-#include <onnxruntime_cxx_api.h>
-#include <coreml_provider_factory.h>
+#import <CoreML/CoreML.h>
+#import <Foundation/Foundation.h>
 
 using namespace whispertalk;
 
@@ -144,99 +144,101 @@ struct ReferenceVoice {
     }
 };
 
-class OrtNeuCodecDecoder {
+class CoreMLNeuCodecDecoder {
 public:
-    bool load(const std::string& onnx_path) {
-        try {
-            env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "neucodec");
+    bool load(const std::string& mlmodelc_path) {
+        @autoreleasepool {
+            NSError *error = nil;
+            NSString *path = [NSString stringWithUTF8String:mlmodelc_path.c_str()];
+            NSURL *url = [NSURL fileURLWithPath:path];
 
-            Ort::SessionOptions opts;
-            opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-            opts.SetIntraOpNumThreads(4);
+            MLModelConfiguration *config = [[MLModelConfiguration alloc] init];
+            config.computeUnits = MLComputeUnitsAll;
 
-            uint32_t coreml_flags = 0;
-            OrtStatus* coreml_status = OrtSessionOptionsAppendExecutionProvider_CoreML(opts, coreml_flags);
-            if (coreml_status != nullptr) {
-                std::fprintf(stderr, "NeuCodec: CoreML EP unavailable, falling back to CPU\n");
-                Ort::GetApi().ReleaseStatus(coreml_status);
-            } else {
-                std::printf("NeuCodec: CoreML EP enabled (ANE/GPU)\n");
+            model_ = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
+            if (!model_) {
+                std::fprintf(stderr, "NeuCodec CoreML: Failed to load %s: %s\n",
+                    mlmodelc_path.c_str(),
+                    [[error localizedDescription] UTF8String]);
+                return false;
+            }
+            [model_ retain];
+
+            MLModelDescription *desc = model_.modelDescription;
+            for (NSString *key in desc.inputDescriptionsByName.allKeys) {
+                input_name_ = [key UTF8String];
+                break;
+            }
+            for (NSString *key in desc.outputDescriptionsByName.allKeys) {
+                output_name_ = [key UTF8String];
+                break;
             }
 
-            session_ = std::make_unique<Ort::Session>(*env_, onnx_path.c_str(), opts);
-
-            Ort::AllocatorWithDefaultOptions alloc;
-            {
-                auto buf = session_->GetInputNameAllocated(0, alloc);
-                input_name_str_ = buf.get();
-            }
-
-            size_t n_outputs = session_->GetOutputCount();
-            for (size_t i = 0; i < n_outputs; ++i) {
-                auto name_buf = session_->GetOutputNameAllocated(i, alloc);
-                output_names_strs_.push_back(name_buf.get());
-            }
-            for (const auto& s : output_names_strs_)
-                output_names_ptrs_.push_back(s.c_str());
-
-            std::printf("NeuCodec decoder loaded: %s (input=%s, outputs=%zu)\n",
-                onnx_path.c_str(), input_name_str_.c_str(), n_outputs);
             available_ = true;
+            std::printf("NeuCodec CoreML loaded: %s (input=%s, output=%s)\n",
+                mlmodelc_path.c_str(), input_name_.c_str(), output_name_.c_str());
             return true;
-        } catch (const Ort::Exception& e) {
-            std::fprintf(stderr, "ORT: Failed to load NeuCodec decoder: %s\n", e.what());
-            return false;
         }
     }
 
     std::vector<float> decode(const std::vector<int32_t>& codes) {
         if (!available_ || codes.empty()) return {};
 
-        try {
-            auto mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        @autoreleasepool {
+            NSError *error = nil;
+            int64_t T = (int64_t)codes.size();
 
-            int64_t T = static_cast<int64_t>(codes.size());
-            std::array<int64_t, 3> shape = {1, 1, T};
+            MLMultiArray *input = [[MLMultiArray alloc]
+                initWithShape:@[@1, @1, @(T)]
+                dataType:MLMultiArrayDataTypeInt32
+                error:&error];
+            if (!input) {
+                std::fprintf(stderr, "NeuCodec: Failed to create input array: %s\n",
+                    [[error localizedDescription] UTF8String]);
+                return {};
+            }
+            std::memcpy((int32_t *)input.dataPointer, codes.data(), codes.size() * sizeof(int32_t));
 
-            Ort::Value input_tensor = Ort::Value::CreateTensor<int32_t>(
-                mem_info,
-                const_cast<int32_t*>(codes.data()),
-                codes.size(),
-                shape.data(), shape.size());
+            NSString *input_key = [NSString stringWithUTF8String:input_name_.c_str()];
+            NSDictionary *feature_dict = @{input_key: [MLFeatureValue featureValueWithMultiArray:input]};
 
-            const char* input_names[] = {input_name_str_.c_str()};
-            auto outputs = session_->Run(
-                Ort::RunOptions{nullptr},
-                input_names, &input_tensor, 1,
-                output_names_ptrs_.data(), output_names_ptrs_.size());
-
-            if (outputs.empty()) {
-                std::fprintf(stderr, "NeuCodec: ORT returned no outputs\n");
+            id<MLFeatureProvider> provider = [[MLDictionaryFeatureProvider alloc]
+                initWithDictionary:feature_dict error:&error];
+            if (!provider) {
+                std::fprintf(stderr, "NeuCodec: Failed to create feature provider\n");
                 return {};
             }
 
-            const float* audio_ptr = outputs[0].GetTensorData<float>();
-            auto out_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
-            size_t n_samples = 1;
-            for (int64_t d : out_shape) {
-                if (d > 0) n_samples *= static_cast<size_t>(d);
+            id<MLFeatureProvider> result = [model_ predictionFromFeatures:provider error:&error];
+            if (!result) {
+                std::fprintf(stderr, "NeuCodec: Prediction failed: %s\n",
+                    [[error localizedDescription] UTF8String]);
+                return {};
             }
 
-            return std::vector<float>(audio_ptr, audio_ptr + n_samples);
-        } catch (const Ort::Exception& e) {
-            std::fprintf(stderr, "NeuCodec: ORT decode failed: %s\n", e.what());
-            return {};
+            NSString *output_key = [NSString stringWithUTF8String:output_name_.c_str()];
+            MLMultiArray *output = [[result featureValueForName:output_key] multiArrayValue];
+            if (!output) {
+                std::fprintf(stderr, "NeuCodec: No output tensor\n");
+                return {};
+            }
+
+            size_t n = (size_t)output.count;
+            const float *src = (const float *)output.dataPointer;
+            return std::vector<float>(src, src + n);
         }
     }
 
     bool is_available() const { return available_; }
 
+    ~CoreMLNeuCodecDecoder() {
+        if (model_) { [model_ release]; model_ = nil; }
+    }
+
 private:
-    std::unique_ptr<Ort::Env>     env_;
-    std::unique_ptr<Ort::Session> session_;
-    std::string input_name_str_;
-    std::vector<std::string> output_names_strs_;
-    std::vector<const char*> output_names_ptrs_;
+    MLModel *model_ = nil;
+    std::string input_name_;
+    std::string output_name_;
     bool available_ = false;
 };
 
@@ -245,7 +247,7 @@ public:
     bool initialize(const std::string& models_dir) {
         std::string neutts_dir = models_dir + "/neutts-nano-german";
         std::string gguf_path = neutts_dir + "/neutts-nano-german-Q4_0.gguf";
-        std::string codec_path = neutts_dir + "/neucodec_decoder.onnx";
+        std::string codec_path = neutts_dir + "/neucodec_decoder.mlmodelc";
         std::string ref_codes_path = neutts_dir + "/ref_codes.bin";
         std::string ref_text_path = neutts_dir + "/ref_text.txt";
 
@@ -295,7 +297,7 @@ public:
             std::printf("Using EOS as speech end: %d\n", speech_end_token_);
         }
 
-        codec_decoder_ = std::make_unique<OrtNeuCodecDecoder>();
+        codec_decoder_ = std::make_unique<CoreMLNeuCodecDecoder>();
         if (!codec_decoder_->load(codec_path)) {
             std::fprintf(stderr, "Failed to load NeuCodec decoder: %s\n", codec_path.c_str());
             return false;
@@ -473,7 +475,7 @@ private:
     ReferenceVoice ref_voice_;
     std::string ref_codes_prompt_;
     llama_token speech_end_token_ = -1;
-    std::unique_ptr<OrtNeuCodecDecoder> codec_decoder_;
+    std::unique_ptr<CoreMLNeuCodecDecoder> codec_decoder_;
 };
 
 struct CallContext {
