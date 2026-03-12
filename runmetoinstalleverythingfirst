@@ -63,6 +63,28 @@ activate_conda_env() {
 
 NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
+ask_hf_token() {
+    if [ -n "${HF_TOKEN:-}" ]; then
+        info "HuggingFace token already set in environment (HF_TOKEN)"
+        export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
+        return
+    fi
+    echo ""
+    echo -e "${YELLOW}HuggingFace Token${NC}"
+    echo "  Some models (NeuCodec) require HuggingFace authentication."
+    echo "  Get a free token at: https://huggingface.co/settings/tokens"
+    echo -n "  Paste your HuggingFace token (or press Enter to skip): "
+    read -r hf_token_input </dev/tty
+    if [ -n "$hf_token_input" ]; then
+        export HF_TOKEN="$hf_token_input"
+        export HUGGING_FACE_HUB_TOKEN="$hf_token_input"
+        info "HuggingFace token set for this session"
+    else
+        warn "No HuggingFace token provided — some downloads may fail if repos are gated"
+    fi
+    echo ""
+}
+
 resolve_whispertalk_python() {
     local conda_base
     conda_base="$(conda info --base 2>/dev/null)"
@@ -436,6 +458,14 @@ import os
 
 neutts_dir = "bin/models/neutts-nano-german"
 
+hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+if hf_token:
+    try:
+        from huggingface_hub import login
+        login(token=hf_token, add_to_git_credential=False)
+    except Exception:
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+
 try:
     import torch
     import numpy as np
@@ -455,7 +485,7 @@ if not hasattr(NeuCodec, 'from_pretrained'):
     print("ERROR: NeuCodec class has no 'from_pretrained' method. API may have changed.", file=sys.stderr)
     sys.exit(1)
 
-codec = NeuCodec.from_pretrained("neuphonic/neucodec")
+codec = NeuCodec.from_pretrained("neuphonic/neucodec", token=hf_token)
 
 if not hasattr(codec, 'encode_code'):
     print("ERROR: NeuCodec instance has no 'encode_code' method. API may have changed.", file=sys.stderr)
@@ -663,6 +693,8 @@ main() {
     echo -e "${BLUE}===============================================${NC}"
     echo -e "${BLUE} WhisperTalk - Full Installation${NC}"
     echo -e "${BLUE}===============================================${NC}"
+
+    ask_hf_token
 
     check_macos
     check_and_install_homebrew
