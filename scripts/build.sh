@@ -144,13 +144,15 @@ build_whisper(){
     -B "$ROOT_DIR/whisper-cpp/build" 
     -DCMAKE_BUILD_TYPE=Release
     -DBUILD_SHARED_LIBS=OFF
+    -DGGML_OPENMP=OFF
+    -DGGML_CCACHE=OFF
     -DWHISPER_BUILD_TESTS=OFF 
     -DWHISPER_BUILD_EXAMPLES=OFF
   )
   
   if [[ "$(uname -s)" = "Darwin" ]]; then
-    log "Enabling CoreML for macOS"
-    cmake_opts+=( -DWHISPER_COREML=1 )
+    log "Enabling CoreML + Metal for macOS"
+    cmake_opts+=( -DWHISPER_COREML=ON -DGGML_METAL=ON )
   fi
 
   # shellcheck disable=SC2086
@@ -166,10 +168,11 @@ build_llama(){
     -B "$ROOT_DIR/llama-cpp/build"
     -DCMAKE_BUILD_TYPE=Release
     -DBUILD_SHARED_LIBS=OFF
+    -DGGML_OPENMP=OFF
   )
   if [[ "$(uname -s)" = "Darwin" ]]; then
-    log "Enabling CoreML for llama-cpp"
-    cmake_opts+=( -DGGML_COREML=ON )
+    log "Enabling Metal for llama-cpp"
+    cmake_opts+=( -DGGML_METAL=ON )
   fi
   # shellcheck disable=SC2086
   cmake $CMAKE_GEN "${cmake_opts[@]}"
@@ -324,6 +327,7 @@ fi
 cmake $CMAKE_GEN -S "$ROOT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
   -DWHISPER_CPP_LIB="$WHISPER_LIB" \
   -DLLAMA_CPP_LIB="$LLAMA_LIB" \
+  -DKOKORO_COREML=ON \
   -DBUILD_SIP_CLIENT=ON \
   -DBUILD_PIPER_SERVICE="$piper_flag"
 

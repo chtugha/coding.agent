@@ -294,7 +294,8 @@ export_kokoro_models() {
     step "Exporting Kokoro TTS models"
 
     if [ -d "bin/models/kokoro-german/coreml/kokoro_duration.mlmodelc" ] && \
-       [ -d "bin/models/kokoro-german/decoder_variants" ]; then
+       [ -d "bin/models/kokoro-german/decoder_variants" ] && \
+       [ -d "bin/models/kokoro-german/coreml/kokoro_f0n_3s.mlmodelc" ]; then
         info "Kokoro models already exist"
         return
     fi
@@ -621,6 +622,7 @@ verify_installation() {
         "bin/models/ggml-large-v3-encoder.mlmodelc:Whisper large-v3 CoreML encoder" \
         "bin/models/ggml-large-v3-turbo-encoder.mlmodelc:Whisper turbo CoreML encoder" \
         "bin/models/kokoro-german/coreml/kokoro_duration.mlmodelc:Kokoro duration model" \
+        "bin/models/kokoro-german/coreml/kokoro_f0n_3s.mlmodelc:Kokoro F0/N predictor (3s)" \
         "bin/models/kokoro-german/decoder_variants:Kokoro decoder variants" \
         "bin/models/neutts-nano-german/neucodec_decoder.mlmodelc:NeuCodec CoreML decoder" \
         "bin/models/neutts-nano-german/ref_codes.bin:NeuTTS reference codes" \
