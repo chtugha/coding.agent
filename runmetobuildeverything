@@ -50,6 +50,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+setup_macos_env() {
+    local clt_sdk="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    local clt_cc="/Library/Developer/CommandLineTools/usr/bin/cc"
+    if [[ -d "$clt_sdk" && -x "$clt_cc" ]]; then
+        export SDKROOT="$clt_sdk"
+        export CC="$clt_cc"
+        export CXX="/Library/Developer/CommandLineTools/usr/bin/c++"
+    fi
+}
+
+CMAKE_GEN=""
+if command -v ninja &> /dev/null; then CMAKE_GEN="-G Ninja"; fi
+
 preflight_check() {
     step "Preflight checks"
 
@@ -61,14 +74,15 @@ preflight_check() {
         error "cmake not found. Run ./runmetoinstalleverythingfirst first."
     fi
 
-    if [ ! -d "whisper-cpp/.git" ]; then
+    if [ ! -d "whisper-cpp/.git" ] && [ ! -f "whisper-cpp/CMakeLists.txt" ]; then
         error "whisper-cpp not found. Run ./runmetoinstalleverythingfirst first."
     fi
 
-    if [ ! -d "llama-cpp/.git" ]; then
+    if [ ! -d "llama-cpp/.git" ] && [ ! -f "llama-cpp/CMakeLists.txt" ]; then
         error "llama-cpp not found. Run ./runmetoinstalleverythingfirst first."
     fi
 
+    setup_macos_env
     info "All prerequisites OK"
 }
 
@@ -82,7 +96,8 @@ build_whisper_cpp() {
     fi
 
     info "Configuring whisper.cpp (CoreML + Metal, static, Release)..."
-    cmake -S whisper-cpp -B whisper-cpp/build \
+    # shellcheck disable=SC2086
+    cmake $CMAKE_GEN -S whisper-cpp -B whisper-cpp/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
         -DWHISPER_COREML=ON \
@@ -112,7 +127,8 @@ build_llama_cpp() {
     fi
 
     info "Configuring llama.cpp (Metal, static, Release)..."
-    cmake -S llama-cpp -B llama-cpp/build \
+    # shellcheck disable=SC2086
+    cmake $CMAKE_GEN -S llama-cpp -B llama-cpp/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
         -DGGML_METAL=ON \
@@ -132,7 +148,8 @@ build_main_project() {
     step "Building WhisperTalk"
 
     info "Configuring WhisperTalk (CoreML, Release, tests=${BUILD_TESTS})..."
-    cmake -S . -B build \
+    # shellcheck disable=SC2086
+    cmake $CMAKE_GEN -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DKOKORO_COREML=ON \
         -DBUILD_TESTS="${BUILD_TESTS}"
