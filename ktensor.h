@@ -67,4 +67,22 @@ struct KTensor {
             at3(0, d, dst_col) = col_data[d];
         }
     }
+
+    void truncate_last_dim(int64_t new_size) {
+        if (ndim < 1 || new_size >= shape[ndim - 1]) return;
+        int64_t outer = 1;
+        for (int i = 0; i < ndim - 1; i++) outer *= shape[i];
+        if (outer == 1) {
+            data.resize(new_size);
+        } else {
+            std::vector<float> tmp(outer * new_size);
+            for (int64_t o = 0; o < outer; o++) {
+                std::memcpy(tmp.data() + o * new_size,
+                            data.data() + o * shape[ndim - 1],
+                            new_size * sizeof(float));
+            }
+            data = std::move(tmp);
+        }
+        shape[ndim - 1] = new_size;
+    }
 };
