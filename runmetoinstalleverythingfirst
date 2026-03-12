@@ -366,9 +366,9 @@ convert_neucodec_to_coreml() {
 
     activate_conda_env whispertalk
 
-    python3 -c "import coremltools" 2>/dev/null || {
-        info "Installing coremltools..."
-        pip install coremltools onnx 2>/dev/null || true
+    python3 -c "import coremltools; import onnx" 2>/dev/null || {
+        info "Installing coremltools and onnx..."
+        pip install coremltools onnx || error "Failed to install coremltools/onnx"
     }
 
     info "Introspecting ONNX model and converting to CoreML mlpackage..."
