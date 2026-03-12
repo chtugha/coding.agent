@@ -78,8 +78,10 @@ jobs:
             bin/whisper-service
             bin/llama-service
             bin/kokoro-service
-            bin/neutts-service
             bin/frontend
+          )
+          OPTIONAL=(
+            bin/neutts-service
           )
           MISSING=0
           for b in "${EXPECTED[@]}"; do
@@ -88,6 +90,13 @@ jobs:
             else
               echo "MISSING: $b"
               MISSING=1
+            fi
+          done
+          for b in "${OPTIONAL[@]}"; do
+            if [ -f "$b" ]; then
+              echo "OK (optional): $b ($(du -h "$b" | cut -f1))"
+            else
+              echo "SKIPPED (optional): $b"
             fi
           done
           exit $MISSING

@@ -106,9 +106,9 @@ Located in `bin/models/kokoro-german/`:
 | File | Purpose |
 |------|---------|
 | `coreml/kokoro_duration.mlmodelc/` | Duration model (CoreML ANE) |
-| `coreml/kokoro_f0n_predictor.mlmodelc/` | F0/N predictor (CoreML ANE) |
+| `coreml/kokoro_f0n_{3s,5s,10s}.mlmodelc/` | F0/N predictor buckets (CoreML ANE) |
 | `decoder_variants/*.mlmodelc/` | Split decoder models (CoreML ANE) |
-| `voice.bin` | Voice style embedding (256-dim float32) |
+| `<voice>_voice.bin` | Voice style embedding (256-dim float32). Available: `df_eva_voice.bin`, `dm_bernd_voice.bin` |
 | `vocab.json` | Phoneme-to-token mapping |
 
 ### NeuTTS (alternative TTS)
@@ -312,8 +312,8 @@ Text-to-speech using the Kokoro model. Receives response text from LLaMA and str
 3. **KokoroVocab**: greedy longest-match scan (up to 4 chars per token, UTF-8 aware) maps phonemes → int64 token IDs from `vocab.json`. Input padded to 512 tokens.
 
 **Two-stage CoreML inference:**
-- **Stage 1 — Duration model** (`kokoro_duration.mlmodelc`): predicts per-phoneme durations, generates alignment tensors (`pred_dur`, `d`, `t_en`, `s`, `ref_s`). Style encoding from `voice.bin` (256-dim reference embedding).
-- **Stage 1b — F0/N predictor** (`kokoro_f0n_predictor.mlmodelc`): predicts fundamental frequency (`f0_pred`) and voicing (`n_pred`) from the duration model's `d` and `s` outputs. These condition the harmonic/noise excitation signal — without them, speech sounds hoarse/unvoiced.
+- **Stage 1 — Duration model** (`kokoro_duration.mlmodelc`): predicts per-phoneme durations, generates alignment tensors (`pred_dur`, `d`, `t_en`, `s`, `ref_s`). Style encoding from `<voice>_voice.bin` (256-dim reference embedding).
+- **Stage 1b — F0/N predictor** (`kokoro_f0n_{3s,5s,10s}.mlmodelc`): three bucketed models (3s/5s/10s) predict fundamental frequency (`f0_pred`) and voicing (`n_pred`) from the duration model's `d` and `s` outputs. Bucket selected by utterance length. These condition the harmonic/noise excitation signal — without them, speech sounds hoarse/unvoiced.
 - **Stage 2 — Decoder** (`decoder_variants/*.mlmodelc`): split decoder generates the audio waveform from alignment tensors + F0/N conditioning. All models run with `MLComputeUnitsAll` (ANE + GPU + CPU).
 
 **Audio output processing:**

@@ -521,10 +521,11 @@ private:
             {
                 std::lock_guard<std::mutex> llama_lock(llama_mutex_);
                 std::lock_guard<std::mutex> calls_lock(calls_mutex_);
-                if (calls_.count(test_cid)) {
+                auto it = calls_.find(test_cid);
+                if (it != calls_.end()) {
                     llama_memory_t mem = llama_get_memory(ctx_);
-                    llama_memory_seq_rm(mem, calls_[test_cid]->seq_id, -1, -1);
-                    calls_.erase(test_cid);
+                    llama_memory_seq_rm(mem, it->second->seq_id, -1, -1);
+                    calls_.erase(it);
                 }
             }
 
@@ -570,10 +571,11 @@ private:
             {
                 std::lock_guard<std::mutex> llama_lock(llama_mutex_);
                 std::lock_guard<std::mutex> calls_lock(calls_mutex_);
-                if (calls_.count(test_cid)) {
+                auto it = calls_.find(test_cid);
+                if (it != calls_.end()) {
                     llama_memory_t mem = llama_get_memory(ctx_);
-                    llama_memory_seq_rm(mem, calls_[test_cid]->seq_id, -1, -1);
-                    calls_.erase(test_cid);
+                    llama_memory_seq_rm(mem, it->second->seq_id, -1, -1);
+                    calls_.erase(it);
                 }
             }
 

@@ -844,6 +844,12 @@ public:
                 f0n_ok = coreml_f0n_->predict(*f0n_bucket, en.ptr(), d_dim, (int)total_frames,
                                                dur_out.s.ptr(), result.f0_pred, result.n_pred);
                 if (f0n_ok) {
+                    int f0n_actual = (int)(total_frames * 2);
+                    int f0n_total = (int)result.f0_pred.size(1);
+                    if (f0n_actual < f0n_total) {
+                        std::memset(result.f0_pred.ptr() + f0n_actual, 0, (f0n_total - f0n_actual) * sizeof(float));
+                        std::memset(result.n_pred.ptr() + f0n_actual, 0, (f0n_total - f0n_actual) * sizeof(float));
+                    }
                     std::printf("F0/N predicted via CoreML (bucket %s, frames=%lld)\n",
                                f0n_bucket->name.c_str(), (long long)total_frames);
                 }
