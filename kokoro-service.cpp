@@ -30,8 +30,8 @@
 //   compared to CPU-only inference for the decoder stage alone.
 //
 // Audio output normalization:
-//   normalize_audio() clips peaks above 0.95 to prevent clipping distortion in the
-//   G.711 encoder. Only scales down — never amplifies — to preserve dynamic range.
+//   normalize_audio() scales audio to 0.90 peak ceiling to prevent clipping distortion
+//   in the G.711 encoder. Skips near-silent (peak < 0.01) and already-normalized audio.
 //
 // SPEECH_ACTIVE handling:
 //   If a SPEECH_ACTIVE signal arrives during synthesis (caller starts speaking),
@@ -480,7 +480,7 @@ public:
         }
         std::printf("Loaded vocab: %zu entries\n", vocab_.phoneme_to_id.size());
 
-        if (!load_voice_pack(voice_path, "", voice_name)) {
+        if (!load_voice_pack(voice_path, voice_name)) {
             return false;
         }
 
@@ -702,9 +702,7 @@ public:
     bool has_coreml() const { return coreml_available_; }
 
 private:
-    bool load_voice_pack(const std::string& bin_path, const std::string& pt_fallback,
-                          const std::string& voice_name) {
-        (void)pt_fallback;
+    bool load_voice_pack(const std::string& bin_path, const std::string& voice_name) {
         struct stat st;
         if (stat(bin_path.c_str(), &st) == 0) {
             std::ifstream f(bin_path, std::ios::binary);
@@ -919,10 +917,7 @@ private:
             std::string text = cmd.substr(11);
             std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
-            {
-                std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                samples = pipeline_.synthesize(text, speed_.load());
-            }
+            samples = pipeline_.synthesize(text, speed_.load());
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
@@ -933,8 +928,6 @@ private:
             double duration_s = (double)samples.size() / KOKORO_SAMPLE_RATE;
             double rtf = (elapsed / 1000.0) / duration_s;
 
-            // Report raw (pre-normalization) peak for diagnostics.
-            // Production path (call_worker) applies normalize_audio() before OAP.
             float raw_peak = 0.0f;
             double sum_sq = 0.0;
             for (float s : samples) {
@@ -964,10 +957,7 @@ private:
             for (int i = 0; i < iterations; i++) {
                 std::vector<float> samples;
                 auto t0 = std::chrono::steady_clock::now();
-                {
-                    std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                    samples = pipeline_.synthesize(text, speed_.load());
-                }
+                samples = pipeline_.synthesize(text, speed_.load());
                 auto ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
                 if (!samples.empty()) {
@@ -1010,10 +1000,7 @@ private:
 
             std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
-            {
-                std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                samples = pipeline_.synthesize(text, speed_.load());
-            }
+            samples = pipeline_.synthesize(text, speed_.load());
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
@@ -1115,10 +1102,9 @@ private:
             auto ctx = std::make_shared<CallContext>();
             ctx->call_id = pkt.call_id;
             ctx->worker = std::thread(&KokoroService::call_worker, this, ctx);
-            calls_[pkt.call_id] = ctx;
+            it = calls_.emplace(pkt.call_id, std::move(ctx)).first;
             std::printf("Started synthesis thread for call %u\n", pkt.call_id);
             log_fwd_.forward(LogLevel::INFO, pkt.call_id, "Started synthesis thread");
-            it = calls_.find(pkt.call_id);
         }
 
         auto& ctx = it->second;
@@ -1152,10 +1138,7 @@ private:
 
             std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
-            {
-                std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                samples = pipeline_.synthesize(text, speed_.load());
-            }
+            samples = pipeline_.synthesize(text, speed_.load());
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
@@ -1211,7 +1194,6 @@ private:
                        samples.data() + offset, count * sizeof(float));
 
             audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 0);
-            audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 1);
             if (node_.send_to_downstream(audio_pkt)) {
                 total_sent += count;
             } else {
@@ -1272,7 +1254,6 @@ private:
     InterconnectNode node_;
     LogForwarder log_fwd_;
     KokoroPipeline pipeline_;
-    std::mutex pipeline_mutex_;
     std::atomic<bool> running_{true};
     std::atomic<int> cmd_sock_{-1};
     std::map<uint32_t, std::shared_ptr<CallContext>> calls_;

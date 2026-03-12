@@ -60,8 +60,10 @@ public:
         return true;
     }
 
-    std::vector<float> compute(const float* f0, int f0_frames) {
+    std::vector<float> compute(const float* f0, int f0_frames) const {
         if (!loaded_) return {};
+
+        thread_local std::mt19937 tl_rng{std::random_device{}()};
 
         int audio_frames = f0_frames * HAR_UPSAMPLE_FACTOR;
         int padded_len = audio_frames + 2 * HAR_STFT_PAD;
@@ -77,7 +79,7 @@ public:
 
         std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
         for (int h = 0; h < HAR_HARMONICS; h++) {
-            float rand_phase = (h == 0) ? 0.0f : uniform(rng_);
+            float rand_phase = (h == 0) ? 0.0f : uniform(tl_rng);
             rad_values[0 * HAR_HARMONICS + h] += rand_phase;
         }
 
@@ -122,7 +124,7 @@ public:
 
             float val = 0.0f;
             for (int h = 0; h < HAR_HARMONICS; h++) {
-                float s = sine_waves[t * HAR_HARMONICS + h] * uv + noise_amp * normal(rng_);
+                float s = sine_waves[t * HAR_HARMONICS + h] * uv + noise_amp * normal(tl_rng);
                 val += s * w_.l_linear_weight[h];
             }
             source[t] = std::tanh(val + w_.l_linear_bias);
@@ -162,5 +164,4 @@ public:
 private:
     HarWeights w_{};
     bool loaded_ = false;
-    std::mt19937 rng_{42};
 };
