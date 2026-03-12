@@ -24,7 +24,7 @@ REQUIRED_PACKAGES = {
     "coremltools": "8.3.0",
     "numpy": "1.26.4",
     "onnx": "1.16.1",
-    "onnx2torch": None,
+    "onnx2torch": "1.5.15",
 }
 
 def _inside_required_env():
@@ -200,25 +200,38 @@ def main():
         onnx.checker.check_model(model)
         print("  Validation OK", flush=True)
     except Exception as e:
-        print(f"  Validation WARNING (non-fatal): {e}", file=sys.stderr)
+        msg = str(e)
+        if "Field 'shape' of type is required but missing" in msg or \
+           "Type (shape_mismatch)" in msg:
+            print(f"  Validation WARNING (known-harmless shape annotation): {msg}", file=sys.stderr)
+        else:
+            print(f"  Validation FAILED: {msg}", file=sys.stderr)
+            return 1
 
     print("[neucodec-coreml] Converting ONNX → PyTorch via onnx2torch...", flush=True)
     torch_model = onnx2torch.convert(model)
     torch_model.eval()
 
-    print("[neucodec-coreml] Tracing PyTorch model (T=256)...", flush=True)
-    example = torch.zeros(1, 1, 256, dtype=torch.int64)
+    ENUM_SIZES = [32, 64, 128, 192, 256, 384, 512, 768, 1024, 1500]
+    TRACE_SIZE = 256
+
+    print(f"[neucodec-coreml] Tracing PyTorch model (T={TRACE_SIZE})...", flush=True)
+    example = torch.zeros(1, 1, TRACE_SIZE, dtype=torch.int32)
     with torch.no_grad():
         traced = torch.jit.trace(torch_model, example, check_trace=False)
 
-    print("[neucodec-coreml] Converting traced model → CoreML mlpackage...", flush=True)
+    print(f"[neucodec-coreml] Converting traced model → CoreML mlpackage (EnumeratedShapes: {ENUM_SIZES})...", flush=True)
+    enumerated = ct.EnumeratedShapes(
+        shapes=[(1, 1, s) for s in ENUM_SIZES],
+        default=(1, 1, TRACE_SIZE),
+    )
     mlmodel = ct.convert(
         traced,
         inputs=[
             ct.TensorType(
                 name="codes",
-                shape=(1, 1, ct.RangeDim(min_size=1, max_size=2048)),
-                dtype=np.int64,
+                shape=enumerated,
+                dtype=np.int32,
             )
         ],
         outputs=[ct.TensorType(name="audio", dtype=np.float32)],

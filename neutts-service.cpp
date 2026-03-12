@@ -164,19 +164,8 @@ public:
             }
             [model_ retain];
 
-            MLModelDescription *desc = model_.modelDescription;
-            for (NSString *key in desc.inputDescriptionsByName.allKeys) {
-                input_name_ = [key UTF8String];
-                break;
-            }
-            for (NSString *key in desc.outputDescriptionsByName.allKeys) {
-                output_name_ = [key UTF8String];
-                break;
-            }
-
             available_ = true;
-            std::printf("NeuCodec CoreML loaded: %s (input=%s, output=%s)\n",
-                mlmodelc_path.c_str(), input_name_.c_str(), output_name_.c_str());
+            std::printf("NeuCodec CoreML loaded: %s\n", mlmodelc_path.c_str());
             return true;
         }
     }
@@ -199,9 +188,7 @@ public:
             }
             std::memcpy((int32_t *)input.dataPointer, codes.data(), codes.size() * sizeof(int32_t));
 
-            NSString *input_key = [NSString stringWithUTF8String:input_name_.c_str()];
-            NSDictionary *feature_dict = @{input_key: [MLFeatureValue featureValueWithMultiArray:input]};
-
+            NSDictionary *feature_dict = @{@"codes": [MLFeatureValue featureValueWithMultiArray:input]};
             id<MLFeatureProvider> provider = [[MLDictionaryFeatureProvider alloc]
                 initWithDictionary:feature_dict error:&error];
             if (!provider) {
@@ -216,8 +203,7 @@ public:
                 return {};
             }
 
-            NSString *output_key = [NSString stringWithUTF8String:output_name_.c_str()];
-            MLMultiArray *output = [[result featureValueForName:output_key] multiArrayValue];
+            MLMultiArray *output = [[result featureValueForName:@"audio"] multiArrayValue];
             if (!output) {
                 std::fprintf(stderr, "NeuCodec: No output tensor\n");
                 return {};
@@ -237,8 +223,6 @@ public:
 
 private:
     MLModel *model_ = nil;
-    std::string input_name_;
-    std::string output_name_;
     bool available_ = false;
 };
 
