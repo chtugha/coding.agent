@@ -80,6 +80,7 @@ compile_commands.json
 # Temporary download directory
 /tmp/whisper-cpp-*
 llama-cpp/
+llama-cpp
 
 
 # Binaries and symbol files
@@ -116,3 +117,4 @@ stage7_v*/
 *.old.json
 whisper-cpp/test_wavs/
 whisper-cpp/
+whisper-cpp
