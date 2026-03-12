@@ -146,11 +146,11 @@ setup_python_env() {
 
     info "Installing Python dependencies..."
     "$WHISPERTALK_PYTHON" -m pip install --quiet --upgrade pip
-    "$WHISPERTALK_PYTHON" -m pip install --quiet torch torchvision torchaudio
     "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
     "$WHISPERTALK_PYTHON" -m pip install --quiet coremltools
     "$WHISPERTALK_PYTHON" -m pip install --quiet openai-whisper
     "$WHISPERTALK_PYTHON" -m pip install --quiet huggingface-hub
+    "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
     info "Python environment ready"
 }
 
@@ -363,111 +363,46 @@ download_neutts_models() {
     fi
 }
 
-convert_neucodec_to_coreml() {
-    step "Converting NeuCodec ONNX → CoreML"
-    local neutts_dir="bin/models/neutts-nano-german"
+download_onnxruntime() {
+    step "Downloading ONNX Runtime"
+    local ORT_VERSION="1.24.3"
+    local ORT_DIR="$SCRIPT_DIR/third_party/onnxruntime"
 
-    if [ -d "$neutts_dir/neucodec_decoder.mlmodelc" ]; then
-        info "NeuCodec CoreML model already exists"
+    if [ -f "$ORT_DIR/lib/libonnxruntime.dylib" ]; then
+        info "ONNX Runtime already present at third_party/onnxruntime/"
+        cp -n "$ORT_DIR/lib/libonnxruntime.dylib" "$SCRIPT_DIR/bin/" 2>/dev/null || true
         return
     fi
 
-    if [ ! -f "$neutts_dir/neucodec_decoder.onnx" ]; then
-        error "NeuCodec ONNX decoder not found at $neutts_dir/neucodec_decoder.onnx"
+    mkdir -p "$SCRIPT_DIR/third_party"
+    local tarball="/tmp/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
+    local url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
+
+    info "Downloading ONNX Runtime ${ORT_VERSION} for macOS arm64..."
+    curl -L --progress-bar -o "$tarball" "$url" || error "Failed to download ONNX Runtime from $url"
+
+    info "Extracting ONNX Runtime..."
+    tar -xzf "$tarball" -C "$SCRIPT_DIR/third_party/"
+    rm -f "$tarball"
+
+    local extracted_dir="$SCRIPT_DIR/third_party/onnxruntime-osx-arm64-${ORT_VERSION}"
+    if [ ! -d "$extracted_dir" ]; then
+        error "ONNX Runtime extraction failed: $extracted_dir not found"
+    fi
+    mv "$extracted_dir" "$ORT_DIR"
+
+    if [ ! -f "$ORT_DIR/lib/libonnxruntime.dylib" ]; then
+        error "ONNX Runtime install failed: libonnxruntime.dylib not found in $ORT_DIR/lib/"
     fi
 
-    "$WHISPERTALK_PYTHON" -c "import coremltools; import onnx; import onnx2torch; import torch" 2>/dev/null || {
-        info "Installing coremltools, onnx, onnx2torch..."
-        "$WHISPERTALK_PYTHON" -m pip install coremltools onnx onnx2torch || error "Failed to install coremltools/onnx/onnx2torch"
-    }
+    info "Copying ONNX Runtime dylib to bin/ for runtime loading..."
+    mkdir -p "$SCRIPT_DIR/bin"
+    cp "$ORT_DIR/lib/libonnxruntime.dylib" "$SCRIPT_DIR/bin/"
+    for versioned in "$ORT_DIR/lib/libonnxruntime."*.dylib; do
+        [ -f "$versioned" ] && [ "$versioned" != "$ORT_DIR/lib/libonnxruntime.dylib" ] && cp "$versioned" "$SCRIPT_DIR/bin/" || true
+    done
 
-    info "Introspecting ONNX model and converting to CoreML mlpackage..."
-    "$WHISPERTALK_PYTHON" - << 'PYEOF'
-import coremltools as ct
-import numpy as np
-import onnx
-import onnx2torch
-import torch
-import os
-import sys
-
-neutts_dir = "bin/models/neutts-nano-german"
-onnx_path = os.path.join(neutts_dir, "neucodec_decoder.onnx")
-mlpackage_path = os.path.join(neutts_dir, "neucodec_decoder.mlpackage")
-
-print(f"Introspecting ONNX model: {onnx_path}")
-onnx_model = onnx.load(onnx_path)
-inputs = onnx_model.graph.input
-print(f"  ONNX inputs ({len(inputs)}):")
-
-input_shapes = []
-for inp in inputs:
-    name = inp.name
-    elem_type = inp.type.tensor_type.elem_type
-    dims = [d.dim_value if d.dim_value > 0 else d.dim_param or "?" for d in inp.type.tensor_type.shape.dim]
-    type_map = {1: "float32", 2: "uint8", 3: "int8", 5: "int16", 6: "int32", 7: "int64", 11: "float64"}
-    dtype_str = type_map.get(elem_type, f"unknown({elem_type})")
-    print(f"    {name}: shape={dims}, dtype={dtype_str}")
-    input_shapes.append((name, dims, dtype_str))
-
-print(f"Patching ONNX opset declaration to 13 for onnx2torch compatibility...")
-for opset in onnx_model.opset_import:
-    if opset.domain == '':
-        opset.version = 13
-        break
-
-print(f"Converting ONNX → PyTorch via onnx2torch...")
-torch_model = onnx2torch.convert(onnx_model)
-torch_model.eval()
-
-example_inputs = []
-ct_inputs = []
-for name, dims, dtype_str in input_shapes:
-    np_dtype = {"float32": np.float32, "int32": np.int32, "int64": np.int64}.get(dtype_str)
-    if np_dtype is None:
-        print(f"  ERROR: Unsupported dtype '{dtype_str}' for input '{name}'")
-        sys.exit(1)
-    torch_dtype = {"float32": torch.float32, "int32": torch.int32, "int64": torch.int64}.get(dtype_str)
-    concrete_dims = [d if isinstance(d, int) and d > 0 else 10 for d in dims]
-    example_inputs.append(torch.zeros(concrete_dims, dtype=torch_dtype))
-    shape = []
-    for d in dims:
-        if isinstance(d, int) and d > 0:
-            shape.append(d)
-        else:
-            shape.append(ct.RangeDim(1, 1500))
-    ct_inputs.append(ct.TensorType(name=name, shape=ct.Shape(shape), dtype=np_dtype))
-
-print(f"Tracing PyTorch model...")
-with torch.no_grad():
-    traced = torch.jit.trace(torch_model, example_inputs if len(example_inputs) > 1 else example_inputs[0])
-
-print(f"Converting PyTorch → CoreML")
-model = ct.convert(
-    traced,
-    inputs=ct_inputs,
-    minimum_deployment_target=ct.target.macOS14,
-    compute_precision=ct.precision.FLOAT32,
-)
-
-print(f"Saving mlpackage to {mlpackage_path}")
-model.save(mlpackage_path)
-print("CoreML conversion complete")
-PYEOF
-
-    if [ ! -d "$neutts_dir/neucodec_decoder.mlpackage" ]; then
-        error "CoreML conversion failed"
-    fi
-
-    info "Compiling mlpackage → mlmodelc..."
-    xcrun coremlc compile "$neutts_dir/neucodec_decoder.mlpackage" "$neutts_dir/"
-
-    if [ -d "$neutts_dir/neucodec_decoder.mlmodelc" ]; then
-        info "NeuCodec CoreML model ready"
-        rm -rf "$neutts_dir/neucodec_decoder.mlpackage"
-    else
-        warn "CoreML compilation may have failed"
-    fi
+    info "ONNX Runtime ${ORT_VERSION} ready at third_party/onnxruntime/"
 }
 
 prepare_neutts_reference() {
@@ -654,9 +589,11 @@ verify_installation() {
         "bin/models/kokoro-german/coreml/kokoro_duration.mlmodelc:Kokoro duration model" \
         "bin/models/kokoro-german/coreml/kokoro_f0n_3s.mlmodelc:Kokoro F0/N predictor (3s)" \
         "bin/models/kokoro-german/decoder_variants:Kokoro decoder variants" \
-        "bin/models/neutts-nano-german/neucodec_decoder.mlmodelc:NeuCodec CoreML decoder" \
+        "bin/models/neutts-nano-german/neucodec_decoder.onnx:NeuCodec ONNX decoder" \
         "bin/models/neutts-nano-german/ref_codes.bin:NeuTTS reference codes" \
-        "bin/models/neutts-nano-german/ref_text.txt:NeuTTS reference phonemes"; do
+        "bin/models/neutts-nano-german/ref_text.txt:NeuTTS reference phonemes" \
+        "third_party/onnxruntime/lib/libonnxruntime.dylib:ONNX Runtime dylib" \
+        "bin/libonnxruntime.dylib:ONNX Runtime dylib (bin/)"; do
         path="${item%%:*}"
         name="${item##*:}"
         if [ -e "$path" ]; then
@@ -745,7 +682,7 @@ main() {
     download_llama_model
     export_kokoro_models
     download_neutts_models
-    convert_neucodec_to_coreml
+    download_onnxruntime
     prepare_neutts_reference
 
     install_git_hooks

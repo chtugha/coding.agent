@@ -280,29 +280,36 @@ else()
     endif()
 endif()
 
-# 7. NeuTTS Service (llama.cpp backbone + NeuCodec CoreML + espeak-ng)
-option(NEUTTS_COREML "Enable CoreML for NeuTTS NeuCodec decoder (required on macOS)" ON)
-if(ESPEAK_NG_LIB AND ESPEAK_NG_INCLUDE)
-    if(APPLE AND NEUTTS_COREML)
-        set_source_files_properties(neutts-service.cpp PROPERTIES LANGUAGE OBJCXX)
-        add_executable(neutts-service neutts-service.cpp)
-        target_compile_definitions(neutts-service PRIVATE NEUTTS_COREML=1)
-        find_library(COREML_FRAMEWORK_NEUTTS CoreML)
-        target_link_libraries(neutts-service PRIVATE
-            Threads::Threads ${ESPEAK_NG_LIB} ${ESPEAK_NG_DEPS}
-            ${COREML_FRAMEWORK_NEUTTS} ${FOUNDATION_FRAMEWORK}
-            ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${METALKIT_FRAMEWORK})
-    else()
-        add_executable(neutts-service neutts-service.cpp)
-        target_link_libraries(neutts-service PRIVATE
-            Threads::Threads ${ESPEAK_NG_LIB} ${ESPEAK_NG_DEPS}
-            ${ACCELERATE_FRAMEWORK})
-    endif()
+# 7. NeuTTS Service (llama.cpp backbone + NeuCodec via ONNX Runtime CoreML EP + espeak-ng)
+# ONNX Runtime is downloaded by runmetoinstalleverythingfirst to third_party/onnxruntime/
+set(ORT_ROOT "${CMAKE_SOURCE_DIR}/third_party/onnxruntime")
+set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.dylib")
+set(ORT_INCLUDE_DIRS "${ORT_ROOT}/include")
+
+if(EXISTS "${ORT_LIB}")
+    set(ORT_FOUND TRUE)
+    message(STATUS "ONNX Runtime: found at ${ORT_ROOT}")
+else()
+    set(ORT_FOUND FALSE)
+    message(WARNING "ONNX Runtime: NOT found at ${ORT_ROOT} — neutts-service will be disabled. Run ./runmetoinstalleverythingfirst first.")
+endif()
+
+if(ESPEAK_NG_LIB AND ESPEAK_NG_INCLUDE AND ORT_FOUND)
+    add_executable(neutts-service neutts-service.cpp)
     target_include_directories(neutts-service PRIVATE
         ${CMAKE_SOURCE_DIR}/llama-cpp/include
         ${CMAKE_SOURCE_DIR}/llama-cpp/ggml/include
-        ${ESPEAK_NG_INCLUDE})
+        ${ESPEAK_NG_INCLUDE}
+        ${ORT_INCLUDE_DIRS})
+    target_link_libraries(neutts-service PRIVATE
+        Threads::Threads ${ESPEAK_NG_LIB} ${ESPEAK_NG_DEPS}
+        ${ORT_LIB}
+        ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK}
+        "-lobjc")
     set_property(TARGET neutts-service PROPERTY CXX_STANDARD 17)
+    set_target_properties(neutts-service PROPERTIES
+        BUILD_RPATH "@executable_path"
+        INSTALL_RPATH "@executable_path")
     if(ESPEAK_NG_DATA_DIR)
         target_compile_definitions(neutts-service PRIVATE ESPEAK_NG_DATA_DIR="${ESPEAK_NG_DATA_DIR}")
     endif()
@@ -324,7 +331,9 @@ if(ESPEAK_NG_LIB AND ESPEAK_NG_INCLUDE)
     if(TARGET thirdparty_ggml)
         target_link_libraries(neutts-service PRIVATE thirdparty_ggml)
     endif()
-    message(STATUS "NeuTTS Service: ENABLED (llama.cpp + NeuCodec CoreML + espeak-ng)")
+    message(STATUS "NeuTTS Service: ENABLED (llama.cpp + NeuCodec ORT/CoreML EP + espeak-ng)")
+elseif(NOT ORT_FOUND)
+    message(WARNING "NeuTTS Service: DISABLED (ONNX Runtime not found)")
 else()
     message(WARNING "NeuTTS Service: DISABLED (espeak-ng not found)")
 endif()
