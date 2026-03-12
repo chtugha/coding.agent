@@ -402,8 +402,12 @@ for inp in inputs:
     print(f"    {name}: shape={dims}, dtype={dtype_str}")
     input_shapes.append((name, dims, dtype_str))
 
+print(f"Downgrading ONNX opset to 13 for onnx2torch compatibility...")
+from onnx import version_converter
+onnx_model_compat = version_converter.convert_version(onnx_model, 13)
+
 print(f"Converting ONNX → PyTorch via onnx2torch...")
-torch_model = onnx2torch.convert(onnx_model)
+torch_model = onnx2torch.convert(onnx_model_compat)
 torch_model.eval()
 
 example_inputs = []
