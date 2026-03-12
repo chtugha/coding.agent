@@ -22,7 +22,7 @@
 //
 // Per-call state (CallState):
 //   buffer:    raw G.711 byte queue fed by the Kokoro receive thread.
-//   read_pos:  logical read head; compact() reclaims memory when read_pos > 4096.
+//   read_pos:  logical read head; compact() reclaims memory when read_pos > COMPACT_THRESHOLD.
 //   fir_history: per-call anti-aliasing filter state; avoids cross-call contamination.
 //   ext[]:     pre-allocated extended buffer (history + one input batch) to avoid
 //              per-frame heap allocation.
@@ -109,12 +109,17 @@ static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 6000;
 // arrives. Configurable at runtime via SET_SIDETONE_GUARD_MS:<ms> on the CMD port.
 static constexpr int SPEECH_ACTIVE_GUARD_MS_DEFAULT = 1500;
 
+static int64_t steady_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 struct CallState {
     uint32_t id;
     std::mutex mutex;
     std::vector<uint8_t> buffer;
     size_t read_pos = 0;
-    std::chrono::steady_clock::time_point last_activity;
+    std::atomic<int64_t> last_activity_ns{0};
     // Set each time new TTS audio is received from Kokoro. Used by the SPEECH_ACTIVE
     // guard to distinguish sidetone echo (arrives <500ms after playback starts) from
     // genuine caller interruption (arrives >1500ms after last audio chunk).
@@ -410,8 +415,8 @@ private:
         }
 
         bool do_wav = save_wav_enabled_.load();
-        size_t safe_out = (in_samples > (size_t)(AA_FILTER_TAPS - 1)) ?
-            (in_samples - (AA_FILTER_TAPS - 1)) / DOWNSAMPLE_RATIO : 0;
+        size_t safe_out = (in_samples > (size_t)AA_HALF_TAPS) ?
+            (in_samples - AA_HALF_TAPS) / DOWNSAMPLE_RATIO : 0;
         for (size_t i = 0; i < safe_out; i++) {
             const float* src = ext + i * DOWNSAMPLE_RATIO;
             float filtered = 0.0f;
@@ -483,7 +488,7 @@ private:
 
             std::lock_guard<std::mutex> lock(state->mutex);
             auto now = std::chrono::steady_clock::now();
-            state->last_activity = now;
+            state->last_activity_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(), std::memory_order_relaxed);
             state->last_audio_received = now;
             if (save_wav_enabled_.load()) {
                 for (size_t i = 0; i < sample_count; i++) {
@@ -515,8 +520,9 @@ private:
             if (now - last_cleanup > std::chrono::seconds(CLEANUP_INTERVAL_S)) {
                 last_cleanup = now;
                 std::lock_guard<std::mutex> lock(calls_mutex_);
+                int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
                 for (auto it = calls_.begin(); it != calls_.end(); ) {
-                    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count();
+                    auto age = (now_ns - it->second->last_activity_ns.load(std::memory_order_relaxed)) / 1000000000LL;
                     if (age > STALE_CALL_TIMEOUT_S) {
                         log_fwd_.forward(whispertalk::LogLevel::WARN, it->first, "Stale call removed after %lds idle", age);
                         it = calls_.erase(it);
@@ -566,7 +572,7 @@ private:
         if (it != calls_.end()) return it->second;
         auto state = std::make_shared<CallState>();
         state->id = cid;
-        state->last_activity = std::chrono::steady_clock::now();
+        state->last_activity_ns.store(steady_now_ns(), std::memory_order_relaxed);
         calls_[cid] = state;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created outbound audio state");
         return state;
