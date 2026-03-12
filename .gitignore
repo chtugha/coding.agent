@@ -118,3 +118,4 @@ stage7_v*/
 whisper-cpp/test_wavs/
 whisper-cpp/
 whisper-cpp
+bin/models/kokoro-german

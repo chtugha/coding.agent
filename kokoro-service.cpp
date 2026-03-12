@@ -226,7 +226,9 @@ public:
 
     struct DurationOutput {
         std::vector<int64_t> pred_dur;
+        KTensor d;
         KTensor t_en;
+        KTensor s;
         KTensor ref_s_out;
     };
 
@@ -301,10 +303,12 @@ public:
                 for (int i = 0; i < 512; i++) output.pred_dur[i] = src[i];
             }
 
+            output.d = extract(@"d", {1, 512, 640});
             output.t_en = extract(@"t_en", {1, 512, 512});
+            output.s = extract(@"s", {1, 128});
             output.ref_s_out = extract(@"ref_s_out", {1, 256});
 
-            return !output.pred_dur.empty() && output.t_en.defined();
+            return !output.pred_dur.empty() && output.t_en.defined() && output.d.defined();
         }
     }
 
@@ -456,6 +460,128 @@ private:
     HarSource har_source_;
     bool available_ = false;
 };
+
+class CoreMLF0NPredictor {
+public:
+    struct BucketInfo {
+        std::string name;
+        int asr_frames;
+        int f0_frames;
+        MLModel* model = nil;
+    };
+
+    bool load(const std::string& coreml_dir) {
+        @autoreleasepool {
+            struct { const char* name; int asr; int f0; } buckets[] = {
+                {"3s", 72, 144},
+                {"5s", 120, 240},
+                {"10s", 240, 480},
+            };
+
+            MLModelConfiguration* config = [[MLModelConfiguration alloc] init];
+            config.computeUnits = MLComputeUnitsAll;
+
+            for (auto& b : buckets) {
+                std::string path = coreml_dir + "/kokoro_f0n_" + b.name + ".mlmodelc";
+                struct stat st;
+                if (stat(path.c_str(), &st) != 0) {
+                    path = coreml_dir + "/kokoro_f0n_" + b.name + ".mlpackage";
+                    if (stat(path.c_str(), &st) != 0) continue;
+                }
+
+                NSString* ns_path = [NSString stringWithUTF8String:path.c_str()];
+                NSURL* url = [NSURL fileURLWithPath:ns_path];
+                NSError* error = nil;
+                MLModel* model = [MLModel modelWithContentsOfURL:url configuration:config error:&error];
+                if (error || !model) {
+                    std::fprintf(stderr, "CoreML: Failed to load F0N predictor %s: %s\n",
+                        b.name, error ? [[error description] UTF8String] : "unknown");
+                    continue;
+                }
+
+                BucketInfo info;
+                info.name = b.name;
+                info.asr_frames = b.asr;
+                info.f0_frames = b.f0;
+                info.model = model;
+                [model retain];
+                buckets_.push_back(info);
+                std::printf("CoreML F0/N predictor loaded: %s (asr=%d, f0=%d)\n", b.name, b.asr, b.f0);
+            }
+
+            available_ = !buckets_.empty();
+            return available_;
+        }
+    }
+
+    const BucketInfo* select_bucket(int asr_frames) const {
+        for (auto& b : buckets_) {
+            if (b.asr_frames >= asr_frames) return &b;
+        }
+        return buckets_.empty() ? nullptr : &buckets_.back();
+    }
+
+    bool predict(const BucketInfo& bucket,
+                 const float* en_data, int en_dim, int en_frames,
+                 const float* s_data,
+                 KTensor& f0_out, KTensor& n_out) {
+        @autoreleasepool {
+            NSError* error = nil;
+
+            MLMultiArray* en_arr = [[MLMultiArray alloc]
+                initWithShape:@[@1, @(en_dim), @(bucket.asr_frames)]
+                dataType:MLMultiArrayDataTypeFloat32 error:&error];
+            if (error) return false;
+            float* en_ptr = (float*)en_arr.dataPointer;
+            std::memset(en_ptr, 0, sizeof(float) * en_dim * bucket.asr_frames);
+            int actual = std::min(en_frames, bucket.asr_frames);
+            for (int ch = 0; ch < en_dim; ch++) {
+                std::memcpy(en_ptr + ch * bucket.asr_frames,
+                           en_data + ch * en_frames,
+                           actual * sizeof(float));
+            }
+
+            MLMultiArray* s_arr = [[MLMultiArray alloc]
+                initWithShape:@[@1, @128]
+                dataType:MLMultiArrayDataTypeFloat32 error:&error];
+            if (error) return false;
+            std::memcpy((float*)s_arr.dataPointer, s_data, 128 * sizeof(float));
+
+            NSDictionary* input_dict = @{@"en": en_arr, @"s": s_arr};
+            auto features = [[MLDictionaryFeatureProvider alloc] initWithDictionary:input_dict error:&error];
+            if (error) return false;
+
+            auto result = [bucket.model predictionFromFeatures:features error:&error];
+            if (error || !result) {
+                std::fprintf(stderr, "CoreML F0N predict failed: %s\n",
+                    error ? [[error description] UTF8String] : "unknown");
+                return false;
+            }
+
+            MLMultiArray* f0_arr = [result featureValueForName:@"F0_pred"].multiArrayValue;
+            MLMultiArray* n_arr_out = [result featureValueForName:@"N_pred"].multiArrayValue;
+            if (!f0_arr || !n_arr_out) return false;
+
+            f0_out = KTensor::zeros({1, (int64_t)bucket.f0_frames});
+            n_out = KTensor::zeros({1, (int64_t)bucket.f0_frames});
+            std::memcpy(f0_out.ptr(), (float*)f0_arr.dataPointer, bucket.f0_frames * sizeof(float));
+            std::memcpy(n_out.ptr(), (float*)n_arr_out.dataPointer, bucket.f0_frames * sizeof(float));
+            return true;
+        }
+    }
+
+    bool is_available() const { return available_; }
+
+    ~CoreMLF0NPredictor() {
+        for (auto& b : buckets_) {
+            if (b.model) [b.model release];
+        }
+    }
+
+private:
+    std::vector<BucketInfo> buckets_;
+    bool available_ = false;
+};
 #endif
 
 struct AlignedIntermediates {
@@ -509,6 +635,15 @@ public:
             coreml_split_decoder_.reset();
             std::fprintf(stderr, "CoreML split decoder load failed from %s\n", variants_dir.c_str());
             return false;
+        }
+
+        std::string coreml_dir = base_dir + "/coreml";
+        coreml_f0n_ = std::make_unique<CoreMLF0NPredictor>();
+        if (coreml_f0n_->load(coreml_dir)) {
+            std::printf("CoreML F0/N predictor ENABLED (ANE)\n");
+        } else {
+            coreml_f0n_.reset();
+            std::printf("CoreML F0/N predictor not available — using zero F0/N fallback\n");
         }
 #else
         std::fprintf(stderr, "FATAL: kokoro-service requires CoreML (macOS). Build with KOKORO_COREML=ON\n");
@@ -687,8 +822,38 @@ public:
         int64_t f0_frames = total_frames * 2;
         result.asr = std::move(asr);
 
-        result.f0_pred = KTensor::zeros({1, f0_frames});
-        result.n_pred = KTensor::zeros({1, f0_frames});
+        bool f0n_ok = false;
+#ifdef KOKORO_COREML
+        if (coreml_f0n_ && coreml_f0n_->is_available() && dur_out.d.defined() && dur_out.s.defined()) {
+            int d_dim = 640;
+            auto en = KTensor::zeros({1, (int64_t)d_dim, total_frames});
+            pos = 0;
+            for (int i = 0; i < actual_len && i < 512; i++) {
+                int64_t dur = dur_out.pred_dur[i];
+                if (dur <= 0) continue;
+                for (int64_t j = 0; j < dur && (pos + j) < total_frames; j++) {
+                    for (int ch = 0; ch < d_dim; ch++) {
+                        en.at3(0, ch, pos + j) = dur_out.d.at3(0, i, ch);
+                    }
+                }
+                pos += dur;
+            }
+
+            auto* f0n_bucket = coreml_f0n_->select_bucket((int)total_frames);
+            if (f0n_bucket) {
+                f0n_ok = coreml_f0n_->predict(*f0n_bucket, en.ptr(), d_dim, (int)total_frames,
+                                               dur_out.s.ptr(), result.f0_pred, result.n_pred);
+                if (f0n_ok) {
+                    std::printf("F0/N predicted via CoreML (bucket %s, frames=%lld)\n",
+                               f0n_bucket->name.c_str(), (long long)total_frames);
+                }
+            }
+        }
+#endif
+        if (!f0n_ok) {
+            result.f0_pred = KTensor::zeros({1, f0_frames});
+            result.n_pred = KTensor::zeros({1, f0_frames});
+        }
 
         result.ref_s_dec = KTensor::from_data(dur_out.ref_s_out.ptr(), {1, 128});
         if (!result.ref_s_dec.defined() || result.ref_s_dec.size(1) < 128) {
@@ -733,6 +898,7 @@ private:
 #ifdef KOKORO_COREML
     std::unique_ptr<CoreMLDurationModel> coreml_duration_;
     std::unique_ptr<CoreMLSplitDecoder> coreml_split_decoder_;
+    std::unique_ptr<CoreMLF0NPredictor> coreml_f0n_;
 #endif
 };
 
