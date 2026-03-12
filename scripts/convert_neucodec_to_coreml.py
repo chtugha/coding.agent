@@ -28,8 +28,7 @@ REQUIRED_PACKAGES = {
 }
 
 def _inside_required_env():
-    conda_prefix = os.environ.get("CONDA_DEFAULT_ENV", "")
-    return conda_prefix == REQUIRED_ENV
+    return os.path.join("envs", REQUIRED_ENV) in sys.executable
 
 
 def _reexec_in_env():
