@@ -119,3 +119,7 @@ whisper-cpp/test_wavs/
 whisper-cpp/
 whisper-cpp
 bin/models/kokoro-german
+
+# External dependencies (cloned/downloaded at install time, never committed)
+third_party/onnxruntime/
+third_party/onnxruntime
