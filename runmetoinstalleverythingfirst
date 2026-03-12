@@ -133,7 +133,8 @@ setup_python_env() {
     info "Installing Python dependencies..."
     pip install --quiet --upgrade pip
     pip install --quiet torch torchvision torchaudio
-    pip install --quiet coremltools ane_transformers
+    pip install --quiet "protobuf>=4.25.1"
+    pip install --quiet coremltools
     pip install --quiet openai-whisper
     pip install --quiet huggingface-hub
     info "Python environment ready"
