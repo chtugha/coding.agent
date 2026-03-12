@@ -701,6 +701,109 @@ def export_split_decoder(kmodel):
     print("\n  Split decoder export complete!")
 
 
+def export_f0n_predictor(kmodel):
+    import torch
+    import torch.nn as nn
+    import numpy as np
+    import coremltools as ct
+
+    print("\n=== Exporting F0/N Predictor (CoreML) ===")
+    os.makedirs(COREML_DIR, exist_ok=True)
+
+    class F0NPredictor(nn.Module):
+        def __init__(self, predictor):
+            super().__init__()
+            self.shared = predictor.shared
+            self.F0_blocks = predictor.F0
+            self.F0_proj = predictor.F0_proj
+            self.N_blocks = predictor.N
+            self.N_proj = predictor.N_proj
+
+        def forward(self, en, s):
+            x, _ = self.shared(en.transpose(-1, -2))
+            F0 = x.transpose(-1, -2)
+            for block in self.F0_blocks:
+                F0 = block(F0, s)
+            F0 = self.F0_proj(F0)
+            N = x.transpose(-1, -2)
+            for block in self.N_blocks:
+                N = block(N, s)
+            N = self.N_proj(N)
+            return F0.squeeze(1), N.squeeze(1)
+
+    f0n_model = F0NPredictor(kmodel.predictor)
+    f0n_model.eval()
+    remove_training_ops(f0n_model)
+    patch_rsqrt(f0n_model)
+    for module in f0n_model.modules():
+        module.eval()
+
+    en_dim = 640
+
+    for bucket in BUCKETS:
+        name = bucket["name"]
+        asr_f = bucket["asr_frames"]
+        f0_f = bucket["f0_frames"]
+        print(f"\n  --- F0/N bucket {name} (asr_frames={asr_f}, f0_frames={f0_f}) ---")
+
+        en = torch.zeros(1, en_dim, asr_f)
+        s = torch.zeros(1, 128)
+
+        print("  Testing forward pass...")
+        with torch.no_grad():
+            f0_out, n_out = f0n_model(en, s)
+            print(f"  F0 shape: {f0_out.shape}, N shape: {n_out.shape}")
+            assert f0_out.shape[-1] == f0_f, f"Expected f0_frames={f0_f}, got {f0_out.shape[-1]}"
+
+        print("  Tracing model...")
+        with torch.no_grad():
+            traced = torch.jit.trace(f0n_model, (en, s), strict=False)
+
+        print("  Converting to CoreML...")
+        try:
+            mlmodel = ct.convert(
+                traced,
+                inputs=[
+                    ct.TensorType(name="en", shape=(1, en_dim, asr_f), dtype=np.float32),
+                    ct.TensorType(name="s", shape=(1, 128), dtype=np.float32),
+                ],
+                outputs=[
+                    ct.TensorType(name="F0_pred"),
+                    ct.TensorType(name="N_pred"),
+                ],
+                convert_to="mlprogram",
+                minimum_deployment_target=ct.target.macOS12,
+                compute_precision=ct.precision.FLOAT16,
+                compute_units=ct.ComputeUnit.ALL,
+            )
+            mlpackage_path = os.path.join(COREML_DIR, f"kokoro_f0n_{name}.mlpackage")
+            mlmodel.save(mlpackage_path)
+            print(f"  Saved: {mlpackage_path}")
+
+            test_in = {
+                "en": np.random.randn(1, en_dim, asr_f).astype(np.float32) * 0.1,
+                "s": np.random.randn(1, 128).astype(np.float32) * 0.1,
+            }
+            t0 = time.time()
+            test_out = mlmodel.predict(test_in)
+            elapsed = (time.time() - t0) * 1000
+            print(f"  CoreML test: {elapsed:.0f}ms, F0 range=[{test_out['F0_pred'].min():.3f}, {test_out['F0_pred'].max():.3f}]")
+
+            print(f"  Compiling .mlpackage -> .mlmodelc ...")
+            mlmodelc_path = os.path.join(COREML_DIR, f"kokoro_f0n_{name}.mlmodelc")
+            if os.path.exists(mlmodelc_path):
+                shutil.rmtree(mlmodelc_path)
+            run_cmd(f'xcrun coremlcompiler compile "{mlpackage_path}" "{COREML_DIR}"', check=False)
+            if os.path.exists(mlmodelc_path):
+                print(f"  Compiled: {mlmodelc_path}")
+        except Exception as e:
+            print(f"  CoreML conversion failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    print("\n  F0/N predictor export complete!")
+
+
 def export_voices_and_vocab(kmodel):
     import torch
     import numpy as np
@@ -732,9 +835,10 @@ def main():
     parser.add_argument("--duration-only", action="store_true", help="Export duration model only")
     parser.add_argument("--decoder-only", action="store_true", help="Export decoder only")
     parser.add_argument("--voices-only", action="store_true", help="Export voices/vocab only")
+    parser.add_argument("--f0n-only", action="store_true", help="Export F0/N predictor only")
     args = parser.parse_args()
 
-    export_all = not (args.duration_only or args.decoder_only or args.voices_only)
+    export_all = not (args.duration_only or args.decoder_only or args.voices_only or args.f0n_only)
 
     if not args.no_install:
         conda_python = ensure_conda_env()
@@ -749,6 +853,8 @@ def main():
                 relaunch_args.append('--decoder-only')
             if args.voices_only:
                 relaunch_args.append('--voices-only')
+            if args.f0n_only:
+                relaunch_args.append('--f0n-only')
             os.execv(conda_python, relaunch_args)
 
     if not args.no_download:
@@ -764,6 +870,9 @@ def main():
 
     if export_all or args.decoder_only:
         export_split_decoder(kmodel)
+
+    if export_all or args.f0n_only:
+        export_f0n_predictor(kmodel)
 
     if export_all or args.voices_only:
         export_voices_and_vocab(kmodel)

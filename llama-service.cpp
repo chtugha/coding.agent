@@ -414,7 +414,8 @@ private:
 
     std::shared_ptr<LlamaCall> get_or_create_call(uint32_t cid) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(cid)) return calls_[cid];
+        auto it = calls_.find(cid);
+        if (it != calls_.end()) return it->second;
         auto call = std::make_shared<LlamaCall>();
         call->id = cid;
         call->seq_id = next_seq_id_.fetch_add(1);
