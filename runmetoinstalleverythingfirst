@@ -63,6 +63,13 @@ activate_conda_env() {
 
 NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
+resolve_whispertalk_python() {
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null)"
+    WHISPERTALK_PYTHON="$conda_base/envs/whispertalk/bin/python3"
+}
+WHISPERTALK_PYTHON=""
+
 check_macos() {
     step "Checking macOS / Apple Silicon"
     if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -130,13 +137,20 @@ setup_python_env() {
 
     activate_conda_env whispertalk
 
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null)"
+    WHISPERTALK_PYTHON="$conda_base/envs/whispertalk/bin/python3"
+    if [ ! -x "$WHISPERTALK_PYTHON" ]; then
+        error "whispertalk Python not found at $WHISPERTALK_PYTHON"
+    fi
+
     info "Installing Python dependencies..."
-    pip install --quiet --upgrade pip
-    pip install --quiet torch torchvision torchaudio
-    pip install --quiet "protobuf>=4.25.1"
-    pip install --quiet coremltools
-    pip install --quiet openai-whisper
-    pip install --quiet huggingface-hub
+    "$WHISPERTALK_PYTHON" -m pip install --quiet --upgrade pip
+    "$WHISPERTALK_PYTHON" -m pip install --quiet torch torchvision torchaudio
+    "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
+    "$WHISPERTALK_PYTHON" -m pip install --quiet coremltools
+    "$WHISPERTALK_PYTHON" -m pip install --quiet openai-whisper
+    "$WHISPERTALK_PYTHON" -m pip install --quiet huggingface-hub
     info "Python environment ready"
 }
 
@@ -180,11 +194,9 @@ setup_llama_cpp() {
 
 setup_kokoro() {
     step "Checking Kokoro dependencies"
-    activate_conda_env whispertalk
-
-    if ! python3 -c "import kokoro" 2>/dev/null; then
+    if ! "$WHISPERTALK_PYTHON" -c "import kokoro" 2>/dev/null; then
         info "Installing kokoro package..."
-        pip install --quiet kokoro
+        "$WHISPERTALK_PYTHON" -m pip install --quiet kokoro
     else
         info "kokoro package already installed"
     fi
@@ -305,11 +317,9 @@ export_kokoro_models() {
         error "conda is required for Kokoro model export. Run the install steps first."
     fi
 
-    activate_conda_env whispertalk
-
     info "Running Kokoro export script (this may take 10-15 minutes)..."
     info "The export script manages its own conda env (kokoro_coreml) with pinned versions."
-    python3 scripts/export_kokoro_models.py
+    "$WHISPERTALK_PYTHON" scripts/export_kokoro_models.py
 
     info "Kokoro models exported"
 }
@@ -366,15 +376,13 @@ convert_neucodec_to_coreml() {
         error "NeuCodec ONNX decoder not found at $neutts_dir/neucodec_decoder.onnx"
     fi
 
-    activate_conda_env whispertalk
-
-    python3 -c "import coremltools; import onnx; import onnx2torch; import torch" 2>/dev/null || {
+    "$WHISPERTALK_PYTHON" -c "import coremltools; import onnx; import onnx2torch; import torch" 2>/dev/null || {
         info "Installing coremltools, onnx, onnx2torch..."
-        pip install coremltools onnx onnx2torch || error "Failed to install coremltools/onnx/onnx2torch"
+        "$WHISPERTALK_PYTHON" -m pip install coremltools onnx onnx2torch || error "Failed to install coremltools/onnx/onnx2torch"
     }
 
     info "Introspecting ONNX model and converting to CoreML mlpackage..."
-    python3 << 'PYEOF'
+    "$WHISPERTALK_PYTHON" - << 'PYEOF'
 import coremltools as ct
 import numpy as np
 import onnx
@@ -479,15 +487,13 @@ prepare_neutts_reference() {
 
     local ref_text="Es wurde eine Untersuchung zur Aufklärung des Unfalls eingeleitet."
 
-    activate_conda_env whispertalk
-
-    python3 -c "import neucodec" 2>/dev/null || {
+    "$WHISPERTALK_PYTHON" -c "import neucodec" 2>/dev/null || {
         info "Installing neucodec, librosa..."
-        pip install neucodec librosa 2>/dev/null || true
+        "$WHISPERTALK_PYTHON" -m pip install neucodec librosa 2>/dev/null || true
     }
 
     info "Validating neucodec API and encoding reference audio → ref_codes.bin..."
-    python3 << PYEOF
+    "$WHISPERTALK_PYTHON" - << PYEOF
 import sys
 import os
 
@@ -545,7 +551,7 @@ PYEOF
     fi
 
     info "Phonemizing reference text → ref_text.txt..."
-    python3 << PYEOF
+    "$WHISPERTALK_PYTHON" - << PYEOF
 import subprocess
 import os
 import sys
@@ -724,6 +730,7 @@ main() {
     install_system_deps
     check_and_install_python
     setup_python_env
+    resolve_whispertalk_python
 
     setup_whisper_cpp
     setup_llama_cpp
