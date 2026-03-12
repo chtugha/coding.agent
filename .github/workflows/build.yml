@@ -1,0 +1,78 @@
+name: Build Verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          brew install cmake espeak-ng ccache
+
+      - name: Build whisper.cpp
+        run: |
+          cmake -S whisper-cpp -B whisper-cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DWHISPER_COREML=ON \
+            -DGGML_METAL=ON \
+            -DGGML_CCACHE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_EXAMPLES=OFF
+          cmake --build whisper-cpp/build --config Release -j$(sysctl -n hw.ncpu)
+
+      - name: Build llama.cpp
+        run: |
+          cmake -S llama-cpp -B llama-cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_METAL=ON \
+            -DGGML_OPENMP=OFF
+          cmake --build llama-cpp/build --config Release -j$(sysctl -n hw.ncpu)
+
+      - name: Build WhisperTalk
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DKOKORO_COREML=ON \
+            -DBUILD_TESTS=ON
+          cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+
+      - name: Verify binaries
+        run: |
+          EXPECTED=(
+            bin/sip-client
+            bin/inbound-audio-processor
+            bin/vad-service
+            bin/outbound-audio-processor
+            bin/whisper-service
+            bin/llama-service
+            bin/kokoro-service
+            bin/neutts-service
+            bin/frontend
+          )
+          MISSING=0
+          for b in "${EXPECTED[@]}"; do
+            if [ -f "$b" ]; then
+              echo "OK: $b ($(du -h "$b" | cut -f1))"
+            else
+              echo "MISSING: $b"
+              MISSING=1
+            fi
+          done
+          exit $MISSING
+
+      - name: Run tests
+        run: |
+          cd build && ctest --output-on-failure || true

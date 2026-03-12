@@ -371,20 +371,48 @@ convert_neucodec_to_coreml() {
         pip install coremltools onnx 2>/dev/null || true
     }
 
-    info "Converting ONNX to CoreML mlpackage..."
+    info "Introspecting ONNX model and converting to CoreML mlpackage..."
     python3 << 'PYEOF'
 import coremltools as ct
 import numpy as np
+import onnx
 import os
+import sys
 
 neutts_dir = "bin/models/neutts-nano-german"
 onnx_path = os.path.join(neutts_dir, "neucodec_decoder.onnx")
 mlpackage_path = os.path.join(neutts_dir, "neucodec_decoder.mlpackage")
 
-print(f"Loading ONNX model from {onnx_path}")
+print(f"Introspecting ONNX model: {onnx_path}")
+onnx_model = onnx.load(onnx_path)
+inputs = onnx_model.graph.input
+print(f"  ONNX inputs ({len(inputs)}):")
+ct_inputs = []
+for inp in inputs:
+    name = inp.name
+    elem_type = inp.type.tensor_type.elem_type
+    dims = [d.dim_value if d.dim_value > 0 else d.dim_param or "?" for d in inp.type.tensor_type.shape.dim]
+    type_map = {1: "float32", 2: "uint8", 3: "int8", 5: "int16", 6: "int32", 7: "int64", 11: "float64"}
+    dtype_str = type_map.get(elem_type, f"unknown({elem_type})")
+    print(f"    {name}: shape={dims}, dtype={dtype_str}")
+
+    np_dtype = {"float32": np.float32, "int32": np.int32, "int64": np.int64, "float64": np.float64}.get(dtype_str)
+    if np_dtype is None:
+        print(f"  ERROR: Unsupported dtype '{dtype_str}' for input '{name}'")
+        sys.exit(1)
+
+    shape = []
+    for d in inp.type.tensor_type.shape.dim:
+        if d.dim_value > 0:
+            shape.append(d.dim_value)
+        else:
+            shape.append(ct.RangeDim(1, 1500))
+    ct_inputs.append(ct.TensorType(name=name, shape=ct.Shape(shape), dtype=np_dtype))
+
+print(f"Converting {onnx_path} → CoreML")
 model = ct.converters.convert(
     onnx_path,
-    inputs=[ct.TensorType(name="codes", shape=(1, 1, ct.RangeDim(1, 1500)), dtype=np.int32)],
+    inputs=ct_inputs,
     minimum_deployment_target=ct.target.macOS14,
     compute_precision=ct.precision.FLOAT32,
 )
@@ -435,23 +463,52 @@ prepare_neutts_reference() {
         pip install neucodec librosa 2>/dev/null || true
     }
 
-    info "Encoding reference audio → ref_codes.bin..."
+    info "Validating neucodec API and encoding reference audio → ref_codes.bin..."
     python3 << PYEOF
-import torch
-import numpy as np
-from librosa import load
-from neucodec import NeuCodec
-import struct
+import sys
 import os
 
 neutts_dir = "bin/models/neutts-nano-german"
 
+try:
+    import torch
+    import numpy as np
+    from librosa import load
+except ImportError as e:
+    print(f"ERROR: Missing dependency: {e}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from neucodec import NeuCodec
+except ImportError:
+    print("ERROR: 'neucodec' package not installed or importable.", file=sys.stderr)
+    print("  Try: pip install neucodec", file=sys.stderr)
+    sys.exit(1)
+
+if not hasattr(NeuCodec, 'from_pretrained'):
+    print("ERROR: NeuCodec class has no 'from_pretrained' method. API may have changed.", file=sys.stderr)
+    sys.exit(1)
+
 codec = NeuCodec.from_pretrained("neuphonic/neucodec")
+
+if not hasattr(codec, 'encode_code'):
+    print("ERROR: NeuCodec instance has no 'encode_code' method. API may have changed.", file=sys.stderr)
+    sys.exit(1)
+
 codec.eval().to("cpu")
 
-wav, _ = load(os.path.join(neutts_dir, "greta.wav"), sr=16000, mono=True)
+wav_path = os.path.join(neutts_dir, "greta.wav")
+if not os.path.exists(wav_path):
+    print(f"ERROR: Reference audio not found: {wav_path}", file=sys.stderr)
+    sys.exit(1)
+
+wav, _ = load(wav_path, sr=16000, mono=True)
 wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)
 ref_codes = codec.encode_code(audio_or_path=wav_tensor).squeeze(0).squeeze(0)
+
+if ref_codes.numel() == 0:
+    print("ERROR: encode_code returned empty codes", file=sys.stderr)
+    sys.exit(1)
 
 codes_np = ref_codes.numpy().astype(np.int32)
 codes_path = os.path.join(neutts_dir, "ref_codes.bin")
@@ -460,13 +517,19 @@ with open(codes_path, "wb") as f:
 print(f"Saved {len(codes_np)} reference codes to {codes_path}")
 PYEOF
 
+    if [ $? -ne 0 ]; then
+        error "Reference audio encoding failed. Check neucodec API compatibility."
+    fi
+
     info "Phonemizing reference text → ref_text.txt..."
     python3 << PYEOF
 import subprocess
 import os
+import sys
 
 ref_text = "$ref_text"
 neutts_dir = "bin/models/neutts-nano-german"
+phones = None
 
 try:
     from phonemizer import phonemize
@@ -500,16 +563,24 @@ except ImportError:
             capture_output=True, text=True)
         phones = result.stdout.strip()
 
+if not phones:
+    print("ERROR: Phonemization produced empty output", file=sys.stderr)
+    sys.exit(1)
+
 ref_text_path = os.path.join(neutts_dir, "ref_text.txt")
 with open(ref_text_path, "w") as f:
     f.write(phones)
 print(f"Saved phonemized reference text: {phones}")
 PYEOF
 
+    if [ $? -ne 0 ]; then
+        error "Reference text phonemization failed."
+    fi
+
     if [ -f "$neutts_dir/ref_codes.bin" ] && [ -f "$neutts_dir/ref_text.txt" ]; then
         info "Reference voice prepared"
     else
-        warn "Reference voice preparation may have failed"
+        error "Reference voice preparation failed: ref_codes.bin or ref_text.txt missing"
     fi
 }
 
