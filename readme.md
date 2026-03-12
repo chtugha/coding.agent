@@ -1,6 +1,6 @@
 # WhisperTalk
 
-A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. WhisperTalk integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** (TTS) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal).
+A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. WhisperTalk integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** or **NeuTTS** (TTS) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal) with no PyTorch runtime dependency.
 
 ## Architecture
 
@@ -13,95 +13,114 @@ A high-performance, real-time speech-to-speech system designed for low-latency t
                         |              ^
                        IAP            OAP
                         |              ^
-                       VAD          Kokoro
+                       VAD          Kokoro / NeuTTS
                         |              ^
                      Whisper -----> LLaMA
 
                      [Frontend] (web UI + log aggregation)
 ```
 
-The pipeline is a linear chain of 7 C++ programs. Every adjacent pair communicates over two persistent TCP connections (management + data). The frontend manages all services and provides a web UI at `http://0.0.0.0:8080/`.
+The pipeline is a linear chain of C++ programs. Every adjacent pair communicates over two persistent TCP connections (management + data). The frontend manages all services and provides a web UI at `http://0.0.0.0:8080/`.
 
 ## Requirements
 
-- **OS**: macOS (Apple Silicon M-series recommended)
+- **OS**: macOS Apple Silicon (M1/M2/M3/M4)
 - **Language**: C++17, Python 3.9+
-- **Build**: CMake 3.22+
-- **Dependencies**:
-  - [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (v1.8.3+, compiled with CoreML support)
-  - [llama.cpp](https://github.com/ggerganov/llama.cpp) (compiled with Metal support)
-  - [PyTorch](https://pytorch.org/) / libtorch (for Kokoro TTS)
+- **Build**: CMake 3.22+, Ninja (recommended)
+- **Dependencies** (installed automatically by `runmetoinstalleverythingfirst`):
+  - [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (compiled with CoreML + Metal)
+  - [llama.cpp](https://github.com/ggerganov/llama.cpp) (compiled with Metal)
   - [espeak-ng](https://github.com/espeak-ng/espeak-ng) (`brew install espeak-ng`)
   - macOS frameworks: Accelerate, Metal, CoreML, Foundation
 
-## Build
+## Quick Install & Build
 
 ```bash
-# Build whisper.cpp with CoreML
-cd whisper-cpp && mkdir -p build && cd build
-cmake .. -DWHISPER_COREML=1 -DWHISPER_COREML_ALLOW_FALLBACK=ON && make -j
-cd ../..
+# Step 1: Install everything (Homebrew, Miniconda, models, CoreML exports)
+./runmetoinstalleverythingfirst
 
-# Build llama.cpp with Metal
-cd llama-cpp && mkdir -p build && cd build
-cmake .. && make -j
-cd ../..
+# Step 2: Build all services
+./runmetobuildeverything
 
-# Build WhisperTalk
-mkdir -p build && cd build
-cmake .. && make -j
+# Step 3: Launch
+cd bin && ./frontend
+# Web UI: http://localhost:8080
 ```
 
-Binaries are output to `bin/`.
+`runmetobuildeverything` auto-clones `whisper-cpp` and `llama-cpp` if missing, detects Ninja for fast parallel builds, and bypasses the macOS Xcode license check using the Command Line Tools SDK directly.
+
+### Manual Build
+
+```bash
+# Build whisper.cpp (CoreML + Metal, static)
+cmake -G Ninja -S whisper-cpp -B whisper-cpp/build \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+  -DWHISPER_COREML=ON -DGGML_METAL=ON \
+  -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF
+cmake --build whisper-cpp/build -j
+
+# Build llama.cpp (Metal, static)
+cmake -G Ninja -S llama-cpp -B llama-cpp/build \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+  -DGGML_METAL=ON
+cmake --build llama-cpp/build -j
+
+# Build WhisperTalk
+cmake -G Ninja -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release -DKOKORO_COREML=ON -DBUILD_TESTS=ON
+cmake --build build -j
+```
 
 ### CMake Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `KOKORO_COREML` | `ON` | Enable CoreML ANE acceleration for Kokoro decoder |
-| `BUILD_TESTS` | `OFF` | Build unit/integration tests (requires Google Test) |
-| `TORCH_CMAKE_PREFIX` | auto-detected | Path to libtorch CMake config |
+| `NEUTTS_COREML` | `ON` | Enable CoreML NeuCodec decoder for NeuTTS |
+| `BUILD_TESTS` | `OFF` | Build unit/integration tests (requires GoogleTest) |
 | `ESPEAK_NG_DATA_DIR` | auto-detected | Path to espeak-ng-data directory |
 
 ## Models
 
-Place model files in `bin/models/`:
+All model files are placed in `bin/models/`. `runmetoinstalleverythingfirst` downloads and prepares all of these automatically.
 
-| Model | File | Size | Purpose |
-|-------|------|------|---------|
-| Whisper large-v3 | `ggml-large-v3.bin` | 2.9 GB | ASR (best accuracy) |
-| Whisper large-v3-turbo-q5_0 | `ggml-large-v3-turbo-q5_0.bin` | 547 MB | ASR (fastest) |
-| Whisper CoreML encoder | `ggml-large-v3-encoder.mlmodelc/` | - | CoreML ANE acceleration |
-| LLaMA 3.2-1B-Instruct | `Llama-3.2-1B-Instruct-Q8_0.gguf` | ~1.1 GB | Response generation |
-| Kokoro TTS | `kokoro.pt` | - | Text-to-speech |
-| Kokoro voice | `voice.bin` | - | Voice style embedding |
-| Kokoro vocab | `vocab.json` | - | Phoneme-to-token mapping |
+### Whisper (ASR)
 
-### CoreML Encoder Conversion
+| File | Size | Purpose |
+|------|------|---------|
+| `ggml-large-v3-turbo-q5_0.bin` | ~547 MB | Default ASR model (best speed/accuracy balance) |
+| `ggml-large-v3-q5_0.bin` | ~1.0 GB | Higher accuracy ASR model |
+| `ggml-large-v3-turbo-encoder.mlmodelc/` | varies | CoreML ANE encoder for large-v3-turbo |
+| `ggml-large-v3-encoder.mlmodelc/` | varies | CoreML ANE encoder for large-v3 |
 
-Each Whisper model architecture needs its own CoreML encoder:
+### LLaMA (LLM)
 
-```bash
-cd whisper-cpp
-python3 models/convert-whisper-to-coreml.py --model large-v3 --encoder-only True --optimize-ane True
-xcrun coremlc compile models/coreml-encoder-large-v3.mlpackage models/
-mv models/coreml-encoder-large-v3.mlmodelc models/ggml-large-v3-encoder.mlmodelc
-```
+| File | Size | Purpose |
+|------|------|---------|
+| `Llama-3.2-1B-Instruct-Q8_0.gguf` | ~1.2 GB | Response generation (Metal-accelerated) |
 
-`large-v3` and `large-v3-q5_0` share the same encoder. `large-v3-turbo` and `large-v3-turbo-q5_0` share a different encoder.
+### Kokoro (TTS)
 
-## Quick Start
+Located in `bin/models/kokoro-german/`:
 
-```bash
-# Start the frontend (manages all services)
-cd bin
-./frontend
+| File | Purpose |
+|------|---------|
+| `coreml/kokoro_duration.mlmodelc/` | Duration model (CoreML ANE) |
+| `coreml/kokoro_f0n_predictor.mlmodelc/` | F0/N predictor (CoreML ANE) |
+| `decoder_variants/*.mlmodelc/` | Split decoder models (CoreML ANE) |
+| `voice.bin` | Voice style embedding (256-dim float32) |
+| `vocab.json` | Phoneme-to-token mapping |
 
-# Open http://localhost:8080 in your browser
-# Use the web UI to start/stop/configure individual services
-```
+### NeuTTS (alternative TTS)
 
-The frontend starts all services as child processes. You can also run services individually (see below).
+Located in `bin/models/neutts-nano-german/`:
+
+| File | Size | Purpose |
+|------|------|---------|
+| `neutts-nano-german-Q4_0.gguf` | ~185 MB | LLaMA-based speech backbone |
+| `neucodec_decoder.mlmodelc/` | ~3.4 GB | NeuCodec CoreML decoder |
+| `ref_codes.bin` | - | Pre-computed reference voice codec codes |
+| `ref_text.txt` | - | Reference voice phoneme transcript |
 
 ## Port Map
 
@@ -109,31 +128,40 @@ All services bind to `127.0.0.1`:
 
 | Service | Mgmt Port | Data Port | Cmd Port | Notes |
 |---------|-----------|-----------|----------|-------|
-| SIP Client | 13100 | 13101 | 13102 | + SIP UDP 5060 + RTP UDP |
+| SIP Client | 13100 | 13101 | 13102 | + SIP UDP 5060 + RTP UDP 10000+ |
 | IAP | 13110 | 13111 | 13112 | |
 | VAD | 13115 | 13116 | 13117 | |
 | Whisper | 13120 | 13121 | 13122 | |
 | LLaMA | 13130 | 13131 | 13132 | |
-| Kokoro | 13140 | 13141 | 13142 | |
+| Kokoro / NeuTTS | 13140 | 13141 | 13142 | Mutually exclusive |
 | OAP | 13150 | 13151 | 13152 | |
-| Frontend | 13160 | 13161 | 13162 | + HTTP 8080 |
-| Log Server | - | - | - | UDP 22022 |
+| Frontend | - | - | - | HTTP 8080, Log UDP 22022 |
+
+---
 
 ## Services
 
 ### 1. SIP Client (`bin/sip-client`)
 
-RTP gateway for the pipeline. Handles SIP registration, incoming/outgoing calls, and routes RTP audio between the telephony network and the internal pipeline.
+RTP gateway and SIP stack. Handles SIP registration with Digest authentication, incoming/outgoing call management, and routes raw RTP audio between the telephony network and the internal pipeline.
+
+**Key behaviors:**
+- Minimal SIP stack over raw UDP (port 5060 by default)
+- MD5 Digest authentication with `WWW-Authenticate` challenge parsing
+- Re-registers every 60 seconds
+- Multi-line: supports N simultaneous SIP registrations (`--lines 0` is valid for test-only mode)
+- Inbound RTP forwarded to IAP as raw Packet frames (12-byte RTP header included; IAP strips it)
+- Outbound G.711 frames from OAP wrapped in RTP headers (seq, timestamp, SSRC) and sent via UDP
+- Stale call auto-hangup after 60 seconds of no RTP traffic
+- RTP port base: 10000, incremented by 2 per call
 
 **Command-Line Parameters:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--user <user>` | - | SIP username for initial line |
-| `--server <ip>` | - | SIP server IP address |
+| `[--lines N] [<user> <server>]` | 0 lines | Lines to register at startup; positional args only needed when `lines > 0` |
 | `--port <port>` | `5060` | SIP server port |
 | `--password <pass>` | - | SIP password for Digest auth |
-| `--lines <n>` | - | Number of SIP lines to register |
 | `--log-level <LEVEL>` | `INFO` | Log verbosity: ERROR, WARN, INFO, DEBUG, TRACE |
 
 **Runtime Commands (cmd port 13102):**
@@ -141,8 +169,8 @@ RTP gateway for the pipeline. Handles SIP registration, incoming/outgoing calls,
 | Command | Description |
 |---------|-------------|
 | `ADD_LINE:<user>:<server>:<port>:<password>` | Register a new SIP account dynamically |
-| `GET_STATS` | Returns JSON with RTP counters for all active calls |
-| `PING` | Health check (returns `PONG`) |
+| `GET_STATS` | JSON RTP counters for all active calls (rx/tx packets, bytes, forwarded, discarded) |
+| `PING` | Health check → `PONG` |
 | `STATUS` | Registered lines, active calls, connection state |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
@@ -150,200 +178,254 @@ RTP gateway for the pipeline. Handles SIP registration, incoming/outgoing calls,
 
 ### 2. Inbound Audio Processor (`bin/inbound-audio-processor`)
 
-Converts G.711 u-law telephony audio (8kHz) to high-quality float32 PCM (16kHz) for the VAD service.
+Converts G.711 μ-law telephony audio (8kHz) to float32 PCM (16kHz) for the VAD service.
 
-- Decodes G.711 u-law using a 256-entry ITU-T lookup table
-- Upsamples 8kHz to 16kHz via 15-tap half-band FIR filter (Hamming-windowed sinc, cutoff ~3.8kHz)
-- Each 160-byte RTP payload (20ms @ 8kHz) produces 320 float32 samples (20ms @ 16kHz)
+**Signal chain:**
+1. **G.711 μ-law decode**: 256-entry ITU-T lookup table; each byte → float32 in [-1.0, 1.0]
+2. **8kHz→16kHz upsample**: 15-tap Hamming-windowed sinc FIR half-band filter (cutoff ~3.8kHz, ~40dB stopband). Zero-stuffs input, then filters to remove spectral copies above 4kHz.
+
+Each 160-byte RTP payload (20ms @ 8kHz) produces 320 float32 samples (20ms @ 16kHz). Continues processing and discards output if VAD is unavailable; auto-reconnects when VAD comes back online.
 
 **Command-Line Parameters:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--log-level <LEVEL>` | `INFO` | Log verbosity: ERROR, WARN, INFO, DEBUG, TRACE |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (cmd port 13112):**
 
 | Command | Description |
 |---------|-------------|
-| `PING` | Health check (returns `PONG`) |
-| `STATUS` | Active call count, upstream/downstream state, avg/max latency (us) |
+| `PING` | Health check → `PONG` |
+| `STATUS` | Active call count, upstream/downstream state, avg/max per-packet latency (μs) |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
 ---
 
 ### 3. VAD Service (`bin/vad-service`)
 
-Energy-based Voice Activity Detection. Segments continuous audio into 0.5-8 second speech chunks for Whisper.
+Energy-based Voice Activity Detection. Segments continuous 16kHz PCM into speech chunks (0.5–8 seconds) for Whisper.
 
-- Adaptive noise floor tracking (EMA, alpha=0.05, time constant ~1s)
-- Micro-pause detection: 400ms silence triggers speech-end
-- Smart-split: searches for energy dips near max-length boundaries to avoid cutting mid-word
-- Pre-speech context: includes 400ms (8 frames) before onset for natural boundaries
-- RMS energy gate: rejects chunks below 0.005 to prevent hallucinations
-- Broadcasts SPEECH_ACTIVE/SPEECH_IDLE downstream for TTS interruption
-
-**Command-Line Parameters:**
-
-| Argument | Default | Range | Description |
-|----------|---------|-------|-------------|
-| `--vad-window-ms <ms>` | `50` | 10-500 | Analysis frame size in ms |
-| `--vad-threshold <mult>` | `2.0` | 0.5-10.0 | Energy threshold multiplier over noise floor |
-| `--vad-silence-ms <ms>` | `400` | - | Silence duration to trigger speech-end |
-| `--vad-max-chunk-ms <ms>` | `8000` | - | Maximum speech chunk duration |
-| `--log-level <LEVEL>` | `INFO` | - | Log verbosity: ERROR, WARN, INFO, DEBUG, TRACE |
-
-**Runtime Commands (cmd port 13117):**
-
-| Command | Description |
-|---------|-------------|
-| `PING` | Health check (returns `PONG`) |
-| `STATUS` | VAD params, noise floor, active calls, connection state |
-| `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
-| `SET_VAD_THRESHOLD:<mult>` | Change energy threshold multiplier |
-| `SET_VAD_SILENCE_MS:<ms>` | Change silence duration threshold |
-| `SET_VAD_MAX_CHUNK_MS:<ms>` | Change maximum chunk duration |
-
----
-
-### 4. Whisper Service (`bin/whisper-service`)
-
-Automatic Speech Recognition using whisper.cpp, optimized for Apple Silicon CoreML/Metal.
-
-- Greedy decoding (3-5x faster than beam search on short segments, negligible accuracy loss)
-- Telephony-optimized parameters: `no_speech_thold=0.9`, `entropy_thold=2.8`
-- No peak normalization (matches whisper-cli defaults)
-- Optional hallucination filter (runtime-toggleable): exact-match + repetition detection + trailing suffix stripping
-- RMS energy check: rejects chunks with RMS < 0.005
-- Packet buffering: up to 64 transcriptions buffered if LLaMA is disconnected
+**Algorithm:**
+- **Adaptive noise floor**: EMA update (alpha=0.05) during silence frames; time constant ~1 second
+- **Onset detection**: requires 3 consecutive frames above `threshold × noise_floor` to confirm speech start
+- **End detection**: 400ms of consecutive sub-threshold frames triggers speech-end
+- **Micro-pause detection**: short pauses (~400ms) between words trigger early submission rather than waiting for full silence — reduces Whisper inference latency since inference time scales with chunk length
+- **Smart-split**: when max chunk length is reached during speech, finds the lowest-energy frame near the boundary to avoid cutting mid-word
+- **Pre-speech context**: 400ms (8 frames × 50ms) before confirmed onset is prepended to each chunk
+- **RMS energy gate**: chunks with RMS < 0.005 discarded as near-silence
+- **SPEECH_ACTIVE/SPEECH_IDLE signals**: broadcast downstream to Kokoro/OAP for TTS interruption
 
 **Command-Line Parameters:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--language <lang>` / `-l` | `de` | Whisper language code |
-| `--model <path>` / `-m` | `models/ggml-large-v3-turbo-q5_0.bin` | Path to GGML model file |
-| `--log-level <LEVEL>` | `INFO` | Log verbosity: ERROR, WARN, INFO, DEBUG, TRACE |
+| `--vad-threshold <mult>` | `2.0` | Energy threshold multiplier over noise floor |
+| `--vad-silence-ms <ms>` | `400` | Silence duration to end speech segment |
+| `--vad-max-chunk-ms <ms>` | `8000` | Maximum speech chunk duration |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
+
+**Runtime Commands (cmd port 13117):**
+
+| Command | Description |
+|---------|-------------|
+| `PING` | Health check → `PONG` |
+| `STATUS` | Noise floor, threshold, silence_ms, max_chunk_ms, active calls, upstream/downstream state |
+| `SET_VAD_THRESHOLD:<mult>` | Update threshold multiplier at runtime |
+| `SET_VAD_SILENCE_MS:<ms>` | Update silence detection duration at runtime |
+| `SET_VAD_MAX_CHUNK_MS:<ms>` | Update max chunk length at runtime |
+| `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
+
+---
+
+### 4. Whisper Service (`bin/whisper-service`)
+
+Automatic Speech Recognition (ASR). Receives pre-segmented speech chunks from VAD and returns transcribed text to LLaMA.
+
+**Inference details:**
+- **Backend**: whisper.cpp with CoreML ANE (Apple Neural Engine) + Metal fallback
+- **Decoding**: Greedy strategy (not beam search). On 2–8s segments, greedy is 3–5× faster than beam_size=5 with negligible accuracy difference. Temperature fallback with `temp_inc=0.2` handles uncertain segments.
+- **Telephony-optimized parameters**: `no_speech_thold=0.9` (prevents early decoder stop on G.711-degraded audio), `entropy_thold=2.8` (tolerant of codec uncertainty)
+- **No audio normalization**: audio passed directly to Whisper (matches whisper-cli defaults for optimal accuracy on G.711 input)
+- **RMS energy pre-check**: rejects chunks with RMS < 0.005 to prevent hallucinations on near-silence
+- **Packet buffering**: if LLaMA is disconnected, buffers up to 64 transcription packets and drains them on reconnect
+- **Hallucination filter** (default OFF, runtime-toggleable): exact-match detection of common Whisper hallucination strings (e.g., "Untertitel", "Copyright", "Musik"); repetition detection; trailing suffix stripping
+
+**Command-Line Parameters:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--language <lang>` / `-l <lang>` | `de` | Whisper language code |
+| `--model <path>` / `-m <path>` | `models/ggml-large-v3-turbo-q5_0.bin` | Path to GGML model file |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (cmd port 13122):**
 
 | Command | Description |
 |---------|-------------|
-| `HALLUCINATION_FILTER:ON` | Enable hallucination filtering |
-| `HALLUCINATION_FILTER:OFF` | Disable hallucination filtering (default) |
-| `HALLUCINATION_FILTER:STATUS` | Query current filter state |
-| `PING` | Health check (returns `PONG`) |
-| `STATUS` | Model name, connection state, filter state |
+| `PING` | Health check → `PONG` |
+| `STATUS` | Model name, upstream/downstream state, hallucination filter state |
+| `HALLUCINATION_FILTER:ON` / `OFF` | Enable/disable hallucination filter |
+| `HALLUCINATION_FILTER:STATUS` | Query filter state |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
 ---
 
 ### 5. LLaMA Service (`bin/llama-service`)
 
-Generates German-language conversational responses using Llama-3.2-1B-Instruct (Q8_0 GGUF).
+Generates a spoken German reply from transcribed text using Llama-3.2-1B-Instruct.
 
-- Greedy sampling, max 64 tokens, stops at sentence-ending punctuation
-- German system prompt: max 1 sentence, 15 words, polite and natural
-- Metal/MPS GPU acceleration (all layers on GPU)
-- Per-call session isolation via KV cache sequence IDs
-- Shut-up mechanism: SPEECH_ACTIVE interrupts generation (~5-13ms latency)
-- Tokenizer resilience: retries with larger buffer on negative token counts
+**Inference details:**
+- **Model**: Llama-3.2-1B-Instruct Q8_0 GGUF, all layers on Metal GPU (`n_gpu_layers=-1`)
+- **Template**: `llama_chat_apply_template()` — uses the model's built-in chat template for correct role tagging; no manual prompt formatting
+- **Sampling**: Greedy (`llama_sampler_init_greedy`). Max 64 tokens per response. Stops at sentence-ending punctuation (`.`, `?`, `!`) or EOS.
+- **Context**: 2048 tokens, 4 threads
+- **German system prompt**: enforces always-German, max 1 sentence / 15 words, polite and natural tone. ~320ms average latency on Apple M-series.
+- **Session isolation**: each call gets its own `LlamaCall` struct with independent message history and KV cache sequence ID. Context cleared on `CALL_END`.
+- **Shut-up mechanism**: `SPEECH_ACTIVE` from VAD aborts active generation immediately (~5–13ms interrupt latency). Worker loop defers new responses while speech is active.
+- **Tokenizer resilience**: retries with progressively larger buffer (up to 4×) if `llama_tokenize()` returns a negative value
 
 **Command-Line Parameters:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model <path>` / `-m` | `models/Llama-3.2-1B-Instruct-Q8_0.gguf` | Path to GGUF model file |
-| `--log-level <LEVEL>` | `INFO` | Log verbosity: ERROR, WARN, INFO, DEBUG, TRACE |
+| `--model <path>` / `-m <path>` | `models/Llama-3.2-1B-Instruct-Q8_0.gguf` | Path to GGUF model |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (cmd port 13132):**
 
 | Command | Description |
 |---------|-------------|
-| `PING` | Health check (returns `PONG`) |
-| `STATUS` | Model name, active calls, connection state, speech state |
+| `PING` | Health check → `PONG` |
+| `STATUS` | Model name, active calls, upstream/downstream state, speech active flag |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
 ---
 
 ### 6. Kokoro TTS Service (`bin/kokoro-service`)
 
-High-fidelity text-to-speech using the Kokoro model with CoreML ANE acceleration.
+Text-to-speech using the Kokoro model. Receives response text from LLaMA and streams 24kHz float32 PCM audio to OAP. No PyTorch dependency — all inference via CoreML on Apple Neural Engine.
 
-- Phonemization: espeak-ng (IPA) -> KokoroVocab (greedy longest-match, up to 4 chars) -> token IDs
-- Two-stage model: Duration model (alignment) -> Decoder model (waveform generation)
-- CoreML split decoder: ~2-4x speedup on M-series chips via Apple Neural Engine
-- Phoneme cache: 10000 entries with LRU eviction
-- Output normalization: peaks clipped to 0.95 ceiling
-- SPEECH_ACTIVE handling: abandons synthesis immediately when caller speaks
-- Language auto-detection: German ("de") or English ("en-us")
+**Phonemization pipeline:**
+1. **espeak-ng** (via `libespeak-ng`) converts input text → IPA phoneme string. Language auto-detected (`de` / `en-us`) via `detect_german()`.
+2. **Phoneme cache** (LRU, 10,000 entries): avoids re-running espeak-ng for repeated phrases.
+3. **KokoroVocab**: greedy longest-match scan (up to 4 chars per token, UTF-8 aware) maps phonemes → int64 token IDs from `vocab.json`. Input padded to 512 tokens.
+
+**Two-stage CoreML inference:**
+- **Stage 1 — Duration model** (`kokoro_duration.mlmodelc`): predicts per-phoneme durations, generates alignment tensors (`pred_dur`, `d`, `t_en`, `s`, `ref_s`). Style encoding from `voice.bin` (256-dim reference embedding).
+- **Stage 1b — F0/N predictor** (`kokoro_f0n_predictor.mlmodelc`): predicts fundamental frequency (`f0_pred`) and voicing (`n_pred`) from the duration model's `d` and `s` outputs. These condition the harmonic/noise excitation signal — without them, speech sounds hoarse/unvoiced.
+- **Stage 2 — Decoder** (`decoder_variants/*.mlmodelc`): split decoder generates the audio waveform from alignment tensors + F0/N conditioning. All models run with `MLComputeUnitsAll` (ANE + GPU + CPU).
+
+**Audio output processing:**
+- `normalize_audio()`: scales to 0.90 peak ceiling (skips near-silent audio and already-normalized output)
+- `apply_fade_in()`: 48-sample linear ramp at onset to prevent click artifacts
+- Sends audio to OAP in 4800-sample chunks (200ms @ 24kHz) for smooth buffer filling
+
+**SPEECH_ACTIVE handling:** Abandoned synthesis immediately if VAD signals caller speech. Per-call synthesis threads, so multi-line calls synthesize in parallel.
 
 **Command-Line Parameters:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model <path>` | `models/kokoro.pt` | Path to Kokoro TorchScript model |
-| `--voice <path>` | `models/voice.bin` | Path to voice style embedding |
-| `--vocab <path>` | `models/vocab.json` | Path to phoneme vocabulary |
-| `--log-level <LEVEL>` | `INFO` | Log verbosity: ERROR, WARN, INFO, DEBUG, TRACE |
+| `--model-dir <path>` | `models/kokoro-german` | Directory containing CoreML models and voice files |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (cmd port 13142):**
 
 | Command | Description |
 |---------|-------------|
-| `PING` | Health check (returns `PONG`) |
-| `STATUS` | Model path, connection state, active call count |
+| `PING` | Health check → `PONG` |
+| `STATUS` | Active calls, upstream/downstream state, current speed |
+| `SET_SPEED:<0.5–2.0>` | Set synthesis speed (1.0 = normal, clamped to [0.5, 2.0]) |
+| `GET_SPEED` | Query current speed |
+| `TEST_SYNTH:<text>` | Synthesize text and return timing/peak/RMS stats (no audio output) |
+| `BENCHMARK:<text>\|<N>` | Run N synthesis iterations; returns avg/p50/p95 latency and RTF |
+| `SYNTH_WAV:<path>\|<text>` | Synthesize text and save to WAV file at `<path>` (relative paths only) |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
 ---
 
-### 7. Outbound Audio Processor (`bin/outbound-audio-processor`)
+### 7. NeuTTS Service (`bin/neutts-service`) — Alternative TTS
 
-Converts TTS audio (24kHz float32) back to telephony format (8kHz G.711 u-law) for the SIP client.
+Alternative TTS engine using the NeuTTS Nano German model. Occupies the same pipeline slot as Kokoro (ports 13140–13142) — only one TTS service can run at a time.
 
-- Downsampling: 24kHz -> 8kHz via 15-tap anti-aliasing FIR (cutoff 3400Hz) + decimate by 3
-- G.711 u-law encoding (ITU-T standard)
-- Constant-rate 20ms timer: sends exactly 160 G.711 bytes per tick
-- Fills with silence (0xFF) when no TTS audio is available to maintain RTP clock
-- Per-call independent buffers and FIR state
-- SPEECH_ACTIVE: clears all call buffers to stop stale TTS audio
+**Inference pipeline:**
+1. espeak-ng converts input text → IPA phonemes (language `de`, with stress markers)
+2. Builds a NeuTTS prompt: `user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {phones}<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>{ref_codes}`
+3. Tokenize and feed to NeuTTS backbone (llama.cpp, Q4_0 GGUF) with temperature=1.0, top_k=50 autoregressive sampling
+4. Extract `<|speech_N|>` tokens as integer codec codes
+5. Stop at `<|SPEECH_GENERATION_END|>` or EOS
+6. Decode codes through NeuCodec CoreML decoder → 24kHz float32 PCM
+
+**Reference voice:** Pre-computed codec codes (`ref_codes.bin`) and phonemized text (`ref_text.txt`) loaded at startup to define voice timbre and style.
+
+**Audio post-processing:** Same as Kokoro — normalize to 0.90 peak, 48-sample fade-in.
 
 **Command-Line Parameters:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--log-level <LEVEL>` | `INFO` | Log verbosity: ERROR, WARN, INFO, DEBUG, TRACE |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
+
+**Runtime Commands (cmd port 13142):**
+
+| Command | Description |
+|---------|-------------|
+| `PING` | Health check → `PONG` |
+| `STATUS` | Active calls, upstream/downstream state |
+| `TEST_SYNTH:<text>` | Synthesize and return timing stats |
+| `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
+
+---
+
+### 8. Outbound Audio Processor (`bin/outbound-audio-processor`)
+
+Converts 24kHz float32 PCM from Kokoro/NeuTTS into 160-byte G.711 μ-law frames for the SIP client. Maintains constant 20ms output cadence.
+
+**Signal chain (per call):**
+1. **DC blocking** (first-order high-pass): α = 0.9947697 (~20Hz cutoff). Removes DC offset and LF rumble. Initialized with the first sample value to avoid onset click.
+2. **Presence boost** (optional, default OFF): High-shelf biquad IIR filter, +3dB shelf at 2500Hz (Audio EQ Cookbook, S=1). Adds air/clarity to the telephone band.
+3. **Anti-aliasing FIR** (63-tap, Hamming-windowed sinc): Cutoff 3400/12000 (normalized). ~43dB stopband attenuation. Coefficients computed once at startup, shared across all calls. Per-call `fir_history[31]` preserves filter state across chunks.
+4. **3:1 Decimation**: Keep every 3rd filtered sample (24kHz → 8kHz).
+5. **G.711 μ-law encode** (ITU-T compliant): `ULAW_CLIP=32635`, `ULAW_BIAS=132`. Encodes int16 PCM to 8-bit μ-law byte.
+
+**Output scheduler:** Dedicated sender thread fires every 20ms using `steady_clock`. Sends exactly 160 bytes per tick. If the TTS buffer is empty (silence or Kokoro disconnected), sends `0xFF` (μ-law silence) to maintain RTP clock continuity. Scheduler resync guard: if OS sleep/load spike causes >100ms drift, snaps `next_tick` to `now` instead of firing a burst of catch-up frames.
+
+**SPEECH_ACTIVE handling:** Clears all per-call buffers and resets FIR/DC/biquad state immediately when VAD signals caller speech. A configurable sidetone guard (default 1500ms) suppresses flushes arriving shortly after new TTS audio — prevents echo from triggering a spurious flush.
+
+**WAV recording** (optional): When enabled, records the 8kHz int16 PCM output per call. Written to disk on `CALL_END`.
+
+**Command-Line Parameters:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--save-wav-dir <dir>` | (disabled) | Enable WAV recording and set output directory |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (cmd port 13152):**
 
 | Command | Description |
 |---------|-------------|
-| `PING` | Health check (returns `PONG`) |
-| `STATUS` | Active calls, buffer lengths, connection state |
+| `PING` | Health check → `PONG` |
+| `STATUS` | Active calls, buffer lengths, upstream/downstream state |
+| `SAVE_WAV:ON` / `OFF` / `STATUS` | Toggle WAV recording |
+| `SET_SAVE_WAV_DIR:<dir>` | Set WAV output directory |
+| `PRESENCE_BOOST:ON` / `OFF` / `STATUS` | Toggle +3dB presence boost biquad |
+| `SET_SIDETONE_GUARD_MS:<ms>` | Set SPEECH_ACTIVE guard window (default 1500ms) |
+| `TEST_ENCODE:<freq>\|<dur_ms>` | Generate sine wave, encode, measure μ-law RMS output |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
 ---
 
-### 8. Frontend (`bin/frontend`)
+### 9. Frontend (`bin/frontend`)
 
-Central control plane and web UI for the entire system.
+Central control plane. Serves the web UI, manages service lifecycles, aggregates logs, and exposes all configuration via REST API.
 
-- Serves a single-page web application at `http://0.0.0.0:8080/`
-- Manages lifecycle of all 7 pipeline services (start/stop/restart/config)
-- Aggregates structured logs from all services via UDP on port 22022
-- Stores logs in SQLite with async batch writer for high throughput
-- In-memory ring buffer + SSE stream for real-time log viewing
-- Per-service log level control (persisted in SQLite, propagated to running services)
-- Test infrastructure for Whisper ASR accuracy, pipeline WER, LLaMA quality, IAP codec quality
-- Model management (list, search, download)
+**Storage**: SQLite database (`whispertalk.db`) — persists service configurations, log level settings, and test results.
 
-**Command-Line Parameters:**
+**Log aggregation**: Each service sends structured log entries as UDP datagrams to port 22022. Frontend stores them in SQLite (ring-buffered in memory for fast `/recent` queries) and streams them live via SSE.
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--port <port>` | `8080` | HTTP server port |
-
-**HTTP API Endpoints:**
+**Full HTTP API (port 8080):**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -351,25 +433,26 @@ Central control plane and web UI for the entire system.
 | POST | `/api/services/start` | Start a service `{name, args}` |
 | POST | `/api/services/stop` | Stop a service `{name}` |
 | POST | `/api/services/restart` | Restart a service `{name}` |
-| GET/POST | `/api/services/config` | Read/write per-service config |
+| GET/POST | `/api/services/config` | Read/write per-service config (persisted in SQLite) |
 | GET | `/api/logs` | Paginated log query `{limit, offset, service, level}` |
-| GET | `/api/logs/recent` | Last N log entries from ring buffer |
+| GET | `/api/logs/recent` | Last N entries from in-memory ring buffer |
 | GET | `/api/logs/stream` | SSE live log stream |
-| POST | `/api/settings/log_level` | Set per-service log level |
-| POST | `/api/db/query` | Execute SELECT query (read-only) |
+| POST | `/api/settings/log_level` | Set per-service log level (propagated to running service immediately) |
+| POST | `/api/db/query` | Execute SELECT query (read-only guard) |
 | POST | `/api/db/write_mode` | Toggle write mode for unsafe queries |
 | GET | `/api/db/schema` | Return SQLite schema |
-| GET | `/api/whisper/models` | List available GGML model files |
-| POST | `/api/whisper/accuracy_test` | Run offline Whisper accuracy test |
-| POST | `/api/whisper/hallucination_filter` | Enable/disable hallucination filter |
-| GET/POST | `/api/vad/config` | Read/write VAD parameters |
-| POST | `/api/sip/add-line` | Register a SIP account |
+| GET | `/api/whisper/models` | List available GGML model files in `models/` |
+| POST | `/api/whisper/accuracy_test` | Run offline Whisper accuracy test on a WAV file |
+| POST | `/api/whisper/hallucination_filter` | Enable/disable Whisper hallucination filter |
+| GET/POST | `/api/vad/config` | Read/write VAD parameters (propagated to running service) |
+| GET/POST | `/api/oap/wav_recording` | Read/write OAP WAV recording settings |
+| POST | `/api/sip/add-line` | Register a new SIP account |
 | POST | `/api/sip/remove-line` | Remove a SIP account |
 | GET | `/api/sip/lines` | List registered SIP lines |
 | GET | `/api/sip/stats` | RTP counters per active call |
-| POST | `/api/iap/quality_test` | Offline G.711 codec quality test |
-| GET | `/api/testfiles` | List WAV+TXT sample pairs |
-| POST | `/api/testfiles/scan` | Rescan Testfiles/ directory |
+| POST | `/api/iap/quality_test` | Offline G.711 codec round-trip quality test |
+| GET | `/api/testfiles` | List WAV+TXT sample pairs in `Testfiles/` |
+| POST | `/api/testfiles/scan` | Rescan `Testfiles/` directory |
 | POST | `/api/tests/start` | Run a test binary |
 | POST | `/api/tests/stop` | Kill a running test |
 | GET | `/api/tests/*/history` | Test run history |
@@ -377,39 +460,44 @@ Central control plane and web UI for the entire system.
 | GET | `/api/test_results` | Pipeline WER test results |
 | GET | `/api/status` | System uptime, service health summary |
 
-### Frontend UI Features
+**Web UI features:**
+- Service management: start/stop/restart each pipeline service independently
+- Real-time log streaming with per-service and per-level filtering
+- Log level control: checkboxes (ERROR/WARN/INFO/DEBUG/TRACE) applied immediately and persisted
+- VAD configuration: threshold, silence duration, max chunk length — runtime update without restart
+- Whisper configuration: model selection, hallucination filter toggle
+- Kokoro configuration: synthesis speed slider, SYNTH_WAV test
+- OAP configuration: WAV recording toggle + directory, presence boost toggle
+- SIP management: add/remove SIP lines, view RTP statistics
+- Beta testing page: audio injection into live calls via Test SIP Provider
+- Test infrastructure: ASR accuracy tests, pipeline WER tests, LLaMA quality tests, codec quality tests
 
-- **Service Management**: Start/stop/restart each pipeline service individually
-- **Log Viewer**: Real-time log streaming with per-service and per-level filtering
-- **Log Level Control**: Checkboxes to set ERROR/WARN/INFO/DEBUG/TRACE per service (applied immediately, persisted across restarts)
-- **VAD Configuration**: Tune threshold, silence duration, max chunk length at runtime
-- **Whisper Configuration**: Select model, toggle hallucination filter
-- **SIP Management**: Add/remove SIP lines, view RTP statistics
-- **Test Infrastructure**: Run ASR accuracy tests, pipeline WER tests, LLaMA quality tests, codec quality tests
-- **Model Management**: List, search, and download models
-
-## Log Level Control
-
-Every service supports 5 log levels: `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE` (most to least severe).
-
-**Three ways to set log level:**
-
-1. **Startup argument**: `./whisper-service --log-level DEBUG`
-2. **Frontend UI**: Use the log level checkboxes in each service's configuration section. Changes take effect immediately without restarting the service.
-3. **Direct command**: Send `SET_LOG_LEVEL:DEBUG` to a service's cmd port via TCP.
-
-Log levels set via the UI are persisted in SQLite and automatically applied on service restart.
+---
 
 ## Interconnect Communication
 
-All inter-service communication uses `interconnect.h`:
+All inter-service communication uses `interconnect.h` (a shared header, no external library):
 
-- **Management channel** (base port +0): Typed control messages (CALL_END, SPEECH_ACTIVE/IDLE, PING/PONG)
-- **Data channel** (base port +1): Binary Packet frames (audio PCM, text, G.711)
-- **Command port** (base port +2): TCP command interface for runtime control
-- **TCP_NODELAY**: Enabled on all connections to minimize latency
-- **Auto-reconnect**: Downstream connections retry every 200ms until reachable
-- **LogForwarder**: Sends structured log entries as UDP datagrams to port 22022
+- **Management channel** (base port +0): Typed control messages — `CALL_START`, `CALL_END`, `SPEECH_ACTIVE`, `SPEECH_IDLE`, `PING`/`PONG`
+- **Data channel** (base port +1): Binary `Packet` frames — variable-length payloads tagged with `call_id` and `PacketType` (audio PCM, text, G.711)
+- **Command port** (base port +2): TCP command interface, one connection per request, 10s recv timeout
+- **TCP_NODELAY**: Enabled on all connections for minimum latency
+- **Auto-reconnect**: Downstream connections retry every 200ms until reachable; upstream server accepts reconnections at any time
+- **LogForwarder**: Sends structured log entries as UDP datagrams to `FRONTEND_LOG_PORT` (22022)
+
+---
+
+## Log Level Control
+
+Every service supports 5 levels: `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`.
+
+**Three ways to set log level:**
+
+1. **Startup argument**: `--log-level DEBUG`
+2. **Frontend UI**: Log level checkboxes — applied immediately to the running service, persisted in SQLite for restarts
+3. **Direct command**: Send `SET_LOG_LEVEL:DEBUG` to the service's cmd port via TCP
+
+---
 
 ## Testing
 
@@ -419,93 +507,94 @@ All inter-service communication uses `interconnect.h`:
 python3 tests/run_pipeline_test.py <MODEL_NAME> [TESTFILES_DIR]
 ```
 
-Injects WAV samples through the full pipeline via a test SIP provider, collects Whisper transcriptions from the frontend log API, and computes character-level similarity against ground truth.
+Injects WAV samples through the full pipeline via Test SIP Provider, collects Whisper transcriptions from the frontend log API, and computes character-level similarity against ground truth.
 
-- **PASS**: >= 99.5% similarity
-- **WARN**: >= 90% similarity
+- **PASS**: ≥ 99.5% similarity
+- **WARN**: ≥ 90% similarity  
 - **FAIL**: < 90% similarity
 
-Test samples go in `Testfiles/` as `sample_NN.wav` + `sample_NN.txt` pairs.
+Test samples: `Testfiles/sample_NN.wav` + `sample_NN.txt` pairs.
 
 ### Test SIP Provider (`bin/test_sip_provider`)
 
-B2BUA test tool that injects audio files into the pipeline as if they were real phone calls.
+B2BUA test tool that injects audio files into the pipeline as if they were real phone calls. Supports WAV recording of both legs of each conference call.
 
 ```bash
 ./test_sip_provider --port 5060 --http-port 22011 --testfiles-dir Testfiles
 ```
 
+**HTTP API (port 22011):**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/conference` | Create a test call with optional audio injection |
+| POST | `/hangup` | Hang up a call |
+| GET | `/calls` | List active calls |
+| GET/POST | `/wav_recording` | Read/write WAV recording settings |
+| POST | `/inject` | Inject an audio file into a call leg |
+
+### Audio Quality Collection (`tests/run_stage7.py`)
+
+End-to-end diagnostic script:
+
+```bash
+python3 tests/run_stage7.py [--iterations N]
+```
+
+Starts all services, connects test calls, enables WAV recording, injects samples, collects logs, and saves WAV files from both OAP and Test SIP Provider. Produces `stage7_output/run_N/` directories with `pipeline.log`, `oap_call_*.wav`, and `tsp_call_*.wav`.
+
 ### Unit/Integration Tests
 
 ```bash
-cd build
-cmake .. -DBUILD_TESTS=ON && make -j
-ctest
+./runmetobuildeverything --build-tests
+cd build && ctest --output-on-failure
 ```
 
-## Benchmarks
-
-See the sections below for detailed Whisper model benchmarks on Apple M4.
+Test binaries: `test_sanity`, `test_interconnect`, `test_kokoro_cpp`, `test_integration`.
 
 ---
 
 ## Whisper Model Benchmarks
 
-**Date**: 2026-02-22
-**Hardware**: Apple M4, macOS 25.2.0
-**whisper.cpp**: v1.8.3 (compiled with `-DWHISPER_COREML=1 -DWHISPER_COREML_ALLOW_FALLBACK=ON`)
-**CoreML conversion**: `--optimize-ane True` (all CoreML encoders)
+**Hardware**: Apple M4, macOS 25.2.0  
+**whisper.cpp**: v1.8.3 (CoreML + Metal)
 
-### Part 1: whisper-cli Direct Test (5 samples, clean 16kHz PCM)
+### whisper-cli Direct Test (5 samples, clean 16kHz PCM)
 
-All 8 model/backend combinations achieved **5/5 PERFECT** transcription accuracy on clean 16kHz input.
+All model/backend combinations achieved 5/5 perfect transcription on clean input.
 
-| Model | Size | Backend | Avg Time (ms) | Notes |
-|-------|------|---------|---------------|-------|
-| large-v3 | 2.9 GB | CoreML + ANE | ~2580 | CoreML warmup: ~35s on first run |
-| large-v3 | 2.9 GB | Metal-only | ~2584 | No warmup penalty |
-| large-v3-q5_0 | 1.0 GB | CoreML + ANE | ~2075 | CoreML warmup: ~22s on first run |
-| large-v3-q5_0 | 1.0 GB | Metal-only | ~2080 | No warmup penalty |
-| large-v3-turbo | 1.5 GB | CoreML + ANE | ~1575 | CoreML warmup: ~24s on first run |
-| large-v3-turbo | 1.5 GB | Metal-only | ~1575 | No warmup penalty |
-| large-v3-turbo-q5_0 | 547 MB | CoreML + ANE | ~1060 | Fastest with CoreML. Warmup: ~22s |
-| large-v3-turbo-q5_0 | 547 MB | Metal-only | ~1575 | Faster without CoreML warmup |
+| Model | Size | Backend | Avg Time |
+|-------|------|---------|----------|
+| large-v3 | 2.9 GB | CoreML + ANE | ~2580ms |
+| large-v3-q5_0 | 1.0 GB | CoreML + ANE | ~2075ms |
+| large-v3-turbo | 1.5 GB | CoreML + ANE | ~1575ms |
+| large-v3-turbo-q5_0 | 547 MB | CoreML + ANE | ~1060ms |
 
-### Part 2: Full Pipeline Test (20 samples, G.711 u-law via SIP/RTP)
+### Full Pipeline Test (20 samples, G.711 μ-law via SIP/RTP)
 
-Audio path: WAV -> 8kHz u-law G.711 -> RTP -> SIP Client -> IAP (upsample 8->16kHz) -> Whisper Service (VAD + greedy decoding)
+Audio path: WAV → 8kHz μ-law G.711 → RTP → SIP Client → IAP (8→16kHz) → Whisper
 
 | Model | Size | Backend | PASS | WARN | FAIL | Avg ms |
 |-------|------|---------|------|------|------|--------|
 | **large-v3** | **2.9 GB** | **Metal** | **12** | **8** | **0** | **1627** |
 | large-v3 | 2.9 GB | CoreML | 11 | 8 | 1* | 1301 |
 | large-v3-q5_0 | 1.0 GB | Metal | 11 | 9 | 0 | 1789 |
-| large-v3-q5_0 | 1.0 GB | CoreML | 11 | 8 | 1* | 1359 |
 | large-v3-turbo | 1.5 GB | CoreML | 9 | 10 | 1* | 688 |
-| large-v3-turbo | 1.5 GB | Metal | 8 | 12 | 0 | 1013 |
 | large-v3-turbo-q5_0 | 547 MB | CoreML | 8 | 11 | 1** | 686 |
-| large-v3-turbo-q5_0 | 547 MB | Metal | 9 | 11 | 0 | 1103 |
 
-**Scoring**: PASS = >=99.5% similarity, WARN = >=90%, FAIL = <90%
+\* CoreML warmup caused first-inference timeout  
+\** Sample_01 failed (41.8%) due to CoreML warmup causing VAD to miss first half
 
-\* = sample_01 TIMEOUT/FAIL due to CoreML warmup on first inference
-\** = sample_01 FAIL (41.8%) due to CoreML warmup causing VAD to miss first half
+**Scoring**: PASS = ≥99.5% similarity, WARN = ≥90%, FAIL = <90%
 
 ### Recommendations
 
-- **Production (accuracy priority)**: `large-v3` + CoreML -- 1301ms avg, best accuracy after warmup
-- **Production (speed priority)**: `large-v3-turbo` + CoreML -- 688ms avg, good accuracy
-- **Development/testing**: `large-v3` + Metal -- no warmup delay, best accuracy, 1627ms avg
+- **Accuracy priority**: `large-v3` + Metal — 1627ms avg, no warmup delay, best accuracy
+- **Speed priority**: `large-v3-turbo` + CoreML — 688ms avg after initial warmup
 
 ### Key Findings
 
-1. **Quantization**: q5_0 has negligible accuracy impact -- same PASS/WARN/FAIL as unquantized
-2. **CoreML warmup**: First inference takes 20-35s for model compilation. One-time cost for long-running services.
-3. **Turbo tradeoff**: ~2x faster but slightly more WARN results (10-12 vs 8). The 4-layer decoder occasionally misses nuances in G.711-degraded audio.
-4. **Consistent problem samples**: Some samples fail across ALL configs due to G.711 codec artifacts, not model limitations.
-
-### Model Verification
-
-When loading a model, verify in logs:
-- `large-v3` (full): Reports `MTL0 total size = 3094.36 MB`, `n_text_layer = 32`
-- `large-v3-turbo`: Reports `MTL0 total size = 1623.92 MB`, `n_text_layer = 4`
+1. **Quantization (q5_0)**: negligible accuracy impact vs. full-precision models
+2. **CoreML warmup**: 20–35s first-inference compilation cost, one-time per service lifetime
+3. **Turbo trade-off**: ~2× faster, slightly more WARN results. 4-layer decoder occasionally misses nuances in G.711-degraded audio.
+4. **Consistent failures**: some samples fail across all model configs due to G.711 codec artifacts, not model limitations
