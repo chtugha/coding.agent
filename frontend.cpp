@@ -675,6 +675,7 @@ private:
                 ('WHISPER_SERVICE', 'bin/whisper-service', '--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (Metal)'),
                 ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
                 ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
+                ('NEUTTS_SERVICE', 'bin/neutts-service', '', 'NeuTTS Nano German TTS (CoreML)'),
                 ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP'),
                 ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'default');
@@ -1082,6 +1083,7 @@ private:
         if (name == "WHISPER_SERVICE") return ServiceType::WHISPER_SERVICE;
         if (name == "LLAMA_SERVICE") return ServiceType::LLAMA_SERVICE;
         if (name == "KOKORO_SERVICE") return ServiceType::KOKORO_SERVICE;
+        if (name == "NEUTTS_SERVICE") return ServiceType::KOKORO_SERVICE;
         if (name == "OUTBOUND_AUDIO_PROCESSOR") return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         if (name == "FRONTEND") return ServiceType::FRONTEND;
         return ServiceType::SIP_CLIENT;
@@ -1679,6 +1681,7 @@ Save outgoing audio as WAV</label>
 <option value="WHISPER_SERVICE">Whisper ASR</option>
 <option value="LLAMA_SERVICE">LLaMA LLM</option>
 <option value="KOKORO_SERVICE">Kokoro TTS</option>
+<option value="NEUTTS_SERVICE">NeuTTS</option>
 <option value="OUTBOUND_AUDIO_PROCESSOR">Outbound Audio</option>
 <option value="FRONTEND">Frontend</option>
 </select>
@@ -2575,7 +2578,7 @@ function fetchServices(){
         :'<span class="wt-badge wt-badge-secondary"><span class="wt-status-dot offline"></span>Offline</span>';
       var desc={'SIP_CLIENT':'SIP/RTP Gateway','INBOUND_AUDIO_PROCESSOR':'G.711 Decode & Resample',
         'VAD_SERVICE':'Voice Activity Detection','WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM','KOKORO_SERVICE':'Kokoro TTS',
-        'OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP'};
+        'NEUTTS_SERVICE':'NeuTTS Nano German','OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP'};
       var eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
       var safeAttr=s.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
       var btns='<div style="margin-top:6px;display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">';
@@ -3132,8 +3135,8 @@ function refreshTestFiles(){
 function loadLogLevels(){
   fetch('/api/settings/log_level').then(r=>r.json()).then(d=>{
     var c=document.getElementById('logLevelControls');
-    var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
-    var names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','VAD_SERVICE':'VAD','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','KOKORO_SERVICE':'Kokoro','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
+    var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','NEUTTS_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
+    var names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','VAD_SERVICE':'VAD','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','KOKORO_SERVICE':'Kokoro TTS','NEUTTS_SERVICE':'NeuTTS','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
     var levels=['ERROR','WARN','INFO','DEBUG','TRACE'];
     c.innerHTML=services.map(s=>{
       var current=d.log_levels&&d.log_levels[s]?d.log_levels[s]:'INFO';
@@ -3144,7 +3147,7 @@ function loadLogLevels(){
 }
 
 function saveAllLogLevels(){
-  var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
+  var services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','NEUTTS_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
   var promises=services.map(s=>{
     var level=document.getElementById('loglevel_'+s).value;
     return fetch('/api/settings/log_level',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -7517,7 +7520,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
-            finish_async_task(task_id, "{\"error\":\"Kokoro service not reachable (port "
+            finish_async_task(task_id, "{\"error\":\"TTS service not reachable (port "
                 + std::to_string(kokoro_cmd_port) + "): " + escape_json(ping_err) + "\"}");
             return;
         }
@@ -7653,7 +7656,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
-            finish_async_task(task_id, "{\"error\":\"Kokoro service not reachable (port "
+            finish_async_task(task_id, "{\"error\":\"TTS service not reachable (port "
                 + std::to_string(kokoro_cmd_port) + "): " + escape_json(ping_err) + "\"}");
             return;
         }
@@ -7743,7 +7746,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             {"vad-service",               whispertalk::ServiceType::VAD_SERVICE},
             {"whisper-service",           whispertalk::ServiceType::WHISPER_SERVICE},
             {"llama-service",             whispertalk::ServiceType::LLAMA_SERVICE},
-            {"kokoro-service",            whispertalk::ServiceType::KOKORO_SERVICE},
+            {"tts-service",               whispertalk::ServiceType::KOKORO_SERVICE},
             {"outbound-audio-processor",  whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
         };
         constexpr int N = 7;
@@ -7849,7 +7852,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
-            finish_async_task(task_id, "{\"error\":\"Kokoro service not reachable\"}");
+            finish_async_task(task_id, "{\"error\":\"TTS service not reachable\"}");
             return;
         }
 
@@ -8062,7 +8065,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             {whispertalk::ServiceType::VAD_SERVICE, "VAD"},
             {whispertalk::ServiceType::WHISPER_SERVICE, "Whisper"},
             {whispertalk::ServiceType::LLAMA_SERVICE, "LLaMA"},
-            {whispertalk::ServiceType::KOKORO_SERVICE, "Kokoro"},
+            {whispertalk::ServiceType::KOKORO_SERVICE, "TTS"},
             {whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
         };
         for (const auto& [svc, name] : required_services) {
@@ -8250,7 +8253,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             {"vad",    whispertalk::ServiceType::VAD_SERVICE},
             {"whisper",whispertalk::ServiceType::WHISPER_SERVICE},
             {"llama",  whispertalk::ServiceType::LLAMA_SERVICE},
-            {"kokoro", whispertalk::ServiceType::KOKORO_SERVICE},
+            {"tts",    whispertalk::ServiceType::KOKORO_SERVICE},
             {"oap",    whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
         };
         constexpr int NSVC = 7;
@@ -8359,7 +8362,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             {ServiceType::VAD_SERVICE, "VAD"},
             {ServiceType::WHISPER_SERVICE, "Whisper"},
             {ServiceType::LLAMA_SERVICE, "LLaMA"},
-            {ServiceType::KOKORO_SERVICE, "Kokoro"},
+            {ServiceType::KOKORO_SERVICE, "TTS"},
             {ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
         };
         for (const auto& [svc, name] : required_svc) {
@@ -9162,7 +9165,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
             const char* services[] = {
                 "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE", "WHISPER_SERVICE",
-                "LLAMA_SERVICE", "KOKORO_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", nullptr
+                "LLAMA_SERVICE", "KOKORO_SERVICE", "NEUTTS_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", nullptr
             };
 
             std::stringstream json;
@@ -9223,6 +9226,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     {"WHISPER_SERVICE",          whispertalk::ServiceType::WHISPER_SERVICE},
                     {"LLAMA_SERVICE",            whispertalk::ServiceType::LLAMA_SERVICE},
                     {"KOKORO_SERVICE",           whispertalk::ServiceType::KOKORO_SERVICE},
+                    {"NEUTTS_SERVICE",           whispertalk::ServiceType::KOKORO_SERVICE},
                     {"OUTBOUND_AUDIO_PROCESSOR", whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
                 };
                 for (const auto& m : svc_map) {
