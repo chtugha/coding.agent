@@ -22,6 +22,20 @@ jobs:
         run: |
           brew install cmake espeak-ng ccache
 
+      - name: Cache whisper.cpp build
+        uses: actions/cache@v4
+        with:
+          path: whisper-cpp/build
+          key: whisper-cpp-${{ hashFiles('whisper-cpp/CMakeLists.txt', 'whisper-cpp/src/**', 'whisper-cpp/ggml/**') }}
+          restore-keys: whisper-cpp-
+
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: llama-cpp/build
+          key: llama-cpp-${{ hashFiles('llama-cpp/CMakeLists.txt', 'llama-cpp/src/**', 'llama-cpp/ggml/**') }}
+          restore-keys: llama-cpp-
+
       - name: Build whisper.cpp
         run: |
           cmake -S whisper-cpp -B whisper-cpp/build \

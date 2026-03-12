@@ -654,33 +654,40 @@ verify_installation() {
 }
 
 install_git_hooks() {
-    step "Installing git hooks"
-    local hooks_dir
-    hooks_dir="$(git rev-parse --git-dir 2>/dev/null)/hooks" || return 0
+    step "Installing git sync helpers"
 
+    local top_level
+    top_level="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+    local git_dir
+    git_dir="$(git -C "$top_level" rev-parse --git-dir 2>/dev/null)" || return 0
+    if [[ "$git_dir" != /* ]]; then
+        git_dir="$top_level/$git_dir"
+    fi
+    local hooks_dir="$git_dir/hooks"
     mkdir -p "$hooks_dir"
 
     cat > "$hooks_dir/post-merge" << 'HOOKEOF'
 #!/bin/bash
-echo "[post-merge] Local main synced with remote."
+CURRENT=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ "$CURRENT" = "main" ]; then
+    echo "[post-merge] Local main updated to $(git rev-parse --short HEAD)."
+fi
 HOOKEOF
     chmod +x "$hooks_dir/post-merge"
 
-    cat > "$hooks_dir/pre-push" << 'HOOKEOF'
-#!/bin/bash
-(
-    sleep 2
-    git fetch origin 2>/dev/null
-    CURRENT=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-    if [ "$CURRENT" = "main" ]; then
-        git merge --ff-only origin/main 2>/dev/null && \
-            echo "[post-push] Local main synced with remote." || true
-    fi
-) &
-HOOKEOF
-    chmod +x "$hooks_dir/pre-push"
+    git -C "$top_level" config alias.pushsync '!f() { git push "$@" && git fetch origin && git merge --ff-only origin/main 2>/dev/null && echo "[pushsync] Local main synced with remote." || echo "[pushsync] Push succeeded. Run git pull to sync if needed."; }; f'
+    info "Git alias 'git pushsync' installed (pushes then fast-forward merges remote)"
 
-    info "Git hooks installed (post-merge, pre-push with background sync)"
+    cat > "$hooks_dir/post-commit" << 'HOOKEOF'
+#!/bin/bash
+CURRENT=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ "$CURRENT" = "main" ]; then
+    echo "[hint] Use 'git pushsync' to push and sync local main with remote."
+fi
+HOOKEOF
+    chmod +x "$hooks_dir/post-commit"
+
+    info "Git hooks installed (post-merge, post-commit hint)"
 }
 
 main() {
