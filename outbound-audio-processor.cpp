@@ -69,6 +69,7 @@ static constexpr int    ULAW_CLIP          = 32635;
 static constexpr int    FRAME_PERIOD_MS    = ULAW_FRAME_SIZE * 1000 / OUTPUT_SAMPLE_RATE;  // 20ms
 static constexpr int    STALE_CALL_TIMEOUT_S   = 60;
 static constexpr int    CLEANUP_INTERVAL_S     = 10;
+static constexpr size_t COMPACT_THRESHOLD      = 4096;
 static constexpr int    SCHEDULER_RESYNC_THRESHOLD_MS = 100;
 
 static const float* get_aa_coeffs() {
@@ -128,7 +129,7 @@ struct CallState {
     float dc_x_prev=0, dc_y_prev=0;
 
     void compact() {
-        if (read_pos > 4096 && read_pos > buffer.size() / 2) {
+        if (read_pos > COMPACT_THRESHOLD && read_pos > buffer.size() / 2) {
             buffer.erase(buffer.begin(), buffer.begin() + read_pos);
             read_pos = 0;
         }
@@ -337,7 +338,7 @@ private:
             size_t in_samples = (size_t)(INPUT_SAMPLE_RATE * dur_ms / 1000);
             std::vector<float> input(in_samples);
             for (size_t i = 0; i < in_samples; i++) {
-                input[i] = 0.8f * std::sinf(2.0f * static_cast<float>(M_PI) * freq * i / INPUT_SAMPLE_RATE);
+                input[i] = 0.8f * std::sin(2.0f * static_cast<float>(M_PI) * freq * i / INPUT_SAMPLE_RATE);
             }
 
             auto t0 = std::chrono::steady_clock::now();
@@ -409,18 +410,23 @@ private:
         }
 
         bool do_wav = save_wav_enabled_.load();
-        for (size_t i = 0; i < out_len; i++) {
-            size_t src_pos = i * DOWNSAMPLE_RATIO + AA_HALF_TAPS;
+        size_t safe_out = (in_samples > (size_t)(AA_FILTER_TAPS - 1)) ?
+            (in_samples - (AA_FILTER_TAPS - 1)) / DOWNSAMPLE_RATIO : 0;
+        for (size_t i = 0; i < safe_out; i++) {
+            const float* src = ext + i * DOWNSAMPLE_RATIO;
+            float filtered = 0.0f;
+            for (int t = 0; t < AA_FILTER_TAPS; t++)
+                filtered += src[t] * coeffs[t];
+            int16_t s16 = static_cast<int16_t>(std::max(-1.0f, std::min(1.0f, filtered)) * PCM_SCALE);
+            ulaw[i] = linear_to_ulaw(s16);
+            if (do_wav) state.wav_samples.push_back(s16);
+        }
+        for (size_t i = safe_out; i < out_len; i++) {
             float filtered = 0.0f;
             for (int t = 0; t < AA_FILTER_TAPS; t++) {
-                int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
-                if (idx >= 0 && idx < static_cast<int>(ext_len))
+                int idx = static_cast<int>(i * DOWNSAMPLE_RATIO) + t;
+                if (idx < static_cast<int>(ext_len))
                     filtered += ext[idx] * coeffs[t];
-                // Tail boundary: for the last output sample per chunk, up to 29 future input
-                // samples (beyond ext) are unavailable and treated as zero. fir_history carries
-                // the true past samples into the next chunk, keeping filter state continuous.
-                // At typical chunk sizes (thousands of samples) this single-sample tail artifact
-                // is inaudible.
             }
             int16_t s16 = static_cast<int16_t>(std::max(-1.0f, std::min(1.0f, filtered)) * PCM_SCALE);
             ulaw[i] = linear_to_ulaw(s16);
@@ -439,33 +445,11 @@ private:
     }
 
     std::vector<uint8_t> downsample_and_encode(const float* input, size_t in_samples) {
-        const float* coeffs = get_aa_coeffs();
-        size_t out_len = in_samples / DOWNSAMPLE_RATIO;
-        size_t ext_len = AA_HALF_TAPS + in_samples;
-
-        std::vector<float> ext(ext_len, 0.0f);
-        // Apply DC blocking inline (fresh state, matching production signal chain)
-        float dc_x = 0.0f, dc_y = 0.0f;
-        for (size_t i = 0; i < in_samples; i++) {
-            float x = input[i];
-            float y = x - dc_x + DC_BLOCK_ALPHA * dc_y;
-            dc_x = x; dc_y = y;
-            ext[AA_HALF_TAPS + i] = y;
-        }
-
-        std::vector<uint8_t> ulaw(out_len);
-        for (size_t i = 0; i < out_len; i++) {
-            size_t src_pos = i * DOWNSAMPLE_RATIO + AA_HALF_TAPS;
-            float filtered = 0.0f;
-            for (int t = 0; t < AA_FILTER_TAPS; t++) {
-                int idx = static_cast<int>(src_pos) - AA_HALF_TAPS + t;
-                if (idx >= 0 && idx < static_cast<int>(ext_len))
-                    filtered += ext[idx] * coeffs[t];
-            }
-            int16_t s16 = static_cast<int16_t>(std::max(-1.0f, std::min(1.0f, filtered)) * PCM_SCALE);
-            ulaw[i] = linear_to_ulaw(s16);
-        }
-        return ulaw;
+        CallState tmp;
+        tmp.id = 0;
+        std::vector<uint8_t> result;
+        downsample_and_encode_into(input, in_samples, tmp, result);
+        return result;
     }
 
     int16_t ulaw_to_linear(uint8_t u) {
@@ -502,10 +486,9 @@ private:
             state->last_activity = now;
             state->last_audio_received = now;
             if (save_wav_enabled_.load()) {
-                state->wav_input_samples.reserve(state->wav_input_samples.size() + sample_count);
                 for (size_t i = 0; i < sample_count; i++) {
                     float s = std::max(-1.0f, std::min(1.0f, pcm_buf[i]));
-                    state->wav_input_samples.push_back(static_cast<int16_t>(s * 32767.0f));
+                    state->wav_input_samples.push_back(static_cast<int16_t>(s * PCM_SCALE));
                 }
             }
             downsample_and_encode_into(pcm_buf, sample_count, *state, state->buffer);
@@ -533,7 +516,6 @@ private:
                 last_cleanup = now;
                 std::lock_guard<std::mutex> lock(calls_mutex_);
                 for (auto it = calls_.begin(); it != calls_.end(); ) {
-                    std::lock_guard<std::mutex> sl(it->second->mutex);
                     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second->last_activity).count();
                     if (age > STALE_CALL_TIMEOUT_S) {
                         log_fwd_.forward(whispertalk::LogLevel::WARN, it->first, "Stale call removed after %lds idle", age);
@@ -580,7 +562,8 @@ private:
 
     std::shared_ptr<CallState> get_or_create_call(uint32_t cid) {
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        if (calls_.count(cid)) return calls_[cid];
+        auto it = calls_.find(cid);
+        if (it != calls_.end()) return it->second;
         auto state = std::make_shared<CallState>();
         state->id = cid;
         state->last_activity = std::chrono::steady_clock::now();
