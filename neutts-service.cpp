@@ -170,23 +170,31 @@ public:
         }
     }
 
-    std::vector<float> decode(const std::vector<int32_t>& codes) {
+    std::vector<float> decode(const std::vector<int64_t>& codes) {
         if (!available_ || codes.empty()) return {};
+
+        static constexpr int64_t ENUM_SIZES[] = {32, 64, 128, 192, 256, 384, 512, 768, 1024, 1500};
+        int64_t actual_T = (int64_t)codes.size();
+        int64_t padded_T = ENUM_SIZES[sizeof(ENUM_SIZES)/sizeof(ENUM_SIZES[0]) - 1];
+        for (int64_t s : ENUM_SIZES) {
+            if (s >= actual_T) { padded_T = s; break; }
+        }
 
         @autoreleasepool {
             NSError *error = nil;
-            int64_t T = (int64_t)codes.size();
 
             MLMultiArray *input = [[MLMultiArray alloc]
-                initWithShape:@[@1, @1, @(T)]
-                dataType:MLMultiArrayDataTypeInt32
+                initWithShape:@[@1, @1, @(padded_T)]
+                dataType:MLMultiArrayDataTypeInt64
                 error:&error];
             if (!input) {
                 std::fprintf(stderr, "NeuCodec: Failed to create input array: %s\n",
                     [[error localizedDescription] UTF8String]);
                 return {};
             }
-            std::memcpy((int32_t *)input.dataPointer, codes.data(), codes.size() * sizeof(int32_t));
+            int64_t *dst = (int64_t *)input.dataPointer;
+            std::memcpy(dst, codes.data(), actual_T * sizeof(int64_t));
+            std::memset(dst + actual_T, 0, (padded_T - actual_T) * sizeof(int64_t));
 
             NSDictionary *feature_dict = @{@"codes": [MLFeatureValue featureValueWithMultiArray:input]};
             id<MLFeatureProvider> provider = [[MLDictionaryFeatureProvider alloc]
@@ -211,6 +219,10 @@ public:
 
             size_t n = (size_t)output.count;
             const float *src = (const float *)output.dataPointer;
+            if (padded_T > actual_T && padded_T > 0) {
+                size_t trimmed = (size_t)((double)n * actual_T / padded_T);
+                return std::vector<float>(src, src + trimmed);
+            }
             return std::vector<float>(src, src + n);
         }
     }
@@ -363,7 +375,7 @@ public:
         int n_past = static_cast<int>(tokens.size());
         llama_batch_free(batch);
 
-        std::vector<int32_t> speech_codes;
+        std::vector<int64_t> speech_codes;
         llama_batch single = llama_batch_init(1, 0, 1);
 
         for (int i = 0; i < 1500; i++) {
@@ -374,7 +386,8 @@ public:
 
             int32_t code = extract_speech_code(id);
             if (code >= 0) {
-                speech_codes.push_back(code);
+                speech_codes.push_back((int64_t)code);
+                if (speech_codes.size() >= 1500) break;
             }
 
             single.n_tokens = 1;
