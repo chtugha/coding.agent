@@ -51,8 +51,36 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-WHISPER_LIB="$ROOT_DIR/whisper-cpp/build/src/libwhisper.dylib"
-LLAMA_LIB="$ROOT_DIR/llama-cpp/build/bin/libllama.dylib"
+ensure_repo(){
+  local dir="$1" url="$2"
+  if [[ ! -f "$dir/CMakeLists.txt" ]]; then
+    log "Cloning $url -> $dir ..."
+    rm -rf "$dir"
+    git clone --depth=1 "$url" "$dir"
+  fi
+}
+
+ensure_repo "$ROOT_DIR/whisper-cpp" "https://github.com/ggerganov/whisper.cpp.git"
+ensure_repo "$ROOT_DIR/llama-cpp"   "https://github.com/ggerganov/llama.cpp.git"
+
+setup_macos_env(){
+  if [[ "$(uname -s)" = "Darwin" ]]; then
+    local clt_sdk="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    local clt_cc="/Library/Developer/CommandLineTools/usr/bin/cc"
+    if [[ -d "$clt_sdk" && -x "$clt_cc" ]]; then
+      export SDKROOT="$clt_sdk"
+      export CC="$clt_cc"
+      export CXX="/Library/Developer/CommandLineTools/usr/bin/c++"
+    fi
+  fi
+}
+setup_macos_env
+
+CMAKE_GEN=""
+if command -v ninja >/dev/null 2>&1; then CMAKE_GEN="-G Ninja"; fi
+
+WHISPER_LIB="$ROOT_DIR/whisper-cpp/build/src/libwhisper.a"
+LLAMA_LIB="$ROOT_DIR/llama-cpp/build/src/libllama.a"
 PIPER_LIB="$ROOT_DIR/libpiper/build/libpiper.dylib"
 
 need_whisper=0; need_llama=0
@@ -115,6 +143,7 @@ build_whisper(){
     -S "$ROOT_DIR/whisper-cpp" 
     -B "$ROOT_DIR/whisper-cpp/build" 
     -DCMAKE_BUILD_TYPE=Release
+    -DBUILD_SHARED_LIBS=OFF
     -DWHISPER_BUILD_TESTS=OFF 
     -DWHISPER_BUILD_EXAMPLES=OFF
   )
@@ -124,7 +153,8 @@ build_whisper(){
     cmake_opts+=( -DWHISPER_COREML=1 )
   fi
 
-  cmake "${cmake_opts[@]}"
+  # shellcheck disable=SC2086
+  cmake $CMAKE_GEN "${cmake_opts[@]}"
   log "Building whisper-cpp..."
   cmake --build "$ROOT_DIR/whisper-cpp/build" --config Release -j 6
 }
@@ -135,12 +165,14 @@ build_llama(){
     -S "$ROOT_DIR/llama-cpp"
     -B "$ROOT_DIR/llama-cpp/build"
     -DCMAKE_BUILD_TYPE=Release
+    -DBUILD_SHARED_LIBS=OFF
   )
   if [[ "$(uname -s)" = "Darwin" ]]; then
     log "Enabling CoreML for llama-cpp"
     cmake_opts+=( -DGGML_COREML=ON )
   fi
-  cmake "${cmake_opts[@]}"
+  # shellcheck disable=SC2086
+  cmake $CMAKE_GEN "${cmake_opts[@]}"
   log "Building llama-cpp (target: llama)..."
   cmake --build "$ROOT_DIR/llama-cpp/build" --config Release --target llama -j 6
 }
@@ -169,10 +201,11 @@ build_piper(){
   fi
 
   log "Configuring libpiper..."
+  # shellcheck disable=SC2086
   if [[ ${#cmake_extra[@]} -gt 0 ]]; then
-    cmake -S "$ROOT_DIR/libpiper" -B "$ROOT_DIR/libpiper/build" -DCMAKE_BUILD_TYPE=Release "${cmake_extra[@]}"
+    cmake $CMAKE_GEN -S "$ROOT_DIR/libpiper" -B "$ROOT_DIR/libpiper/build" -DCMAKE_BUILD_TYPE=Release "${cmake_extra[@]}"
   else
-    cmake -S "$ROOT_DIR/libpiper" -B "$ROOT_DIR/libpiper/build" -DCMAKE_BUILD_TYPE=Release
+    cmake $CMAKE_GEN -S "$ROOT_DIR/libpiper" -B "$ROOT_DIR/libpiper/build" -DCMAKE_BUILD_TYPE=Release
   fi
 
 
@@ -287,7 +320,8 @@ if [[ "$WITH_PIPER" = "1" ]]; then
   piper_flag="ON"
 fi
 
-cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
+# shellcheck disable=SC2086
+cmake $CMAKE_GEN -S "$ROOT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
   -DWHISPER_CPP_LIB="$WHISPER_LIB" \
   -DLLAMA_CPP_LIB="$LLAMA_LIB" \
   -DBUILD_SIP_CLIENT=ON \

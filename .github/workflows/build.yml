@@ -17,6 +17,8 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper-cpp
           git clone --depth=1 https://github.com/ggerganov/llama.cpp.git llama-cpp
+          echo "WHISPER_SHA=$(git -C whisper-cpp rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "LLAMA_SHA=$(git -C llama-cpp rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Install system dependencies
         run: |
@@ -26,14 +28,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: whisper-cpp/build
-          key: whisper-cpp-${{ hashFiles('whisper-cpp/CMakeLists.txt', 'whisper-cpp/src/**', 'whisper-cpp/ggml/**') }}
+          key: whisper-cpp-${{ env.WHISPER_SHA }}
           restore-keys: whisper-cpp-
 
       - name: Cache llama.cpp build
         uses: actions/cache@v4
         with:
           path: llama-cpp/build
-          key: llama-cpp-${{ hashFiles('llama-cpp/CMakeLists.txt', 'llama-cpp/src/**', 'llama-cpp/ggml/**') }}
+          key: llama-cpp-${{ env.LLAMA_SHA }}
           restore-keys: llama-cpp-
 
       - name: Build whisper.cpp
