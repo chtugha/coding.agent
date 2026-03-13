@@ -74,7 +74,7 @@ ask_hf_token() {
     echo "  Some models (NeuCodec) require HuggingFace authentication."
     echo "  Get a free token at: https://huggingface.co/settings/tokens"
     echo -n "  Paste your HuggingFace token (or press Enter to skip): "
-    read -r hf_token_input </dev/tty
+    read -r hf_token_input </dev/tty 2>/dev/null || hf_token_input=""
     if [ -n "$hf_token_input" ]; then
         export HF_TOKEN="$hf_token_input"
         export HUGGING_FACE_HUB_TOKEN="$hf_token_input"
@@ -529,7 +529,7 @@ phones = None
 try:
     from phonemizer import phonemize
     phones = phonemize(ref_text, language='de', backend='espeak', strip=True, preserve_punctuation=True)
-except ImportError:
+except (ImportError, RuntimeError):
     import ctypes
     import ctypes.util
 
