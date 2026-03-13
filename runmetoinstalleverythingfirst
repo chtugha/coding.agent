@@ -168,12 +168,12 @@ setup_python_env() {
 
     info "Installing Python dependencies..."
     "$WHISPERTALK_PYTHON" -m pip install --quiet --upgrade pip
-    "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
     "$WHISPERTALK_PYTHON" -m pip install --quiet coremltools
     "$WHISPERTALK_PYTHON" -m pip install --quiet openai-whisper
     "$WHISPERTALK_PYTHON" -m pip install --quiet huggingface-hub
     "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
     "$WHISPERTALK_PYTHON" -m pip install --quiet ane-transformers
+    "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
     info "Python environment ready"
 }
 
