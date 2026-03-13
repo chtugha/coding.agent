@@ -28,7 +28,8 @@ REQUIRED_PACKAGES = {
 }
 
 def _inside_required_env():
-    return os.path.join("envs", REQUIRED_ENV) in sys.executable
+    marker = os.sep + os.path.join("envs", REQUIRED_ENV) + os.sep
+    return marker in sys.executable
 
 
 def _reexec_in_env():
@@ -59,18 +60,21 @@ def fix_onnx_graph(model):
     Apply graph surgery to make the model onnx2torch-compatible:
       1. SplitToSequence + SequenceAt → Gather (with scalar index)
       2. ReduceMean opset-18 → opset-17 (axes from input → attribute)
-      3. Shape opset-15+ start/end → Shape + Slice
-      4. Strip Reshape allowzero attribute
-      5. Set opset version to 17
+      3. Shape start/end → Shape + Slice (onnx2torch compat)
+      4. Strip opset-18 attrs (Reshape allowzero, Split num_outputs)
+      5. Fix Clip empty min/max → explicit constants
+      6. Set opset version to 17
     """
     import numpy as np
     from onnx import helper, numpy_helper, TensorProto
 
     graph = model.graph
 
+    seen_names = set()
     for idx, node in enumerate(graph.node):
-        if not node.name:
-            node.name = f"__unnamed_{idx}__"
+        if not node.name or node.name in seen_names:
+            node.name = f"__auto_{idx}__"
+        seen_names.add(node.name)
 
     inits = {i.name: numpy_helper.to_array(i) for i in graph.initializer}
 
