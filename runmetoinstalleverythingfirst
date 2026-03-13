@@ -173,6 +173,7 @@ setup_python_env() {
     "$WHISPERTALK_PYTHON" -m pip install --quiet openai-whisper
     "$WHISPERTALK_PYTHON" -m pip install --quiet huggingface-hub
     "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
+    "$WHISPERTALK_PYTHON" -m pip install --quiet ane-transformers
     info "Python environment ready"
 }
 
@@ -270,7 +271,7 @@ generate_whisper_coreml_encoder() {
         fi
 
         info "Converting ${model_name} to CoreML (this may take 5-10 minutes)..."
-        python3 models/convert-whisper-to-coreml.py \
+        "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
             --model "${model_name}" \
             --encoder-only True \
             --optimize-ane True
