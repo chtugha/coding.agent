@@ -320,7 +320,7 @@ def main():
     TRACE_SIZE = 256
 
     print(f"[neucodec-coreml] Tracing PyTorch model (T={TRACE_SIZE})...", flush=True)
-    example = torch.zeros(1, 1, TRACE_SIZE, dtype=torch.int64)
+    example = torch.zeros(1, 1, TRACE_SIZE, dtype=torch.int32)
     with torch.no_grad():
         traced = torch.jit.trace(torch_model, example, check_trace=False)
 
@@ -335,7 +335,7 @@ def main():
             ct.TensorType(
                 name="codes",
                 shape=enumerated,
-                dtype=np.int64,
+                dtype=np.int32,
             )
         ],
         outputs=[ct.TensorType(name="audio", dtype=np.float32)],

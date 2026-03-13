@@ -63,6 +63,23 @@ setup_macos_env() {
 CMAKE_GEN=""
 if command -v ninja &> /dev/null; then CMAKE_GEN="-G Ninja"; fi
 
+clear_stale_cache() {
+    local bdir="$1"
+    local cache="$bdir/CMakeCache.txt"
+    [ -f "$cache" ] || return 0
+    if [ -n "$CMAKE_GEN" ]; then
+        if ! grep -q 'CMAKE_GENERATOR:INTERNAL=Ninja' "$cache" 2>/dev/null; then
+            warn "Removing stale CMake cache in $bdir (generator mismatch)"
+            rm -rf "$bdir"
+        fi
+    else
+        if grep -q 'CMAKE_GENERATOR:INTERNAL=Ninja' "$cache" 2>/dev/null; then
+            warn "Removing stale CMake cache in $bdir (generator mismatch)"
+            rm -rf "$bdir"
+        fi
+    fi
+}
+
 preflight_check() {
     step "Preflight checks"
 
@@ -95,6 +112,7 @@ build_whisper_cpp() {
         return
     fi
 
+    clear_stale_cache whisper-cpp/build
     info "Configuring whisper.cpp (CoreML + Metal, static, Release)..."
     # shellcheck disable=SC2086
     cmake $CMAKE_GEN -S whisper-cpp -B whisper-cpp/build \
@@ -126,6 +144,7 @@ build_llama_cpp() {
         return
     fi
 
+    clear_stale_cache llama-cpp/build
     info "Configuring llama.cpp (Metal, static, Release)..."
     # shellcheck disable=SC2086
     cmake $CMAKE_GEN -S llama-cpp -B llama-cpp/build \
@@ -147,6 +166,7 @@ build_llama_cpp() {
 build_main_project() {
     step "Building WhisperTalk"
 
+    clear_stale_cache build
     info "Configuring WhisperTalk (CoreML, Release, tests=${BUILD_TESTS})..."
     # shellcheck disable=SC2086
     cmake $CMAKE_GEN -S . -B build \
