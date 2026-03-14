@@ -109,6 +109,9 @@ __pycache__/
 # Test data (WAV files can be large)
 tests/data/
 
+# WAV output artifacts from manual testing
+*.wav
+
 # Stage 7 diagnostic output (binary WAV files + logs, not for source control)
 stage7_output/
 stage7_v*/

@@ -139,51 +139,80 @@ Note: The user switched to kokoro-service which is working correctly. The NeuTTS
 
 ### Fix 1 — llama-service.cpp (Primary, must fix)
 
-In the context initialization, add:
-
-```cpp
-cparams.n_seq_max = 256;  // LLAMA_MAX_SEQ — support up to 256 distinct call sequences
-```
-
-And wrap the seq_id allocation to prevent overflow:
+In the context initialization, add `cparams.kv_unified = true` so all seq_ids 0–255 are
+valid and the entire 2048-token pool is available to each sequence. Also wrap the
+seq_id allocation to prevent long-term overflow:
 
 ```cpp
 call->seq_id = next_seq_id_.fetch_add(1) % 256;
 ```
 
-This ensures all seq_ids (0–255) are within the valid range, and after 256 calls the IDs wrap around (safe because `llama_memory_seq_rm` always clears the sequence before reuse).
-
 ### Fix 2 — neutts-service.cpp (Secondary)
 
-Add a `log_fwd_.forward(ERROR, ...)` call in the synthesis failure path so failures are visible in the frontend log, making future debugging easier:
-
-```cpp
-if (samples.empty() || samples.size() > MAX_AUDIO_SAMPLES) {
-    log_fwd_.forward(LogLevel::ERROR, ctx->call_id,
-        "NeuTTS synthesis produced no audio (empty samples)");
-    std::fprintf(stderr, "Invalid audio output for call %u: %zu samples\n", ...);
-    continue;
-}
-```
-
-Also add a log when `llama_decode` fails in `synthesize()`:
-
-```cpp
-if (llama_decode(ctx_, batch) != 0) {
-    llama_batch_free(batch);
-    // log_fwd_ not available in NeuTTSPipeline — use stderr + consider moving logging up
-    std::fprintf(stderr, "NeuTTS: prompt decode failed\n");
-    return {};
-}
-```
-
-The deeper NeuTTS model quality issue (why no speech codes are generated) may require additional investigation with direct testing of the synthesis pipeline via the `SYNTH_WAV` command.
+The `CoreMLNeuCodecDecoder::decode()` must always pass exactly 256 codes to the model
+(pad with zeros if fewer) and trim the output to `480 × (actual_T − 1)` samples.
+A warmup synthesis at startup pre-compiles Metal shaders so the first real call is fast.
 
 ---
 
 ## Implementation Notes
 
-- The `llama-service.cpp` fix is a 2-line change in the context initialization block
-- Both fixes are backwards-compatible — no protocol or API changes needed
-- After fixing `llama-service.cpp`, the service must be rebuilt and restarted
-- Kokoro-service is confirmed working and is the recommended TTS for now
+### Fix 1 — llama-service.cpp (applied)
+
+Added `cparams.kv_unified = true` at context initialization (line 109). Setting
+`n_seq_max = 256` was considered but rejected: with `kv_unified=false` (the default),
+`n_ctx_seq = n_ctx / n_seq_max = 2048 / 256 = 8` tokens per sequence, which is far too
+small. With `kv_unified=true` the entire 2048-token pool is shared and `LLAMA_MAX_SEQ`
+(256) is used as the upper bound for seq_id validation — all seq_ids 0–255 are valid.
+
+Applied change:
+```cpp
+cparams.kv_unified = true;          // all seq_ids 0-255 valid; full 2048-token pool shared
+// line 422:
+call->seq_id = next_seq_id_.fetch_add(1) % 256;   // prevent overflow past LLAMA_MAX_SEQ
+```
+
+### Fix 2 — neutts-service.cpp (applied, root cause corrected)
+
+The original hypothesis ("empty speech_codes") was **wrong**. Post-implementation
+investigation revealed the actual root cause:
+
+**Root cause**: `CoreMLNeuCodecDecoder::decode()` padded input codes to the next bucket
+size (e.g., 65 codes → padded to 128). The compiled `neucodec_decoder.mlmodelc` has
+`hasShapeFlexibility: 0` for its output tensor at shape `[1, 1, 122400]`, which corresponds
+to exactly 256 input codes: `122400 = 480 × (256 − 1)`. Calling the model with any input
+size other than 256 triggered `"Error in dynamically resizing for sequence length (error: -7)"`.
+The model's enumerated input shapes metadata lists 128 as supported, but the compiled output
+shape constraint prevents it from working.
+
+Applied changes:
+- Always pad to `COMPILED_T = 256` (the only shape where output size matches compiled model)
+- Trim output to `COMPILED_SAMPLES / (COMPILED_T - 1) × (actual_T - 1)` = `480 × (actual_T - 1)` samples
+- Cap generation at 256 speech codes (aligns with decoder capacity; ~5s of audio — sufficient for phone conversations)
+- Reduce autoregressive loop limit from 1500 to 400 iterations
+- Added warmup synthesis in `initialize()` to pre-compile Metal GPU shaders; eliminates 20+ second cold-start on first call
+
+### Test Results
+
+#### Bug 1 — LLaMA sequential calls
+```
+TEST 1: RESPONSE:286ms:Guten Tag
+TEST 2: RESPONSE:261ms:Es geht mir gut, danke.
+(5 sequential TEST_PROMPT commands all succeed)
+```
+Before fix: call 2+ always returned `"ERROR: Prompt decode failed"`.
+
+#### Bug 2 — NeuTTS synthesis
+```
+SYNTH_WAV:test.wav|Guten Tag.          → WAV_RESULT:293ms:22560:24000:0.94s:rtf=0.31
+SYNTH_WAV:test.wav|Ja, ich höre dich. → WAV_RESULT:532ms:52320:24000:2.18s:rtf=0.24
+SYNTH_WAV:test.wav|Wie kann ich ...?  → WAV_RESULT:386ms:37920:24000:1.58s:rtf=0.24
+```
+Before fix: all synthesis attempts returned `"ERROR:synthesis failed"`.
+RTF ~0.24–0.31 (3–4× faster than real-time). Warmup takes ~2.7s during `initialize()`.
+
+### Regression Tests Added
+
+Two new tests added to `tests/test_integration.cpp`:
+- `RegressionTest.LlamaSeqIdRegressionMultipleCallsAllSucceed` — launches `llama-service`, sends 5 `TEST_PROMPT` commands, asserts all return `RESPONSE:` (not `ERROR:`)
+- `RegressionTest.NeuTTSCodecShapeRegressionSynthesisSucceeds` — launches `neutts-service`, sends `SYNTH_WAV` for 3 German phrases, asserts all return `WAV_RESULT:` (not `ERROR:`)

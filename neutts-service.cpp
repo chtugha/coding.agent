@@ -173,8 +173,9 @@ public:
     std::vector<float> decode(const std::vector<int32_t>& codes) {
         if (!available_ || codes.empty()) return {};
 
-        static constexpr int64_t COMPILED_T = 256;
-        static constexpr int64_t SAMPLES_PER_CODE = 480;
+        static constexpr int64_t COMPILED_T       = 256;     // only input shape that works (mlmodelc output has no shape flexibility)
+        static constexpr int64_t COMPILED_SAMPLES = 122400;  // model output shape [1,1,122400] = 480 * (256-1)
+        static constexpr int64_t SAMPLES_PER_CODE = COMPILED_SAMPLES / (COMPILED_T - 1);  // = 480
 
         int64_t actual_T = (int64_t)codes.size();
         if (actual_T > COMPILED_T) actual_T = COMPILED_T;
