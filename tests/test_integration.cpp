@@ -137,6 +137,124 @@ struct Pipeline {
     }
 };
 
+static std::string send_cmd(uint16_t port, const std::string& cmd, int timeout_s = 30) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return "";
+    struct timeval tv{timeout_s, 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    addr.sin_port = htons(port);
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        close(sock);
+        return "";
+    }
+    std::string msg = cmd + "\n";
+    send(sock, msg.c_str(), msg.size(), 0);
+    std::string resp;
+    char buf[4096];
+    ssize_t n;
+    while ((n = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
+        buf[n] = '\0';
+        resp += buf;
+        if (resp.find('\n') != std::string::npos) break;
+    }
+    close(sock);
+    if (!resp.empty() && resp.back() == '\n') resp.pop_back();
+    return resp;
+}
+
+static bool wait_for_port(uint16_t port, int timeout_s = 60) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
+    while (std::chrono::steady_clock::now() < deadline) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        addr.sin_port = htons(port);
+        struct timeval tv{1, 0};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            close(sock);
+            return true;
+        }
+        close(sock);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    return false;
+}
+
+class RegressionTest : public ::testing::Test {
+protected:
+    pid_t service_pid = -1;
+
+    void SetUp() override {
+        ASSERT_FALSE(g_bin_dir.empty()) << "BIN_DIR not set";
+        ASSERT_FALSE(g_models_dir.empty()) << "MODELS_DIR not set";
+    }
+
+    void TearDown() override {
+        kill_process(service_pid);
+        service_pid = -1;
+    }
+};
+
+TEST_F(RegressionTest, LlamaSeqIdRegressionMultipleCallsAllSucceed) {
+    std::printf("\n  === REGRESSION: llama seq_id (Bug 1) ===\n");
+    std::printf("  Verifies kv_unified=true fix: all calls after the first must succeed\n");
+
+    service_pid = launch_process("llama-service", {},
+        {{"WHISPERTALK_MODELS_DIR", g_models_dir}});
+    ASSERT_GT(service_pid, 0) << "Failed to launch llama-service";
+
+    constexpr uint16_t CMD_PORT = 13132;
+    ASSERT_TRUE(wait_for_port(CMD_PORT, 60)) << "llama-service cmd port not ready";
+
+    constexpr int NUM_CALLS = 5;
+    for (int i = 0; i < NUM_CALLS; i++) {
+        std::string resp = send_cmd(CMD_PORT,
+            "TEST_PROMPT:Hallo, wie geht es dir?", 30);
+        std::printf("  Call %d response: %s\n", i + 1, resp.c_str());
+        EXPECT_EQ(resp.find("RESPONSE:"), 0u)
+            << "Call " << (i + 1) << " failed (expected RESPONSE:..., got: " << resp << ")";
+        EXPECT_EQ(resp.find("ERROR:"), std::string::npos)
+            << "Call " << (i + 1) << " returned an error";
+    }
+    std::printf("  =========================================\n\n");
+}
+
+TEST_F(RegressionTest, NeuTTSCodecShapeRegressionSynthesisSucceeds) {
+    std::printf("\n  === REGRESSION: NeuTTS CoreML shape (Bug 2) ===\n");
+    std::printf("  Verifies COMPILED_T=256 fix: SYNTH_WAV must return WAV_RESULT\n");
+
+    service_pid = launch_process("neutts-service", {},
+        {{"WHISPERTALK_MODELS_DIR", g_models_dir}});
+    ASSERT_GT(service_pid, 0) << "Failed to launch neutts-service";
+
+    constexpr uint16_t CMD_PORT = 13142;
+    ASSERT_TRUE(wait_for_port(CMD_PORT, 120)) << "neutts-service cmd port not ready (warmup may take ~30s)";
+    std::this_thread::sleep_for(std::chrono::seconds(5));  // wait for warmup synthesis to complete after port opens
+
+    const std::vector<std::string> phrases = {
+        "Guten Tag.",
+        "Ja, ich höre dich.",
+        "Wie kann ich Ihnen helfen?"
+    };
+    for (const auto& phrase : phrases) {
+        std::string resp = send_cmd(CMD_PORT,
+            "SYNTH_WAV:test_regression_neutts.wav|" + phrase, 60);
+        std::printf("  [%s] → %s\n", phrase.c_str(), resp.c_str());
+        EXPECT_EQ(resp.find("WAV_RESULT:"), 0u)
+            << "Synthesis failed for [" << phrase << "]: " << resp;
+        EXPECT_EQ(resp.find("ERROR:"), std::string::npos)
+            << "Synthesis returned error for [" << phrase << "]: " << resp;
+    }
+    std::printf("  ================================================\n\n");
+}
+
 static int find_free_port() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in addr{};

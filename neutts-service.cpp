@@ -173,18 +173,18 @@ public:
     std::vector<float> decode(const std::vector<int32_t>& codes) {
         if (!available_ || codes.empty()) return {};
 
-        static constexpr int64_t ENUM_SIZES[] = {32, 64, 128, 192, 256, 384, 512, 768, 1024, 1500};
+        static constexpr int64_t COMPILED_T       = 256;     // only input shape that works (mlmodelc output has no shape flexibility)
+        static constexpr int64_t COMPILED_SAMPLES = 122400;  // model output shape [1,1,122400] = 480 * (256-1)
+        static constexpr int64_t SAMPLES_PER_CODE = COMPILED_SAMPLES / (COMPILED_T - 1);  // = 480
+
         int64_t actual_T = (int64_t)codes.size();
-        int64_t padded_T = ENUM_SIZES[sizeof(ENUM_SIZES)/sizeof(ENUM_SIZES[0]) - 1];
-        for (int64_t s : ENUM_SIZES) {
-            if (s >= actual_T) { padded_T = s; break; }
-        }
+        if (actual_T > COMPILED_T) actual_T = COMPILED_T;
 
         @autoreleasepool {
             NSError *error = nil;
 
             MLMultiArray *input = [[MLMultiArray alloc]
-                initWithShape:@[@1, @1, @(padded_T)]
+                initWithShape:@[@1, @1, @(COMPILED_T)]
                 dataType:MLMultiArrayDataTypeInt32
                 error:&error];
             if (!input) {
@@ -194,7 +194,7 @@ public:
             }
             int32_t *dst = (int32_t *)input.dataPointer;
             std::memcpy(dst, codes.data(), actual_T * sizeof(int32_t));
-            std::memset(dst + actual_T, 0, (padded_T - actual_T) * sizeof(int32_t));
+            std::memset(dst + actual_T, 0, (COMPILED_T - actual_T) * sizeof(int32_t));
 
             NSDictionary *feature_dict = @{@"codes": [MLFeatureValue featureValueWithMultiArray:input]};
             id<MLFeatureProvider> provider = [[MLDictionaryFeatureProvider alloc]
@@ -219,10 +219,8 @@ public:
 
             size_t n = (size_t)output.count;
             const float *src = (const float *)output.dataPointer;
-            if (padded_T > actual_T && padded_T > 0) {
-                size_t trimmed = (size_t)((double)n * actual_T / padded_T);
-                return std::vector<float>(src, src + trimmed);
-            }
+            size_t actual_samples = (size_t)(SAMPLES_PER_CODE * (actual_T - 1));
+            if (actual_samples < n) n = actual_samples;
             return std::vector<float>(src, src + n);
         }
     }
@@ -314,6 +312,17 @@ public:
         espeak_SetVoiceByName("de");
         std::printf("espeak-ng initialized (German)\n");
 
+        std::printf("Warming up Metal shaders and CoreML (first synthesis)...\n");
+        auto warmup_start = std::chrono::steady_clock::now();
+        auto warmup = synthesize("Hallo.");
+        auto warmup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - warmup_start).count();
+        if (warmup.empty()) {
+            std::fprintf(stderr, "Warmup synthesis failed — first real call may be slow\n");
+        } else {
+            std::printf("Warmup done in %lldms (%zu samples)\n", (long long)warmup_ms, warmup.size());
+        }
+
         return true;
     }
 
@@ -378,7 +387,7 @@ public:
         std::vector<int32_t> speech_codes;
         llama_batch single = llama_batch_init(1, 0, 1);
 
-        for (int i = 0; i < 1500; i++) {
+        for (int i = 0; i < 400; i++) {
             if (interrupted && interrupted->load()) break;
 
             llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
@@ -387,7 +396,7 @@ public:
             int32_t code = extract_speech_code(id);
             if (code >= 0) {
                 speech_codes.push_back((int32_t)code);
-                if (speech_codes.size() >= 1500) break;
+                if (speech_codes.size() >= 256) break;
             }
 
             single.n_tokens = 1;
