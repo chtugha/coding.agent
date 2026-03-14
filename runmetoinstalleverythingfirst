@@ -172,7 +172,7 @@ setup_python_env() {
     "$WHISPERTALK_PYTHON" -m pip install --quiet openai-whisper
     "$WHISPERTALK_PYTHON" -m pip install --quiet huggingface-hub
     "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
-    "$WHISPERTALK_PYTHON" -m pip install --quiet ane-transformers
+    "$WHISPERTALK_PYTHON" -m pip install --quiet --no-deps ane-transformers
     "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
     info "Python environment ready"
 }
