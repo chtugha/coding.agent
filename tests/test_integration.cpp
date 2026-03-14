@@ -236,7 +236,7 @@ TEST_F(RegressionTest, NeuTTSCodecShapeRegressionSynthesisSucceeds) {
 
     constexpr uint16_t CMD_PORT = 13142;
     ASSERT_TRUE(wait_for_port(CMD_PORT, 120)) << "neutts-service cmd port not ready (warmup may take ~30s)";
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(5));  // wait for warmup synthesis to complete after port opens
 
     const std::vector<std::string> phrases = {
         "Guten Tag.",
