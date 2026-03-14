@@ -37,11 +37,29 @@ For a typical 10-word German response (~100–200 speech codes), the user waits 
 
 - `neutts-service.cpp` — `NeuTTSPipeline::synthesize()`, `NeuTTSService::call_worker()`
 
-### Proposed Solution
+### Proposed Solution: Two complementary optimizations
 
-**Stream audio in batches during synthesis**. NeuCodec is a VQ-codec where each code independently maps to a fixed 480-sample (20ms @ 24kHz) audio segment. The CoreML model accepts up to 256 codes with zero-padding for shorter inputs, so partial batches can be decoded immediately.
+#### A. KV cache prefix pinning for ref_codes_prompt (reduces time-to-first-code)
 
-Refactor `synthesize()` to accept a callback `std::function<void(const std::vector<float>&)>` and call it after each batch of N codes (e.g., 64 codes = ~1.28s of audio at 20ms/code):
+The prompt structure is:
+```
+"user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {input_phones}<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>{ref_codes_str}"
+```
+
+- `ref_phones` and `ref_codes_str` are **constant** across all synthesis calls (loaded once from `ref_text.txt` / `ref_codes.bin`)
+- `input_phones` varies per call and appears **before** `ref_codes_str` in the prompt
+
+The common prefix `"user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} "` (~50–200 tokens depending on reference voice length) can be pre-decoded once at init and its KV states kept in the llama context with `llama_memory_seq_keep()`. Each synthesis would then start the `llama_decode` from that cached position, skipping re-computation of the ref_phones prefix on every call.
+
+Note: `ref_codes_str` (~256 tokens for `<|speech_N|>` tokens) appears after `input_phones`, so its KV states depend on `input_phones` and cannot be cached. But the prefix up to and including `ref_phones` is always identical and can be pinned.
+
+**Expected gain**: saves ~50–200ms per synthesis call (the prefix decode cost), reducing time-to-first-code from the initial `llama_decode`.
+
+#### B. Stream audio in batches during synthesis (reduces time-to-first-audio)
+
+NeuCodec is a VQ-codec where each code independently maps to a fixed 480-sample (20ms @ 24kHz) audio segment. **Verified**: `CoreMLNeuCodecDecoder::decode()` already implements zero-padding — it allocates a fixed `[1,1,256]` input, copies `actual_T` codes, zeroes the remainder (`std::memset(dst + actual_T, 0, ...)`), and trims output to `(actual_T - 1) * 480` samples (lines 196–223). Partial batches are fully supported without any CoreML model changes.
+
+Refactor `synthesize()` to accept a callback `std::function<void(const std::vector<float>&)>` and invoke it after each batch of N codes (e.g., 64 codes = ~1.28s of audio at 20ms/code):
 
 ```
 // During autoregressive loop, every BATCH_SIZE codes:
@@ -53,7 +71,7 @@ batch_codes.clear();
 This reduces **time-to-first-audio** from ~`(total_codes × 10ms + CoreML)` to ~`(batch_size × 10ms + CoreML)`.
 
 - For 64-code batches: first audio after ~640ms instead of ~2s
-- No changes to CoreML model required (zero-padding already supported)
+- No changes to CoreML model required (zero-padding already in place)
 - `call_worker` must hold `pipeline_mutex_` for the full streaming synthesis (unchanged)
 
 **Implementation sketch in `call_worker`:**
@@ -100,7 +118,7 @@ This causes `LlamaService::worker_loop` to block indefinitely waiting for a `SPE
    }
    ```
 3. **Caller hangs up mid-speech**: SIP client receives BYE → calls `broadcast_call_end(call1_id)` → `CALL_END` propagates through VAD → Whisper → LLaMA
-4. **VAD erases the VadCall** for call1 and never sends `SPEECH_IDLE` for call1
+4. **VAD erases the VadCall** for call1 (`handle_call_end` just calls `calls_.erase(it)`, no `SPEECH_IDLE` broadcast). Note: VAD has a `speech_signal_timeout_s_` mechanism (default 10s) that force-sends `SPEECH_IDLE` after a timeout — but this only fires while the VadCall is still alive inside `processing_loop`. Once the call is erased on CALL_END, the timeout can never trigger. The `SPEECH_IDLE` is permanently lost.
 5. **`CALL_END` reaches LLaMA's interconnect** (`handle_remote_call_end`): erases call1 from `active_call_ids_`, calls `call_end_handler_`, forwards downstream — **but does NOT clear `speech_active_calls_`**
 6. **LLaMA `worker_loop` is stuck**: `is_speech_active(call1_id)` still returns `true`, `running_` is still `true` → infinite 50ms sleep loop
 7. **Call 2 starts**: New call (call2_id ≠ call1_id). Whisper transcribes and sends text to LLaMA's `work_queue_`
@@ -162,7 +180,17 @@ Apply the same pattern in `handle_remote_call_end()`.
 }
 ```
 
-However, `ended_call_ids_` is private in `InterconnectNode`. The cleanest approach is just fixing the root cause in `interconnect.h`.
+However, `ended_call_ids_` is private in `InterconnectNode`. To enable this check cleanly, add a public accessor to `InterconnectNode`:
+
+```cpp
+// In interconnect.h, InterconnectNode public section:
+bool has_ended(uint32_t call_id) const {
+    std::lock_guard<std::mutex> lock(call_id_mutex_);
+    return ended_call_ids_.count(call_id) > 0;
+}
+```
+
+This allows `worker_loop` to discard stale items for already-ended calls without exposing the full set. The primary fix in `interconnect.h` is still necessary; this is defense-in-depth.
 
 ### Secondary Issue: LLaMA `handle_call_end` blocks `mgmt_recv_loop`
 
@@ -214,6 +242,8 @@ This reduces the window where `mgmt_recv_loop` is blocked because `generating = 
 
 | Issue | Root Cause | Affected File | Fix |
 |---|---|---|---|
-| NeuTTS latency | Full synthesis before first audio send | `neutts-service.cpp` | Streaming synthesis via batch callback |
+| NeuTTS latency (time-to-first-code) | ref_phones prefix re-decoded from scratch every call | `neutts-service.cpp` | KV cache prefix pinning for constant `ref_phones` prefix |
+| NeuTTS latency (time-to-first-audio) | Full synthesis before first audio send | `neutts-service.cpp` | Streaming synthesis via batch callback (zero-padding already supported) |
 | Second call silent | `speech_active_calls_` not cleared on CALL_END | `interconnect.h` | Clear `speech_active_calls_` in `broadcast_call_end` + `handle_remote_call_end` |
+| Second call silent (defense-in-depth) | `worker_loop` has no call-ended check in speech-wait loop | `interconnect.h` + `llama-service.cpp` | Add `has_ended()` accessor; discard stale work items |
 | mgmt_recv_loop blocking | `handle_call_end` holds `llama_mutex_` on mgmt thread | `llama-service.cpp` | Set `generating=false` before acquiring `llama_mutex_` |
