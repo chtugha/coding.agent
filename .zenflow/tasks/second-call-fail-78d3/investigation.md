@@ -247,3 +247,28 @@ This reduces the window where `mgmt_recv_loop` is blocked because `generating = 
 | Second call silent | `speech_active_calls_` not cleared on CALL_END | `interconnect.h` | Clear `speech_active_calls_` in `broadcast_call_end` + `handle_remote_call_end` |
 | Second call silent (defense-in-depth) | `worker_loop` has no call-ended check in speech-wait loop | `interconnect.h` + `llama-service.cpp` | Add `has_ended()` accessor; discard stale work items |
 | mgmt_recv_loop blocking | `handle_call_end` holds `llama_mutex_` on mgmt thread | `llama-service.cpp` | Set `generating=false` before acquiring `llama_mutex_` |
+
+---
+
+## Implementation Notes
+
+### Changes Made
+
+#### `interconnect.h`
+- **`broadcast_call_end`**: Added block after `call_id_mutex_` section to erase `call_id` from `speech_active_calls_` under `speech_mutex_`.
+- **`handle_remote_call_end`**: Same cleanup added.
+- **`has_ended()`**: Added new public accessor that checks `ended_call_ids_` under `call_id_mutex_`.
+
+#### `llama-service.cpp`
+- **`worker_loop`**: Added `has_ended()` check before entering speech-active wait loop (discards stale items for already-ended calls). Added `has_ended()` check inside the sleep loop to break early. Added post-wait `has_ended()` check to discard items if call ended during wait.
+- **`handle_call_end`**: Refactored to set `generating=false` and erase from `calls_` under `calls_mutex_` before acquiring `llama_mutex_`. This unblocks generation immediately and reduces `mgmt_recv_loop` blocking window.
+
+#### `neutts-service.cpp`
+- Added `#include <functional>` header.
+- **`NeuTTSPipeline::synthesize_streaming()`**: New method that accepts a `std::function<void(const std::vector<float>&)>` callback. Runs the same autoregressive loop but flushes decoded audio in batches of 64 codes (~1.28s) via the callback. Applies per-chunk normalization and fade-in on first chunk only.
+- **`call_worker`**: Replaced `synthesize()` + post-send block with `synthesize_streaming()` call that sends each chunk directly to OAP as it becomes available. First audio now arrives ~640ms into generation instead of after full synthesis.
+
+#### `tests/test_interconnect.cpp`
+- Added `SpeechActiveTest.SpeechActiveClearedOnBroadcastCallEnd`: verifies `is_speech_active` returns false after `broadcast_call_end`.
+- Added `SpeechActiveTest.SpeechActiveClearedOnHandleRemoteCallEnd`: verifies both upstream and downstream nodes clear speech state after CALL_END propagates.
+- Added `SpeechActiveTest.HasEndedReturnsFalseForActiveCall`: verifies `has_ended()` lifecycle correctness.

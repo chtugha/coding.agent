@@ -666,6 +666,10 @@ public:
                 ended_call_ids_.erase(ended_call_ids_.begin(), it);
             }
         }
+        {
+            std::lock_guard<std::mutex> lock(speech_mutex_);
+            speech_active_calls_.erase(call_id);
+        }
 
         if (!already_ended && call_end_handler_) {
             call_end_handler_(call_id);
@@ -704,6 +708,11 @@ public:
     bool is_speech_active(uint32_t call_id) const {
         std::lock_guard<std::mutex> lock(speech_mutex_);
         return speech_active_calls_.count(call_id) > 0;
+    }
+
+    bool has_ended(uint32_t call_id) const {
+        std::lock_guard<std::mutex> lock(call_id_mutex_);
+        return ended_call_ids_.count(call_id) > 0;
     }
 
     size_t active_call_count() const {
@@ -1034,6 +1043,10 @@ private:
                 std::advance(it, ended_call_ids_.size() / 2);
                 ended_call_ids_.erase(ended_call_ids_.begin(), it);
             }
+        }
+        {
+            std::lock_guard<std::mutex> lock(speech_mutex_);
+            speech_active_calls_.erase(call_id);
         }
 
         if (!already_ended) {

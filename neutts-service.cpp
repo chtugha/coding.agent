@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <queue>
@@ -420,6 +421,94 @@ public:
             samples.resize(MAX_AUDIO_SAMPLES);
         }
         return samples;
+    }
+
+    void synthesize_streaming(const std::string& text, std::atomic<bool>* interrupted,
+                              std::function<void(const std::vector<float>&)> callback) {
+        static constexpr int BATCH_CODES = 64;
+
+        std::string input_phones = phonemize(text);
+        if (input_phones.empty()) return;
+
+        std::string prompt = build_prompt(input_phones);
+        auto tokens = tokenize(prompt, false);
+        if (tokens.empty()) return;
+
+        llama_memory_t mem = llama_get_memory(ctx_);
+        llama_memory_seq_rm(mem, 0, -1, -1);
+
+        llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
+        batch.n_tokens = tokens.size();
+        for (size_t i = 0; i < tokens.size(); i++) {
+            batch.token[i] = tokens[i];
+            batch.pos[i] = i;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = (i == tokens.size() - 1);
+        }
+        if (llama_decode(ctx_, batch) != 0) {
+            llama_batch_free(batch);
+            return;
+        }
+        int n_past = static_cast<int>(tokens.size());
+        llama_batch_free(batch);
+
+        llama_batch single = llama_batch_init(1, 0, 1);
+        std::vector<int32_t> pending_codes;
+        pending_codes.reserve(BATCH_CODES);
+        size_t total_samples = 0;
+        bool first_chunk = true;
+
+        auto flush_batch = [&]() {
+            if (pending_codes.empty()) return;
+            auto chunk = codec_decoder_->decode(pending_codes);
+            pending_codes.clear();
+            if (chunk.empty()) return;
+            if (total_samples + chunk.size() > MAX_AUDIO_SAMPLES) {
+                size_t allowed = MAX_AUDIO_SAMPLES - total_samples;
+                if (allowed == 0) return;
+                chunk.resize(allowed);
+            }
+            normalize_audio(chunk);
+            if (first_chunk) {
+                apply_fade_in(chunk);
+                first_chunk = false;
+            }
+            total_samples += chunk.size();
+            callback(chunk);
+        };
+
+        for (int i = 0; i < 400; i++) {
+            if (interrupted && interrupted->load()) break;
+            if (total_samples >= MAX_AUDIO_SAMPLES) break;
+
+            llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
+            if (id == speech_end_token_ || id == llama_vocab_eos(vocab_)) break;
+
+            int32_t code = extract_speech_code(id);
+            if (code >= 0) {
+                pending_codes.push_back(code);
+                if ((int)pending_codes.size() >= BATCH_CODES) {
+                    flush_batch();
+                    if (interrupted && interrupted->load()) break;
+                }
+            }
+
+            single.n_tokens = 1;
+            single.token[0] = id;
+            single.pos[0] = n_past;
+            single.n_seq_id[0] = 1;
+            single.seq_id[0][0] = 0;
+            single.logits[0] = true;
+
+            if (llama_decode(ctx_, single) != 0) break;
+            n_past++;
+        }
+        llama_batch_free(single);
+
+        if (!(interrupted && interrupted->load())) {
+            flush_batch();
+        }
     }
 
     ~NeuTTSPipeline() {
@@ -823,40 +912,37 @@ private:
 
             std::printf("Synthesizing for call %u: %s\n", ctx->call_id, text.c_str());
 
-            std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
+            size_t total_samples_sent = 0;
             {
                 std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                samples = pipeline_.synthesize(text, &ctx->interrupted);
+                pipeline_.synthesize_streaming(text, &ctx->interrupted,
+                    [&](const std::vector<float>& chunk) {
+                        if (!ctx->interrupted.load()) {
+                            total_samples_sent += chunk.size();
+                            send_audio_to_downstream(ctx->call_id, chunk);
+                        }
+                    });
             }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
             if (ctx->interrupted.load()) {
                 ctx->interrupted = false;
-                std::printf("Synthesis interrupted for call %u — discarding %zu samples\n",
-                           ctx->call_id, samples.size());
-                log_fwd_.forward(LogLevel::WARN, ctx->call_id, "Synthesis interrupted — discarding audio");
+                std::printf("Synthesis interrupted for call %u\n", ctx->call_id);
+                log_fwd_.forward(LogLevel::WARN, ctx->call_id, "Synthesis interrupted");
                 continue;
             }
 
-            if (samples.empty() || samples.size() > MAX_AUDIO_SAMPLES) {
-                std::fprintf(stderr, "Invalid audio output for call %u: %zu samples\n",
-                            ctx->call_id, samples.size());
+            if (total_samples_sent == 0) {
+                std::fprintf(stderr, "No audio output for call %u\n", ctx->call_id);
                 continue;
             }
 
-            float raw_peak = normalize_audio(samples);
-            apply_fade_in(samples);
-
-            const char* norm_tag = (raw_peak > 0.01f && std::abs(raw_peak - 0.90f) > 0.001f)
-                                   ? " -> normalized" : "";
-            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
-                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak, norm_tag);
-            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (NeuTTS)",
-                            samples.size(), (long long)elapsed);
-
-            send_audio_to_downstream(ctx->call_id, samples);
+            std::printf("Synthesized %zu samples in %lldms for call %u (streaming)\n",
+                        total_samples_sent, (long long)elapsed, ctx->call_id);
+            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (NeuTTS streaming)",
+                            total_samples_sent, (long long)elapsed);
         }
     }
 

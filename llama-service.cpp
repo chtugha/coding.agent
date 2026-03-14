@@ -231,14 +231,25 @@ private:
                 work_queue_.pop();
             }
 
+            if (interconnect_.has_ended(item.call_id)) {
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Discarding stale work item — call already ended");
+                continue;
+            }
+
             if (interconnect_.is_speech_active(item.call_id)) {
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
                 while (interconnect_.is_speech_active(item.call_id) && running_) {
+                    if (interconnect_.has_ended(item.call_id)) break;
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Speech ended, resuming response generation");
             }
             if (!running_) break;
+
+            if (interconnect_.has_ended(item.call_id)) {
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Discarding stale work item — call ended during speech wait");
+                continue;
+            }
 
             std::string response = process_call(item.call_id, item.text);
             if (!response.empty()) {
@@ -449,14 +460,20 @@ private:
     }
 
     void handle_call_end(uint32_t call_id) {
-        std::lock_guard<std::mutex> llama_lock(llama_mutex_);
-        std::lock_guard<std::mutex> calls_lock(calls_mutex_);
-        auto it = calls_.find(call_id);
-        if (it != calls_.end()) {
-            it->second->generating = false;
+        std::shared_ptr<LlamaCall> call_to_clean;
+        {
+            std::lock_guard<std::mutex> calls_lock(calls_mutex_);
+            auto it = calls_.find(call_id);
+            if (it != calls_.end()) {
+                it->second->generating = false;
+                call_to_clean = it->second;
+                calls_.erase(it);
+            }
+        }
+        if (call_to_clean) {
+            std::lock_guard<std::mutex> llama_lock(llama_mutex_);
             llama_memory_t mem = llama_get_memory(ctx_);
-            llama_memory_seq_rm(mem, it->second->seq_id, -1, -1);
-            calls_.erase(it);
+            llama_memory_seq_rm(mem, call_to_clean->seq_id, -1, -1);
             log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, clearing conversation context");
         }
     }

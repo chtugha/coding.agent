@@ -988,3 +988,62 @@ TEST(StressTest, ThreeHopPipeline_ConcurrentMultiLine) {
     iap.shutdown();
     sip.shutdown();
 }
+
+TEST(SpeechActiveTest, SpeechActiveClearedOnBroadcastCallEnd) {
+    InterconnectNode node(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(node.initialize());
+
+    uint32_t cid = node.reserve_call_id(100);
+
+    node.broadcast_speech_signal(cid, true);
+    EXPECT_TRUE(node.is_speech_active(cid));
+
+    node.broadcast_call_end(cid);
+    EXPECT_FALSE(node.is_speech_active(cid));
+    EXPECT_TRUE(node.has_ended(cid));
+
+    node.shutdown();
+}
+
+TEST(SpeechActiveTest, SpeechActiveClearedOnHandleRemoteCallEnd) {
+    InterconnectNode upstream(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(upstream.initialize());
+
+    InterconnectNode downstream(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(downstream.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(upstream.connect_to_downstream());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    uint32_t cid = upstream.reserve_call_id(200);
+
+    upstream.broadcast_speech_signal(cid, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(upstream.is_speech_active(cid));
+
+    upstream.broadcast_call_end(cid);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    EXPECT_FALSE(upstream.is_speech_active(cid));
+    EXPECT_FALSE(downstream.is_speech_active(cid));
+    EXPECT_TRUE(upstream.has_ended(cid));
+    EXPECT_TRUE(downstream.has_ended(cid));
+
+    downstream.shutdown();
+    upstream.shutdown();
+}
+
+TEST(SpeechActiveTest, HasEndedReturnsFalseForActiveCall) {
+    InterconnectNode node(ServiceType::SIP_CLIENT);
+    EXPECT_TRUE(node.initialize());
+
+    uint32_t cid = node.reserve_call_id(300);
+    EXPECT_FALSE(node.has_ended(cid));
+
+    node.broadcast_call_end(cid);
+    EXPECT_TRUE(node.has_ended(cid));
+
+    node.shutdown();
+}
