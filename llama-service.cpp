@@ -106,6 +106,7 @@ public:
         cparams.n_ctx = 2048;
         cparams.n_threads = 4;
         cparams.n_threads_batch = 4;
+        cparams.kv_unified = true;
         ctx_ = llama_init_from_model(model_, cparams);
         if (!ctx_) {
             throw std::runtime_error("Failed to initialize context");
@@ -418,7 +419,7 @@ private:
         if (it != calls_.end()) return it->second;
         auto call = std::make_shared<LlamaCall>();
         call->id = cid;
-        call->seq_id = next_seq_id_.fetch_add(1);
+        call->seq_id = next_seq_id_.fetch_add(1) % 256;
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created conversation context");
