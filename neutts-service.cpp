@@ -424,7 +424,7 @@ public:
     }
 
     void synthesize_streaming(const std::string& text, std::atomic<bool>* interrupted,
-                              std::function<void(const std::vector<float>&)> callback) {
+                              std::function<void(std::vector<float>)> callback) {
         static constexpr int BATCH_CODES = 64;
 
         std::string input_phones = phonemize(text);
@@ -455,27 +455,36 @@ public:
 
         llama_batch single = llama_batch_init(1, 0, 1);
         std::vector<int32_t> pending_codes;
-        pending_codes.reserve(BATCH_CODES);
+        pending_codes.reserve(BATCH_CODES + 1);
         size_t total_samples = 0;
-        bool first_chunk = true;
+        int32_t context_code = -1;
 
+        // flush_batch: decode current pending_codes and emit via callback.
+        // Uses overlap-1 context: the last code of the previous batch is prepended as the
+        // codec's context slot (code[0] → no audio output, code[1..N] → audio), ensuring
+        // no speech codes are silently dropped at batch boundaries.
+        // Does NOT normalize — normalization is applied once by the caller on the full buffer.
         auto flush_batch = [&]() {
             if (pending_codes.empty()) return;
-            auto chunk = codec_decoder_->decode(pending_codes);
+
+            std::vector<int32_t> input_codes;
+            if (context_code >= 0) {
+                input_codes.push_back(context_code);
+            }
+            input_codes.insert(input_codes.end(), pending_codes.begin(), pending_codes.end());
+
+            context_code = pending_codes.back();
             pending_codes.clear();
+
+            auto chunk = codec_decoder_->decode(input_codes);
             if (chunk.empty()) return;
             if (total_samples + chunk.size() > MAX_AUDIO_SAMPLES) {
                 size_t allowed = MAX_AUDIO_SAMPLES - total_samples;
                 if (allowed == 0) return;
                 chunk.resize(allowed);
             }
-            normalize_audio(chunk);
-            if (first_chunk) {
-                apply_fade_in(chunk);
-                first_chunk = false;
-            }
             total_samples += chunk.size();
-            callback(chunk);
+            callback(std::move(chunk));
         };
 
         for (int i = 0; i < 400; i++) {
@@ -913,17 +922,15 @@ private:
             std::printf("Synthesizing for call %u: %s\n", ctx->call_id, text.c_str());
 
             auto start = std::chrono::steady_clock::now();
-            size_t total_samples_sent = 0;
+            std::vector<std::vector<float>> audio_chunks;
             {
                 std::lock_guard<std::mutex> lock(pipeline_mutex_);
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
-                    [&](const std::vector<float>& chunk) {
-                        if (!ctx->interrupted.load()) {
-                            total_samples_sent += chunk.size();
-                            send_audio_to_downstream(ctx->call_id, chunk);
-                        }
+                    [&](std::vector<float> chunk) {
+                        audio_chunks.push_back(std::move(chunk));
                     });
             }
+
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
@@ -934,15 +941,30 @@ private:
                 continue;
             }
 
-            if (total_samples_sent == 0) {
+            if (audio_chunks.empty()) {
                 std::fprintf(stderr, "No audio output for call %u\n", ctx->call_id);
                 continue;
             }
 
-            std::printf("Synthesized %zu samples in %lldms for call %u (streaming)\n",
-                        total_samples_sent, (long long)elapsed, ctx->call_id);
-            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (NeuTTS streaming)",
-                            total_samples_sent, (long long)elapsed);
+            // Concatenate all chunks, normalize once, then send — outside pipeline_mutex_.
+            size_t total_samples = 0;
+            for (const auto& c : audio_chunks) total_samples += c.size();
+
+            std::vector<float> samples;
+            samples.reserve(total_samples);
+            for (auto& c : audio_chunks) samples.insert(samples.end(), c.begin(), c.end());
+
+            float raw_peak = normalize_audio(samples);
+            apply_fade_in(samples);
+
+            const char* norm_tag = (raw_peak > 0.01f && std::abs(raw_peak - 0.90f) > 0.001f)
+                                   ? " -> normalized" : "";
+            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
+                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak, norm_tag);
+            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (NeuTTS)",
+                            samples.size(), (long long)elapsed);
+
+            send_audio_to_downstream(ctx->call_id, samples);
         }
     }
 

@@ -1018,17 +1018,30 @@ TEST(SpeechActiveTest, SpeechActiveClearedOnHandleRemoteCallEnd) {
 
     uint32_t cid = upstream.reserve_call_id(200);
 
+    std::atomic<bool> speech_propagated(false);
+    downstream.register_speech_signal_handler([&](uint32_t, bool active) {
+        if (active) speech_propagated = true;
+    });
+
     upstream.broadcast_speech_signal(cid, true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    for (int i = 0; i < 50 && !speech_propagated; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     EXPECT_TRUE(upstream.is_speech_active(cid));
+    EXPECT_TRUE(downstream.is_speech_active(cid));
 
     upstream.broadcast_call_end(cid);
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    for (int i = 0; i < 50 && downstream.is_speech_active(cid); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     EXPECT_FALSE(upstream.is_speech_active(cid));
     EXPECT_FALSE(downstream.is_speech_active(cid));
     EXPECT_TRUE(upstream.has_ended(cid));
+
+    for (int i = 0; i < 50 && !downstream.has_ended(cid); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
     EXPECT_TRUE(downstream.has_ended(cid));
 
     downstream.shutdown();
