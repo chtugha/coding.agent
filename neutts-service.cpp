@@ -590,6 +590,11 @@ struct CallContext {
     std::thread worker;
     std::atomic<bool> active{true};
     std::atomic<bool> interrupted{false};
+
+    std::queue<std::vector<float>> audio_queue;
+    std::mutex audio_mutex;
+    std::condition_variable audio_cv;
+    std::thread audio_sender;
 };
 
 class NeuTTSService {
@@ -886,6 +891,7 @@ private:
             auto ctx = std::make_shared<CallContext>();
             ctx->call_id = pkt.call_id;
             ctx->worker = std::thread(&NeuTTSService::call_worker, this, ctx);
+            ctx->audio_sender = std::thread(&NeuTTSService::audio_sender_loop, this, ctx);
             calls_[pkt.call_id] = ctx;
             std::printf("Started synthesis thread for call %u\n", pkt.call_id);
             log_fwd_.forward(LogLevel::INFO, pkt.call_id, "Started NeuTTS synthesis thread");
@@ -921,16 +927,26 @@ private:
 
             std::printf("Synthesizing for call %u: %s\n", ctx->call_id, text.c_str());
 
+            size_t chunks_produced = 0;
             auto start = std::chrono::steady_clock::now();
-            std::vector<std::vector<float>> audio_chunks;
             {
                 std::lock_guard<std::mutex> lock(pipeline_mutex_);
+                bool first_chunk = true;
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
                     [&](std::vector<float> chunk) {
-                        audio_chunks.push_back(std::move(chunk));
+                        if (ctx->interrupted.load()) return;
+                        if (first_chunk) {
+                            apply_fade_in(chunk);
+                            first_chunk = false;
+                        }
+                        {
+                            std::lock_guard<std::mutex> alock(ctx->audio_mutex);
+                            ctx->audio_queue.push(std::move(chunk));
+                        }
+                        ctx->audio_cv.notify_one();
+                        chunks_produced++;
                     });
             }
-
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
@@ -941,30 +957,32 @@ private:
                 continue;
             }
 
-            if (audio_chunks.empty()) {
+            if (chunks_produced == 0) {
                 std::fprintf(stderr, "No audio output for call %u\n", ctx->call_id);
                 continue;
             }
 
-            // Concatenate all chunks, normalize once, then send — outside pipeline_mutex_.
-            size_t total_samples = 0;
-            for (const auto& c : audio_chunks) total_samples += c.size();
+            std::printf("Synthesis complete for call %u in %lldms (%zu chunks)\n",
+                        ctx->call_id, (long long)elapsed, chunks_produced);
+            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesis complete in %lldms (NeuTTS streaming)",
+                            (long long)elapsed);
+        }
+    }
 
-            std::vector<float> samples;
-            samples.reserve(total_samples);
-            for (auto& c : audio_chunks) samples.insert(samples.end(), c.begin(), c.end());
-
-            float raw_peak = normalize_audio(samples);
-            apply_fade_in(samples);
-
-            const char* norm_tag = (raw_peak > 0.01f && std::abs(raw_peak - 0.90f) > 0.001f)
-                                   ? " -> normalized" : "";
-            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
-                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak, norm_tag);
-            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (NeuTTS)",
-                            samples.size(), (long long)elapsed);
-
-            send_audio_to_downstream(ctx->call_id, samples);
+    void audio_sender_loop(std::shared_ptr<CallContext> ctx) {
+        while (true) {
+            std::vector<float> chunk;
+            {
+                std::unique_lock<std::mutex> lock(ctx->audio_mutex);
+                ctx->audio_cv.wait(lock, [&] {
+                    return !ctx->audio_queue.empty() || !ctx->active.load();
+                });
+                if (!ctx->active.load() && ctx->audio_queue.empty()) break;
+                if (ctx->audio_queue.empty()) continue;
+                chunk = std::move(ctx->audio_queue.front());
+                ctx->audio_queue.pop();
+            }
+            send_audio_to_downstream(ctx->call_id, chunk);
         }
     }
 
@@ -1020,6 +1038,12 @@ private:
             std::queue<std::string> empty;
             std::swap(ctx->text_queue, empty);
         }
+        {
+            std::lock_guard<std::mutex> alock(ctx->audio_mutex);
+            std::queue<std::vector<float>> empty;
+            std::swap(ctx->audio_queue, empty);
+        }
+        ctx->audio_cv.notify_one();
         log_fwd_.forward(LogLevel::DEBUG, call_id, "SPEECH_ACTIVE — flushed TTS queue, interrupting synthesis");
     }
 
@@ -1035,7 +1059,9 @@ private:
         }
         ctx->active = false;
         ctx->queue_cv.notify_one();
+        ctx->audio_cv.notify_all();
         if (ctx->worker.joinable()) ctx->worker.join();
+        if (ctx->audio_sender.joinable()) ctx->audio_sender.join();
     }
 
     void shutdown_all_calls() {
@@ -1043,9 +1069,11 @@ private:
         for (auto& [id, ctx] : calls_) {
             ctx->active = false;
             ctx->queue_cv.notify_one();
+            ctx->audio_cv.notify_all();
         }
         for (auto& [id, ctx] : calls_) {
             if (ctx->worker.joinable()) ctx->worker.join();
+            if (ctx->audio_sender.joinable()) ctx->audio_sender.join();
         }
         calls_.clear();
     }
