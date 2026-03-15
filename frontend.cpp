@@ -113,6 +113,7 @@ static constexpr int LOG_RETENTION_DAYS = 30;
 static constexpr int SERVICE_CHECK_INTERVAL_S = 2;
 static constexpr int ASYNC_CLEANUP_INTERVAL_S = 30;
 static constexpr int RECENT_LOGS_API_LIMIT = 100;
+static constexpr int DASHBOARD_RECENT_LOGS_LIMIT = 10;
 static constexpr useconds_t SIGTERM_GRACE_US = 500000;
 static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;
 static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;
@@ -1588,12 +1589,12 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <aside class="wt-sidebar">
 <div class="wt-sidebar-header"><h1>WhisperTalk</h1></div>
 <div class="wt-sidebar-section">
-<a class="wt-nav-item" data-page="dashboard" onclick="showPage('dashboard')">
+<a class="wt-nav-item active" data-page="dashboard" onclick="showPage('dashboard')">
 <span class="nav-icon">&#x1F3E0;</span><span class="nav-text">Dashboard</span></a>
 </div>
 <div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Testing</p>
-<a class="wt-nav-item active" data-page="tests" onclick="showPage('tests')">
+<a class="wt-nav-item" data-page="tests" onclick="showPage('tests')">
 <span class="nav-icon">&#x1F9EA;</span>Tests<span class="nav-badge" id="testsBadge">0</span></a>
 <a class="wt-nav-item" data-page="beta-testing" onclick="showPage('beta-testing')">
 <span class="nav-icon">&#x1F3AF;</span>Beta Testing</a>
@@ -1646,7 +1647,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
     std::string build_ui_pages() {
         return R"PG(
-<div class="wt-page" id="page-dashboard">
+<div class="wt-page active" id="page-dashboard">
 <div class="wt-content">
 
 <div class="wt-pipeline-hero">
@@ -1681,7 +1682,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 </div>
 <div class="wt-metric-card" style="background:var(--wt-gradient-info)">
 <div class="metric-value" id="dashMetricActiveCalls">0</div>
-<div class="metric-label">Active Calls</div>
+<div class="metric-label">Running Tests</div>
 </div>
 <div class="wt-metric-card" style="background:var(--wt-gradient-hero)">
 <div class="metric-value" id="dashMetricTestPass">0</div>
@@ -1715,7 +1716,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
 </div></div>
 
-<div class="wt-page active" id="page-tests">
+<div class="wt-page" id="page-tests">
 <div class="wt-content">
 <div id="tests-overview">
 <h2 class="wt-page-title">Tests</h2>
@@ -2596,7 +2597,7 @@ Save outgoing audio as WAV</label>
         std::string port_str = std::to_string(http_port_);
         std::string tsp_port_str = std::to_string(TEST_SIP_PROVIDER_PORT);
         std::string js = R"JS(
-var currentPage='tests',currentTest=null,currentSvc=null;
+var currentPage='dashboard',currentTest=null,currentSvc=null;
 var logSSE=null,svcLogSSE=null,testLogPoll=null;
 var TSP_PORT=)JS" + tsp_port_str + R"JS(;
 
@@ -2702,7 +2703,7 @@ function dashStartAll(){
     d.services.forEach(function(s){
       if(!s.online){
         fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({name:s.name})});
+          body:JSON.stringify({service:s.name})});
       }
     });
     setTimeout(fetchDashboard,1000);
@@ -2714,7 +2715,7 @@ function dashStopAll(){
     d.services.forEach(function(s){
       if(s.online){
         fetch('/api/services/stop',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({name:s.name})});
+          body:JSON.stringify({service:s.name})});
       }
     });
     setTimeout(fetchDashboard,1000);
@@ -2726,7 +2727,7 @@ function dashRestartFailed(){
     d.services.forEach(function(s){
       if(!s.online&&s.managed){
         fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({name:s.name})});
+          body:JSON.stringify({service:s.name})});
       }
     });
     setTimeout(fetchDashboard,1000);
@@ -4195,7 +4196,7 @@ function exportTestResults(){
 setInterval(fetchStatus,3000);
 setInterval(fetchTests,3000);
 setInterval(fetchServices,5000);
-fetchStatus();fetchTests();fetchServices();
+fetchStatus();fetchTests();fetchServices();fetchDashboard();startDashboardPoll();
 document.getElementById('statusText').textContent='Port )JS" + port_str + R"JS(';
 
 document.addEventListener('click',function(e){
@@ -9708,7 +9709,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 bool alive = s.managed && s.pid > 0;
                 if (alive) svc_online++;
                 svc_json << "{\"name\":\"" << escape_json(s.name)
-                         << "\",\"online\":" << (alive ? "true" : "false") << "}";
+                         << "\",\"online\":" << (alive ? "true" : "false")
+                         << ",\"managed\":" << (s.managed ? "true" : "false") << "}";
             }
         }
         svc_json << "]";
@@ -9726,7 +9728,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         {
             std::lock_guard<std::mutex> lock(logs_mutex_);
             size_t count = 0;
-            for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < 10; ++it, ++count) {
+            for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < DASHBOARD_RECENT_LOGS_LIMIT; ++it, ++count) {
                 if (count > 0) logs_json << ",";
                 logs_json << "{\"timestamp\":\"" << escape_json(it->timestamp)
                           << "\",\"service\":\"" << service_type_to_string(it->service)
