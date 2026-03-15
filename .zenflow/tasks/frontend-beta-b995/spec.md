@@ -172,7 +172,7 @@ Replace all numeric literals in `setInterval`/`setTimeout` calls with these cons
 
 5. **All 93 `void` methods, 47 `std::string` methods, 11 `bool` methods, and 5 `int` methods** are reachable from either `http_handler()`, the event loop, or the constructor. Verified by cross-referencing each function definition against call sites.
 
-6. **All 129 JS functions** defined in `build_ui_js()` are referenced from either HTML `onclick` handlers in `build_ui_pages()`, other JS functions, or the initialization code at the end of the JS block. No orphaned JS functions found.
+6. **JS functions** defined in `build_ui_js()` were spot-checked and appear to be referenced from HTML `onclick` handlers in `build_ui_pages()`, other JS functions, or the initialization code. No obviously orphaned JS functions found during the scan.
 
 ### Phase 4: Test Infrastructure (R3.x)
 
@@ -599,24 +599,36 @@ Key visual changes:
 
 Most animations are CSS-only (no external animation library). Two exceptions require minimal JS assistance: page transitions (reflow trigger) and collapsible expand (scrollHeight measurement).
 
-**Important — page transitions**: CSS transitions do **not** fire when `display` changes from `none` to `block`. The existing codebase uses `display:none`/`display:block` for page switching. To enable fade-in transitions, replace `display` toggling with `visibility`/`pointer-events`:
+**Important — page transitions**: CSS transitions do **not** fire when `display` changes from `none` to `block`. The existing codebase uses `display:none`/`display:block` for page switching. To enable fade-in transitions, replace `display` toggling with `visibility`/`pointer-events`.
+
+**Layout approach**: All `.wt-page` elements use `position:absolute` at all times. The wrapping `<main class="wt-main">` acts as the positioned container. Only the active page is visible and interactive. Since `position` is not a transitionable CSS property, toggling between `absolute` and `relative` would cause an immediate layout collapse during fade-out. Keeping all pages `absolute` avoids this — the container's scroll height is determined by the active page's content via the `height:auto` JS measurement below.
 
 ```css
+.wt-main { position:relative; overflow-y:auto; }
 .wt-page { 
-  visibility:hidden; pointer-events:none; position:absolute; top:0; left:0; width:100%; 
+  position:absolute; top:0; left:0; width:100%;
+  visibility:hidden; pointer-events:none;
   opacity:0; transform:translateY(8px); 
   transition:opacity 0.2s ease-out, transform 0.2s ease-out, visibility 0s linear 0.2s;
 }
 .wt-page.active { 
-  visibility:visible; pointer-events:auto; position:relative;
+  position:relative;
+  visibility:visible; pointer-events:auto;
   opacity:1; transform:translateY(0); 
   transition:opacity 0.2s ease-out, transform 0.2s ease-out, visibility 0s linear 0s;
 }
 ```
 
+**Key detail**: The active page gets `position:relative` so it participates in normal flow and gives the container its height. Inactive pages are `position:absolute` and stacked at `top:0` — they take no space. Since only one page is active at a time, the `position` switch from `relative` to `absolute` happens simultaneously with the class toggle on the old and new pages (both in the same `showPage()` call), so the container always has exactly one `position:relative` child providing height. There is no frame where zero children are relative.
+
 The `visibility` transition delay trick: when hiding, `visibility:hidden` is delayed by 0.2s (matching fade duration) so it stays visible during fade-out; when showing, it applies immediately (0s delay).
 
-The `showPage()` JS function must be updated to toggle `active` class instead of changing `display`/`style.display`. Remove any `display:none !important` from `.hidden` class usage on pages.
+The `showPage()` JS function flow:
+1. Add `.active` to the new page (immediately becomes `position:relative`, visible, starts fade-in)
+2. Remove `.active` from old page (immediately becomes `position:absolute`, starts fade-out; `visibility:hidden` is delayed 0.2s)
+3. Since the new page is already `position:relative` before the old page loses it, the container height transitions smoothly
+
+Remove any `display:none !important` from `.hidden` class usage on pages.
 
 | Element | Trigger | Animation |
 |---------|---------|-----------|
