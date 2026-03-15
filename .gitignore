@@ -3,6 +3,7 @@ node_modules/
 
 # Build directories
 build/
+build_test/
 dist/
 whisper-cpp/build/
 whisper-cpp-build-bak/
