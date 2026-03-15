@@ -104,7 +104,8 @@ Replace all corresponding numeric literals with the named constants.
 
 **Verification**: Build with `cmake .. && make -j$(sysctl -n hw.logicalcpu)`. Run `bin/test_sanity` and `bin/test_interconnect` to confirm no regressions.
 
-### [ ] Step: CSS design system, page transitions, and responsive breakpoints
+### [x] Step: CSS design system, page transitions, and responsive breakpoints
+<!-- chat-id: 54e377d5-40e8-4fd2-bf9b-ec3a30d81317 -->
 
 All changes in `frontend.cpp` within `serve_index()` (the `<style>` block, lines 1419–1498).
 
