@@ -37,6 +37,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <unordered_map>
 #include <thread>
 #include <vector>
 #include <sys/stat.h>
@@ -313,6 +314,8 @@ public:
         espeak_SetVoiceByName("de");
         std::printf("espeak-ng initialized (German)\n");
 
+        build_speech_code_lut();
+
         std::printf("Warming up Metal shaders and CoreML (first synthesis)...\n");
         auto warmup_start = std::chrono::steady_clock::now();
         auto warmup = synthesize("Hallo.");
@@ -323,6 +326,8 @@ public:
         } else {
             std::printf("Warmup done in %lldms (%zu samples)\n", (long long)warmup_ms, warmup.size());
         }
+
+        pin_prefix();
 
         return true;
     }
@@ -357,100 +362,53 @@ public:
     }
 
     std::vector<float> synthesize(const std::string& text, std::atomic<bool>* interrupted = nullptr) {
-        std::string input_phones = phonemize(text);
-        if (input_phones.empty()) return {};
-
-        std::string prompt = build_prompt(input_phones);
-
-        auto tokens = tokenize(prompt, false);
-        if (tokens.empty()) return {};
-
-        llama_memory_t mem = llama_get_memory(ctx_);
-        llama_memory_seq_rm(mem, 0, -1, -1);
-
-        llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
-        batch.n_tokens = tokens.size();
-        for (size_t i = 0; i < tokens.size(); i++) {
-            batch.token[i] = tokens[i];
-            batch.pos[i] = i;
-            batch.n_seq_id[i] = 1;
-            batch.seq_id[i][0] = 0;
-            batch.logits[i] = (i == tokens.size() - 1);
-        }
-
-        if (llama_decode(ctx_, batch) != 0) {
-            llama_batch_free(batch);
-            return {};
-        }
-        int n_past = static_cast<int>(tokens.size());
-        llama_batch_free(batch);
-
-        std::vector<int32_t> speech_codes;
-        llama_batch single = llama_batch_init(1, 0, 1);
-
-        for (int i = 0; i < 400; i++) {
-            if (interrupted && interrupted->load()) break;
-
-            llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
-            if (id == speech_end_token_ || id == llama_vocab_eos(vocab_)) break;
-
-            int32_t code = extract_speech_code(id);
-            if (code >= 0) {
-                speech_codes.push_back((int32_t)code);
-                if (speech_codes.size() >= 256) break;
-            }
-
-            single.n_tokens = 1;
-            single.token[0] = id;
-            single.pos[0] = n_past;
-            single.n_seq_id[0] = 1;
-            single.seq_id[0][0] = 0;
-            single.logits[0] = true;
-
-            if (llama_decode(ctx_, single) != 0) break;
-            n_past++;
-        }
-        llama_batch_free(single);
-
-        if (speech_codes.empty()) return {};
-
-        std::printf("Generated %zu speech codes\n", speech_codes.size());
-
-        auto samples = codec_decoder_->decode(speech_codes);
-        if (samples.size() > MAX_AUDIO_SAMPLES) {
-            samples.resize(MAX_AUDIO_SAMPLES);
-        }
-        return samples;
+        std::vector<float> result;
+        synthesize_streaming(text, interrupted, [&](std::vector<float> chunk) {
+            result.insert(result.end(), chunk.begin(), chunk.end());
+        });
+        return result;
     }
 
     void synthesize_streaming(const std::string& text, std::atomic<bool>* interrupted,
                               std::function<void(std::vector<float>)> callback) {
+        static constexpr int FIRST_BATCH_CODES = 16;
         static constexpr int BATCH_CODES = 64;
 
         std::string input_phones = phonemize(text);
         if (input_phones.empty()) return;
 
-        std::string prompt = build_prompt(input_phones);
-        auto tokens = tokenize(prompt, false);
-        if (tokens.empty()) return;
-
         llama_memory_t mem = llama_get_memory(ctx_);
-        llama_memory_seq_rm(mem, 0, -1, -1);
+        std::vector<llama_token> decode_tokens;
+        int n_past;
 
-        llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
-        batch.n_tokens = tokens.size();
-        for (size_t i = 0; i < tokens.size(); i++) {
-            batch.token[i] = tokens[i];
-            batch.pos[i] = i;
+        if (prefix_n_past_ > 0) {
+            std::string suffix = build_suffix(input_phones);
+            decode_tokens = tokenize(suffix, false);
+            if (decode_tokens.empty()) return;
+            llama_memory_seq_rm(mem, 0, prefix_n_past_, -1);
+            n_past = prefix_n_past_;
+        } else {
+            std::string prompt = build_prompt(input_phones);
+            decode_tokens = tokenize(prompt, false);
+            if (decode_tokens.empty()) return;
+            llama_memory_seq_rm(mem, 0, -1, -1);
+            n_past = 0;
+        }
+
+        llama_batch batch = llama_batch_init(decode_tokens.size(), 0, 1);
+        batch.n_tokens = decode_tokens.size();
+        for (size_t i = 0; i < decode_tokens.size(); i++) {
+            batch.token[i] = decode_tokens[i];
+            batch.pos[i] = n_past + i;
             batch.n_seq_id[i] = 1;
             batch.seq_id[i][0] = 0;
-            batch.logits[i] = (i == tokens.size() - 1);
+            batch.logits[i] = (i == decode_tokens.size() - 1);
         }
         if (llama_decode(ctx_, batch) != 0) {
             llama_batch_free(batch);
             return;
         }
-        int n_past = static_cast<int>(tokens.size());
+        n_past += static_cast<int>(decode_tokens.size());
         llama_batch_free(batch);
 
         llama_batch single = llama_batch_init(1, 0, 1);
@@ -458,12 +416,8 @@ public:
         pending_codes.reserve(BATCH_CODES + 1);
         size_t total_samples = 0;
         int32_t context_code = -1;
+        int batch_target = FIRST_BATCH_CODES;
 
-        // flush_batch: decode current pending_codes and emit via callback.
-        // Uses overlap-1 context: the last code of the previous batch is prepended as the
-        // codec's context slot (code[0] → no audio output, code[1..N] → audio), ensuring
-        // no speech codes are silently dropped at batch boundaries.
-        // Does NOT normalize — normalization is applied once by the caller on the full buffer.
         auto flush_batch = [&]() {
             if (pending_codes.empty()) return;
 
@@ -485,6 +439,7 @@ public:
             }
             total_samples += chunk.size();
             callback(std::move(chunk));
+            batch_target = BATCH_CODES;
         };
 
         for (int i = 0; i < 400; i++) {
@@ -494,10 +449,10 @@ public:
             llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
             if (id == speech_end_token_ || id == llama_vocab_eos(vocab_)) break;
 
-            int32_t code = extract_speech_code(id);
+            int32_t code = lookup_speech_code(id);
             if (code >= 0) {
                 pending_codes.push_back(code);
-                if ((int)pending_codes.size() >= BATCH_CODES) {
+                if ((int)pending_codes.size() >= batch_target) {
                     flush_batch();
                     if (interrupted && interrupted->load()) break;
                 }
@@ -531,6 +486,12 @@ private:
     std::string build_prompt(const std::string& input_phones) {
         return "user: Convert the text to speech:<|TEXT_PROMPT_START|>"
                + ref_voice_.phonemes + " " + input_phones
+               + "<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>"
+               + ref_codes_prompt_;
+    }
+
+    std::string build_suffix(const std::string& input_phones) {
+        return input_phones
                + "<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>"
                + ref_codes_prompt_;
     }
@@ -569,6 +530,54 @@ private:
         return -1;
     }
 
+    int32_t lookup_speech_code(llama_token id) const {
+        auto it = speech_code_lut_.find(id);
+        return it != speech_code_lut_.end() ? it->second : -1;
+    }
+
+    void build_speech_code_lut() {
+        int n_vocab = llama_vocab_n_tokens(vocab_);
+        for (llama_token id = 0; id < n_vocab; id++) {
+            int32_t code = extract_speech_code(id);
+            if (code >= 0) speech_code_lut_[id] = code;
+        }
+        std::printf("Built speech code LUT: %zu entries\n", speech_code_lut_.size());
+    }
+
+    bool pin_prefix() {
+        std::string prefix_str = "user: Convert the text to speech:<|TEXT_PROMPT_START|>"
+                                + ref_voice_.phonemes + " ";
+        prefix_tokens_ = tokenize(prefix_str, false);
+        if (prefix_tokens_.empty()) {
+            std::fprintf(stderr, "Failed to tokenize prefix for KV cache pinning\n");
+            return false;
+        }
+
+        llama_memory_t mem = llama_get_memory(ctx_);
+        llama_memory_seq_rm(mem, 0, -1, -1);
+
+        llama_batch batch = llama_batch_init(prefix_tokens_.size(), 0, 1);
+        batch.n_tokens = prefix_tokens_.size();
+        for (size_t i = 0; i < prefix_tokens_.size(); i++) {
+            batch.token[i] = prefix_tokens_[i];
+            batch.pos[i] = i;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = (i == prefix_tokens_.size() - 1);
+        }
+        if (llama_decode(ctx_, batch) != 0) {
+            llama_batch_free(batch);
+            std::fprintf(stderr, "Failed to decode prefix for KV cache pinning\n");
+            prefix_tokens_.clear();
+            prefix_n_past_ = 0;
+            return false;
+        }
+        prefix_n_past_ = static_cast<int>(prefix_tokens_.size());
+        llama_batch_free(batch);
+        std::printf("Pinned KV cache prefix: %d tokens\n", prefix_n_past_);
+        return true;
+    }
+
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;
@@ -576,6 +585,9 @@ private:
     std::mutex espeak_mutex_;
     std::mutex cache_mutex_;
     std::unordered_map<std::string, std::string> phoneme_cache_;
+    std::unordered_map<llama_token, int32_t> speech_code_lut_;
+    std::vector<llama_token> prefix_tokens_;
+    int prefix_n_past_ = 0;
     ReferenceVoice ref_voice_;
     std::string ref_codes_prompt_;
     llama_token speech_end_token_ = -1;
