@@ -935,12 +935,17 @@ private:
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
                     [&](std::vector<float> chunk) {
                         if (ctx->interrupted.load()) return;
+                        // Apply a uniform gain of 0.9 to every chunk: consistent amplitude
+                        // across the utterance without buffering (global peak normalization
+                        // requires the full audio to be available first).
+                        for (float& s : chunk) s *= 0.9f;
                         if (first_chunk) {
                             apply_fade_in(chunk);
                             first_chunk = false;
                         }
                         {
                             std::lock_guard<std::mutex> alock(ctx->audio_mutex);
+                            if (ctx->interrupted.load()) return;
                             ctx->audio_queue.push(std::move(chunk));
                         }
                         ctx->audio_cv.notify_one();
@@ -1057,6 +1062,7 @@ private:
             ctx = it->second;
             calls_.erase(it);
         }
+        ctx->interrupted = true;
         ctx->active = false;
         ctx->queue_cv.notify_one();
         ctx->audio_cv.notify_all();
