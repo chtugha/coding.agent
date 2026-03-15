@@ -321,3 +321,51 @@ Final integration verification:
   - [ ] Dark mode renders correctly with overrides
 - [ ] Grep for remaining bare numeric literals in setInterval/setTimeout — none found
 - [ ] Verify `is_read_only_query("SELECT load_extension('...')")` returns false
+
+### [ ] Step: Documentation
+
+Produce comprehensive documentation covering all changes made in this overhaul.
+
+**1. Code-level inline comments** (`frontend.cpp`):
+- Document each new API endpoint (`/api/dashboard`, `/api/test_results_summary`) with purpose, request/response format, and data sources
+- Document the dashboard data flow: which in-memory structures and DB tables feed each metric card and the activity feed
+- Document the navigation/page system: how `showPage()` works with the visibility/opacity transition mechanism, the add-before-remove ordering requirement, and why `.hidden` is kept separate from `.wt-page` transitions
+- Document the CSS design system variables block: purpose of each `--wt-*` custom property group (gradients, shadows, surfaces) and theme override pattern
+- Document the named constants blocks (both C++ `static constexpr` and JS `var` declarations) with units and what each controls
+- Document security measures: `sqlite3_db_config` load_extension disable, `is_read_only_query` comment stripping, `kill_ghost_processes` input sanitization, local-only binding assumption
+
+**2. User-facing guide** (`docs/frontend-guide.md`):
+- Overview of the new dashboard: what each metric card shows, how pipeline visualization reflects service state, quick actions available
+- Navigation walkthrough: what each section and page is for
+- How to use Test Results page: filtering, chart zoom, interpreting trend data
+- How to use Beta Tests page: tab organization, running individual component/pipeline tests, collapsible panels
+- Theme switching instructions
+- Troubleshooting: common startup errors (SQLite readonly, missing binaries), how to verify services are running
+
+**3. Developer/maintenance guide** (`docs/frontend-architecture.md`):
+- Architecture overview: single-file structure, key method responsibilities (`serve_index`, `build_ui_pages`, `build_ui_js`, `http_handler`)
+- How to add a new pipeline node to the dashboard diagram (HTML node div + JS status mapping + API topology entry)
+- How to add a new test category to Beta Testing tabs
+- How to add a new page: HTML div in `build_ui_pages()`, nav entry in `serve_index()`, `showPage()` integration, optional polling setup
+- How to add a new API endpoint: handler method + route in `http_handler()`
+- CSS design system reference: complete list of `--wt-*` variables, component classes (`.wt-card`, `.wt-metric-card`, `.wt-pipeline-node`, etc.), animation classes
+- Named constants reference: all C++ and JS constants with descriptions
+- Test infrastructure: how `discover_tests()` works, how to add new test binaries, `run_pipeline_test.py` expected formats
+- Security model: local-only assumption, SQL query guard, input sanitization points
+
+**4. Changelog** (`CHANGELOG.md` or append to existing):
+- Summary of all changes organized by category:
+  - **Fixed**: SQLite readonly database error when started from bin directory
+  - **Security**: Hardened SQL query guard, sanitized popen inputs, disabled load_extension, added JSON escape handling for `\b`/`\f`
+  - **Removed**: Dead code (`is_service_running_unlocked`)
+  - **Changed**: Replaced all C++ and JS magic numbers with named constants
+  - **Added**: Dashboard page with pipeline visualization, metric cards, activity feed, quick actions
+  - **Added**: Test Results page with trend charts, filters, aggregated data
+  - **Changed**: Reorganized navigation (Dashboard → Pipeline → Testing → Configuration)
+  - **Changed**: Beta Testing page split into Component Tests / Pipeline Tests / Tools tabs
+  - **Changed**: Page transitions use visibility/opacity animation instead of display toggle
+  - **Added**: CSS design system with custom properties, gradients, responsive breakpoints
+  - **Fixed**: Test binaries gracefully skip when dependencies unavailable (GTEST_SKIP)
+  - **Fixed**: Verified test runner output parsing and pipeline test script compatibility
+
+**Verification**: All documentation files exist, are accurate relative to the implemented code, and contain no stale references.
