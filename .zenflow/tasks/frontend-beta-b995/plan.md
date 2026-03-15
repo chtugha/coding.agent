@@ -73,7 +73,8 @@ Changes in `init_database()` (line 483):
 
 **Verification**: Build with `cmake .. && make -j$(sysctl -n hw.logicalcpu)`. Confirm no compilation errors.
 
-### [ ] Step: C++ code quality — magic numbers, security hardening, dead code removal
+### [x] Step: C++ code quality — magic numbers, security hardening, dead code removal
+<!-- chat-id: e5ecede5-b568-4f6a-aab6-12d2de36d98c -->
 
 All changes in `frontend.cpp`.
 

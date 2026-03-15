@@ -103,6 +103,16 @@
 #include <fcntl.h>
 #include <cerrno>
 #include <climits>
+#include <regex>
+
+static constexpr int LOG_FLUSH_INTERVAL_MS = 500;
+static constexpr int UDP_BUFFER_SIZE = 4096;
+static constexpr int DB_QUERY_ROW_LIMIT = 10000;
+static constexpr int MG_POLL_TIMEOUT_MS = 100;
+static constexpr int LOG_RETENTION_DAYS = 30;
+static constexpr int SERVICE_CHECK_INTERVAL_S = 2;
+static constexpr int ASYNC_CLEANUP_INTERVAL_S = 30;
+static constexpr int RECENT_LOGS_API_LIMIT = 100;
 
 using namespace whispertalk;
 
@@ -344,20 +354,20 @@ public:
         auto last_svc_check = std::chrono::steady_clock::now();
         auto last_async_cleanup = std::chrono::steady_clock::now();
         while (!s_sigint_received) {
-            mg_mgr_poll(&mgr_, 100);
+            mg_mgr_poll(&mgr_, MG_POLL_TIMEOUT_MS);
             check_test_status();
             flush_sse_queue();
 
             auto now = std::chrono::steady_clock::now();
-            if (now - last_flush >= std::chrono::milliseconds(500)) {
+            if (now - last_flush >= std::chrono::milliseconds(LOG_FLUSH_INTERVAL_MS)) {
                 flush_log_queue();
                 last_flush = now;
             }
-            if (now - last_svc_check >= std::chrono::seconds(2)) {
+            if (now - last_svc_check >= std::chrono::seconds(SERVICE_CHECK_INTERVAL_S)) {
                 check_service_status();
                 last_svc_check = now;
             }
-            if (now - last_async_cleanup >= std::chrono::seconds(30)) {
+            if (now - last_async_cleanup >= std::chrono::seconds(ASYNC_CLEANUP_INTERVAL_S)) {
                 cleanup_old_async_tasks();
                 last_async_cleanup = now;
             }
@@ -818,15 +828,6 @@ private:
         }
     }
 
-    bool is_service_running_unlocked(const std::string& name) {
-        for (const auto& svc : services_) {
-            if (svc.name == name) {
-                return svc.managed && svc.pid > 0;
-            }
-        }
-        return false;
-    }
-
     static std::vector<std::string> split_args(const std::string& s) {
         std::vector<std::string> result;
         std::istringstream iss(s);
@@ -850,6 +851,8 @@ private:
     }
 
     void kill_ghost_processes(const std::string& binary_name) {
+        static const std::regex valid_name("^[a-zA-Z0-9_.-]+$");
+        if (!std::regex_match(binary_name, valid_name)) return;
         std::string cmd = "pgrep -f '" + binary_name + "' 2>/dev/null";
         FILE* fp = popen(cmd.c_str(), "r");
         if (!fp) return;
@@ -1090,9 +1093,7 @@ private:
         tv.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        // recv buffer: 4096 bytes. Max inbound UDP datagram from LogForwarder is
-        // 2303 bytes (buf[2304]-1), so 4096 provides ample headroom — no resize needed.
-        char buffer[4096];
+        char buffer[UDP_BUFFER_SIZE];
         while (!s_sigint_received) {
             ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
             if (n > 0) {
@@ -1216,8 +1217,8 @@ private:
 
     void rotate_logs() {
         if (!db_) return;
-        const char* sql = "DELETE FROM logs WHERE timestamp < datetime('now', '-30 days')";
-        sqlite3_exec(db_, sql, nullptr, nullptr, nullptr);
+        std::string sql = "DELETE FROM logs WHERE timestamp < datetime('now', '-" + std::to_string(LOG_RETENTION_DAYS) + " days')";
+        sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, nullptr);
     }
 
     // GET /api/logs/stream — SSE live log stream. Registers the connection for
@@ -5526,7 +5527,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         std::stringstream json;
         json << "{\"logs\":[";
         size_t count = 0;
-        for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < 100; ++it, ++count) {
+        for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < RECENT_LOGS_API_LIMIT; ++it, ++count) {
             if (count > 0) json << ",";
             json << "{"
                  << "\"timestamp\":\"" << escape_json(it->timestamp) << "\","
@@ -5575,6 +5576,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 else if (next == 't') { result += '\t'; pos += 2; }
                 else if (next == 'r') { result += '\r'; pos += 2; }
                 else if (next == '/') { result += '/'; pos += 2; }
+                else if (next == 'b') { result += '\b'; pos += 2; }
+                else if (next == 'f') { result += '\f'; pos += 2; }
                 else { result += json[pos]; pos++; }
             } else if (json[pos] == '"') {
                 break;
@@ -10345,16 +10348,36 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, response.str());
     }
 
-    static bool is_read_only_query(const std::string& query) {
-        std::string trimmed = query;
-        size_t start = trimmed.find_first_not_of(" \t\r\n");
-        if (start == std::string::npos) return false;
-        trimmed = trimmed.substr(start);
-        if (trimmed.size() < 6) return false;
-        std::string upper;
-        for (size_t i = 0; i < trimmed.size(); i++) {
-            upper += static_cast<char>(toupper(static_cast<unsigned char>(trimmed[i])));
+    static std::string strip_sql_comments(const std::string& sql) {
+        std::string result;
+        result.reserve(sql.size());
+        size_t i = 0;
+        while (i < sql.size()) {
+            if (i + 1 < sql.size() && sql[i] == '-' && sql[i + 1] == '-') {
+                while (i < sql.size() && sql[i] != '\n') i++;
+            } else if (i + 1 < sql.size() && sql[i] == '/' && sql[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < sql.size() && !(sql[i] == '*' && sql[i + 1] == '/')) i++;
+                if (i + 1 < sql.size()) i += 2;
+            } else {
+                result += sql[i];
+                i++;
+            }
         }
+        return result;
+    }
+
+    static bool is_read_only_query(const std::string& query) {
+        std::string stripped = strip_sql_comments(query);
+        size_t start = stripped.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) return false;
+        stripped = stripped.substr(start);
+        if (stripped.size() < 6) return false;
+        std::string upper;
+        for (size_t i = 0; i < stripped.size(); i++) {
+            upper += static_cast<char>(toupper(static_cast<unsigned char>(stripped[i])));
+        }
+        if (upper.find("LOAD_EXTENSION") != std::string::npos) return false;
         if (upper.substr(0, 6) == "SELECT" || upper.substr(0, 7) == "EXPLAIN") return true;
         if (upper.substr(0, 6) == "PRAGMA") {
             if (upper.find('=') != std::string::npos) return false;
@@ -10425,7 +10448,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         
         int row_count = 0;
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            if (row_count >= 10000) break;
+            if (row_count >= DB_QUERY_ROW_LIMIT) break;
             if (row_count > 0) json << ",";
             json << "{";
             
@@ -10448,7 +10471,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
         
         json << "],\"affected\":" << sqlite3_changes(db_)
-             << ",\"truncated\":" << (row_count >= 10000 ? "true" : "false") << "}";
+             << ",\"truncated\":" << (row_count >= DB_QUERY_ROW_LIMIT ? "true" : "false") << "}";
         sqlite3_finalize(stmt);
         
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
