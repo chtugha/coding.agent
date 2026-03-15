@@ -101,6 +101,7 @@
 #include <dirent.h>
 #include <algorithm>
 #include <fcntl.h>
+#include <cerrno>
 #include <climits>
 
 using namespace whispertalk;
@@ -284,9 +285,11 @@ public:
           db_path_(project_root + "/frontend.db") {
         
         db_ok_ = init_database();
-        discover_tests();
-        load_services();
-        scan_testfiles_directory();
+        if (db_ok_) {
+            discover_tests();
+            load_services();
+            scan_testfiles_directory();
+        }
     }
 
     ~FrontendServer() {
@@ -297,7 +300,6 @@ public:
 
     bool start() {
         if (!db_ok_) {
-            std::cerr << "Database initialization failed\n";
             return false;
         }
 
@@ -382,7 +384,7 @@ private:
     uint16_t log_port_;
     InterconnectNode interconnect_;
     sqlite3* db_;
-    bool db_ok_;
+    bool db_ok_ = false;
     bool db_write_mode_ = false;
     std::string project_root_;
     std::string db_path_;
@@ -509,8 +511,8 @@ private:
 
         int cfg_rc = sqlite3_db_config(db_, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr);
         if (cfg_rc != SQLITE_OK) {
-            std::cerr << "Warning: could not disable SQLite extension loading: "
-                      << sqlite3_errmsg(db_) << "\n";
+            std::cerr << "Warning: could not disable SQLite extension loading (rc="
+                      << cfg_rc << ")\n";
         }
 
         const char* schema = R"(
