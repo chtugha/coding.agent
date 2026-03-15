@@ -36,6 +36,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <unordered_map>
 #include <thread>
 #include <vector>
 #include <sys/stat.h>
@@ -312,6 +313,8 @@ public:
         espeak_SetVoiceByName("de");
         std::printf("espeak-ng initialized (German)\n");
 
+        build_speech_code_lut();
+
         std::printf("Warming up Metal shaders and CoreML (first synthesis)...\n");
         auto warmup_start = std::chrono::steady_clock::now();
         auto warmup = synthesize("Hallo.");
@@ -322,6 +325,8 @@ public:
         } else {
             std::printf("Warmup done in %lldms (%zu samples)\n", (long long)warmup_ms, warmup.size());
         }
+
+        pin_prefix();
 
         return true;
     }
@@ -356,47 +361,106 @@ public:
     }
 
     std::vector<float> synthesize(const std::string& text, std::atomic<bool>* interrupted = nullptr) {
+        std::vector<float> result;
+        result.reserve(NEUTTS_SAMPLE_RATE * 4);
+        synthesize_streaming(text, interrupted, [&](std::vector<float> chunk) {
+            result.insert(result.end(), chunk.begin(), chunk.end());
+        });
+        return result;
+    }
+
+    template<typename Callback>
+    void synthesize_streaming(const std::string& text, std::atomic<bool>* interrupted,
+                              Callback&& callback) {
+        static constexpr int FIRST_BATCH_CODES = 16;
+        static constexpr int BATCH_CODES = 64;
+
         std::string input_phones = phonemize(text);
-        if (input_phones.empty()) return {};
-
-        std::string prompt = build_prompt(input_phones);
-
-        auto tokens = tokenize(prompt, false);
-        if (tokens.empty()) return {};
+        if (input_phones.empty()) return;
 
         llama_memory_t mem = llama_get_memory(ctx_);
-        llama_memory_seq_rm(mem, 0, -1, -1);
+        std::vector<llama_token> decode_tokens;
+        int n_past;
 
-        llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
-        batch.n_tokens = tokens.size();
-        for (size_t i = 0; i < tokens.size(); i++) {
-            batch.token[i] = tokens[i];
-            batch.pos[i] = i;
+        if (prefix_n_past_ > 0) {
+            std::string suffix = build_suffix(input_phones);
+            decode_tokens = tokenize(suffix, false);
+            if (decode_tokens.empty()) return;
+            llama_memory_seq_rm(mem, 0, prefix_n_past_, -1);
+            n_past = prefix_n_past_;
+        } else {
+            std::string prompt = build_prompt(input_phones);
+            decode_tokens = tokenize(prompt, false);
+            if (decode_tokens.empty()) return;
+            llama_memory_seq_rm(mem, 0, -1, -1);
+            n_past = 0;
+        }
+
+        llama_batch batch = llama_batch_init(decode_tokens.size(), 0, 1);
+        batch.n_tokens = decode_tokens.size();
+        for (size_t i = 0; i < decode_tokens.size(); i++) {
+            batch.token[i] = decode_tokens[i];
+            batch.pos[i] = n_past + i;
             batch.n_seq_id[i] = 1;
             batch.seq_id[i][0] = 0;
-            batch.logits[i] = (i == tokens.size() - 1);
+            batch.logits[i] = (i == decode_tokens.size() - 1);
         }
-
         if (llama_decode(ctx_, batch) != 0) {
             llama_batch_free(batch);
-            return {};
+            return;
         }
-        int n_past = static_cast<int>(tokens.size());
+        n_past += static_cast<int>(decode_tokens.size());
         llama_batch_free(batch);
 
-        std::vector<int32_t> speech_codes;
         llama_batch single = llama_batch_init(1, 0, 1);
+        std::vector<int32_t> pending_codes;
+        pending_codes.reserve(BATCH_CODES + 1);
+        size_t total_samples = 0;
+        int32_t context_code = -1;
+        int batch_target = FIRST_BATCH_CODES;
 
+        std::vector<int32_t> input_codes;
+        input_codes.reserve(BATCH_CODES + 1);
+
+        auto flush_batch = [&]() {
+            if (pending_codes.empty()) return;
+
+            input_codes.clear();
+            if (context_code >= 0) {
+                input_codes.push_back(context_code);
+            }
+            input_codes.insert(input_codes.end(), pending_codes.begin(), pending_codes.end());
+
+            context_code = pending_codes.back();
+            pending_codes.clear();
+
+            auto chunk = codec_decoder_->decode(input_codes);
+            if (chunk.empty()) return;
+            if (total_samples + chunk.size() > MAX_AUDIO_SAMPLES) {
+                size_t allowed = MAX_AUDIO_SAMPLES - total_samples;
+                if (allowed == 0) return;
+                chunk.resize(allowed);
+            }
+            total_samples += chunk.size();
+            callback(std::move(chunk));
+            batch_target = BATCH_CODES;
+        };
+
+        const llama_token eos = llama_vocab_eos(vocab_);
         for (int i = 0; i < 400; i++) {
             if (interrupted && interrupted->load()) break;
+            if (total_samples >= MAX_AUDIO_SAMPLES) break;
 
             llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
-            if (id == speech_end_token_ || id == llama_vocab_eos(vocab_)) break;
+            if (id == speech_end_token_ || id == eos) break;
 
-            int32_t code = extract_speech_code(id);
+            int32_t code = lookup_speech_code(id);
             if (code >= 0) {
-                speech_codes.push_back((int32_t)code);
-                if (speech_codes.size() >= 256) break;
+                pending_codes.push_back(code);
+                if ((int)pending_codes.size() >= batch_target) {
+                    flush_batch();
+                    if (interrupted && interrupted->load()) break;
+                }
             }
 
             single.n_tokens = 1;
@@ -411,15 +475,9 @@ public:
         }
         llama_batch_free(single);
 
-        if (speech_codes.empty()) return {};
-
-        std::printf("Generated %zu speech codes\n", speech_codes.size());
-
-        auto samples = codec_decoder_->decode(speech_codes);
-        if (samples.size() > MAX_AUDIO_SAMPLES) {
-            samples.resize(MAX_AUDIO_SAMPLES);
+        if (!(interrupted && interrupted->load())) {
+            flush_batch();
         }
-        return samples;
     }
 
     ~NeuTTSPipeline() {
@@ -433,6 +491,12 @@ private:
     std::string build_prompt(const std::string& input_phones) {
         return "user: Convert the text to speech:<|TEXT_PROMPT_START|>"
                + ref_voice_.phonemes + " " + input_phones
+               + "<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>"
+               + ref_codes_prompt_;
+    }
+
+    std::string build_suffix(const std::string& input_phones) {
+        return input_phones
                + "<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>"
                + ref_codes_prompt_;
     }
@@ -471,6 +535,54 @@ private:
         return -1;
     }
 
+    int32_t lookup_speech_code(llama_token id) const {
+        auto it = speech_code_lut_.find(id);
+        return it != speech_code_lut_.end() ? it->second : -1;
+    }
+
+    void build_speech_code_lut() {
+        int n_vocab = llama_vocab_n_tokens(vocab_);
+        for (llama_token id = 0; id < n_vocab; id++) {
+            int32_t code = extract_speech_code(id);
+            if (code >= 0) speech_code_lut_[id] = code;
+        }
+        std::printf("Built speech code LUT: %zu entries\n", speech_code_lut_.size());
+    }
+
+    bool pin_prefix() {
+        std::string prefix_str = "user: Convert the text to speech:<|TEXT_PROMPT_START|>"
+                                + ref_voice_.phonemes + " ";
+        prefix_tokens_ = tokenize(prefix_str, false);
+        if (prefix_tokens_.empty()) {
+            std::fprintf(stderr, "Failed to tokenize prefix for KV cache pinning\n");
+            return false;
+        }
+
+        llama_memory_t mem = llama_get_memory(ctx_);
+        llama_memory_seq_rm(mem, 0, -1, -1);
+
+        llama_batch batch = llama_batch_init(prefix_tokens_.size(), 0, 1);
+        batch.n_tokens = prefix_tokens_.size();
+        for (size_t i = 0; i < prefix_tokens_.size(); i++) {
+            batch.token[i] = prefix_tokens_[i];
+            batch.pos[i] = i;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = (i == prefix_tokens_.size() - 1);
+        }
+        if (llama_decode(ctx_, batch) != 0) {
+            llama_batch_free(batch);
+            std::fprintf(stderr, "Failed to decode prefix for KV cache pinning\n");
+            prefix_tokens_.clear();
+            prefix_n_past_ = 0;
+            return false;
+        }
+        prefix_n_past_ = static_cast<int>(prefix_tokens_.size());
+        llama_batch_free(batch);
+        std::printf("Pinned KV cache prefix: %d tokens\n", prefix_n_past_);
+        return true;
+    }
+
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;
@@ -478,6 +590,9 @@ private:
     std::mutex espeak_mutex_;
     std::mutex cache_mutex_;
     std::unordered_map<std::string, std::string> phoneme_cache_;
+    std::unordered_map<llama_token, int32_t> speech_code_lut_;
+    std::vector<llama_token> prefix_tokens_;
+    int prefix_n_past_ = 0;
     ReferenceVoice ref_voice_;
     std::string ref_codes_prompt_;
     llama_token speech_end_token_ = -1;
@@ -492,6 +607,11 @@ struct CallContext {
     std::thread worker;
     std::atomic<bool> active{true};
     std::atomic<bool> interrupted{false};
+
+    std::queue<std::vector<float>> audio_queue;
+    std::mutex audio_mutex;
+    std::condition_variable audio_cv;
+    std::thread audio_sender;
 };
 
 class NeuTTSService {
@@ -783,15 +903,15 @@ private:
         std::string text(reinterpret_cast<const char*>(pkt.payload.data()), pkt.payload.size());
 
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        auto it = calls_.find(pkt.call_id);
-        if (it == calls_.end()) {
+        auto [it, inserted] = calls_.try_emplace(pkt.call_id, nullptr);
+        if (inserted) {
             auto ctx = std::make_shared<CallContext>();
             ctx->call_id = pkt.call_id;
             ctx->worker = std::thread(&NeuTTSService::call_worker, this, ctx);
-            calls_[pkt.call_id] = ctx;
+            ctx->audio_sender = std::thread(&NeuTTSService::audio_sender_loop, this, ctx);
+            it->second = ctx;
             std::printf("Started synthesis thread for call %u\n", pkt.call_id);
             log_fwd_.forward(LogLevel::INFO, pkt.call_id, "Started NeuTTS synthesis thread");
-            it = calls_.find(pkt.call_id);
         }
 
         auto& ctx = it->second;
@@ -823,81 +943,93 @@ private:
 
             std::printf("Synthesizing for call %u: %s\n", ctx->call_id, text.c_str());
 
-            std::vector<float> samples;
+            size_t chunks_produced = 0;
             auto start = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> lock(pipeline_mutex_);
-                samples = pipeline_.synthesize(text, &ctx->interrupted);
+                bool first_chunk = true;
+                pipeline_.synthesize_streaming(text, &ctx->interrupted,
+                    [&](std::vector<float> chunk) {
+                        if (ctx->interrupted.load()) return;
+                        static constexpr float STREAMING_GAIN = 0.90f;
+                        for (float& s : chunk) s *= STREAMING_GAIN;
+                        if (first_chunk) {
+                            apply_fade_in(chunk);
+                            first_chunk = false;
+                        }
+                        {
+                            std::lock_guard<std::mutex> alock(ctx->audio_mutex);
+                            if (ctx->interrupted.load()) return;
+                            ctx->audio_queue.push(std::move(chunk));
+                        }
+                        ctx->audio_cv.notify_one();
+                        chunks_produced++;
+                    });
             }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
             if (ctx->interrupted.load()) {
                 ctx->interrupted = false;
-                std::printf("Synthesis interrupted for call %u — discarding %zu samples\n",
-                           ctx->call_id, samples.size());
-                log_fwd_.forward(LogLevel::WARN, ctx->call_id, "Synthesis interrupted — discarding audio");
+                std::printf("Synthesis interrupted for call %u\n", ctx->call_id);
+                log_fwd_.forward(LogLevel::WARN, ctx->call_id, "Synthesis interrupted");
                 continue;
             }
 
-            if (samples.empty() || samples.size() > MAX_AUDIO_SAMPLES) {
-                std::fprintf(stderr, "Invalid audio output for call %u: %zu samples\n",
-                            ctx->call_id, samples.size());
+            if (chunks_produced == 0) {
+                std::fprintf(stderr, "No audio output for call %u\n", ctx->call_id);
                 continue;
             }
 
-            float raw_peak = normalize_audio(samples);
-            apply_fade_in(samples);
+            std::printf("Synthesis complete for call %u in %lldms (%zu chunks)\n",
+                        ctx->call_id, (long long)elapsed, chunks_produced);
+            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesis complete in %lldms (NeuTTS streaming)",
+                            (long long)elapsed);
+        }
+    }
 
-            const char* norm_tag = (raw_peak > 0.01f && std::abs(raw_peak - 0.90f) > 0.001f)
-                                   ? " -> normalized" : "";
-            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
-                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak, norm_tag);
-            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (NeuTTS)",
-                            samples.size(), (long long)elapsed);
-
-            send_audio_to_downstream(ctx->call_id, samples);
+    void audio_sender_loop(std::shared_ptr<CallContext> ctx) {
+        while (true) {
+            std::vector<float> chunk;
+            {
+                std::unique_lock<std::mutex> lock(ctx->audio_mutex);
+                ctx->audio_cv.wait(lock, [&] {
+                    return !ctx->audio_queue.empty() || !ctx->active.load();
+                });
+                if (!ctx->active.load() && ctx->audio_queue.empty()) break;
+                if (ctx->audio_queue.empty()) continue;
+                chunk = std::move(ctx->audio_queue.front());
+                ctx->audio_queue.pop();
+            }
+            send_audio_to_downstream(ctx->call_id, chunk);
         }
     }
 
     void send_audio_to_downstream(uint32_t call_id, const std::vector<float>& samples) {
-        if (node_.downstream_state() != ConnectionState::CONNECTED) {
-            std::printf("Downstream (OAP) not connected - discarding audio for call %u\n", call_id);
-            return;
-        }
+        if (node_.downstream_state() != ConnectionState::CONNECTED) return;
 
         static constexpr size_t CHUNK_SAMPLES = 4800;
-        size_t header_size = sizeof(int32_t);
-        size_t total_sent = 0;
+        static constexpr size_t HEADER_SIZE = sizeof(int32_t);
 
         for (size_t offset = 0; offset < samples.size(); offset += CHUNK_SAMPLES) {
             size_t count = std::min(CHUNK_SAMPLES, samples.size() - offset);
 
             Packet audio_pkt;
             audio_pkt.call_id = call_id;
-            audio_pkt.payload_size = static_cast<uint32_t>(header_size + count * sizeof(float));
+            audio_pkt.payload_size = static_cast<uint32_t>(HEADER_SIZE + count * sizeof(float));
             audio_pkt.payload.resize(audio_pkt.payload_size);
 
             int32_t sr = NEUTTS_SAMPLE_RATE;
             std::memcpy(audio_pkt.payload.data(), &sr, sizeof(int32_t));
-            std::memcpy(audio_pkt.payload.data() + header_size,
+            std::memcpy(audio_pkt.payload.data() + HEADER_SIZE,
                        samples.data() + offset, count * sizeof(float));
 
             audio_pkt.trace.record(ServiceType::KOKORO_SERVICE, 0);
             audio_pkt.trace.record(ServiceType::KOKORO_SERVICE, 1);
-            if (node_.send_to_downstream(audio_pkt)) {
-                total_sent += count;
-            } else {
-                std::fprintf(stderr, "Failed to send audio chunk for call %u at offset %zu\n", call_id, offset);
+            if (!node_.send_to_downstream(audio_pkt)) {
                 log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio chunk to OAP");
                 break;
             }
-        }
-
-        if (total_sent > 0) {
-            std::printf("Sent %zu samples @ %d Hz for call %u to OAP (%zu chunks)\n",
-                       total_sent, NEUTTS_SAMPLE_RATE, call_id,
-                       (total_sent + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES);
         }
     }
 
@@ -912,6 +1044,12 @@ private:
             std::queue<std::string> empty;
             std::swap(ctx->text_queue, empty);
         }
+        {
+            std::lock_guard<std::mutex> alock(ctx->audio_mutex);
+            std::queue<std::vector<float>> empty;
+            std::swap(ctx->audio_queue, empty);
+        }
+        ctx->audio_cv.notify_one();
         log_fwd_.forward(LogLevel::DEBUG, call_id, "SPEECH_ACTIVE — flushed TTS queue, interrupting synthesis");
     }
 
@@ -925,19 +1063,25 @@ private:
             ctx = it->second;
             calls_.erase(it);
         }
+        ctx->interrupted = true;
         ctx->active = false;
         ctx->queue_cv.notify_one();
+        ctx->audio_cv.notify_all();
         if (ctx->worker.joinable()) ctx->worker.join();
+        if (ctx->audio_sender.joinable()) ctx->audio_sender.join();
     }
 
     void shutdown_all_calls() {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         for (auto& [id, ctx] : calls_) {
+            ctx->interrupted = true;
             ctx->active = false;
             ctx->queue_cv.notify_one();
+            ctx->audio_cv.notify_all();
         }
         for (auto& [id, ctx] : calls_) {
             if (ctx->worker.joinable()) ctx->worker.join();
+            if (ctx->audio_sender.joinable()) ctx->audio_sender.join();
         }
         calls_.clear();
     }
