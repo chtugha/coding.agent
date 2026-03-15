@@ -10,13 +10,21 @@ The WhisperTalk frontend (`frontend.cpp`, ~10,500 lines) is the central control 
 
 **Current behavior**: When started from `bin/` directory, the frontend emits `flush_log_queue: insert failed: attempt to write a readonly database` every 500ms.
 
-**Root cause**: `init_database()` at line 484 opens `sqlite3_open("frontend.db", &db_)` using a relative path. The `main()` function (line 10435+) performs `chdir()` *before* constructing `FrontendServer` (line 10481), so the constructor always runs after the CWD correction attempt. The problem is that the chdir logic itself fails for certain invocation paths:
-- When invoked as `cd bin && ./frontend`, `argv[0]` is `./frontend`. `rfind('/')` finds position 1, so `exe_dir` becomes `.` — which is skipped by the `!= "."` guard (line 10440). The fallback then calls `stat("bin/frontend", &st)` which fails (no `bin/` subdirectory inside `bin/`), so CWD remains `bin/`. The database file `frontend.db` is then created inside `bin/` rather than the project root, or an existing read-only copy is opened.
-- The fundamental issue is that the DB path `"frontend.db"` is a bare relative filename that depends entirely on CWD being correct, rather than being resolved to an absolute path derived from the executable location.
+**Root cause**: `init_database()` at line 484 opens `sqlite3_open("frontend.db", &db_)` using a relative path. The `main()` function (line 10435+) performs `chdir()` *before* constructing `FrontendServer` (line 10481), so the constructor always runs after the CWD correction attempt. The chdir fallback logic (lines 10455–10466) does correctly handle common cases like `cd bin && ./frontend` — it detects CWD ends in `"bin"` and chdirs to the parent.
+
+The actual failure mechanism involves `sqlite3_open` behavior and file permissions:
+- `sqlite3_open("frontend.db", &db_)` is called with the default `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE` flags. Per SQLite documentation, if the file exists but is **not writable** by the current user, `sqlite3_open` **succeeds** (returns `SQLITE_OK`) but silently opens the database in **read-only mode**.
+- The code at line 484–488 only checks `rc != SQLITE_OK`, so it does not detect the read-only fallback.
+- All subsequent writes (every 500ms in `flush_log_queue`) fail with "attempt to write a readonly database".
+- This occurs when: (a) a `frontend.db` file was previously created with different permissions (e.g., by a different user, or during a build step that ran as root), (b) the project root directory itself is not writable, or (c) an invocation path not covered by the chdir logic causes the DB to be created in a non-writable location. The relative path makes this fragile.
+
+Two underlying issues:
+1. The DB path is a bare relative filename depending on CWD, rather than an absolute path derived from the executable location.
+2. The code does not verify the database was opened in read-write mode after `sqlite3_open` returns.
 
 **Requirements**:
 - R1.1: The database path must be resolved to an absolute path based on the detected project root, not rely on CWD.
-- R1.2: If the database file cannot be opened for writing, the frontend must emit a clear fatal error and exit, rather than silently failing every 500ms.
+- R1.2: After `sqlite3_open` succeeds, verify the database is writable via `sqlite3_db_readonly(db_, "main") == 0`. If read-only, emit a clear fatal error with the resolved DB path and exit, rather than silently failing every 500ms.
 - R1.3: The chdir logic must handle all invocation scenarios: `bin/frontend`, `./bin/frontend`, `cd bin && ./frontend`, absolute paths, and symlinks.
 
 ### 2.2 Code Quality, Bugs, and Security Issues (P1 - High)
@@ -190,7 +198,7 @@ Configuration:
 
 ## 5. Success Criteria
 
-- SC1: `cd bin && ./frontend` starts without any SQLite errors
+- SC1: Frontend starts without any SQLite errors under all invocation methods (`bin/frontend`, `./bin/frontend`, `cd bin && ./frontend`, absolute paths). Additionally, if `frontend.db` exists with wrong permissions, the frontend must exit with a clear error message rather than spamming stderr.
 - SC2: All magic numbers replaced with named constants
 - SC3: No dead code or stubs remaining (verified by code review)
 - SC4: Security issues (SQL injection guard, command injection, credential handling) addressed
