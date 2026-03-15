@@ -113,6 +113,11 @@ static constexpr int LOG_RETENTION_DAYS = 30;
 static constexpr int SERVICE_CHECK_INTERVAL_S = 2;
 static constexpr int ASYNC_CLEANUP_INTERVAL_S = 30;
 static constexpr int RECENT_LOGS_API_LIMIT = 100;
+static constexpr useconds_t SIGTERM_GRACE_US = 500000;
+static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;
+static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;
+static constexpr useconds_t SHUTDOWN_GRACE_US = 2000000;
+static constexpr useconds_t RESTART_WAIT_US = 500000;
 
 using namespace whispertalk;
 
@@ -853,7 +858,12 @@ private:
     void kill_ghost_processes(const std::string& binary_name) {
         static const std::regex valid_name("^[a-zA-Z0-9_.-]+$");
         if (!std::regex_match(binary_name, valid_name)) return;
-        std::string cmd = "pgrep -f '" + binary_name + "' 2>/dev/null";
+        std::string escaped_name;
+        for (char ch : binary_name) {
+            if (ch == '.') escaped_name += "[.]";
+            else escaped_name += ch;
+        }
+        std::string cmd = "pgrep -f '" + escaped_name + "' 2>/dev/null";
         FILE* fp = popen(cmd.c_str(), "r");
         if (!fp) return;
         char buf[64];
@@ -867,7 +877,7 @@ private:
             std::cerr << "Killing ghost process " << p << " for " << binary_name << "\n";
             kill(p, SIGTERM);
         }
-        if (!pids.empty()) usleep(500000);
+        if (!pids.empty()) usleep(SIGTERM_GRACE_US);
         for (pid_t p : pids) {
             if (kill(p, 0) == 0) {
                 kill(p, SIGKILL);
@@ -887,7 +897,7 @@ private:
                 size_t slash = bin_name.rfind('/');
                 if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
                 kill_ghost_processes(bin_name);
-                usleep(200000);
+                usleep(SERVICE_STARTUP_WAIT_US);
             }
 
             if (!is_allowed_binary(svc.binary_path)) return false;
@@ -967,7 +977,7 @@ private:
                     svc.pid = 0;
                     return true;
                 }
-                usleep(100000);
+                usleep(STOP_POLL_INTERVAL_US);
             }
             kill(svc.pid, SIGKILL);
             waitpid(svc.pid, nullptr, 0);
@@ -1055,7 +1065,7 @@ private:
                 }
             }
         }
-        usleep(2000000);
+        usleep(SHUTDOWN_GRACE_US);
         {
             std::lock_guard<std::mutex> lock(services_mutex_);
             for (auto& svc : services_) {
@@ -1217,7 +1227,9 @@ private:
 
     void rotate_logs() {
         if (!db_) return;
-        std::string sql = "DELETE FROM logs WHERE timestamp < datetime('now', '-" + std::to_string(LOG_RETENTION_DAYS) + " days')";
+        static const std::string sql =
+            "DELETE FROM logs WHERE timestamp < datetime('now', '-"
+            + std::to_string(LOG_RETENTION_DAYS) + " days')";
         sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, nullptr);
     }
 
@@ -5805,7 +5817,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         stop_service(name);
 
-        usleep(500000);
+        usleep(RESTART_WAIT_US);
 
         if (start_service(name, args)) {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"restarted\"}");
@@ -10359,6 +10371,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 i += 2;
                 while (i + 1 < sql.size() && !(sql[i] == '*' && sql[i + 1] == '/')) i++;
                 if (i + 1 < sql.size()) i += 2;
+                else i = sql.size();
             } else {
                 result += sql[i];
                 i++;
