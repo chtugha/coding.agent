@@ -1569,7 +1569,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-collapsible{max-height:0;overflow:hidden;transition:max-height 0.3s ease}
 .wt-collapsible.open{max-height:2000px}
 .wt-beta-tabs{display:flex;gap:4px;margin-bottom:16px;border:none;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius)}
-.wt-beta-tabs .nav-link{border:none;border-radius:calc(var(--wt-radius) - 4px);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
+.wt-beta-tabs .nav-link{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
 .wt-beta-tabs .nav-link:hover{background:var(--wt-surface-sunken);color:var(--wt-text)}
 .wt-beta-tabs .nav-link.active{background:var(--wt-accent);color:#fff;box-shadow:var(--wt-shadow-sm)}
 .wt-test-summary-bar{display:flex;gap:12px;align-items:center;padding:12px 16px;background:var(--wt-surface-elevated);border-radius:var(--wt-radius);margin-bottom:16px}
