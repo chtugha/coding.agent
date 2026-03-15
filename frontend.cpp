@@ -428,6 +428,8 @@ private:
     std::mutex sse_queue_mutex_;
     std::vector<LogEntry> sse_queue_;
 
+    std::chrono::steady_clock::time_point start_time_ = std::chrono::steady_clock::now();
+
     struct AsyncTask {
         int64_t id;
         std::string type;
@@ -1318,6 +1320,8 @@ private:
             
             if (mg_strcmp(hm->uri, mg_str("/")) == 0) {
                 serve_index(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/dashboard")) == 0) {
+                handle_dashboard(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tests")) == 0) {
                 serve_tests_api(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tests/start")) == 0) {
@@ -1584,6 +1588,10 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <aside class="wt-sidebar">
 <div class="wt-sidebar-header"><h1>WhisperTalk</h1></div>
 <div class="wt-sidebar-section">
+<a class="wt-nav-item" data-page="dashboard" onclick="showPage('dashboard')">
+<span class="nav-icon">&#x1F3E0;</span><span class="nav-text">Dashboard</span></a>
+</div>
+<div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Testing</p>
 <a class="wt-nav-item active" data-page="tests" onclick="showPage('tests')">
 <span class="nav-icon">&#x1F9EA;</span>Tests<span class="nav-badge" id="testsBadge">0</span></a>
@@ -1638,6 +1646,75 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
     std::string build_ui_pages() {
         return R"PG(
+<div class="wt-page" id="page-dashboard">
+<div class="wt-content">
+
+<div class="wt-pipeline-hero">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+<div>
+<div class="wt-headline" style="color:#fff">Pipeline Overview</div>
+<div style="font-size:13px;opacity:0.7;margin-top:4px">Real-time service health and data flow</div>
+</div>
+<div id="dashHealthBadge" style="padding:6px 16px;border-radius:20px;font-size:13px;font-weight:600;background:rgba(255,255,255,0.2);color:#fff">Checking...</div>
+</div>
+<div class="pipeline-flow">
+<div class="wt-pipeline-node" id="pipeline-node-SIP_CLIENT"><span class="node-label">SIP</span><span class="node-status offline" id="pipeline-status-SIP_CLIENT"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-INBOUND_AUDIO_PROCESSOR"><span class="node-label">IAP</span><span class="node-status offline" id="pipeline-status-INBOUND_AUDIO_PROCESSOR"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-VAD_SERVICE"><span class="node-label">VAD</span><span class="node-status offline" id="pipeline-status-VAD_SERVICE"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-WHISPER_SERVICE"><span class="node-label">ASR</span><span class="node-status offline" id="pipeline-status-WHISPER_SERVICE"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-LLAMA_SERVICE"><span class="node-label">LLM</span><span class="node-status offline" id="pipeline-status-LLAMA_SERVICE"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-KOKORO_SERVICE"><span class="node-label">TTS</span><span class="node-status offline" id="pipeline-status-KOKORO_SERVICE"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-OUTBOUND_AUDIO_PROCESSOR"><span class="node-label">OAP</span><span class="node-status offline" id="pipeline-status-OUTBOUND_AUDIO_PROCESSOR"></span></div>
+</div>
+</div>
+
+<div class="wt-metrics-grid">
+<div class="wt-metric-card" style="background:var(--wt-gradient-success)">
+<div class="metric-value" id="dashMetricServicesOnline">0</div>
+<div class="metric-label">Services Online</div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-info)">
+<div class="metric-value" id="dashMetricActiveCalls">0</div>
+<div class="metric-label">Active Calls</div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-hero)">
+<div class="metric-value" id="dashMetricTestPass">0</div>
+<div class="metric-label">Tests Passed</div>
+<div class="metric-delta" id="dashMetricTestFail"></div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-neutral)">
+<div class="metric-value" id="dashMetricUptime">0s</div>
+<div class="metric-label">Uptime</div>
+</div>
+</div>
+
+<div class="wt-dashboard-content">
+<div>
+<div class="wt-card" style="max-height:400px;display:flex;flex-direction:column">
+<div class="wt-card-header"><span class="wt-card-title">Activity Feed</span></div>
+<div id="dashActivityFeed" style="flex:1;overflow-y:auto;font-size:12px;font-family:var(--wt-mono);line-height:1.8"></div>
+</div>
+</div>
+<div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Quick Actions</span></div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<button class="wt-btn wt-btn-primary" style="width:100%;justify-content:center" onclick="dashStartAll()">&#x25B6; Start All Services</button>
+<button class="wt-btn wt-btn-danger" style="width:100%;justify-content:center" onclick="dashStopAll()">&#x25A0; Stop All Services</button>
+<button class="wt-btn wt-btn-secondary" style="width:100%;justify-content:center" onclick="dashRestartFailed()">&#x21BB; Restart Failed</button>
+</div>
+</div>
+</div>
+</div>
+
+</div></div>
+
 <div class="wt-page active" id="page-tests">
 <div class="wt-content">
 <div id="tests-overview">
@@ -2531,6 +2608,8 @@ function showPage(p){
     e.classList.toggle('active',e.dataset.page===p);
   });
   currentPage=p;
+  if(p==='dashboard'){fetchDashboard();startDashboardPoll();}
+  else{stopDashboardPoll();}
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
@@ -2546,6 +2625,112 @@ function fetchStatus(){
       d.services_online+' services \u2022 '+d.running_tests+' tests \u2022 '+d.sse_connections+' SSE';
     document.getElementById('svcBadge').textContent=d.services_online+'/6';
   }).catch(()=>{document.getElementById('statusText').textContent='Disconnected';});
+}
+
+var dashPollTimer=null;
+function startDashboardPoll(){
+  stopDashboardPoll();
+  dashPollTimer=setInterval(fetchDashboard,3000);
+}
+function stopDashboardPoll(){
+  if(dashPollTimer){clearInterval(dashPollTimer);dashPollTimer=null;}
+}
+
+function animateCountUp(el,newVal){
+  var text=String(newVal);
+  if(el.textContent===text)return;
+  el.textContent=text;
+  el.classList.remove('metric-updated');
+  void el.offsetWidth;
+  el.classList.add('metric-updated');
+}
+
+function formatUptime(s){
+  if(s<60)return s+'s';
+  if(s<3600)return Math.floor(s/60)+'m';
+  if(s<86400)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+  return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';
+}
+
+function fetchDashboard(){
+  fetch('/api/dashboard').then(r=>r.json()).then(function(d){
+    animateCountUp(document.getElementById('dashMetricServicesOnline'),d.services_online);
+    animateCountUp(document.getElementById('dashMetricActiveCalls'),d.running_tests);
+    animateCountUp(document.getElementById('dashMetricTestPass'),d.test_pass);
+    var failEl=document.getElementById('dashMetricTestFail');
+    if(d.test_fail>0){failEl.textContent=d.test_fail+' failed';failEl.className='metric-delta negative';}
+    else{failEl.textContent='';failEl.className='metric-delta';}
+    document.getElementById('dashMetricUptime').textContent=formatUptime(d.uptime_seconds);
+
+    var badge=document.getElementById('dashHealthBadge');
+    var ratio=d.services_total>0?d.services_online/d.services_total:0;
+    if(ratio>=1){badge.textContent='Healthy';badge.style.background='rgba(52,199,89,0.4)';}
+    else if(ratio>=0.5){badge.textContent='Degraded';badge.style.background='rgba(255,159,10,0.4)';}
+    else{badge.textContent='Offline';badge.style.background='rgba(255,59,48,0.4)';}
+
+    if(d.services){
+      var svcMap={};
+      d.services.forEach(function(s){svcMap[s.name]=s.online;});
+      (d.pipeline||[]).forEach(function(name){
+        var dot=document.getElementById('pipeline-status-'+name);
+        if(dot){
+          dot.className='node-status '+(svcMap[name]?'online':'offline');
+        }
+      });
+    }
+
+    var feed=document.getElementById('dashActivityFeed');
+    if(d.recent_logs&&d.recent_logs.length>0){
+      var html='';
+      d.recent_logs.forEach(function(log){
+        var lvlClass='log-lvl-'+log.level;
+        html+='<div class="wt-log-entry" style="animation:slideIn 0.3s ease">'
+          +'<span class="log-ts">'+escapeHtml(log.timestamp)+'</span> '
+          +'<span class="log-svc">'+escapeHtml(log.service)+'</span> '
+          +'<span class="'+lvlClass+'">'+escapeHtml(log.level)+'</span> '
+          +escapeHtml(log.message)+'</div>';
+      });
+      feed.innerHTML=html;
+    } else {
+      feed.innerHTML='<div style="color:var(--wt-text-secondary);padding:16px;text-align:center">No recent activity</div>';
+    }
+  }).catch(function(){});
+}
+
+function dashStartAll(){
+  fetch('/api/services').then(r=>r.json()).then(function(d){
+    d.services.forEach(function(s){
+      if(!s.online){
+        fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({name:s.name})});
+      }
+    });
+    setTimeout(fetchDashboard,1000);
+  });
+}
+
+function dashStopAll(){
+  fetch('/api/services').then(r=>r.json()).then(function(d){
+    d.services.forEach(function(s){
+      if(s.online){
+        fetch('/api/services/stop',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({name:s.name})});
+      }
+    });
+    setTimeout(fetchDashboard,1000);
+  });
+}
+
+function dashRestartFailed(){
+  fetch('/api/services').then(r=>r.json()).then(function(d){
+    d.services.forEach(function(s){
+      if(!s.online&&s.managed){
+        fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({name:s.name})});
+      }
+    });
+    setTimeout(fetchDashboard,1000);
+  });
 }
 
 function fetchTests(){
@@ -9507,6 +9692,83 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
         }
+    }
+
+    void handle_dashboard(struct mg_connection *c) {
+        int svc_online = 0;
+        int svc_total = 0;
+        std::stringstream svc_json;
+        svc_json << "[";
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            svc_total = static_cast<int>(services_.size());
+            for (size_t i = 0; i < services_.size(); i++) {
+                if (i > 0) svc_json << ",";
+                const auto& s = services_[i];
+                bool alive = s.managed && s.pid > 0;
+                if (alive) svc_online++;
+                svc_json << "{\"name\":\"" << escape_json(s.name)
+                         << "\",\"online\":" << (alive ? "true" : "false") << "}";
+            }
+        }
+        svc_json << "]";
+
+        int running_tests = 0;
+        {
+            std::lock_guard<std::mutex> lock(tests_mutex_);
+            for (const auto& t : tests_) {
+                if (t.is_running) running_tests++;
+            }
+        }
+
+        std::stringstream logs_json;
+        logs_json << "[";
+        {
+            std::lock_guard<std::mutex> lock(logs_mutex_);
+            size_t count = 0;
+            for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < 10; ++it, ++count) {
+                if (count > 0) logs_json << ",";
+                logs_json << "{\"timestamp\":\"" << escape_json(it->timestamp)
+                          << "\",\"service\":\"" << service_type_to_string(it->service)
+                          << "\",\"level\":\"" << escape_json(it->level)
+                          << "\",\"message\":\"" << escape_json(it->message) << "\"}";
+            }
+        }
+        logs_json << "]";
+
+        int test_pass = 0, test_fail = 0;
+        if (db_) {
+            sqlite3_stmt* stmt;
+            const char* sql = "SELECT status, COUNT(*) FROM service_test_runs GROUP BY status";
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const char* st = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                    int cnt = sqlite3_column_int(stmt, 1);
+                    if (st) {
+                        std::string status_str(st);
+                        if (status_str == "pass" || status_str == "PASS" || status_str == "passed" || status_str == "success") test_pass += cnt;
+                        else if (status_str == "fail" || status_str == "FAIL" || status_str == "failed" || status_str == "error") test_fail += cnt;
+                    }
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto uptime_s = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
+
+        std::stringstream json;
+        json << "{\"services_online\":" << svc_online
+             << ",\"services_total\":" << svc_total
+             << ",\"running_tests\":" << running_tests
+             << ",\"test_pass\":" << test_pass
+             << ",\"test_fail\":" << test_fail
+             << ",\"uptime_seconds\":" << uptime_s
+             << ",\"services\":" << svc_json.str()
+             << ",\"recent_logs\":" << logs_json.str()
+             << ",\"pipeline\":[\"SIP_CLIENT\",\"INBOUND_AUDIO_PROCESSOR\",\"VAD_SERVICE\",\"WHISPER_SERVICE\",\"LLAMA_SERVICE\",\"KOKORO_SERVICE\",\"OUTBOUND_AUDIO_PROCESSOR\"]"
+             << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
     // GET /api/status — System health summary: uptime, service count, memory usage.

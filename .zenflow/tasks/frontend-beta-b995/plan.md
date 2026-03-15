@@ -138,7 +138,8 @@ All changes in `frontend.cpp` within `serve_index()` (the `<style>` block, lines
 
 **Verification**: Build succeeds. Visual inspection deferred to integration step.
 
-### [ ] Step: Dashboard page — HTML, API endpoint, and JS
+### [x] Step: Dashboard page — HTML, API endpoint, and JS
+<!-- chat-id: 57963d16-b9c2-46d5-ae7e-a2e5da6c3e0c -->
 
 **HTML** — Add `build_dashboard_page()` method or add dashboard div to `build_ui_pages()`:
 - Pipeline hero section: horizontal node chain (SIP→IAP→VAD→Whisper→LLaMA→Kokoro/NeuTTS→OAP) using CSS flex with `.wt-pipeline-hero`, `.wt-pipeline-node`, `.wt-pipeline-connector` classes. Each node has a status dot with ID for JS updates (e.g., `id="pipeline-node-SIP_CLIENT"`)
