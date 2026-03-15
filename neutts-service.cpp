@@ -935,10 +935,8 @@ private:
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
                     [&](std::vector<float> chunk) {
                         if (ctx->interrupted.load()) return;
-                        // Apply a uniform gain of 0.9 to every chunk: consistent amplitude
-                        // across the utterance without buffering (global peak normalization
-                        // requires the full audio to be available first).
-                        for (float& s : chunk) s *= 0.9f;
+                        static constexpr float STREAMING_GAIN = 0.90f;
+                        for (float& s : chunk) s *= STREAMING_GAIN;
                         if (first_chunk) {
                             apply_fade_in(chunk);
                             first_chunk = false;
