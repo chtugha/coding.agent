@@ -32,7 +32,6 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <functional>
 #include <map>
 #include <mutex>
 #include <queue>
@@ -363,14 +362,16 @@ public:
 
     std::vector<float> synthesize(const std::string& text, std::atomic<bool>* interrupted = nullptr) {
         std::vector<float> result;
+        result.reserve(NEUTTS_SAMPLE_RATE * 4);
         synthesize_streaming(text, interrupted, [&](std::vector<float> chunk) {
             result.insert(result.end(), chunk.begin(), chunk.end());
         });
         return result;
     }
 
+    template<typename Callback>
     void synthesize_streaming(const std::string& text, std::atomic<bool>* interrupted,
-                              std::function<void(std::vector<float>)> callback) {
+                              Callback&& callback) {
         static constexpr int FIRST_BATCH_CODES = 16;
         static constexpr int BATCH_CODES = 64;
 
@@ -418,10 +419,13 @@ public:
         int32_t context_code = -1;
         int batch_target = FIRST_BATCH_CODES;
 
+        std::vector<int32_t> input_codes;
+        input_codes.reserve(BATCH_CODES + 1);
+
         auto flush_batch = [&]() {
             if (pending_codes.empty()) return;
 
-            std::vector<int32_t> input_codes;
+            input_codes.clear();
             if (context_code >= 0) {
                 input_codes.push_back(context_code);
             }
@@ -442,12 +446,13 @@ public:
             batch_target = BATCH_CODES;
         };
 
+        const llama_token eos = llama_vocab_eos(vocab_);
         for (int i = 0; i < 400; i++) {
             if (interrupted && interrupted->load()) break;
             if (total_samples >= MAX_AUDIO_SAMPLES) break;
 
             llama_token id = llama_sampler_sample(sampler_, ctx_, -1);
-            if (id == speech_end_token_ || id == llama_vocab_eos(vocab_)) break;
+            if (id == speech_end_token_ || id == eos) break;
 
             int32_t code = lookup_speech_code(id);
             if (code >= 0) {
@@ -898,16 +903,15 @@ private:
         std::string text(reinterpret_cast<const char*>(pkt.payload.data()), pkt.payload.size());
 
         std::lock_guard<std::mutex> lock(calls_mutex_);
-        auto it = calls_.find(pkt.call_id);
-        if (it == calls_.end()) {
+        auto [it, inserted] = calls_.try_emplace(pkt.call_id, nullptr);
+        if (inserted) {
             auto ctx = std::make_shared<CallContext>();
             ctx->call_id = pkt.call_id;
             ctx->worker = std::thread(&NeuTTSService::call_worker, this, ctx);
             ctx->audio_sender = std::thread(&NeuTTSService::audio_sender_loop, this, ctx);
-            calls_[pkt.call_id] = ctx;
+            it->second = ctx;
             std::printf("Started synthesis thread for call %u\n", pkt.call_id);
             log_fwd_.forward(LogLevel::INFO, pkt.call_id, "Started NeuTTS synthesis thread");
-            it = calls_.find(pkt.call_id);
         }
 
         auto& ctx = it->second;
@@ -1002,43 +1006,30 @@ private:
     }
 
     void send_audio_to_downstream(uint32_t call_id, const std::vector<float>& samples) {
-        if (node_.downstream_state() != ConnectionState::CONNECTED) {
-            std::printf("Downstream (OAP) not connected - discarding audio for call %u\n", call_id);
-            return;
-        }
+        if (node_.downstream_state() != ConnectionState::CONNECTED) return;
 
         static constexpr size_t CHUNK_SAMPLES = 4800;
-        size_t header_size = sizeof(int32_t);
-        size_t total_sent = 0;
+        static constexpr size_t HEADER_SIZE = sizeof(int32_t);
 
         for (size_t offset = 0; offset < samples.size(); offset += CHUNK_SAMPLES) {
             size_t count = std::min(CHUNK_SAMPLES, samples.size() - offset);
 
             Packet audio_pkt;
             audio_pkt.call_id = call_id;
-            audio_pkt.payload_size = static_cast<uint32_t>(header_size + count * sizeof(float));
+            audio_pkt.payload_size = static_cast<uint32_t>(HEADER_SIZE + count * sizeof(float));
             audio_pkt.payload.resize(audio_pkt.payload_size);
 
             int32_t sr = NEUTTS_SAMPLE_RATE;
             std::memcpy(audio_pkt.payload.data(), &sr, sizeof(int32_t));
-            std::memcpy(audio_pkt.payload.data() + header_size,
+            std::memcpy(audio_pkt.payload.data() + HEADER_SIZE,
                        samples.data() + offset, count * sizeof(float));
 
             audio_pkt.trace.record(ServiceType::KOKORO_SERVICE, 0);
             audio_pkt.trace.record(ServiceType::KOKORO_SERVICE, 1);
-            if (node_.send_to_downstream(audio_pkt)) {
-                total_sent += count;
-            } else {
-                std::fprintf(stderr, "Failed to send audio chunk for call %u at offset %zu\n", call_id, offset);
+            if (!node_.send_to_downstream(audio_pkt)) {
                 log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio chunk to OAP");
                 break;
             }
-        }
-
-        if (total_sent > 0) {
-            std::printf("Sent %zu samples @ %d Hz for call %u to OAP (%zu chunks)\n",
-                       total_sent, NEUTTS_SAMPLE_RATE, call_id,
-                       (total_sent + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES);
         }
     }
 
@@ -1083,6 +1074,7 @@ private:
     void shutdown_all_calls() {
         std::lock_guard<std::mutex> lock(calls_mutex_);
         for (auto& [id, ctx] : calls_) {
+            ctx->interrupted = true;
             ctx->active = false;
             ctx->queue_cv.notify_one();
             ctx->audio_cv.notify_all();
