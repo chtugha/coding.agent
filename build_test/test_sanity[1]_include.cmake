@@ -1,0 +1,5 @@
+if(EXISTS "/Users/whisper/.zenflow/worktrees/frontend-beta-b995/build_test/test_sanity[1]_tests.cmake")
+  include("/Users/whisper/.zenflow/worktrees/frontend-beta-b995/build_test/test_sanity[1]_tests.cmake")
+else()
+  add_test(test_sanity_NOT_BUILT test_sanity_NOT_BUILT)
+endif()

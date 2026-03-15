@@ -1,0 +1,5 @@
+add_test([=[SanityTest.BasicAssertions]=]  /Users/whisper/.zenflow/worktrees/frontend-beta-b995/bin/test_sanity [==[--gtest_filter=SanityTest.BasicAssertions]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[SanityTest.BasicAssertions]=]  PROPERTIES WORKING_DIRECTORY /Users/whisper/.zenflow/worktrees/frontend-beta-b995/build_test SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[SanityTest.StringComparison]=]  /Users/whisper/.zenflow/worktrees/frontend-beta-b995/bin/test_sanity [==[--gtest_filter=SanityTest.StringComparison]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[SanityTest.StringComparison]=]  PROPERTIES WORKING_DIRECTORY /Users/whisper/.zenflow/worktrees/frontend-beta-b995/build_test SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_sanity_TESTS SanityTest.BasicAssertions SanityTest.StringComparison)

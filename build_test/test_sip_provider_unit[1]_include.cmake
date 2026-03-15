@@ -1,0 +1,5 @@
+if(EXISTS "/Users/whisper/.zenflow/worktrees/frontend-beta-b995/build_test/test_sip_provider_unit[1]_tests.cmake")
+  include("/Users/whisper/.zenflow/worktrees/frontend-beta-b995/build_test/test_sip_provider_unit[1]_tests.cmake")
+else()
+  add_test(test_sip_provider_unit_NOT_BUILT test_sip_provider_unit_NOT_BUILT)
+endif()

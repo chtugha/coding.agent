@@ -1,0 +1,5 @@
+if(EXISTS "/Users/whisper/.zenflow/worktrees/frontend-beta-b995/build_test/test_interconnect[1]_tests.cmake")
+  include("/Users/whisper/.zenflow/worktrees/frontend-beta-b995/build_test/test_interconnect[1]_tests.cmake")
+else()
+  add_test(test_interconnect_NOT_BUILT test_interconnect_NOT_BUILT)
+endif()
