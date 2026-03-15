@@ -45,6 +45,8 @@ Save to `{@artifacts_path}/spec.md` with:
 
 Create a detailed implementation plan based on `{@artifacts_path}/spec.md`.
 
+**Note on line numbers**: Line references below are from the original `frontend.cpp` (10,488 lines). After each step, subsequent line numbers may shift — implementors should use function/string search rather than relying on exact line numbers for later steps.
+
 ### [ ] Step: Fix SQLite readonly database error
 
 Fix the P0 critical bug where `frontend.db` is opened with a relative path and no read-only check.
@@ -68,7 +70,7 @@ Changes in `init_database()` (line 483):
 - After open succeeds, check `sqlite3_db_readonly(db_, "main") == 1` → emit fatal error with resolved path and `exit(1)`
 - Call `sqlite3_db_config(db_, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, NULL)` to disable load_extension
 
-**Verification**: Build with `cmake .. && make -j$(nproc)`. Confirm no compilation errors.
+**Verification**: Build with `cmake .. && make -j$(sysctl -n hw.logicalcpu)`. Confirm no compilation errors.
 
 ### [ ] Step: C++ code quality — magic numbers, security hardening, dead code removal
 
@@ -88,13 +90,17 @@ Replace all corresponding numeric literals with the named constants.
 
 **Security hardening**:
 - `is_read_only_query()` (line 10320): Strip SQL comments (`--` to EOL, `/* ... */`) before keyword check. Add check that `upper` does not contain `LOAD_EXTENSION` substring. The `sqlite3_db_config` disable in init_database already blocks it at runtime, but belt-and-suspenders.
-- `kill_ghost_processes()` (line 824): Validate `binary_name` against `[a-zA-Z0-9_./-]` regex. If invalid chars found, return without executing popen.
+- `kill_ghost_processes()` (line 824): Validate `binary_name` against `[a-zA-Z0-9_.-]` regex (no `/` — only bare binary names should be passed). If invalid chars found, return without executing popen.
 - `extract_json_string()` (line 5515): Add `\b` (backspace) and `\f` (form-feed) escape cases at lines 5543–5550.
 
 **Dead code removal**:
 - Remove `is_service_running_unlocked()` (lines 793–800) — never called anywhere.
 
-**Verification**: Build with `cmake .. && make -j$(nproc)`. Run `bin/test_sanity` and `bin/test_interconnect` to confirm no regressions.
+**R2.7 — Security assumptions verification**:
+- Verify HTTP server binds to `127.0.0.1` (line 324 — already done per requirements, just confirm it hasn't changed).
+- Add a code comment at the `mg_http_listen` call documenting the local-only security assumption.
+
+**Verification**: Build with `cmake .. && make -j$(sysctl -n hw.logicalcpu)`. Run `bin/test_sanity` and `bin/test_interconnect` to confirm no regressions.
 
 ### [ ] Step: CSS design system, page transitions, and responsive breakpoints
 
@@ -106,12 +112,12 @@ All changes in `frontend.cpp` within `serve_index()` (the `<style>` block, lines
 - Surface vars: `--wt-surface-elevated`, `--wt-surface-sunken`
 - All per spec section 6.2
 
-**Page transition mechanism** — Replace display-based page switching:
+**Page transition mechanism** — Replace display-based switching **only for `.wt-page` elements**:
 - Change `.wt-page{display:none}` / `.wt-page.active{display:block}` (lines 1497–1498) to visibility/opacity/pointer-events approach per spec section 6.9
 - Add `.wt-main{position:relative;overflow-y:auto}` override (line 1437)
 - Active page gets `position:relative`, inactive pages get `position:absolute;top:0;left:0;width:100%`
 - Add `@keyframes slideIn`, `@keyframes countPulse`, `@keyframes flowPulse` animations
-- Remove `.hidden{display:none !important}` (line 1496) and replace usage with visibility approach where applicable
+- **KEEP `.hidden{display:none !important}` (line 1496)** — it is used by ~50 `classList.add/remove('hidden')` calls for inline element toggling (service config panels, test detail/overview, schema view, etc.). These are fine-grained show/hide within pages, NOT page-level transitions. Only `.wt-page` uses the new visibility/opacity mechanism.
 
 **New component CSS classes** per spec sections 6.4–6.8:
 - `.wt-pipeline-hero`, `.wt-pipeline-node`, `.wt-pipeline-connector` — dashboard pipeline diagram
@@ -129,9 +135,32 @@ All changes in `frontend.cpp` within `serve_index()` (the `<style>` block, lines
 
 **Verification**: Build succeeds. Visual inspection deferred to integration step.
 
+### [ ] Step: Dashboard page — HTML, API endpoint, and JS
+
+**HTML** — Add `build_dashboard_page()` method or add dashboard div to `build_ui_pages()`:
+- Pipeline hero section: horizontal node chain (SIP→IAP→VAD→Whisper→LLaMA→Kokoro/NeuTTS→OAP) using CSS flex with `.wt-pipeline-hero`, `.wt-pipeline-node`, `.wt-pipeline-connector` classes. Each node has a status dot with ID for JS updates (e.g., `id="pipeline-node-SIP_CLIENT"`)
+- Metrics row: 4 `.wt-metric-card` cards in a CSS grid — Services Online, Active Calls, Test Pass/Fail, Uptime
+- Two-column grid below: Activity Feed (left, recent log entries) and Quick Actions (right, Start All / Stop All / Run Pipeline Test / Restart Failed buttons)
+- Overall health badge (green/yellow/red) in the hero section
+
+**API endpoint** — Add `handle_dashboard()` method + route in `http_handler()`:
+- `GET /api/dashboard` returns JSON combining: service statuses (reuse `services_` vector), recent logs (last 10 from `recent_logs_` ring buffer), test summary (pass/fail counts from `service_test_runs` table), uptime (compute from server start time), pipeline topology (static JSON array of node names and connections)
+- Add `std::chrono::steady_clock::time_point start_time_` member initialized in constructor for uptime calculation
+
+**JS** — Add to `build_ui_js()`:
+- `fetchDashboard()` function: fetches `/api/dashboard`, updates pipeline node status dots, metric card values (with countUp animation), activity feed entries (with slideIn animation), health badge color
+- Poll `fetchDashboard()` every 3s when dashboard page is active (stop polling when switching away)
+- Quick action buttons call existing endpoints: `/api/services/start_all`, `/api/services/stop_all`, `/api/tests/start` for pipeline test
+
+**Note**: This step creates the `page-dashboard` div and JS but does NOT yet set it as default — navigation is updated in the next step.
+
+**Verification**: Build succeeds. The `page-dashboard` div exists in the DOM.
+
 ### [ ] Step: Navigation sidebar restructure
 
 Changes in `frontend.cpp` within `serve_index()` (lines 1500–1541).
+
+**Depends on**: Dashboard page step (above) must be completed first — this step references `page-dashboard` and `page-test-results` divs that must already exist in `build_ui_pages()`.
 
 **Replace the current sidebar HTML** with the new structure:
 ```
@@ -155,31 +184,11 @@ CONFIGURATION section:
 - Keep theme dropdown and status bar at bottom unchanged
 
 **Update `showPage()` JS** in `build_ui_js()`:
-- Change the page transition logic from `display:none/block` to the CSS class-based `active` toggle (add `.active` to new page, remove from old)
-- Update default page from `'tests'` to `'dashboard'` in initialization
+- Change the page transition logic from `display:none/block` to the CSS class-based `active` toggle per spec §6.9. Critical ordering: add `.active` to the new page **before** removing `.active` from the old page, so the container always has exactly one `position:relative` child and never hits a zero-height frame.
+- Update default page from `'tests'` to `'dashboard'` in initialization — `showPage('dashboard')` called on page load
 - Ensure `showPage()` updates nav item active states correctly for new nav structure
 
-**Verification**: Build succeeds.
-
-### [ ] Step: Dashboard page — HTML, API endpoint, and JS
-
-**HTML** — Add `build_dashboard_page()` method or add dashboard div to `build_ui_pages()`:
-- Pipeline hero section: horizontal node chain (SIP→IAP→VAD→Whisper→LLaMA→Kokoro/NeuTTS→OAP) using CSS flex with `.wt-pipeline-hero`, `.wt-pipeline-node`, `.wt-pipeline-connector` classes. Each node has a status dot with ID for JS updates (e.g., `id="pipeline-node-SIP_CLIENT"`)
-- Metrics row: 4 `.wt-metric-card` cards in a CSS grid — Services Online, Active Calls, Test Pass/Fail, Uptime
-- Two-column grid below: Activity Feed (left, recent log entries) and Quick Actions (right, Start All / Stop All / Run Pipeline Test / Restart Failed buttons)
-- Overall health badge (green/yellow/red) in the hero section
-
-**API endpoint** — Add `handle_dashboard()` method + route in `http_handler()`:
-- `GET /api/dashboard` returns JSON combining: service statuses (reuse `services_` vector), recent logs (last 10 from `recent_logs_` ring buffer), test summary (pass/fail counts from `service_test_runs` table), uptime (compute from server start time), pipeline topology (static JSON array of node names and connections)
-- Add `std::chrono::steady_clock::time_point start_time_` member initialized in constructor for uptime calculation
-
-**JS** — Add to `build_ui_js()`:
-- `fetchDashboard()` function: fetches `/api/dashboard`, updates pipeline node status dots, metric card values (with countUp animation), activity feed entries (with slideIn animation), health badge color
-- Poll `fetchDashboard()` every 3s when dashboard page is active (stop polling when switching away)
-- Quick action buttons call existing endpoints: `/api/services/start_all`, `/api/services/stop_all`, `/api/tests/start` for pipeline test
-- `showPage('dashboard')` called on page load (replaces `showPage('tests')`)
-
-**Verification**: Build succeeds. Start frontend, open browser, confirm dashboard loads with pipeline diagram and live data.
+**Verification**: Build succeeds. Dashboard loads as default page on startup.
 
 ### [ ] Step: Beta Testing page reorganization with Bootstrap tabs
 
@@ -244,6 +253,7 @@ var POLL_TTS_ROUNDTRIP_MS=3000, POLL_FULL_LOOP_MS=3000;
 var DELAY_SAVE_FEEDBACK_MS=1500, DELAY_MODEL_SELECT_MS=500;
 var STATUS_CLEAR_MS=5000, POLL_LLAMA_BENCH_MS=2000;
 var POLL_PIPELINE_STRESS_MS=2000;
+var COUNTUP_STEP_MS=20, COUNTUP_DURATION_MS=400;
 ```
 
 **Replace all 45+ numeric literals** in `setInterval()` and `setTimeout()` calls with the corresponding named constants. The spec section 2.2 in requirements.md lists every occurrence with line numbers.
@@ -254,13 +264,35 @@ Also replace the hardcoded `20` in SIP line grid/loops with `SIP_MAX_LINES`.
 
 ### [ ] Step: Test infrastructure fixes
 
+**R3.1 — Graceful skip guards**:
+
 **File**: `tests/test_integration.cpp`
 - Add `GTEST_SKIP()` guard at start of `EndToEndTest.SingleCallFullPipeline` test: check if pipeline services are available (e.g., try connecting to the expected ports). If unavailable, `GTEST_SKIP() << "Pipeline services not running"` instead of timing out after 34s.
 
 **File**: `tests/test_kokoro_cpp.cpp`
 - Add `GTEST_SKIP()` guard at start of tests 2–4: check if model files exist at expected paths (`bin/models/kokoro-german/vocab.json`, `bin/models/kokoro-german/df_eva_voice.bin`). If missing, `GTEST_SKIP() << "Model files not found at bin/models/kokoro-german/"`.
 
-**Verification**: Build with `cmake -DBUILD_TESTS=ON .. && make -j$(nproc)`. Run all test binaries:
+**R3.2 — Test runner output format compatibility**:
+
+**File**: `frontend.cpp` — `check_test_status()` and `handle_test_log()`
+- Run each passing test binary (`test_sanity`, `test_interconnect`, `test_sip_provider_unit`) from the frontend UI and verify the live output and results are captured correctly. Compare the gtest XML/text output format against what `check_test_status()` expects.
+- If any format mismatch is found, update the parsing logic.
+
+**R3.3 — `run_pipeline_test.py` verification**:
+
+**File**: `tests/run_pipeline_test.py`
+- Review the log message patterns it expects (e.g., `"Transcription (Xms): <text>"`) against current `flush_log_queue` output format and SSE log format.
+- If patterns have drifted, update the regex/string matches in the Python script.
+- Verify the API endpoints it calls (`/api/services/start`, `/api/tests/start`, etc.) still match current `http_handler()` routes.
+
+**R3.4 — Test result display verification**:
+
+**File**: `frontend.cpp` — `build_ui_pages()` (tests page) and `build_ui_js()` (fetchTests, test history rendering)
+- Verify that test run rows stored in `service_test_runs` DB table are correctly displayed in the Tests page history table.
+- Verify `discover_tests()` hardcoded list matches current CMakeLists.txt test targets (currently 6 entries — confirm no new tests have been added).
+- R3.5: Add user-visible error message in the frontend when a test binary fails to start (e.g., missing binary, permission denied) — verify `handle_test_start()` error response is displayed in the UI.
+
+**Verification**: Build with `cmake -DBUILD_TESTS=ON .. && make -j$(sysctl -n hw.logicalcpu)`. Run all test binaries:
 - `bin/test_sanity` — expect 2/2 PASS
 - `bin/test_interconnect` — expect 30/30 PASS
 - `bin/test_sip_provider_unit` — expect 25/25 PASS
@@ -271,7 +303,7 @@ Also replace the hardcoded `20` in SIP line grid/loops with `SIP_MAX_LINES`.
 
 Final integration verification:
 
-- [ ] Full build: `cmake -DBUILD_TESTS=ON .. && make -j$(nproc)` — zero warnings, zero errors
+- [ ] Full build: `cmake -DBUILD_TESTS=ON .. && make -j$(sysctl -n hw.logicalcpu)` — zero warnings, zero errors
 - [ ] Run all test binaries — confirm pass/skip results match expectations
 - [ ] Start frontend from project root: `bin/frontend` — no SQLite errors
 - [ ] Start frontend from bin dir: `cd bin && ./frontend` — no SQLite errors
