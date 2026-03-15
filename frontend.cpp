@@ -279,10 +279,11 @@ public:
           log_port_(0),
           interconnect_(ServiceType::FRONTEND),
           db_(nullptr),
+          db_ok_(false),
           project_root_(project_root),
           db_path_(project_root + "/frontend.db") {
         
-        init_database();
+        db_ok_ = init_database();
         discover_tests();
         load_services();
         scan_testfiles_directory();
@@ -295,6 +296,11 @@ public:
     }
 
     bool start() {
+        if (!db_ok_) {
+            std::cerr << "Database initialization failed\n";
+            return false;
+        }
+
         if (!interconnect_.initialize()) {
             std::cerr << "Failed to initialize interconnect\n";
             return false;
@@ -376,6 +382,7 @@ private:
     uint16_t log_port_;
     InterconnectNode interconnect_;
     sqlite3* db_;
+    bool db_ok_;
     bool db_write_mode_ = false;
     std::string project_root_;
     std::string db_path_;
@@ -485,22 +492,26 @@ private:
         }
     }
 
-    void init_database() {
+    bool init_database() {
         int rc = sqlite3_open(db_path_.c_str(), &db_);
         if (rc != SQLITE_OK) {
             std::cerr << "Cannot open database: " << sqlite3_errmsg(db_) << "\n";
             db_ = nullptr;
-            return;
+            return false;
         }
 
         if (sqlite3_db_readonly(db_, "main") == 1) {
             std::cerr << "Fatal: database is read-only: " << db_path_ << "\n";
             sqlite3_close(db_);
             db_ = nullptr;
-            exit(1);
+            return false;
         }
 
-        sqlite3_db_config(db_, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr);
+        int cfg_rc = sqlite3_db_config(db_, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr);
+        if (cfg_rc != SQLITE_OK) {
+            std::cerr << "Warning: could not disable SQLite extension loading: "
+                      << sqlite3_errmsg(db_) << "\n";
+        }
 
         const char* schema = R"(
             CREATE TABLE IF NOT EXISTS logs (
@@ -699,6 +710,7 @@ private:
         sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
 
         rotate_logs();
+        return true;
     }
 
     void discover_tests() {
@@ -10458,10 +10470,14 @@ int main(int argc, char* argv[]) {
                     std::string parent = exe_dir.substr(0, ps);
                     if (chdir(parent.c_str()) == 0) {
                         std::cout << "Working directory: " << parent << "\n";
+                    } else {
+                        std::cerr << "Warning: chdir to " << parent << " failed: " << strerror(errno) << "\n";
                     }
                 } else {
                     if (chdir(exe_dir.c_str()) == 0) {
                         std::cout << "Working directory: " << exe_dir << "\n";
+                    } else {
+                        std::cerr << "Warning: chdir to " << exe_dir << " failed: " << strerror(errno) << "\n";
                     }
                 }
             }
@@ -10524,7 +10540,7 @@ int main(int argc, char* argv[]) {
         port = static_cast<uint16_t>(atoi(argv[2]));
     }
 
-    mkdir("logs", 0755);
+    mkdir((project_root + "/logs").c_str(), 0755);
 
     std::cout << "WhisperTalk Frontend Server\n";
     std::cout << "============================\n\n";
