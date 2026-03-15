@@ -10,9 +10,9 @@ The WhisperTalk frontend (`frontend.cpp`, ~10,500 lines) is the central control 
 
 **Current behavior**: When started from `bin/` directory, the frontend emits `flush_log_queue: insert failed: attempt to write a readonly database` every 500ms.
 
-**Root cause**: `init_database()` at line 484 opens `sqlite3_open("frontend.db", &db_)` using a relative path. The `main()` function (line 10435+) attempts to `chdir()` to the project root when launched from `bin/`, but this logic has edge cases:
-- The chdir logic depends on `argv[0]` containing a path with `/`. When invoked as just `./frontend` from within `bin/`, `exe_dir` resolves to `.` which is skipped. The fallback check (`stat("bin/frontend", &st)`) then tries to detect the mistake, but if CWD is already `bin/`, `chdir` to parent may fail or the DB file may already have been created with wrong permissions.
-- The database is opened *in the constructor* (line 282) before `main()` can correct the CWD, because the `FrontendServer` object is constructed at line 10481 after the chdir block. However, the chdir happens before construction, so the real issue is that certain invocation paths (e.g., `cd bin && ./frontend` where argv[0] is `./frontend`) cause the chdir logic to set CWD incorrectly or not at all.
+**Root cause**: `init_database()` at line 484 opens `sqlite3_open("frontend.db", &db_)` using a relative path. The `main()` function (line 10435+) performs `chdir()` *before* constructing `FrontendServer` (line 10481), so the constructor always runs after the CWD correction attempt. The problem is that the chdir logic itself fails for certain invocation paths:
+- When invoked as `cd bin && ./frontend`, `argv[0]` is `./frontend`. `rfind('/')` finds position 1, so `exe_dir` becomes `.` — which is skipped by the `!= "."` guard (line 10440). The fallback then calls `stat("bin/frontend", &st)` which fails (no `bin/` subdirectory inside `bin/`), so CWD remains `bin/`. The database file `frontend.db` is then created inside `bin/` rather than the project root, or an existing read-only copy is opened.
+- The fundamental issue is that the DB path `"frontend.db"` is a bare relative filename that depends entirely on CWD being correct, rather than being resolved to an absolute path derived from the executable location.
 
 **Requirements**:
 - R1.1: The database path must be resolved to an absolute path based on the detected project root, not rely on CWD.
@@ -25,20 +25,30 @@ The WhisperTalk frontend (`frontend.cpp`, ~10,500 lines) is the central control 
 
 **Issues identified**:
 
-#### Magic Numbers
+#### Magic Numbers (C++)
 - `500` (ms) - log flush interval (line 341)
 - `4096` - UDP buffer size (log receiver)
-- `10000` - default row limit for DB queries
-- `22011` - TEST_SIP_PROVIDER_PORT (line 393, partially named)
-- `1000` - MAX_RECENT_LOGS (line 392, partially named)
+- `10000` - default row limit for DB queries (line 10400)
 - `100` - mg_mgr_poll timeout (line 336)
-- `3000`, `5000` - JS setInterval timers for status/test/service polling (line 3926-3928)
-- `1500` - test log poll interval (line 2554)
 - `30` - days for log rotation (line 1191)
-- `20` - hardcoded SIP line count throughout JS code
+- `2` (seconds) - service status check interval (line 345)
+- `30` (seconds) - async task cleanup interval (line 349)
+- Note: `MAX_RECENT_LOGS` (1000) and `TEST_SIP_PROVIDER_PORT` (22011) are already named `static constexpr` constants — no action needed.
+
+#### Magic Numbers (JS — 45+ occurrences of `setInterval`/`setTimeout` with numeric literals)
+- `3000` - fetchStatus interval (line 3926), reconnectLogSSE retry (line 2925), TTS roundtrip/full loop poll (lines 3673, 3741), status message clear timeouts (lines 3007, 3022, 3025, 3048, 3051, 3074), toast display duration (line 3074), accuracy poll (line 5109)
+- `5000` - fetchServices interval (line 3928), refreshCallLineMap interval (line 3092), status clear timeout (line 2996)
+- `2000` - restart service delay (lines 2832, 2854), SIP RTP stats refresh (line 4099), LLaMA quality poll (line 3238), Kokoro quality/bench poll (lines 3386, 3440), benchmark poll (line 4455), LLaMA benchmark poll (line 4936), pipeline stress poll (line 3583)
+- `1500` - test log poll (line 2554), shutup pipeline poll (line 3330), save button feedback (line 2841)
+- `1000` - service start/stop refresh delays (lines 2820, 2826, 2846, 2850, 4013), LLaMA shutup poll (line 3286)
+- `500` - fetchTests delay after start/stop (lines 2531, 2538), sipRefreshActiveLines delay (line 2769), refreshCallLineMap initial delay (line 3093), model select delay (line 4365)
+- `300` - sipRefreshActiveLines delay (line 2804), call-line-map debounce (line 3099), toast fade-out (line 3074)
+- `200` - SIP line add sequential delay (line 4018)
+- `10000` - pipeline health check interval (line 3498)
+- `20` - hardcoded SIP line count in grid/loops throughout JS code
 
 #### Security Issues
-- `is_read_only_query()` SQL injection guard can be bypassed (e.g., with CTEs, ATTACH, or creative formatting)
+- `is_read_only_query()` SQL guard only checks the first keyword (SELECT/EXPLAIN/PRAGMA). While `handle_db_query` already uses `sqlite3_prepare_v2` (single-statement only, so multi-statement injection like `SELECT 1; DROP TABLE` is NOT possible), the guard could still be bypassed if SQLite extensions are enabled (e.g., `SELECT load_extension(...)`) or via PRAGMA writes if the safe-list check is incomplete
 - Credentials (SIP passwords, HuggingFace tokens) stored in plaintext in SQLite `settings` table
 - `kill_ghost_processes()` (line 824) uses `popen("pgrep -f ...")` with unsanitized binary name - command injection risk
 - `curl` invoked via `fork()/execvp()` for HuggingFace API calls with token written to temp file
@@ -57,32 +67,33 @@ The WhisperTalk frontend (`frontend.cpp`, ~10,500 lines) is the central control 
 
 **Requirements**:
 - R2.1: Extract all magic numbers into named constants (C++ `constexpr` or `static const`)
-- R2.2: Extract all JS magic numbers/intervals into named constants at the top of the JS block
-- R2.3: Fix `is_read_only_query()` to use a proper SQL statement parser or whitelist approach (parameterized query execution, or parse the first keyword after stripping comments/whitespace)
+- R2.2: Extract all 45+ JS `setInterval`/`setTimeout` numeric literals into a named-constants block at the top of the JS script section (e.g., `var POLL_STATUS_MS=3000, POLL_TESTS_MS=3000, POLL_SERVICES_MS=5000, ...`)
+- R2.3: Harden `is_read_only_query()`: disable `load_extension` via `sqlite3_db_config(db_, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, NULL)` at init, strip SQL comments before keyword check, and verify PRAGMA whitelist is complete. Note: `handle_db_query` already uses `sqlite3_prepare_v2` (single-statement), so multi-statement injection is not possible.
 - R2.4: Sanitize all inputs to `popen()`/shell commands to prevent command injection
 - R2.5: Remove dead code, unused functions, and commented-out blocks
-- R2.6: Replace `extract_json_string` with a lightweight JSON parser (e.g., nlohmann/json is likely too heavy; consider a minimal single-header parser, or keep the hand-rolled approach but make it robust and well-tested)
+- R2.6: Keep the hand-rolled `extract_json_string` (adding an external JSON library is disproportionate for this codebase) but add explicit bounds-checking, handle escaped quotes inside values, and ensure it doesn't read past the end of the input string
 - R2.7: Document security assumptions (local-only access) and bind HTTP to `127.0.0.1` (already done at line 324)
 - R2.8: Remove any stub/simulation code and replace with real implementations or clearly mark as TODO with tracking
 
 ### 2.3 Broken Tests (P1 - High)
 
-**Current state**: Test binaries (`test_sanity`, `test_interconnect`, `test_sip_provider_unit`, `test_kokoro_cpp`, `test_integration`, `test_sip_provider`) are discovered by scanning `bin/test_*`. The test infrastructure in the frontend hardcodes test discovery at line 690. The `run_pipeline_test.py` Python script runs full WER tests.
+**Current state**: Test binaries are defined in a **hardcoded vector** in `discover_tests()` (line 692-700): `test_sanity`, `test_interconnect`, `test_sip_provider_unit`, `test_kokoro_cpp`, `test_integration`, `test_sip_provider`. There is no filesystem scanning or glob — new test binaries must be manually added to this list. The `run_pipeline_test.py` Python script runs full WER tests.
 
 **Issues**:
-- Tests may have fallen out of sync with service API changes (port numbers, message formats, protocol changes)
+- Tests may have fallen out of sync with service API changes (port numbers, message formats, protocol changes in `interconnect.h`)
 - The frontend test runner infrastructure may not correctly parse test output from updated test binaries
 - Test result display in the UI may not match current test output formats
-- The pipeline test script relies on specific log message formats that may have changed
+- The pipeline test script relies on specific log message formats (e.g., `"Transcription (Xms): <text>"`) that may have changed
+- Test discovery is hardcoded — adding new tests requires modifying `discover_tests()` source code
 
 **Requirements**:
-- R3.1: Audit each test binary against current service implementations and fix compilation/runtime failures
+- R3.1: Build each test binary and run it to identify specific compilation errors and runtime failures. Check for stale port numbers (e.g., ports defined in `interconnect.h`), changed message format structs, and missing dependencies.
 - R3.2: Update the frontend test runner to handle current test binary output formats
 - R3.3: Ensure `run_pipeline_test.py` works with current log message formats and API endpoints
 - R3.4: Verify test result storage and display in the frontend UI matches actual test output
 - R3.5: Add error reporting when tests fail to compile or are missing dependencies
 
-### 2.4 Frontend UI Redesign (P0 - High)
+### 2.4 Frontend UI Redesign (P1 - High)
 
 **Current navigation structure**:
 ```
@@ -193,6 +204,6 @@ Configuration:
 ## 6. Priority Order
 
 1. **P0**: Fix SQLite readonly error (R1.x) - blocking normal operation
-2. **P0**: Dashboard and navigation redesign (R4.x) - primary user-facing improvement
+2. **P1**: Dashboard and navigation redesign (R4.x) - primary user-facing improvement
 3. **P1**: Code quality and security fixes (R2.x) - technical debt reduction
 4. **P1**: Fix broken tests (R3.x) - dependent on understanding current service state
