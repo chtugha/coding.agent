@@ -152,15 +152,35 @@ All changes in `frontend.cpp` within `serve_index()` (the `<style>` block, lines
 - Poll `fetchDashboard()` every 3s when dashboard page is active (stop polling when switching away)
 - Quick action buttons call existing endpoints: `/api/services/start_all`, `/api/services/stop_all`, `/api/tests/start` for pipeline test
 
-**Note**: This step creates the `page-dashboard` div and JS but does NOT yet set it as default — navigation is updated in the next step.
+**Note**: This step creates the `page-dashboard` div and JS but does NOT yet set it as default — navigation is updated in a later step.
 
 **Verification**: Build succeeds. The `page-dashboard` div exists in the DOM.
+
+### [ ] Step: Test Results page
+
+**HTML** — Add new `page-test-results` div to `build_ui_pages()`:
+- Hero row: 3 metric cards (Total Tests, Pass Rate %, Avg Latency) using `.wt-metric-card` style
+- Full-width Chart.js line chart for trends over time (WER, accuracy, latency) with gradient fills, bezier curves, zoom plugin
+- Filter bar: dropdown for test type, date range inputs, model selector — using `.wt-filter-bar` layout
+- Results table below chart with sortable columns, status badges, alternating row shading
+
+**API** — May reuse existing endpoints (`/api/test_results`, `/api/whisper_accuracy`, DB query endpoint) or add a new aggregation endpoint `GET /api/test_results_summary` that queries `whisper_accuracy_tests`, `model_benchmark_runs`, `iap_quality_tests`, `service_test_runs` tables and returns combined JSON.
+
+**JS** — Add to `build_ui_js()`:
+- `fetchTestResults()` function: fetches data, renders Chart.js chart with `CHART_DEFAULTS` config per spec section 6.12, populates results table
+- Filter change handlers that re-fetch/re-render
+- Chart.js instance management (destroy old chart before creating new one to avoid memory leaks)
+- Poll on page activation, stop when switching away
+
+**Note**: This step must come before Navigation sidebar restructure, which references the `page-test-results` div.
+
+**Verification**: Build succeeds. Open Test Results page, confirm chart renders and data loads.
 
 ### [ ] Step: Navigation sidebar restructure
 
 Changes in `frontend.cpp` within `serve_index()` (lines 1500–1541).
 
-**Depends on**: Dashboard page step (above) must be completed first — this step references `page-dashboard` and `page-test-results` divs that must already exist in `build_ui_pages()`.
+**Depends on**: Dashboard page and Test Results page steps (above) must be completed first — this step references `page-dashboard` and `page-test-results` divs that must already exist in `build_ui_pages()`.
 
 **Replace the current sidebar HTML** with the new structure:
 ```
@@ -170,7 +190,7 @@ PIPELINE section:
   Live Logs                           → page-logs
 TESTING section:
   Test Runner                         → page-tests
-  Test Results                        → page-test-results (new)
+  Test Results                        → page-test-results
   Beta Tests                          → page-beta-testing
 CONFIGURATION section:
   Models                              → page-models
@@ -214,24 +234,6 @@ Changes in `frontend.cpp` within `build_ui_pages()` (lines 1754–2193+ for the 
 **Make test panels collapsible** using `.wt-collapsible` CSS class + JS `maxHeight` toggle per spec section 6.9.
 
 **Verification**: Build succeeds. Open Beta Tests page, confirm tabs work and panels are organized.
-
-### [ ] Step: Test Results page
-
-**HTML** — Add new `page-test-results` div to `build_ui_pages()`:
-- Hero row: 3 metric cards (Total Tests, Pass Rate %, Avg Latency) using `.wt-metric-card` style
-- Full-width Chart.js line chart for trends over time (WER, accuracy, latency) with gradient fills, bezier curves, zoom plugin
-- Filter bar: dropdown for test type, date range inputs, model selector — using `.wt-filter-bar` layout
-- Results table below chart with sortable columns, status badges, alternating row shading
-
-**API** — May reuse existing endpoints (`/api/test_results`, `/api/whisper_accuracy`, DB query endpoint) or add a new aggregation endpoint `GET /api/test_results_summary` that queries `whisper_accuracy_tests`, `model_benchmark_runs`, `iap_quality_tests`, `service_test_runs` tables and returns combined JSON.
-
-**JS** — Add to `build_ui_js()`:
-- `fetchTestResults()` function: fetches data, renders Chart.js chart with `CHART_DEFAULTS` config per spec section 6.12, populates results table
-- Filter change handlers that re-fetch/re-render
-- Chart.js instance management (destroy old chart before creating new one to avoid memory leaks)
-- Poll on page activation, stop when switching away
-
-**Verification**: Build succeeds. Open Test Results page, confirm chart renders and data loads.
 
 ### [ ] Step: JS magic numbers extraction
 
