@@ -1475,7 +1475,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-nav-item .nav-icon{width:20px;text-align:center;font-size:15px}
 .wt-nav-item .nav-badge{margin-left:auto;font-size:11px;font-weight:600;background:var(--wt-accent);color:#fff;border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
 .wt-nav-item.active .nav-badge{background:rgba(255,255,255,0.25)}
-.wt-main{flex:1;overflow-y:auto;padding:0;position:relative}
+.wt-main{flex:1;overflow:hidden;padding:0;position:relative}
 .wt-content{max-width:960px;margin:0 auto;padding:24px 32px}
 .wt-page-title{font-size:28px;font-weight:700;letter-spacing:-0.02em;margin:0 0 20px}
 .wt-card{background:var(--wt-card-bg);border-radius:var(--wt-radius);border:0.5px solid var(--wt-border);padding:16px;margin-bottom:12px;transition:box-shadow 0.2s}
@@ -1548,7 +1548,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-micro{font-size:10px;font-weight:600;letter-spacing:0.3px}
 .wt-pipeline-hero{background:var(--wt-gradient-hero);border-radius:var(--wt-radius-lg);padding:32px;color:#fff;position:relative;overflow:hidden}
 .wt-pipeline-hero .pipeline-flow{display:flex;align-items:center;flex-wrap:wrap;gap:8px;justify-content:center}
-.wt-pipeline-node{width:64px;height:64px;background:rgba(255,255,255,0.18);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.2s ease,box-shadow 0.2s ease;border:1.5px solid rgba(255,255,255,0.3)}
+.wt-pipeline-node{width:64px;height:64px;background:rgba(255,255,255,0.18);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-radius:var(--wt-radius);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.2s ease,box-shadow 0.2s ease;border:1.5px solid rgba(255,255,255,0.3)}
 .wt-pipeline-node:hover{transform:scale(1.08);box-shadow:var(--wt-shadow-lg)}
 .wt-pipeline-node .node-label{font-size:11px;font-weight:700;letter-spacing:0.5px}
 .wt-pipeline-node .node-status{width:10px;height:10px;border-radius:50%;margin-top:4px}
@@ -1564,12 +1564,12 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-metric-card .metric-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-top:8px}
 .wt-metric-card .metric-delta{font-size:12px;font-weight:600;margin-top:4px}
 .wt-metric-card .metric-delta.positive{color:rgba(255,255,255,0.9)}
-.wt-metric-card .metric-delta.negative{color:rgba(255,255,255,0.75)}
+.wt-metric-card .metric-delta.negative{color:rgba(255,180,180,0.95)}
 .wt-dashboard-content{display:grid;grid-template-columns:3fr 2fr;gap:16px;margin-top:16px}
 .wt-collapsible{max-height:0;overflow:hidden;transition:max-height 0.3s ease}
 .wt-collapsible.open{max-height:2000px}
-.wt-beta-tabs{display:flex;gap:4px;margin-bottom:16px;border:none;padding:4px;background:var(--wt-surface-sunken);border-radius:12px}
-.wt-beta-tabs .nav-link{border:none;border-radius:8px;padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
+.wt-beta-tabs{display:flex;gap:4px;margin-bottom:16px;border:none;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius)}
+.wt-beta-tabs .nav-link{border:none;border-radius:calc(var(--wt-radius) - 4px);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
 .wt-beta-tabs .nav-link:hover{background:var(--wt-surface-sunken);color:var(--wt-text)}
 .wt-beta-tabs .nav-link.active{background:var(--wt-accent);color:#fff;box-shadow:var(--wt-shadow-sm)}
 .wt-test-summary-bar{display:flex;gap:12px;align-items:center;padding:12px 16px;background:var(--wt-surface-elevated);border-radius:var(--wt-radius);margin-bottom:16px}
@@ -5440,9 +5440,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 .wt-toggle::after{border-radius:2px !important}
 .wt-status-dot.online{box-shadow:0 0 6px var(--wt-success) !important}
 .wt-pipeline-hero{opacity:0.95}
-.wt-pipeline-node{background:rgba(0,0,0,0.4) !important;border-color:rgba(255,255,255,0.1) !important;border-radius:0 !important}
-.wt-beta-tabs{border-radius:0 !important}
-.wt-beta-tabs .nav-link{border-radius:0 !important}
+.wt-pipeline-node{background:rgba(0,0,0,0.4) !important;border-color:rgba(255,255,255,0.1) !important}
 )CSS";
 
         const char* css = nullptr;
