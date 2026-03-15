@@ -101,6 +101,7 @@
 #include <dirent.h>
 #include <algorithm>
 #include <fcntl.h>
+#include <climits>
 
 using namespace whispertalk;
 
@@ -273,11 +274,13 @@ static LlamaScoreResult score_llama_response(const std::string& response,
 
 class FrontendServer {
 public:
-    FrontendServer(uint16_t http_port = 8080) 
+    FrontendServer(uint16_t http_port, const std::string& project_root) 
         : http_port_(http_port),
           log_port_(0),
           interconnect_(ServiceType::FRONTEND),
-          db_(nullptr) {
+          db_(nullptr),
+          project_root_(project_root),
+          db_path_(project_root + "/frontend.db") {
         
         init_database();
         discover_tests();
@@ -374,6 +377,8 @@ private:
     InterconnectNode interconnect_;
     sqlite3* db_;
     bool db_write_mode_ = false;
+    std::string project_root_;
+    std::string db_path_;
     struct mg_mgr mgr_;
     std::thread log_thread_;
     
@@ -481,12 +486,21 @@ private:
     }
 
     void init_database() {
-        int rc = sqlite3_open("frontend.db", &db_);
+        int rc = sqlite3_open(db_path_.c_str(), &db_);
         if (rc != SQLITE_OK) {
             std::cerr << "Cannot open database: " << sqlite3_errmsg(db_) << "\n";
             db_ = nullptr;
             return;
         }
+
+        if (sqlite3_db_readonly(db_, "main") == 1) {
+            std::cerr << "Fatal: database is read-only: " << db_path_ << "\n";
+            sqlite3_close(db_);
+            db_ = nullptr;
+            exit(1);
+        }
+
+        sqlite3_db_config(db_, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr);
 
         const char* schema = R"(
             CREATE TABLE IF NOT EXISTS logs (
@@ -10433,15 +10447,15 @@ int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
 
     {
-        std::string exe_path = argv[0];
-        size_t slash = exe_path.rfind('/');
-        if (slash != std::string::npos) {
-            std::string exe_dir = exe_path.substr(0, slash);
-            if (!exe_dir.empty() && exe_dir != ".") {
-                std::string parent = exe_dir;
-                size_t ps = parent.rfind('/');
-                if (ps != std::string::npos && parent.substr(ps + 1) == "bin") {
-                    parent = parent.substr(0, ps);
+        char resolved[PATH_MAX];
+        if (realpath(argv[0], resolved)) {
+            std::string exe_real(resolved);
+            size_t slash = exe_real.rfind('/');
+            if (slash != std::string::npos) {
+                std::string exe_dir = exe_real.substr(0, slash);
+                size_t ps = exe_dir.rfind('/');
+                if (ps != std::string::npos && exe_dir.substr(ps + 1) == "bin") {
+                    std::string parent = exe_dir.substr(0, ps);
                     if (chdir(parent.c_str()) == 0) {
                         std::cout << "Working directory: " << parent << "\n";
                     }
@@ -10451,8 +10465,28 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
+        } else {
+            std::string exe_path = argv[0];
+            size_t slash = exe_path.rfind('/');
+            if (slash != std::string::npos) {
+                std::string exe_dir = exe_path.substr(0, slash);
+                if (!exe_dir.empty() && exe_dir != ".") {
+                    std::string parent = exe_dir;
+                    size_t ps = parent.rfind('/');
+                    if (ps != std::string::npos && parent.substr(ps + 1) == "bin") {
+                        parent = parent.substr(0, ps);
+                        if (chdir(parent.c_str()) == 0) {
+                            std::cout << "Working directory: " << parent << "\n";
+                        }
+                    } else {
+                        if (chdir(exe_dir.c_str()) == 0) {
+                            std::cout << "Working directory: " << exe_dir << "\n";
+                        }
+                    }
+                }
+            }
         }
-        char cwd[1024];
+        char cwd[PATH_MAX];
         if (getcwd(cwd, sizeof(cwd))) {
             struct stat st;
             if (stat("bin/frontend", &st) != 0) {
@@ -10468,6 +10502,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::string project_root;
+    {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd))) {
+            project_root = cwd;
+        } else {
+            std::cerr << "Fatal: cannot determine working directory\n";
+            return 1;
+        }
+    }
+
+    struct stat st;
+    if (stat((project_root + "/bin/frontend").c_str(), &st) != 0) {
+        std::cerr << "Fatal: bin/frontend not found in project root: " << project_root << "\n";
+        return 1;
+    }
+
     uint16_t port = 8080;
     if (argc > 2 && strcmp(argv[1], "--port") == 0) {
         port = static_cast<uint16_t>(atoi(argv[2]));
@@ -10478,7 +10529,7 @@ int main(int argc, char* argv[]) {
     std::cout << "WhisperTalk Frontend Server\n";
     std::cout << "============================\n\n";
 
-    FrontendServer server(port);
+    FrontendServer server(port, project_root);
     if (!server.start()) {
         return 1;
     }

@@ -47,7 +47,8 @@ Create a detailed implementation plan based on `{@artifacts_path}/spec.md`.
 
 **Note on line numbers**: Line references below are from the original `frontend.cpp` (10,488 lines). After each step, subsequent line numbers may shift — implementors should use function/string search rather than relying on exact line numbers for later steps.
 
-### [ ] Step: Fix SQLite readonly database error
+### [x] Step: Fix SQLite readonly database error
+<!-- chat-id: f64106e6-feec-42ac-b48b-34a631645a05 -->
 
 Fix the P0 critical bug where `frontend.db` is opened with a relative path and no read-only check.
 
