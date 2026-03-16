@@ -105,6 +105,7 @@
 #include <climits>
 #include <regex>
 #include <iomanip>
+#include <unordered_set>
 
 static constexpr int LOG_FLUSH_INTERVAL_MS = 500;
 static constexpr int UDP_BUFFER_SIZE = 4096;
@@ -2663,13 +2664,14 @@ function showPage(p){
     e.classList.toggle('active',e.dataset.page===p);
   });
   currentPage=p;
+  if(p!=='dashboard')stopDashboardPoll();
+  if(p!=='test-results')stopTestResultsPoll();
   if(p==='dashboard'){fetchDashboard();startDashboardPoll();}
-  else{stopDashboardPoll();}
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
   if(p==='models'){loadModels();loadModelComparison();}
-  if(p==='test-results'){fetchTestResultsPage();startTestResultsPoll();}else{stopTestResultsPoll();}
+  if(p==='test-results'){fetchTestResultsPage();startTestResultsPoll();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
   if(p==='credentials'){loadCredentials();}
@@ -9820,14 +9822,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         type_filter = extract_param("type");
         status_filter = extract_param("status");
         if (!status_filter.empty()) {
-            static const std::vector<std::string> allowed_statuses = {
+            static const std::unordered_set<std::string> allowed_statuses = {
                 "pass", "fail", "warn", "PASS", "FAIL", "WARN", "passed", "failed", "success", "error"
             };
-            bool valid = false;
-            for (const auto& s : allowed_statuses) {
-                if (status_filter == s) { valid = true; break; }
-            }
-            if (!valid) status_filter.clear();
+            if (allowed_statuses.find(status_filter) == allowed_statuses.end()) status_filter.clear();
         }
         std::string from_str = extract_param("from");
         std::string to_str = extract_param("to");
@@ -9883,11 +9881,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     if (status_str == "pass" || status_str == "PASS" || status_str == "passed" || status_str == "success") pass_count++;
                     else if (status_str == "fail" || status_str == "FAIL" || status_str == "failed" || status_str == "error") fail_count++;
                     else if (status_str == "warn" || status_str == "WARN") warn_count++;
-                    if (metrics) {
-                        std::string m(metrics);
-                        size_t lp = m.find("\"latency_ms\":");
+                    if (metrics_safe.size() > 2) {
+                        size_t lp = metrics_safe.find("\"latency_ms\":");
                         if (lp != std::string::npos) {
-                            double lat = std::atof(m.c_str() + lp + 13);
+                            double lat = std::atof(metrics_safe.c_str() + lp + 13);
                             if (lat > 0) { total_latency += lat; latency_count++; }
                         }
                     }
