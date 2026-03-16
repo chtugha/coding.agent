@@ -2942,9 +2942,16 @@ function startTestDetail(){
   if(!currentTest)return;
   var args=document.getElementById('testDetailArgs').value;
   fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({test:currentTest,args:args})}).then(()=>{
-    document.getElementById('testDetailLog').textContent='Starting...';
-    setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
+    body:JSON.stringify({test:currentTest,args:args})}).then(function(r){
+    return r.json().then(function(d){
+      if(d.error){
+        document.getElementById('testDetailLog').textContent='Error: '+d.error;
+        showToast('Failed to start test: '+d.error,'danger');
+      }else{
+        document.getElementById('testDetailLog').textContent='Starting...';
+        setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
+      }
+    });
   });
 }
 
@@ -6195,64 +6202,81 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         std::string body(hm->body.buf, hm->body.len);
         std::string test_name = extract_json_string(body, "test");
         std::string custom_args = extract_json_string(body, "args");
-        
-        std::lock_guard<std::mutex> lock(tests_mutex_);
-        for (auto& test : tests_) {
-            if (test.name == test_name && !test.is_running) {
-                std::string bin_name = test.binary_path;
-                size_t slash = bin_name.rfind('/');
-                if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
-                kill_ghost_processes(bin_name);
 
-                std::vector<std::string> use_args;
-                if (!custom_args.empty()) {
-                    use_args = split_args(custom_args);
-                } else {
-                    use_args = test.default_args;
-                }
-
-                if (!is_allowed_binary(test.binary_path)) {
-                    std::cerr << "Invalid test binary path: " << test.binary_path << "\n";
-                    break;
-                }
-
-                mkdir("logs", 0755);
-                std::string log_path = "logs/" + test.name + "_" + std::to_string(time(nullptr)) + ".log";
-
-                pid_t pid = fork();
-                if (pid < 0) {
-                    std::cerr << "fork() failed for test " << test.name << ": " << strerror(errno) << "\n";
-                    break;
-                }
-                if (pid == 0) {
-                    for (int i = 3; i < 1024; ++i) close(i);
-
-                    int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd >= 0) {
-                        dup2(fd, STDOUT_FILENO);
-                        dup2(fd, STDERR_FILENO);
-                        close(fd);
-                    }
-                    
-                    std::vector<char*> argv;
-                    argv.push_back(const_cast<char*>(test.binary_path.c_str()));
-                    for (auto& a : use_args) {
-                        argv.push_back(const_cast<char*>(a.c_str()));
-                    }
-                    argv.push_back(nullptr);
-                    
-                    execv(test.binary_path.c_str(), argv.data());
-                    _exit(1);
-                }
-                test.is_running = true;
-                test.pid = pid;
-                test.start_time = time(nullptr);
-                test.log_file = log_path;
-                test.default_args = use_args;
-                break;
-            }
+        if (test_name.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing test name\"}");
+            return;
         }
-        
+
+        std::lock_guard<std::mutex> lock(tests_mutex_);
+
+        TestInfo* found = nullptr;
+        for (auto& test : tests_) {
+            if (test.name == test_name) { found = &test; break; }
+        }
+
+        if (!found) {
+            mg_http_reply(c, 404, "Content-Type: application/json\r\n", "{\"error\":\"Test not found\"}");
+            return;
+        }
+
+        if (found->is_running) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n", "{\"error\":\"Test is already running\"}");
+            return;
+        }
+
+        std::string bin_name = found->binary_path;
+        size_t slash = bin_name.rfind('/');
+        if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
+        kill_ghost_processes(bin_name);
+
+        std::vector<std::string> use_args;
+        if (!custom_args.empty()) {
+            use_args = split_args(custom_args);
+        } else {
+            use_args = found->default_args;
+        }
+
+        if (!is_allowed_binary(found->binary_path)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid test binary path\"}");
+            return;
+        }
+
+        mkdir("logs", 0755);
+        std::string log_path = "logs/" + found->name + "_" + std::to_string(time(nullptr)) + ".log";
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            std::string err_msg = std::string("{\"error\":\"Failed to start test: ") + strerror(errno) + "\"}";
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "%s", err_msg.c_str());
+            return;
+        }
+        if (pid == 0) {
+            for (int i = 3; i < 1024; ++i) close(i);
+
+            int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                dup2(fd, STDOUT_FILENO);
+                dup2(fd, STDERR_FILENO);
+                close(fd);
+            }
+
+            std::vector<char*> argv;
+            argv.push_back(const_cast<char*>(found->binary_path.c_str()));
+            for (auto& a : use_args) {
+                argv.push_back(const_cast<char*>(a.c_str()));
+            }
+            argv.push_back(nullptr);
+
+            execv(found->binary_path.c_str(), argv.data());
+            _exit(1);
+        }
+        found->is_running = true;
+        found->pid = pid;
+        found->start_time = time(nullptr);
+        found->log_file = log_path;
+        found->default_args = use_args;
+
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"ok\"}");
     }
 

@@ -272,7 +272,8 @@ Also replace the hardcoded `20` in SIP line grid/loops with `SIP_MAX_LINES`.
 
 **Verification**: Build succeeds. `grep -n 'setInterval\|setTimeout' frontend.cpp` shows only named constants as the delay argument (no bare numeric literals except 0).
 
-### [ ] Step: Test infrastructure fixes
+### [x] Step: Test infrastructure fixes
+<!-- chat-id: a8edbbaa-e9e6-4078-a601-172fe2e772a9 -->
 
 **R3.1 — Graceful skip guards**:
 

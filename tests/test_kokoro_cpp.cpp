@@ -182,12 +182,24 @@ int main() {
         else { failed++; }
     }
 
+    int skipped = 0;
+
     std::printf("\n[TEST 2] Vocab loading\n");
     KokoroVocab vocab;
-    if (!vocab.load(vocab_path)) {
-        std::printf("  FAIL: Could not load vocab from %s\n", vocab_path.c_str());
-        failed++;
-    } else {
+    bool vocab_loaded = false;
+    {
+        struct stat st;
+        if (stat(vocab_path.c_str(), &st) != 0) {
+            std::printf("  SKIP: vocab file not found at %s\n", vocab_path.c_str());
+            skipped++;
+        } else if (!vocab.load(vocab_path)) {
+            std::printf("  FAIL: Could not load vocab from %s\n", vocab_path.c_str());
+            failed++;
+        } else {
+            vocab_loaded = true;
+        }
+    }
+    if (vocab_loaded) {
         std::printf("  Loaded %zu vocab entries\n", vocab.phoneme_to_id.size());
         if (vocab.phoneme_to_id.size() >= 100) {
             passed++;
@@ -199,7 +211,10 @@ int main() {
     }
 
     std::printf("\n[TEST 3] Phoneme encoding\n");
-    {
+    if (!vocab_loaded) {
+        std::printf("  SKIP: vocab not loaded\n");
+        skipped++;
+    } else {
         auto ph = phonemize_german("Hallo");
         auto ids = vocab.encode(ph);
         std::printf("  \"Hallo\" -> \"%s\" -> %zu tokens\n", ph.c_str(), ids.size());
@@ -235,8 +250,8 @@ int main() {
                 std::printf("  FAIL: too few voice entries\n");
             }
         } else {
-            failed++;
-            std::printf("  FAIL: no voice file found at %s\n", bin_path.c_str());
+            skipped++;
+            std::printf("  SKIP: voice file not found at %s\n", bin_path.c_str());
             goto done;
         }
     }
@@ -479,6 +494,6 @@ int main() {
 done:
     espeak_Terminate();
 
-    std::printf("\n=== Results: %d passed, %d failed ===\n", passed, failed);
+    std::printf("\n=== Results: %d passed, %d failed, %d skipped ===\n", passed, failed, skipped);
     return failed > 0 ? 1 : 0;
 }

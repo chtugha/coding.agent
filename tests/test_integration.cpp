@@ -12,9 +12,16 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
 
 static std::string g_bin_dir;
 static std::string g_models_dir;
+
+static bool binary_exists(const std::string& name) {
+    std::string path = g_bin_dir + "/" + name;
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR);
+}
 
 static pid_t launch_process(const std::string& bin, const std::vector<std::string>& args = {},
                             const std::vector<std::pair<std::string,std::string>>& env = {}) {
@@ -203,6 +210,8 @@ protected:
 };
 
 TEST_F(RegressionTest, LlamaSeqIdRegressionMultipleCallsAllSucceed) {
+    if (!binary_exists("llama-service"))
+        GTEST_SKIP() << "llama-service binary not found in " << g_bin_dir;
     std::printf("\n  === REGRESSION: llama seq_id (Bug 1) ===\n");
     std::printf("  Verifies kv_unified=true fix: all calls after the first must succeed\n");
 
@@ -227,6 +236,8 @@ TEST_F(RegressionTest, LlamaSeqIdRegressionMultipleCallsAllSucceed) {
 }
 
 TEST_F(RegressionTest, NeuTTSCodecShapeRegressionSynthesisSucceeds) {
+    if (!binary_exists("neutts-service"))
+        GTEST_SKIP() << "neutts-service binary not found in " << g_bin_dir;
     std::printf("\n  === REGRESSION: NeuTTS CoreML shape (Bug 2) ===\n");
     std::printf("  Verifies COMPILED_T=256 fix: SYNTH_WAV must return WAV_RESULT\n");
 
@@ -276,6 +287,16 @@ protected:
     void SetUp() override {
         ASSERT_FALSE(g_bin_dir.empty()) << "BIN_DIR not set";
         ASSERT_FALSE(g_models_dir.empty()) << "MODELS_DIR not set";
+
+        const char* required[] = {
+            "test_sip_provider", "sip-client", "inbound-audio-processor",
+            "vad-service", "whisper-service", "llama-service",
+            "kokoro-service", "outbound-audio-processor"
+        };
+        for (const char* bin : required) {
+            if (!binary_exists(bin))
+                GTEST_SKIP() << "Pipeline binary not found: " << g_bin_dir << "/" << bin;
+        }
     }
 
     void TearDown() override {
