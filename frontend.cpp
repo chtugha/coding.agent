@@ -4867,12 +4867,13 @@ const updateBetaSummaryDots=()=>{
   const getTabStatus=(paneId)=>{
     const pane=document.getElementById(paneId);
     if(!pane) return 'neutral';
-    const statuses=pane.querySelectorAll('.badge,.wt-badge');
+    const els=pane.querySelectorAll('.badge,.wt-badge,[id$="Status"],[id$="Result"]');
     let hasPass=false,hasFail=false;
-    statuses.forEach(el=>{
+    els.forEach(el=>{
       const text=(el.textContent||'').toLowerCase();
-      if(text.includes('pass')||text.includes('success')||text.includes('running')) hasPass=true;
-      if(text.includes('fail')||text.includes('error')) hasFail=true;
+      const html=(el.innerHTML||'').toLowerCase();
+      if(text.includes('pass')||text.includes('success')||text.includes('complete')||html.includes('wt-success')) hasPass=true;
+      if(text.includes('fail')||text.includes('error')||html.includes('wt-danger')) hasFail=true;
     });
     if(hasFail) return 'danger';
     if(hasPass) return 'success';
@@ -4895,6 +4896,19 @@ document.addEventListener('keydown',e=>{
 document.querySelectorAll('#betaTestTabs [data-bs-toggle="tab"]').forEach(el=>{
   el.addEventListener('shown.bs.tab',updateBetaSummaryDots);
 });
+
+(()=>{
+  let debounceTimer=null;
+  const debouncedUpdate=()=>{
+    if(debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer=setTimeout(updateBetaSummaryDots,300);
+  };
+  const observer=new MutationObserver(debouncedUpdate);
+  ['beta-component','beta-pipeline','beta-tools'].forEach(id=>{
+    const pane=document.getElementById(id);
+    if(pane) observer.observe(pane,{childList:true,subtree:true,characterData:true});
+  });
+})();
 
 function switchModelTab(tab){
   ['whisper','llama','compare'].forEach(t=>{
