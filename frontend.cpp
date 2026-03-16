@@ -2669,8 +2669,7 @@ function showPage(p){
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
   if(p==='models'){loadModels();loadModelComparison();}
-  if(p==='test-results'){fetchTestResultsPage();startTestResultsPoll();}
-  else{stopTestResultsPoll();}
+  if(p==='test-results'){fetchTestResultsPage();startTestResultsPoll();}else{stopTestResultsPoll();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
   if(p==='credentials'){loadCredentials();}
@@ -9805,15 +9804,31 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         long from_ts = 0, to_ts = 0;
 
         auto extract_param = [&](const std::string& key) -> std::string {
-            size_t pos = query_str.find(key + "=");
-            if (pos == std::string::npos) return "";
-            size_t start = pos + key.size() + 1;
-            size_t end = query_str.find('&', start);
-            return query_str.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            std::string needle = key + "=";
+            size_t pos = 0;
+            while ((pos = query_str.find(needle, pos)) != std::string::npos) {
+                if (pos == 0 || query_str[pos - 1] == '&') {
+                    size_t start = pos + needle.size();
+                    size_t end = query_str.find('&', start);
+                    return query_str.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                }
+                pos += needle.size();
+            }
+            return "";
         };
 
         type_filter = extract_param("type");
         status_filter = extract_param("status");
+        if (!status_filter.empty()) {
+            static const std::vector<std::string> allowed_statuses = {
+                "pass", "fail", "warn", "PASS", "FAIL", "WARN", "passed", "failed", "success", "error"
+            };
+            bool valid = false;
+            for (const auto& s : allowed_statuses) {
+                if (status_filter == s) { valid = true; break; }
+            }
+            if (!valid) status_filter.clear();
+        }
         std::string from_str = extract_param("from");
         std::string to_str = extract_param("to");
         if (!from_str.empty()) from_ts = std::atol(from_str.c_str());
@@ -9848,14 +9863,20 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     if (!first) json << ",";
                     first = false;
                     const char* st = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+                    const char* svc = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+                    const char* tt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
                     const char* metrics = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
                     std::string status_str = st ? st : "";
+                    std::string metrics_safe = "{}";
+                    if (metrics && metrics[0] == '{') {
+                        metrics_safe = metrics;
+                    }
                     json << "{\"type\":\"service_test\""
                          << ",\"id\":" << sqlite3_column_int(stmt, 0)
-                         << ",\"service\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1))) << "\""
-                         << ",\"test_type\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2))) << "\""
+                         << ",\"service\":\"" << escape_json(svc ? svc : "") << "\""
+                         << ",\"test_type\":\"" << escape_json(tt ? tt : "") << "\""
                          << ",\"status\":\"" << escape_json(status_str) << "\""
-                         << ",\"metrics\":" << (metrics ? metrics : "{}")
+                         << ",\"metrics\":" << metrics_safe
                          << ",\"timestamp\":" << sqlite3_column_int64(stmt, 5)
                          << "}";
                     total++;
@@ -9936,16 +9957,24 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
 
         if (type_filter.empty() || type_filter == "model_benchmark") {
+            std::string bm_where = " WHERE 1=1";
+            if (from_ts > 0) bm_where += " AND timestamp >= " + std::to_string(from_ts);
+            if (to_ts > 0) bm_where += " AND timestamp <= " + std::to_string(to_ts);
             std::string sql = "SELECT id, model_name, model_type, avg_accuracy, avg_latency_ms, pass_count, fail_count, timestamp FROM model_benchmark_runs"
-                + build_where("timestamp", "model_type", "") + " ORDER BY timestamp DESC LIMIT 200";
+                + bm_where + " ORDER BY timestamp DESC LIMIT 200";
             sqlite3_stmt* stmt;
             if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
                 while (sqlite3_step(stmt) == SQLITE_ROW) {
-                    if (!first) json << ",";
-                    first = false;
                     int pc = sqlite3_column_int(stmt, 5);
                     int fc = sqlite3_column_int(stmt, 6);
                     std::string status_str = (fc > 0) ? "fail" : "pass";
+                    if (!status_filter.empty()) {
+                        std::string sf_lower = status_filter;
+                        for (auto& ch : sf_lower) ch = std::tolower(ch);
+                        if (sf_lower != status_str) continue;
+                    }
+                    if (!first) json << ",";
+                    first = false;
                     double lat = sqlite3_column_double(stmt, 4);
                     const char* mn = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
                     const char* mt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
@@ -9962,8 +9991,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                          << ",\"timestamp\":" << sqlite3_column_int64(stmt, 7)
                          << "}";
                     total++;
-                    pass_count += pc;
-                    fail_count += fc;
+                    if (fc > 0) fail_count++;
+                    else pass_count++;
                     if (lat > 0) { total_latency += lat; latency_count++; }
                 }
                 sqlite3_finalize(stmt);
