@@ -1576,7 +1576,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-metric-card .metric-delta.negative{color:rgba(255,180,180,0.95)}
 .wt-dashboard-content{display:grid;grid-template-columns:3fr 2fr;gap:16px;margin-top:16px}
 .wt-collapsible{max-height:0;overflow:hidden;transition:max-height 0.3s ease}
-.wt-collapsible.open{max-height:2000px}
+.wt-collapsible.open{max-height:5000px}
 .wt-beta-tabs{display:flex;gap:4px;margin-bottom:16px;border:none;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius)}
 .wt-beta-tabs .nav-link{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
 .wt-beta-tabs .nav-link:hover{background:var(--wt-surface-sunken);color:var(--wt-text)}
@@ -1971,23 +1971,24 @@ Save outgoing audio as WAV</label>
 <div class="wt-content">
 <h2 class="wt-page-title">Beta Testing & Optimization</h2>
 
-<div id="betaTestSummary" style="display:flex;gap:16px;align-items:center;margin-bottom:16px;padding:10px 16px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius);font-size:13px">
+<div id="betaTestSummary" class="wt-test-summary-bar">
 <span style="font-weight:600;color:var(--wt-text-secondary)">Status:</span>
-<span><span id="betaDotComponent" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--wt-text-secondary);margin-right:4px"></span>Component</span>
-<span><span id="betaDotPipeline" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--wt-text-secondary);margin-right:4px"></span>Pipeline</span>
-<span><span id="betaDotTools" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--wt-text-secondary);margin-right:4px"></span>Tools</span>
+<span><span id="betaDotComponent" class="summary-dot"></span>Component</span>
+<span><span id="betaDotPipeline" class="summary-dot"></span>Pipeline</span>
+<span><span id="betaDotTools" class="summary-dot"></span>Tools</span>
 </div>
 
-<ul class="nav wt-beta-tabs" id="betaTestTabs">
-<li><a class="nav-link active" data-tab="beta-component" onclick="switchBetaTab('beta-component')">Component Tests</a></li>
-<li><a class="nav-link" data-tab="beta-pipeline" onclick="switchBetaTab('beta-pipeline')">Pipeline Tests</a></li>
-<li><a class="nav-link" data-tab="beta-tools" onclick="switchBetaTab('beta-tools')">Tools</a></li>
+<ul class="nav wt-beta-tabs" id="betaTestTabs" role="tablist">
+<li role="presentation"><a class="nav-link active" id="tab-beta-component" data-bs-toggle="tab" href="#beta-component" role="tab" aria-controls="beta-component" aria-selected="true">Component Tests</a></li>
+<li role="presentation"><a class="nav-link" id="tab-beta-pipeline" data-bs-toggle="tab" href="#beta-pipeline" role="tab" aria-controls="beta-pipeline" aria-selected="false">Pipeline Tests</a></li>
+<li role="presentation"><a class="nav-link" id="tab-beta-tools" data-bs-toggle="tab" href="#beta-tools" role="tab" aria-controls="beta-tools" aria-selected="false">Tools</a></li>
 </ul>
 
-<div id="beta-component">
+<div class="tab-content">
+<div class="tab-pane active" id="beta-component" role="tabpanel" aria-labelledby="tab-beta-component">
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Test SIP Client RTP packet routing and TCP connection handling with IAP service.</p>
@@ -2031,7 +2032,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: IAP Codec Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: IAP Codec Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px"><strong>Codec algorithm test</strong> (does not require IAP service). Runs the exact G.711 mu-law encode/decode + 15-tap FIR half-band 8kHz&#x2192;16kHz upsample pipeline offline, measuring SNR and RMS Error per-packet. Service connectivity is tested in Test 1 above.</p>
@@ -2076,7 +2077,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Whisper Accuracy Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Whisper Accuracy Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <div class="wt-field">
@@ -2150,7 +2151,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: LLaMA Response Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: LLaMA Response Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -2178,7 +2179,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -2207,10 +2208,10 @@ Save outgoing audio as WAV</label>
 
 </div><!-- end beta-component -->
 
-<div id="beta-pipeline" style="display:none">
+<div class="tab-pane" id="beta-pipeline" role="tabpanel" aria-labelledby="tab-beta-pipeline">
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4b: Shut-Up Mechanism (Pipeline)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: Shut-Up Mechanism (Pipeline)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -2238,7 +2239,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 6: Full Pipeline Round-Trip</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: Full Pipeline Round-Trip</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -2260,7 +2261,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 6b: Full Loop File Test (WER)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 3: Full Loop File Test (WER)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -2284,7 +2285,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 7: Pipeline Resilience Health Check</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: Pipeline Resilience Health Check</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -2302,7 +2303,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 8: Multi-Line Command Stress Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Multi-Line Command Stress Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -2321,7 +2322,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 9: Full Pipeline Stress Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 6: Full Pipeline Stress Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
 <div class="wt-collapsible open">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -2367,7 +2368,7 @@ Save outgoing audio as WAV</label>
 
 </div><!-- end beta-pipeline -->
 
-<div id="beta-tools" style="display:none">
+<div class="tab-pane" id="beta-tools" role="tabpanel" aria-labelledby="tab-beta-tools">
 
 <div class="wt-card">
 <div class="wt-card-header">
@@ -2474,6 +2475,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 </div><!-- end beta-tools -->
+
+</div><!-- end tab-content -->
 
 </div></div>
 
@@ -2738,7 +2741,7 @@ function showPage(p){
   if(p==='dashboard'){fetchDashboard();startDashboardPoll();}
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
-  if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
+  if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();updateBetaSummaryDots();}
   if(p==='models'){loadModels();loadModelComparison();}
   if(p==='test-results'){fetchTestResultsPage();startTestResultsPoll();}
   if(p==='logs'){reconnectLogSSE();}
@@ -4851,23 +4854,36 @@ function updateVadThresholdDisplay(val){
 
 // ===== MODELS PAGE =====
 
-function switchBetaTab(tab){
-  ['beta-component','beta-pipeline','beta-tools'].forEach(function(t){
-    var el=document.getElementById(t);
-    if(el) el.style.display=(t===tab)?'':'none';
-  });
-  document.querySelectorAll('#betaTestTabs .nav-link').forEach(function(a){
-    a.classList.toggle('active',a.dataset.tab===tab);
-  });
-}
-
-function toggleCollapsible(header){
-  var body=header.nextElementSibling;
+const toggleCollapsible=(header)=>{
+  const body=header.nextElementSibling;
   if(!body) return;
-  body.classList.toggle('open');
-  var arrow=header.querySelector('span:last-child');
-  if(arrow) arrow.innerHTML=body.classList.contains('open')?'&#x25BC;':'&#x25B6;';
-}
+  const isOpen=body.classList.toggle('open');
+  header.setAttribute('aria-expanded',isOpen);
+  const arrow=header.querySelector('span:last-child');
+  if(arrow) arrow.innerHTML=isOpen?'&#x25BC;':'&#x25B6;';
+};
+
+const updateBetaSummaryDots=()=>{
+  const getTabStatus=(paneId)=>{
+    const pane=document.getElementById(paneId);
+    if(!pane) return 'neutral';
+    const statuses=pane.querySelectorAll('.badge,.wt-badge,[class*="status"]');
+    let hasPass=false,hasFail=false;
+    statuses.forEach(el=>{
+      const text=(el.textContent||'').toLowerCase();
+      if(text.includes('pass')||text.includes('success')||text.includes('running')) hasPass=true;
+      if(text.includes('fail')||text.includes('error')) hasFail=true;
+    });
+    if(hasFail) return 'danger';
+    if(hasPass) return 'success';
+    return 'neutral';
+  };
+  const colorMap={success:'var(--wt-success,#198754)',danger:'var(--wt-danger,#dc3545)',neutral:'var(--wt-text-secondary)'};
+  ['Component','Pipeline','Tools'].forEach(name=>{
+    const dot=document.getElementById('betaDot'+name);
+    if(dot) dot.style.background=colorMap[getTabStatus('beta-'+name.toLowerCase())];
+  });
+};
 
 function switchModelTab(tab){
   ['whisper','llama','compare'].forEach(t=>{
