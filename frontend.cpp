@@ -1597,29 +1597,29 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <span class="nav-icon">&#x1F3E0;</span><span class="nav-text">Dashboard</span></a>
 </div>
 <div class="wt-sidebar-section">
+<p class="wt-sidebar-section-title">Pipeline</p>
+<a class="wt-nav-item" data-page="services" onclick="showPage('services')">
+<span class="nav-icon">&#x2699;</span><span class="nav-text">Services</span><span class="nav-badge" id="svcBadge">0/6</span></a>
+<a class="wt-nav-item" data-page="logs" onclick="showPage('logs')">
+<span class="nav-icon">&#x1F4CB;</span><span class="nav-text">Live Logs</span></a>
+</div>
+<div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Testing</p>
 <a class="wt-nav-item" data-page="tests" onclick="showPage('tests')">
-<span class="nav-icon">&#x1F9EA;</span>Tests<span class="nav-badge" id="testsBadge">0</span></a>
+<span class="nav-icon">&#x1F9EA;</span><span class="nav-text">Test Runner</span><span class="nav-badge" id="testsBadge">0</span></a>
 <a class="wt-nav-item" data-page="test-results" onclick="showPage('test-results')">
 <span class="nav-icon">&#x1F4CA;</span><span class="nav-text">Test Results</span></a>
 <a class="wt-nav-item" data-page="beta-testing" onclick="showPage('beta-testing')">
-<span class="nav-icon">&#x1F3AF;</span>Beta Testing</a>
+<span class="nav-icon">&#x1F3AF;</span><span class="nav-text">Beta Tests</span></a>
+</div>
+<div class="wt-sidebar-section">
+<p class="wt-sidebar-section-title">Configuration</p>
 <a class="wt-nav-item" data-page="models" onclick="showPage('models')">
-<span class="nav-icon">&#x1F916;</span>Models</a>
-</div>
-<div class="wt-sidebar-section">
-<p class="wt-sidebar-section-title">Services</p>
-<a class="wt-nav-item" data-page="services" onclick="showPage('services')">
-<span class="nav-icon">&#x2699;</span>Pipeline<span class="nav-badge" id="svcBadge">0/6</span></a>
-</div>
-<div class="wt-sidebar-section">
-<p class="wt-sidebar-section-title">System</p>
-<a class="wt-nav-item" data-page="logs" onclick="showPage('logs')">
-<span class="nav-icon">&#x1F4CB;</span>Live Logs</a>
+<span class="nav-icon">&#x1F916;</span><span class="nav-text">Models</span></a>
 <a class="wt-nav-item" data-page="database" onclick="showPage('database')">
-<span class="nav-icon">&#x1F5C4;</span>Database</a>
+<span class="nav-icon">&#x1F5C4;</span><span class="nav-text">Database</span></a>
 <a class="wt-nav-item" data-page="credentials" onclick="showPage('credentials')">
-<span class="nav-icon">&#x1F511;</span>Credentials</a>
+<span class="nav-icon">&#x1F511;</span><span class="nav-text">Credentials</span></a>
 </div>
 <div class="wt-status-bar" id="statusBar">
 <span id="statusText">Connecting...</span>

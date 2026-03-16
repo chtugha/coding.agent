@@ -181,7 +181,8 @@ All changes in `frontend.cpp` within `serve_index()` (the `<style>` block, lines
 
 **Verification**: Build succeeds. Open Test Results page, confirm chart renders and data loads.
 
-### [ ] Step: Navigation sidebar restructure
+### [x] Step: Navigation sidebar restructure
+<!-- chat-id: 702d2294-9dd8-4d6c-a6a9-b803401f5784 -->
 
 Changes in `frontend.cpp` within `serve_index()` (lines 1500–1541).
 
