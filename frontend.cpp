@@ -2946,12 +2946,15 @@ function startTestDetail(){
     return r.json().then(function(d){
       if(d.error){
         document.getElementById('testDetailLog').textContent='Error: '+d.error;
-        showToast('Failed to start test: '+d.error,'danger');
+        showToast('Failed to start test: '+d.error,'error');
       }else{
         document.getElementById('testDetailLog').textContent='Starting...';
         setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
       }
     });
+  }).catch(function(e){
+    document.getElementById('testDetailLog').textContent='Network error: '+e;
+    showToast('Failed to start test: '+e,'error');
   });
 }
 
@@ -6225,6 +6228,11 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             return;
         }
 
+        if (!is_allowed_binary(found->binary_path)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid test binary path\"}");
+            return;
+        }
+
         std::string bin_name = found->binary_path;
         size_t slash = bin_name.rfind('/');
         if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
@@ -6237,17 +6245,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             use_args = found->default_args;
         }
 
-        if (!is_allowed_binary(found->binary_path)) {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid test binary path\"}");
-            return;
-        }
-
         mkdir("logs", 0755);
         std::string log_path = "logs/" + found->name + "_" + std::to_string(time(nullptr)) + ".log";
 
         pid_t pid = fork();
         if (pid < 0) {
-            std::string err_msg = std::string("{\"error\":\"Failed to start test: ") + strerror(errno) + "\"}";
+            std::string err_msg = std::string("{\"error\":\"Failed to start test: ") + escape_json(strerror(errno)) + "\"}";
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "%s", err_msg.c_str());
             return;
         }

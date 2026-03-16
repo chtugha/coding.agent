@@ -142,6 +142,7 @@ int main() {
 
     int passed = 0;
     int failed = 0;
+    int skipped = 0;
 
     std::printf("=== Kokoro C++ TTS Test Suite (CoreML Split Decoder) ===\n\n");
 
@@ -181,8 +182,6 @@ int main() {
         if (all_ok) { passed++; std::printf("  PASS\n"); }
         else { failed++; }
     }
-
-    int skipped = 0;
 
     std::printf("\n[TEST 2] Vocab loading\n");
     KokoroVocab vocab;
