@@ -101,6 +101,24 @@
 #include <dirent.h>
 #include <algorithm>
 #include <fcntl.h>
+#include <cerrno>
+#include <climits>
+#include <regex>
+
+static constexpr int LOG_FLUSH_INTERVAL_MS = 500;
+static constexpr int UDP_BUFFER_SIZE = 4096;
+static constexpr int DB_QUERY_ROW_LIMIT = 10000;
+static constexpr int MG_POLL_TIMEOUT_MS = 100;
+static constexpr int LOG_RETENTION_DAYS = 30;
+static constexpr int SERVICE_CHECK_INTERVAL_S = 2;
+static constexpr int ASYNC_CLEANUP_INTERVAL_S = 30;
+static constexpr int RECENT_LOGS_API_LIMIT = 100;
+static constexpr int DASHBOARD_RECENT_LOGS_LIMIT = 10;
+static constexpr useconds_t SIGTERM_GRACE_US = 500000;
+static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;
+static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;
+static constexpr useconds_t SHUTDOWN_GRACE_US = 2000000;
+static constexpr useconds_t RESTART_WAIT_US = 500000;
 
 using namespace whispertalk;
 
@@ -273,16 +291,21 @@ static LlamaScoreResult score_llama_response(const std::string& response,
 
 class FrontendServer {
 public:
-    FrontendServer(uint16_t http_port = 8080) 
+    FrontendServer(uint16_t http_port, const std::string& project_root) 
         : http_port_(http_port),
           log_port_(0),
           interconnect_(ServiceType::FRONTEND),
-          db_(nullptr) {
+          db_(nullptr),
+          db_ok_(false),
+          project_root_(project_root),
+          db_path_(project_root + "/frontend.db") {
         
-        init_database();
-        discover_tests();
-        load_services();
-        scan_testfiles_directory();
+        db_ok_ = init_database();
+        if (db_ok_) {
+            discover_tests();
+            load_services();
+            scan_testfiles_directory();
+        }
     }
 
     ~FrontendServer() {
@@ -292,6 +315,10 @@ public:
     }
 
     bool start() {
+        if (!db_ok_) {
+            return false;
+        }
+
         if (!interconnect_.initialize()) {
             std::cerr << "Failed to initialize interconnect\n";
             return false;
@@ -333,20 +360,20 @@ public:
         auto last_svc_check = std::chrono::steady_clock::now();
         auto last_async_cleanup = std::chrono::steady_clock::now();
         while (!s_sigint_received) {
-            mg_mgr_poll(&mgr_, 100);
+            mg_mgr_poll(&mgr_, MG_POLL_TIMEOUT_MS);
             check_test_status();
             flush_sse_queue();
 
             auto now = std::chrono::steady_clock::now();
-            if (now - last_flush >= std::chrono::milliseconds(500)) {
+            if (now - last_flush >= std::chrono::milliseconds(LOG_FLUSH_INTERVAL_MS)) {
                 flush_log_queue();
                 last_flush = now;
             }
-            if (now - last_svc_check >= std::chrono::seconds(2)) {
+            if (now - last_svc_check >= std::chrono::seconds(SERVICE_CHECK_INTERVAL_S)) {
                 check_service_status();
                 last_svc_check = now;
             }
-            if (now - last_async_cleanup >= std::chrono::seconds(30)) {
+            if (now - last_async_cleanup >= std::chrono::seconds(ASYNC_CLEANUP_INTERVAL_S)) {
                 cleanup_old_async_tasks();
                 last_async_cleanup = now;
             }
@@ -373,7 +400,10 @@ private:
     uint16_t log_port_;
     InterconnectNode interconnect_;
     sqlite3* db_;
+    bool db_ok_ = false;
     bool db_write_mode_ = false;
+    std::string project_root_;
+    std::string db_path_;
     struct mg_mgr mgr_;
     std::thread log_thread_;
     
@@ -398,6 +428,8 @@ private:
 
     std::mutex sse_queue_mutex_;
     std::vector<LogEntry> sse_queue_;
+
+    std::chrono::steady_clock::time_point start_time_ = std::chrono::steady_clock::now();
 
     struct AsyncTask {
         int64_t id;
@@ -480,12 +512,25 @@ private:
         }
     }
 
-    void init_database() {
-        int rc = sqlite3_open("frontend.db", &db_);
+    bool init_database() {
+        int rc = sqlite3_open(db_path_.c_str(), &db_);
         if (rc != SQLITE_OK) {
             std::cerr << "Cannot open database: " << sqlite3_errmsg(db_) << "\n";
             db_ = nullptr;
-            return;
+            return false;
+        }
+
+        if (sqlite3_db_readonly(db_, "main") == 1) {
+            std::cerr << "Fatal: database is read-only: " << db_path_ << "\n";
+            sqlite3_close(db_);
+            db_ = nullptr;
+            return false;
+        }
+
+        int cfg_rc = sqlite3_db_config(db_, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr);
+        if (cfg_rc != SQLITE_OK) {
+            std::cerr << "Warning: could not disable SQLite extension loading (rc="
+                      << cfg_rc << ")\n";
         }
 
         const char* schema = R"(
@@ -685,6 +730,7 @@ private:
         sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
 
         rotate_logs();
+        return true;
     }
 
     void discover_tests() {
@@ -790,15 +836,6 @@ private:
         }
     }
 
-    bool is_service_running_unlocked(const std::string& name) {
-        for (const auto& svc : services_) {
-            if (svc.name == name) {
-                return svc.managed && svc.pid > 0;
-            }
-        }
-        return false;
-    }
-
     static std::vector<std::string> split_args(const std::string& s) {
         std::vector<std::string> result;
         std::istringstream iss(s);
@@ -822,7 +859,14 @@ private:
     }
 
     void kill_ghost_processes(const std::string& binary_name) {
-        std::string cmd = "pgrep -f '" + binary_name + "' 2>/dev/null";
+        static const std::regex valid_name("^[a-zA-Z0-9_.-]+$");
+        if (!std::regex_match(binary_name, valid_name)) return;
+        std::string escaped_name;
+        for (char ch : binary_name) {
+            if (ch == '.') escaped_name += "[.]";
+            else escaped_name += ch;
+        }
+        std::string cmd = "pgrep -f '" + escaped_name + "' 2>/dev/null";
         FILE* fp = popen(cmd.c_str(), "r");
         if (!fp) return;
         char buf[64];
@@ -836,7 +880,7 @@ private:
             std::cerr << "Killing ghost process " << p << " for " << binary_name << "\n";
             kill(p, SIGTERM);
         }
-        if (!pids.empty()) usleep(500000);
+        if (!pids.empty()) usleep(SIGTERM_GRACE_US);
         for (pid_t p : pids) {
             if (kill(p, 0) == 0) {
                 kill(p, SIGKILL);
@@ -856,7 +900,7 @@ private:
                 size_t slash = bin_name.rfind('/');
                 if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
                 kill_ghost_processes(bin_name);
-                usleep(200000);
+                usleep(SERVICE_STARTUP_WAIT_US);
             }
 
             if (!is_allowed_binary(svc.binary_path)) return false;
@@ -936,7 +980,7 @@ private:
                     svc.pid = 0;
                     return true;
                 }
-                usleep(100000);
+                usleep(STOP_POLL_INTERVAL_US);
             }
             kill(svc.pid, SIGKILL);
             waitpid(svc.pid, nullptr, 0);
@@ -1024,7 +1068,7 @@ private:
                 }
             }
         }
-        usleep(2000000);
+        usleep(SHUTDOWN_GRACE_US);
         {
             std::lock_guard<std::mutex> lock(services_mutex_);
             for (auto& svc : services_) {
@@ -1062,9 +1106,7 @@ private:
         tv.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        // recv buffer: 4096 bytes. Max inbound UDP datagram from LogForwarder is
-        // 2303 bytes (buf[2304]-1), so 4096 provides ample headroom — no resize needed.
-        char buffer[4096];
+        char buffer[UDP_BUFFER_SIZE];
         while (!s_sigint_received) {
             ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
             if (n > 0) {
@@ -1188,8 +1230,10 @@ private:
 
     void rotate_logs() {
         if (!db_) return;
-        const char* sql = "DELETE FROM logs WHERE timestamp < datetime('now', '-30 days')";
-        sqlite3_exec(db_, sql, nullptr, nullptr, nullptr);
+        static const std::string sql =
+            "DELETE FROM logs WHERE timestamp < datetime('now', '-"
+            + std::to_string(LOG_RETENTION_DAYS) + " days')";
+        sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, nullptr);
     }
 
     // GET /api/logs/stream — SSE live log stream. Registers the connection for
@@ -1277,6 +1321,8 @@ private:
             
             if (mg_strcmp(hm->uri, mg_str("/")) == 0) {
                 serve_index(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/dashboard")) == 0) {
+                handle_dashboard(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tests")) == 0) {
                 serve_tests_api(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tests/start")) == 0) {
@@ -1417,8 +1463,8 @@ private:
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 )WT" + theme_css_link + R"WT(
 <style>
-:root{--wt-sidebar-width:240px;--wt-bg:#f5f5f7;--wt-sidebar-bg:rgba(255,255,255,0.72);--wt-card-bg:#fff;--wt-border:#d2d2d7;--wt-text:#1d1d1f;--wt-text-secondary:#86868b;--wt-accent:#0071e3;--wt-success:#34c759;--wt-danger:#ff3b30;--wt-warning:#ff9f0a;--wt-radius:12px;--wt-font:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;--wt-mono:"SF Mono",SFMono-Regular,ui-monospace,Menlo,monospace}
-[data-bs-theme="dark"]{--wt-bg:#1c1c1e;--wt-sidebar-bg:rgba(44,44,46,0.72);--wt-card-bg:#2c2c2e;--wt-border:#38383a;--wt-text:#f5f5f7;--wt-text-secondary:#98989d}
+:root{--wt-sidebar-width:240px;--wt-bg:#f5f5f7;--wt-sidebar-bg:rgba(255,255,255,0.72);--wt-card-bg:#fff;--wt-border:#d2d2d7;--wt-text:#1d1d1f;--wt-text-secondary:#86868b;--wt-accent:#0071e3;--wt-success:#34c759;--wt-danger:#ff3b30;--wt-warning:#ff9f0a;--wt-radius:12px;--wt-font:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;--wt-mono:"SF Mono",SFMono-Regular,ui-monospace,Menlo,monospace;--wt-gradient-hero:linear-gradient(135deg,#667eea 0%,#764ba2 100%);--wt-gradient-success:linear-gradient(135deg,#11998e 0%,#38ef7d 100%);--wt-gradient-danger:linear-gradient(135deg,#eb3349 0%,#f45c43 100%);--wt-gradient-warning:linear-gradient(135deg,#f7971e 0%,#ffd200 100%);--wt-gradient-info:linear-gradient(135deg,#2193b0 0%,#6dd5ed 100%);--wt-gradient-neutral:linear-gradient(135deg,#bdc3c7 0%,#2c3e50 100%);--wt-gradient-pipeline:linear-gradient(90deg,#667eea,#764ba2,#f093fb,#f5576c,#fda085,#f9d423,#38ef7d);--wt-surface-elevated:rgba(255,255,255,0.85);--wt-surface-sunken:rgba(0,0,0,0.02);--wt-chart-1:#667eea;--wt-chart-2:#764ba2;--wt-chart-3:#f093fb;--wt-chart-4:#43e97b;--wt-chart-5:#fa709a;--wt-chart-6:#fee140;--wt-chart-7:#30cfd0;--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.04),0 1px 2px rgba(0,0,0,0.06);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.08),0 2px 4px rgba(0,0,0,0.04);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.12),0 4px 8px rgba(0,0,0,0.06);--wt-shadow-glow-success:0 0 20px rgba(52,199,89,0.3);--wt-shadow-glow-danger:0 0 20px rgba(255,59,48,0.3);--wt-radius-lg:16px}
+[data-bs-theme="dark"]{--wt-bg:#1c1c1e;--wt-sidebar-bg:rgba(44,44,46,0.72);--wt-card-bg:#2c2c2e;--wt-border:#38383a;--wt-text:#f5f5f7;--wt-text-secondary:#98989d;--wt-surface-elevated:rgba(50,50,52,0.85);--wt-surface-sunken:rgba(255,255,255,0.03);--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.2);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.3);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.4)}
 *{box-sizing:border-box}
 body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-text);overflow:hidden;height:100vh}
 .wt-app{display:flex;height:100vh}
@@ -1434,7 +1480,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-nav-item .nav-icon{width:20px;text-align:center;font-size:15px}
 .wt-nav-item .nav-badge{margin-left:auto;font-size:11px;font-weight:600;background:var(--wt-accent);color:#fff;border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
 .wt-nav-item.active .nav-badge{background:rgba(255,255,255,0.25)}
-.wt-main{flex:1;overflow-y:auto;padding:0}
+.wt-main{flex:1;overflow:hidden;padding:0;position:relative}
 .wt-content{max-width:960px;margin:0 auto;padding:24px 32px}
 .wt-page-title{font-size:28px;font-weight:700;letter-spacing:-0.02em;margin:0 0 20px}
 .wt-card{background:var(--wt-card-bg);border-radius:var(--wt-radius);border:0.5px solid var(--wt-border);padding:16px;margin-bottom:12px;transition:box-shadow 0.2s}
@@ -1494,15 +1540,61 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-toggle::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;background:#fff;border-radius:50%;transition:transform 0.2s;box-shadow:0 1px 3px rgba(0,0,0,0.2)}
 .wt-toggle.on::after{transform:translateX(18px)}
 .hidden{display:none !important}
-.wt-page{display:none}
-.wt-page.active{display:block}
+.wt-page{position:absolute;top:0;left:0;width:100%;height:100%;visibility:hidden;pointer-events:none;opacity:0;transform:translateY(8px);transition:opacity 0.2s ease-out,transform 0.2s ease-out,visibility 0s linear 0.2s;overflow-y:auto}
+.wt-page.active{visibility:visible;pointer-events:auto;opacity:1;transform:translateY(0);transition:opacity 0.2s ease-out,transform 0.2s ease-out,visibility 0s linear 0s}
+@keyframes slideIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes countPulse{0%{transform:scale(1)}50%{transform:scale(1.05)}100%{transform:scale(1)}}
+@keyframes flowPulse{0%{opacity:0.3}50%{opacity:1}100%{opacity:0.3}}
+.metric-updated{animation:countPulse 0.4s ease}
+.wt-display{font-size:48px;font-weight:800;letter-spacing:-0.03em;line-height:1}
+.wt-headline{font-size:28px;font-weight:700;letter-spacing:-0.02em}
+.wt-title-lg{font-size:20px;font-weight:600;letter-spacing:-0.01em}
+.wt-caption{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.5px;color:var(--wt-text-secondary)}
+.wt-micro{font-size:10px;font-weight:600;letter-spacing:0.3px}
+.wt-pipeline-hero{background:var(--wt-gradient-hero);border-radius:var(--wt-radius-lg);padding:32px;color:#fff;position:relative;overflow:hidden}
+.wt-pipeline-hero .pipeline-flow{display:flex;align-items:center;flex-wrap:wrap;gap:8px;justify-content:center}
+.wt-pipeline-node{width:64px;height:64px;background:rgba(255,255,255,0.18);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-radius:var(--wt-radius);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.2s ease,box-shadow 0.2s ease;border:1.5px solid rgba(255,255,255,0.3)}
+.wt-pipeline-node:hover{transform:scale(1.08);box-shadow:var(--wt-shadow-lg)}
+.wt-pipeline-node .node-label{font-size:11px;font-weight:700;letter-spacing:0.5px}
+.wt-pipeline-node .node-status{width:10px;height:10px;border-radius:50%;margin-top:4px}
+.wt-pipeline-node .node-status.online{background:var(--wt-success);box-shadow:var(--wt-shadow-glow-success)}
+.wt-pipeline-node .node-status.offline{background:rgba(255,255,255,0.3)}
+.wt-pipeline-node .node-status.error{background:var(--wt-danger);box-shadow:var(--wt-shadow-glow-danger)}
+.wt-pipeline-connector{height:2px;background:rgba(255,255,255,0.4);flex:1;max-width:48px;position:relative;animation:flowPulse 2s infinite}
+.wt-pipeline-connector::after{content:'\25B8';position:absolute;right:-6px;top:-8px;color:rgba(255,255,255,0.6);font-size:14px}
+.wt-metrics-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:16px 0}
+.wt-metric-card{border-radius:var(--wt-radius-lg);padding:24px;color:#fff;position:relative;overflow:hidden;transition:transform 0.2s ease,box-shadow 0.2s ease;box-shadow:var(--wt-shadow-md)}
+.wt-metric-card:hover{transform:translateY(-2px);box-shadow:var(--wt-shadow-lg)}
+.wt-metric-card .metric-value{font-size:48px;font-weight:800;letter-spacing:-0.03em;line-height:1}
+.wt-metric-card .metric-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-top:8px}
+.wt-metric-card .metric-delta{font-size:12px;font-weight:600;margin-top:4px}
+.wt-metric-card .metric-delta.positive{color:rgba(255,255,255,0.9)}
+.wt-metric-card .metric-delta.negative{color:rgba(255,180,180,0.95)}
+.wt-dashboard-content{display:grid;grid-template-columns:3fr 2fr;gap:16px;margin-top:16px}
+.wt-collapsible{max-height:0;overflow:hidden;transition:max-height 0.3s ease}
+.wt-collapsible.open{max-height:2000px}
+.wt-beta-tabs{display:flex;gap:4px;margin-bottom:16px;border:none;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius)}
+.wt-beta-tabs .nav-link{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
+.wt-beta-tabs .nav-link:hover{background:var(--wt-surface-sunken);color:var(--wt-text)}
+.wt-beta-tabs .nav-link.active{background:var(--wt-accent);color:#fff;box-shadow:var(--wt-shadow-sm)}
+.wt-test-summary-bar{display:flex;gap:12px;align-items:center;padding:12px 16px;background:var(--wt-surface-elevated);border-radius:var(--wt-radius);margin-bottom:16px}
+.wt-test-summary-bar .summary-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+[data-bs-theme="dark"] .wt-pipeline-hero{opacity:0.95}
+[data-bs-theme="dark"] .wt-pipeline-node{background:rgba(0,0,0,0.3);border-color:rgba(255,255,255,0.15)}
+[data-bs-theme="dark"] .wt-card{box-shadow:0 1px 4px rgba(0,0,0,0.3)}
+@media (max-width:1024px){.wt-content{padding:16px 20px}.wt-metrics-grid{grid-template-columns:repeat(2,1fr)}.wt-dashboard-content{grid-template-columns:1fr}.wt-metric-card .metric-value{font-size:36px}}
+@media (max-width:768px){.wt-sidebar{width:48px;min-width:48px}.wt-sidebar .nav-text,.wt-sidebar-section-title,.wt-sidebar-header h1{display:none}.wt-nav-item{justify-content:center;padding:12px 0}.wt-metric-card .metric-value{font-size:32px}}
 </style></head><body>
 <div class="wt-app">
 <aside class="wt-sidebar">
 <div class="wt-sidebar-header"><h1>WhisperTalk</h1></div>
 <div class="wt-sidebar-section">
+<a class="wt-nav-item active" data-page="dashboard" onclick="showPage('dashboard')">
+<span class="nav-icon">&#x1F3E0;</span><span class="nav-text">Dashboard</span></a>
+</div>
+<div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Testing</p>
-<a class="wt-nav-item active" data-page="tests" onclick="showPage('tests')">
+<a class="wt-nav-item" data-page="tests" onclick="showPage('tests')">
 <span class="nav-icon">&#x1F9EA;</span>Tests<span class="nav-badge" id="testsBadge">0</span></a>
 <a class="wt-nav-item" data-page="beta-testing" onclick="showPage('beta-testing')">
 <span class="nav-icon">&#x1F3AF;</span>Beta Testing</a>
@@ -1555,7 +1647,76 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 
     std::string build_ui_pages() {
         return R"PG(
-<div class="wt-page active" id="page-tests">
+<div class="wt-page active" id="page-dashboard">
+<div class="wt-content">
+
+<div class="wt-pipeline-hero">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+<div>
+<div class="wt-headline" style="color:#fff">Pipeline Overview</div>
+<div style="font-size:13px;opacity:0.7;margin-top:4px">Real-time service health and data flow</div>
+</div>
+<div id="dashHealthBadge" style="padding:6px 16px;border-radius:20px;font-size:13px;font-weight:600;background:rgba(255,255,255,0.2);color:#fff">Checking...</div>
+</div>
+<div class="pipeline-flow">
+<div class="wt-pipeline-node" id="pipeline-node-SIP_CLIENT"><span class="node-label">SIP</span><span class="node-status offline" id="pipeline-status-SIP_CLIENT"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-INBOUND_AUDIO_PROCESSOR"><span class="node-label">IAP</span><span class="node-status offline" id="pipeline-status-INBOUND_AUDIO_PROCESSOR"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-VAD_SERVICE"><span class="node-label">VAD</span><span class="node-status offline" id="pipeline-status-VAD_SERVICE"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-WHISPER_SERVICE"><span class="node-label">ASR</span><span class="node-status offline" id="pipeline-status-WHISPER_SERVICE"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-LLAMA_SERVICE"><span class="node-label">LLM</span><span class="node-status offline" id="pipeline-status-LLAMA_SERVICE"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-KOKORO_SERVICE"><span class="node-label">TTS</span><span class="node-status offline" id="pipeline-status-KOKORO_SERVICE"></span></div>
+<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-node" id="pipeline-node-OUTBOUND_AUDIO_PROCESSOR"><span class="node-label">OAP</span><span class="node-status offline" id="pipeline-status-OUTBOUND_AUDIO_PROCESSOR"></span></div>
+</div>
+</div>
+
+<div class="wt-metrics-grid">
+<div class="wt-metric-card" style="background:var(--wt-gradient-success)">
+<div class="metric-value" id="dashMetricServicesOnline">0</div>
+<div class="metric-label">Services Online</div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-info)">
+<div class="metric-value" id="dashMetricRunningTests">0</div>
+<div class="metric-label">Running Tests</div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-hero)">
+<div class="metric-value" id="dashMetricTestPass">0</div>
+<div class="metric-label">Tests Passed</div>
+<div class="metric-delta" id="dashMetricTestFail"></div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-neutral)">
+<div class="metric-value" id="dashMetricUptime">0s</div>
+<div class="metric-label">Uptime</div>
+</div>
+</div>
+
+<div class="wt-dashboard-content">
+<div>
+<div class="wt-card" style="max-height:400px;display:flex;flex-direction:column">
+<div class="wt-card-header"><span class="wt-card-title">Activity Feed</span></div>
+<div id="dashActivityFeed" style="flex:1;overflow-y:auto;font-size:12px;font-family:var(--wt-mono);line-height:1.8"></div>
+</div>
+</div>
+<div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Quick Actions</span></div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<button class="wt-btn wt-btn-primary" style="width:100%;justify-content:center" onclick="dashStartAll()">&#x25B6; Start All Services</button>
+<button class="wt-btn wt-btn-danger" style="width:100%;justify-content:center" onclick="dashStopAll()">&#x25A0; Stop All Services</button>
+<button class="wt-btn wt-btn-secondary" style="width:100%;justify-content:center" onclick="dashRestartFailed()">&#x21BB; Restart Failed</button>
+</div>
+</div>
+</div>
+</div>
+
+</div></div>
+
+<div class="wt-page" id="page-tests">
 <div class="wt-content">
 <div id="tests-overview">
 <h2 class="wt-page-title">Tests</h2>
@@ -2436,17 +2597,20 @@ Save outgoing audio as WAV</label>
         std::string port_str = std::to_string(http_port_);
         std::string tsp_port_str = std::to_string(TEST_SIP_PROVIDER_PORT);
         std::string js = R"JS(
-var currentPage='tests',currentTest=null,currentSvc=null;
+var currentPage='dashboard',currentTest=null,currentSvc=null;
 var logSSE=null,svcLogSSE=null,testLogPoll=null;
 var TSP_PORT=)JS" + tsp_port_str + R"JS(;
 
 function showPage(p){
-  document.querySelectorAll('.wt-page').forEach(e=>e.classList.remove('active'));
-  document.getElementById('page-'+p).classList.add('active');
+  var newPage=document.getElementById('page-'+p);
+  if(newPage)newPage.classList.add('active');
+  document.querySelectorAll('.wt-page').forEach(function(e){if(e.id!=='page-'+p)e.classList.remove('active');});
   document.querySelectorAll('.wt-nav-item').forEach(e=>{
     e.classList.toggle('active',e.dataset.page===p);
   });
   currentPage=p;
+  if(p==='dashboard'){fetchDashboard();startDashboardPoll();}
+  else{stopDashboardPoll();}
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
@@ -2462,6 +2626,112 @@ function fetchStatus(){
       d.services_online+' services \u2022 '+d.running_tests+' tests \u2022 '+d.sse_connections+' SSE';
     document.getElementById('svcBadge').textContent=d.services_online+'/6';
   }).catch(()=>{document.getElementById('statusText').textContent='Disconnected';});
+}
+
+var dashPollTimer=null;
+function startDashboardPoll(){
+  stopDashboardPoll();
+  dashPollTimer=setInterval(fetchDashboard,3000);
+}
+function stopDashboardPoll(){
+  if(dashPollTimer){clearInterval(dashPollTimer);dashPollTimer=null;}
+}
+
+function animateCountUp(el,newVal){
+  var text=String(newVal);
+  if(el.textContent===text)return;
+  el.textContent=text;
+  el.classList.remove('metric-updated');
+  void el.offsetWidth;
+  el.classList.add('metric-updated');
+}
+
+function formatUptime(s){
+  if(s<60)return s+'s';
+  if(s<3600)return Math.floor(s/60)+'m';
+  if(s<86400)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+  return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';
+}
+
+function fetchDashboard(){
+  fetch('/api/dashboard').then(r=>r.json()).then(function(d){
+    animateCountUp(document.getElementById('dashMetricServicesOnline'),d.services_online);
+    animateCountUp(document.getElementById('dashMetricRunningTests'),d.running_tests);
+    animateCountUp(document.getElementById('dashMetricTestPass'),d.test_pass);
+    var failEl=document.getElementById('dashMetricTestFail');
+    if(d.test_fail>0){failEl.textContent=d.test_fail+' failed';failEl.className='metric-delta negative';}
+    else{failEl.textContent='';failEl.className='metric-delta';}
+    document.getElementById('dashMetricUptime').textContent=formatUptime(d.uptime_seconds);
+
+    var badge=document.getElementById('dashHealthBadge');
+    var ratio=d.services_total>0?d.services_online/d.services_total:0;
+    if(ratio>=1){badge.textContent='Healthy';badge.style.background='rgba(52,199,89,0.4)';}
+    else if(ratio>=0.5){badge.textContent='Degraded';badge.style.background='rgba(255,159,10,0.4)';}
+    else{badge.textContent='Offline';badge.style.background='rgba(255,59,48,0.4)';}
+
+    if(d.services){
+      var svcMap={};
+      d.services.forEach(function(s){svcMap[s.name]=s.online;});
+      (d.pipeline||[]).forEach(function(name){
+        var dot=document.getElementById('pipeline-status-'+name);
+        if(dot){
+          dot.className='node-status '+(svcMap[name]?'online':'offline');
+        }
+      });
+    }
+
+    var feed=document.getElementById('dashActivityFeed');
+    if(d.recent_logs&&d.recent_logs.length>0){
+      var html='';
+      d.recent_logs.forEach(function(log){
+        var lvlClass='log-lvl-'+log.level;
+        html+='<div class="wt-log-entry" style="animation:slideIn 0.3s ease">'
+          +'<span class="log-ts">'+escapeHtml(log.timestamp)+'</span> '
+          +'<span class="log-svc">'+escapeHtml(log.service)+'</span> '
+          +'<span class="'+lvlClass+'">'+escapeHtml(log.level)+'</span> '
+          +escapeHtml(log.message)+'</div>';
+      });
+      feed.innerHTML=html;
+    } else {
+      feed.innerHTML='<div style="color:var(--wt-text-secondary);padding:16px;text-align:center">No recent activity</div>';
+    }
+  }).catch(function(){});
+}
+
+function dashStartAll(){
+  fetch('/api/services').then(r=>r.json()).then(function(d){
+    d.services.forEach(function(s){
+      if(!s.online){
+        fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({service:s.name})});
+      }
+    });
+    setTimeout(fetchDashboard,1000);
+  });
+}
+
+function dashStopAll(){
+  fetch('/api/services').then(r=>r.json()).then(function(d){
+    d.services.forEach(function(s){
+      if(s.online){
+        fetch('/api/services/stop',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({service:s.name})});
+      }
+    });
+    setTimeout(fetchDashboard,1000);
+  });
+}
+
+function dashRestartFailed(){
+  fetch('/api/services').then(r=>r.json()).then(function(d){
+    d.services.forEach(function(s){
+      if(!s.online&&s.managed){
+        fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({service:s.name})});
+      }
+    });
+    setTimeout(fetchDashboard,1000);
+  });
 }
 
 function fetchTests(){
@@ -3926,7 +4196,7 @@ function exportTestResults(){
 setInterval(fetchStatus,3000);
 setInterval(fetchTests,3000);
 setInterval(fetchServices,5000);
-fetchStatus();fetchTests();fetchServices();
+fetchStatus();fetchTests();fetchServices();fetchDashboard();startDashboardPoll();
 document.getElementById('statusText').textContent='Port )JS" + port_str + R"JS(';
 
 document.addEventListener('click',function(e){
@@ -5288,10 +5558,10 @@ if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadC
         std::string name = uri.substr(strlen("/css/theme/"));
 
         static const char* slate_css = R"CSS(
-:root{--wt-bg:#272b30;--wt-sidebar-bg:rgba(39,43,48,0.85);--wt-card-bg:#32363b;--wt-border:#43474c;--wt-text:#c8c8c8;--wt-text-secondary:#999;--wt-accent:#5bc0de;--wt-success:#62c462;--wt-danger:#ee5f5b;--wt-warning:#f89406}
+:root{--wt-bg:#272b30;--wt-sidebar-bg:rgba(39,43,48,0.85);--wt-card-bg:#32363b;--wt-border:#43474c;--wt-text:#c8c8c8;--wt-text-secondary:#999;--wt-accent:#5bc0de;--wt-success:#62c462;--wt-danger:#ee5f5b;--wt-warning:#f89406;--wt-surface-elevated:rgba(50,55,59,0.85);--wt-surface-sunken:rgba(255,255,255,0.03);--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.2);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.3);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.4)}
 body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 .wt-sidebar{background:var(--wt-sidebar-bg) !important;border-color:var(--wt-border) !important}
-.wt-card{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important}
+.wt-card{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important;box-shadow:0 1px 4px rgba(0,0,0,0.3) !important}
 .wt-card:hover{box-shadow:0 2px 12px rgba(0,0,0,0.2) !important}
 .wt-input,.wt-textarea,.wt-select{background:#3a3f44 !important;color:var(--wt-text) !important;border-color:var(--wt-border) !important}
 .wt-btn-secondary{background:#43474c !important;color:#c8c8c8 !important}
@@ -5306,6 +5576,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 .wt-sidebar-section-title{color:#777 !important}
 .wt-theme-menu{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important}
 .wt-theme-opt:hover{background:rgba(255,255,255,0.05) !important}
+.wt-pipeline-hero{opacity:0.95}
+.wt-pipeline-node{background:rgba(0,0,0,0.3) !important;border-color:rgba(255,255,255,0.15) !important}
 )CSS";
 
         static const char* flatly_css = R"CSS(
@@ -5326,10 +5598,10 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 )CSS";
 
         static const char* cyborg_css = R"CSS(
-:root{--wt-bg:#060606;--wt-sidebar-bg:rgba(17,17,17,0.9);--wt-card-bg:#111;--wt-border:#282828;--wt-text:#ddd;--wt-text-secondary:#888;--wt-accent:#2a9fd6;--wt-success:#77b300;--wt-danger:#cc0000;--wt-warning:#ff8800;--wt-radius:0px}
+:root{--wt-bg:#060606;--wt-sidebar-bg:rgba(17,17,17,0.9);--wt-card-bg:#111;--wt-border:#282828;--wt-text:#ddd;--wt-text-secondary:#888;--wt-accent:#2a9fd6;--wt-success:#77b300;--wt-danger:#cc0000;--wt-warning:#ff8800;--wt-radius:0px;--wt-radius-lg:0px;--wt-surface-elevated:rgba(17,17,17,0.85);--wt-surface-sunken:rgba(255,255,255,0.02);--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.3);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.4);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.5)}
 body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 .wt-sidebar{background:var(--wt-sidebar-bg) !important;border-color:var(--wt-border) !important}
-.wt-card{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important;border-radius:0 !important}
+.wt-card{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important;border-radius:0 !important;box-shadow:0 1px 4px rgba(0,0,0,0.4) !important}
 .wt-card:hover{box-shadow:0 0 10px rgba(42,159,214,0.15) !important}
 .wt-input,.wt-textarea,.wt-select{background:#1a1a1a !important;color:var(--wt-text) !important;border-color:var(--wt-border) !important;border-radius:0 !important}
 .wt-btn{border-radius:0 !important;text-transform:uppercase;font-size:11px !important;letter-spacing:1px}
@@ -5353,6 +5625,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 .wt-toggle{border-radius:2px !important}
 .wt-toggle::after{border-radius:2px !important}
 .wt-status-dot.online{box-shadow:0 0 6px var(--wt-success) !important}
+.wt-pipeline-hero{opacity:0.95}
+.wt-pipeline-node{background:rgba(0,0,0,0.4) !important;border-color:rgba(255,255,255,0.1) !important}
 )CSS";
 
         const char* css = nullptr;
@@ -5498,7 +5772,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         std::stringstream json;
         json << "{\"logs\":[";
         size_t count = 0;
-        for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < 100; ++it, ++count) {
+        for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < RECENT_LOGS_API_LIMIT; ++it, ++count) {
             if (count > 0) json << ",";
             json << "{"
                  << "\"timestamp\":\"" << escape_json(it->timestamp) << "\","
@@ -5547,6 +5821,8 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 else if (next == 't') { result += '\t'; pos += 2; }
                 else if (next == 'r') { result += '\r'; pos += 2; }
                 else if (next == '/') { result += '/'; pos += 2; }
+                else if (next == 'b') { result += '\b'; pos += 2; }
+                else if (next == 'f') { result += '\f'; pos += 2; }
                 else { result += json[pos]; pos++; }
             } else if (json[pos] == '"') {
                 break;
@@ -5774,7 +6050,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
 
         stop_service(name);
 
-        usleep(500000);
+        usleep(RESTART_WAIT_US);
 
         if (start_service(name, args)) {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"restarted\"}");
@@ -9419,6 +9695,84 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    void handle_dashboard(struct mg_connection *c) {
+        int svc_online = 0;
+        int svc_total = 0;
+        std::stringstream svc_json;
+        svc_json << "[";
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            svc_total = static_cast<int>(services_.size());
+            for (size_t i = 0; i < services_.size(); i++) {
+                if (i > 0) svc_json << ",";
+                const auto& s = services_[i];
+                bool alive = s.managed && s.pid > 0;
+                if (alive) svc_online++;
+                svc_json << "{\"name\":\"" << escape_json(s.name)
+                         << "\",\"online\":" << (alive ? "true" : "false")
+                         << ",\"managed\":" << (s.managed ? "true" : "false") << "}";
+            }
+        }
+        svc_json << "]";
+
+        int running_tests = 0;
+        {
+            std::lock_guard<std::mutex> lock(tests_mutex_);
+            for (const auto& t : tests_) {
+                if (t.is_running) running_tests++;
+            }
+        }
+
+        std::stringstream logs_json;
+        logs_json << "[";
+        {
+            std::lock_guard<std::mutex> lock(logs_mutex_);
+            size_t count = 0;
+            for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < DASHBOARD_RECENT_LOGS_LIMIT; ++it, ++count) {
+                if (count > 0) logs_json << ",";
+                logs_json << "{\"timestamp\":\"" << escape_json(it->timestamp)
+                          << "\",\"service\":\"" << service_type_to_string(it->service)
+                          << "\",\"level\":\"" << escape_json(it->level)
+                          << "\",\"message\":\"" << escape_json(it->message) << "\"}";
+            }
+        }
+        logs_json << "]";
+
+        int test_pass = 0, test_fail = 0;
+        if (db_) {
+            sqlite3_stmt* stmt;
+            const char* sql = "SELECT status, COUNT(*) FROM service_test_runs GROUP BY status";
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const char* st = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                    int cnt = sqlite3_column_int(stmt, 1);
+                    if (st) {
+                        std::string status_str(st);
+                        if (status_str == "pass" || status_str == "PASS" || status_str == "passed" || status_str == "success") test_pass += cnt;
+                        else if (status_str == "fail" || status_str == "FAIL" || status_str == "failed" || status_str == "error") test_fail += cnt;
+                    }
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto uptime_s = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
+
+        std::stringstream json;
+        json << "{\"services_online\":" << svc_online
+             << ",\"services_total\":" << svc_total
+             << ",\"running_tests\":" << running_tests
+             << ",\"test_pass\":" << test_pass
+             << ",\"test_fail\":" << test_fail
+             << ",\"uptime_seconds\":" << uptime_s
+             << ",\"services\":" << svc_json.str()
+             << ",\"recent_logs\":" << logs_json.str()
+             << ",\"pipeline\":[\"SIP_CLIENT\",\"INBOUND_AUDIO_PROCESSOR\",\"VAD_SERVICE\",\"WHISPER_SERVICE\",\"LLAMA_SERVICE\",\"KOKORO_SERVICE\",\"OUTBOUND_AUDIO_PROCESSOR\"]"
+             << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
     // GET /api/status — System health summary: uptime, service count, memory usage.
     void handle_status(struct mg_connection *c) {
         int svc_count = 0;
@@ -10317,16 +10671,37 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, response.str());
     }
 
-    static bool is_read_only_query(const std::string& query) {
-        std::string trimmed = query;
-        size_t start = trimmed.find_first_not_of(" \t\r\n");
-        if (start == std::string::npos) return false;
-        trimmed = trimmed.substr(start);
-        if (trimmed.size() < 6) return false;
-        std::string upper;
-        for (size_t i = 0; i < trimmed.size(); i++) {
-            upper += static_cast<char>(toupper(static_cast<unsigned char>(trimmed[i])));
+    static std::string strip_sql_comments(const std::string& sql) {
+        std::string result;
+        result.reserve(sql.size());
+        size_t i = 0;
+        while (i < sql.size()) {
+            if (i + 1 < sql.size() && sql[i] == '-' && sql[i + 1] == '-') {
+                while (i < sql.size() && sql[i] != '\n') i++;
+            } else if (i + 1 < sql.size() && sql[i] == '/' && sql[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < sql.size() && !(sql[i] == '*' && sql[i + 1] == '/')) i++;
+                if (i + 1 < sql.size()) i += 2;
+                else i = sql.size();
+            } else {
+                result += sql[i];
+                i++;
+            }
         }
+        return result;
+    }
+
+    static bool is_read_only_query(const std::string& query) {
+        std::string stripped = strip_sql_comments(query);
+        size_t start = stripped.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) return false;
+        stripped = stripped.substr(start);
+        if (stripped.size() < 6) return false;
+        std::string upper;
+        for (size_t i = 0; i < stripped.size(); i++) {
+            upper += static_cast<char>(toupper(static_cast<unsigned char>(stripped[i])));
+        }
+        if (upper.find("LOAD_EXTENSION") != std::string::npos) return false;
         if (upper.substr(0, 6) == "SELECT" || upper.substr(0, 7) == "EXPLAIN") return true;
         if (upper.substr(0, 6) == "PRAGMA") {
             if (upper.find('=') != std::string::npos) return false;
@@ -10397,7 +10772,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         
         int row_count = 0;
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            if (row_count >= 10000) break;
+            if (row_count >= DB_QUERY_ROW_LIMIT) break;
             if (row_count > 0) json << ",";
             json << "{";
             
@@ -10420,7 +10795,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
         
         json << "],\"affected\":" << sqlite3_changes(db_)
-             << ",\"truncated\":" << (row_count >= 10000 ? "true" : "false") << "}";
+             << ",\"truncated\":" << (row_count >= DB_QUERY_ROW_LIMIT ? "true" : "false") << "}";
         sqlite3_finalize(stmt);
         
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
@@ -10433,26 +10808,50 @@ int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
 
     {
-        std::string exe_path = argv[0];
-        size_t slash = exe_path.rfind('/');
-        if (slash != std::string::npos) {
-            std::string exe_dir = exe_path.substr(0, slash);
-            if (!exe_dir.empty() && exe_dir != ".") {
-                std::string parent = exe_dir;
-                size_t ps = parent.rfind('/');
-                if (ps != std::string::npos && parent.substr(ps + 1) == "bin") {
-                    parent = parent.substr(0, ps);
+        char resolved[PATH_MAX];
+        if (realpath(argv[0], resolved)) {
+            std::string exe_real(resolved);
+            size_t slash = exe_real.rfind('/');
+            if (slash != std::string::npos) {
+                std::string exe_dir = exe_real.substr(0, slash);
+                size_t ps = exe_dir.rfind('/');
+                if (ps != std::string::npos && exe_dir.substr(ps + 1) == "bin") {
+                    std::string parent = exe_dir.substr(0, ps);
                     if (chdir(parent.c_str()) == 0) {
                         std::cout << "Working directory: " << parent << "\n";
+                    } else {
+                        std::cerr << "Warning: chdir to " << parent << " failed: " << strerror(errno) << "\n";
                     }
                 } else {
                     if (chdir(exe_dir.c_str()) == 0) {
                         std::cout << "Working directory: " << exe_dir << "\n";
+                    } else {
+                        std::cerr << "Warning: chdir to " << exe_dir << " failed: " << strerror(errno) << "\n";
+                    }
+                }
+            }
+        } else {
+            std::string exe_path = argv[0];
+            size_t slash = exe_path.rfind('/');
+            if (slash != std::string::npos) {
+                std::string exe_dir = exe_path.substr(0, slash);
+                if (!exe_dir.empty() && exe_dir != ".") {
+                    std::string parent = exe_dir;
+                    size_t ps = parent.rfind('/');
+                    if (ps != std::string::npos && parent.substr(ps + 1) == "bin") {
+                        parent = parent.substr(0, ps);
+                        if (chdir(parent.c_str()) == 0) {
+                            std::cout << "Working directory: " << parent << "\n";
+                        }
+                    } else {
+                        if (chdir(exe_dir.c_str()) == 0) {
+                            std::cout << "Working directory: " << exe_dir << "\n";
+                        }
                     }
                 }
             }
         }
-        char cwd[1024];
+        char cwd[PATH_MAX];
         if (getcwd(cwd, sizeof(cwd))) {
             struct stat st;
             if (stat("bin/frontend", &st) != 0) {
@@ -10468,17 +10867,34 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::string project_root;
+    {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd))) {
+            project_root = cwd;
+        } else {
+            std::cerr << "Fatal: cannot determine working directory\n";
+            return 1;
+        }
+    }
+
+    struct stat st;
+    if (stat((project_root + "/bin/frontend").c_str(), &st) != 0) {
+        std::cerr << "Fatal: bin/frontend not found in project root: " << project_root << "\n";
+        return 1;
+    }
+
     uint16_t port = 8080;
     if (argc > 2 && strcmp(argv[1], "--port") == 0) {
         port = static_cast<uint16_t>(atoi(argv[2]));
     }
 
-    mkdir("logs", 0755);
+    mkdir((project_root + "/logs").c_str(), 0755);
 
     std::cout << "WhisperTalk Frontend Server\n";
     std::cout << "============================\n\n";
 
-    FrontendServer server(port);
+    FrontendServer server(port, project_root);
     if (!server.start()) {
         return 1;
     }
