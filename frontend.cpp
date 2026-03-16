@@ -2727,6 +2727,23 @@ Save outgoing audio as WAV</label>
 var currentPage='dashboard',currentTest=null,currentSvc=null;
 var logSSE=null,svcLogSSE=null,testLogPoll=null;
 var TSP_PORT=)JS" + tsp_port_str + R"JS(;
+var POLL_STATUS_MS=3000,POLL_TESTS_MS=3000,POLL_SERVICES_MS=5000;
+var POLL_TEST_LOG_MS=1500,POLL_SIP_STATS_MS=2000;
+var POLL_TEST_RESULTS_MS=5000,POLL_CALL_LINE_MAP_MS=5000;
+var DELAY_SERVICE_REFRESH_MS=1000,DELAY_TEST_REFRESH_MS=500;
+var DELAY_SIP_LINE_MS=200,TOAST_DURATION_MS=3000;
+var POLL_BENCHMARK_MS=2000,POLL_ACCURACY_MS=3000;
+var POLL_STRESS_MS=2000,POLL_PIPELINE_HEALTH_MS=10000;
+var SIP_MAX_LINES=20,SSE_RECONNECT_MS=3000;
+var DELAY_RESTART_MS=2000,DELAY_SIP_REFRESH_MS=300;
+var POLL_SHUTUP_MS=1500,POLL_LLAMA_QUALITY_MS=2000;
+var POLL_LLAMA_SHUTUP_MS=1000,POLL_KOKORO_QUALITY_MS=2000;
+var POLL_KOKORO_BENCH_MS=2000,POLL_TTS_ROUNDTRIP_MS=3000;
+var POLL_FULL_LOOP_MS=3000,DELAY_SAVE_FEEDBACK_MS=1500;
+var DELAY_MODEL_SELECT_MS=500,DELAY_SIP_ADD_REFRESH_MS=500;
+var STATUS_CLEAR_MS=5000,POLL_LLAMA_BENCH_MS=2000;
+var POLL_PIPELINE_STRESS_MS=2000,POLL_DOWNLOAD_MS=1000;
+var TOAST_FADE_MS=300,DELAY_DEBOUNCE_MS=300;
 
 function showPage(p){
   var newPage=document.getElementById('page-'+p);
@@ -2760,7 +2777,7 @@ function fetchStatus(){
 var dashPollTimer=null;
 function startDashboardPoll(){
   stopDashboardPoll();
-  dashPollTimer=setInterval(fetchDashboard,3000);
+  dashPollTimer=setInterval(fetchDashboard,POLL_STATUS_MS);
 }
 function stopDashboardPoll(){
   if(dashPollTimer){clearInterval(dashPollTimer);dashPollTimer=null;}
@@ -2835,7 +2852,7 @@ function dashStartAll(){
           body:JSON.stringify({service:s.name})});
       }
     });
-    setTimeout(fetchDashboard,1000);
+    setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
   });
 }
 
@@ -2847,7 +2864,7 @@ function dashStopAll(){
           body:JSON.stringify({service:s.name})});
       }
     });
-    setTimeout(fetchDashboard,1000);
+    setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
   });
 }
 
@@ -2859,7 +2876,7 @@ function dashRestartFailed(){
           body:JSON.stringify({service:s.name})});
       }
     });
-    setTimeout(fetchDashboard,1000);
+    setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
   });
 }
 
@@ -2927,14 +2944,14 @@ function startTestDetail(){
   fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({test:currentTest,args:args})}).then(()=>{
     document.getElementById('testDetailLog').textContent='Starting...';
-    setTimeout(fetchTests,500);pollTestLog();
+    setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
   });
 }
 
 function stopTestDetail(){
   if(!currentTest)return;
   fetch('/api/tests/stop',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({test:currentTest})}).then(()=>setTimeout(fetchTests,500));
+    body:JSON.stringify({test:currentTest})}).then(()=>setTimeout(fetchTests,DELAY_TEST_REFRESH_MS));
 }
 
 function clearTestLog(){document.getElementById('testDetailLog').textContent='';}
@@ -2950,7 +2967,7 @@ function pollTestLog(){
         el.scrollTop=el.scrollHeight;
       }
     }).catch(()=>{});
-  },1500);
+  },POLL_TEST_LOG_MS);
 }
 
 function loadTestHistory(name){
@@ -3165,7 +3182,7 @@ function sipConnectPbx(){
       status.innerHTML='<span style="color:var(--wt-success)">Line added</span>';
       document.getElementById('sipPbxUser').value='';
       document.getElementById('sipPbxPassword').value='';
-      setTimeout(sipRefreshActiveLines,500);
+      setTimeout(sipRefreshActiveLines,DELAY_SIP_ADD_REFRESH_MS);
     } else {
       status.innerHTML='<span style="color:var(--wt-danger)">'+(d.error||'Failed')+'</span>';
     }
@@ -3200,7 +3217,7 @@ function sipHangupLine(index){
   fetch('/api/sip/remove-line',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({index:index.toString()})
   }).then(r=>r.json()).then(function(){
-    setTimeout(sipRefreshActiveLines,300);
+    setTimeout(sipRefreshActiveLines,DELAY_SIP_REFRESH_MS);
   }).catch(function(){});
 }
 
@@ -3216,19 +3233,19 @@ function startSvcDetail(){
   var args=document.getElementById('svcDetailArgs').value;
   fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({service:currentSvc,args:args})}).then(()=>{
-    setTimeout(fetchServices,1000);connectSvcSSE(currentSvc);
+    setTimeout(fetchServices,DELAY_SERVICE_REFRESH_MS);connectSvcSSE(currentSvc);
   });
 }
 function stopSvcDetail(){
   if(!currentSvc)return;
   fetch('/api/services/stop',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({service:currentSvc})}).then(()=>setTimeout(fetchServices,1000));
+    body:JSON.stringify({service:currentSvc})}).then(()=>setTimeout(fetchServices,DELAY_SERVICE_REFRESH_MS));
 }
 function restartSvcDetail(){
   if(!currentSvc)return;
   var args=document.getElementById('svcDetailArgs').value;
   fetch('/api/services/restart',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({service:currentSvc,args:args})}).then(()=>setTimeout(fetchServices,2000));
+    body:JSON.stringify({service:currentSvc,args:args})}).then(()=>setTimeout(fetchServices,DELAY_RESTART_MS));
 }
 function saveSvcConfig(){
   if(!currentSvc)return;
@@ -3237,20 +3254,20 @@ function saveSvcConfig(){
     body:JSON.stringify({service:currentSvc,args:args})}).then(()=>{
     fetchServices();
     var btn=document.getElementById('svcSaveBtn');
-    btn.textContent='Saved!';setTimeout(()=>{btn.textContent='Save Config';},1500);
+    btn.textContent='Saved!';setTimeout(()=>{btn.textContent='Save Config';},DELAY_SAVE_FEEDBACK_MS);
   });
 }
 function quickSvcStart(name){
   fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,1000));
+    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,DELAY_SERVICE_REFRESH_MS));
 }
 function quickSvcStop(name){
   fetch('/api/services/stop',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,1000));
+    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,DELAY_SERVICE_REFRESH_MS));
 }
 function quickSvcRestart(name){
   fetch('/api/services/restart',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,2000));
+    body:JSON.stringify({service:name})}).then(()=>setTimeout(fetchServices,DELAY_RESTART_MS));
 }
 function clearSvcLog(){document.getElementById('svcDetailLog').textContent='';}
 
@@ -3280,7 +3297,7 @@ function connectSvcSSE(name){
   };
   svcLogSSE.onerror=function(){
     svcLogSSE.close();
-    setTimeout(function(){if(currentSvc===name)connectSvcSSE(name);},3000);
+    setTimeout(function(){if(currentSvc===name)connectSvcSSE(name);},SSE_RECONNECT_MS);
   };
 }
 
@@ -3321,7 +3338,7 @@ function reconnectLogSSE(){
   };
   logSSE.onerror=function(){
     logSSE.close();
-    setTimeout(reconnectLogSSE,3000);
+    setTimeout(reconnectLogSSE,SSE_RECONNECT_MS);
   };
 }
 
@@ -3392,7 +3409,7 @@ function loadCredentials(){
     credFields.forEach(f=>{
       var el=document.getElementById(f.statusId);
       if(el){el.style.color='var(--wt-danger)';el.textContent='Failed to load: '+e.message;
-        setTimeout(()=>{el.textContent='';},5000);}
+        setTimeout(()=>{el.textContent='';},STATUS_CLEAR_MS);}
     });
   });
 }
@@ -3403,7 +3420,7 @@ function saveCredential(key,inputId,statusId,clearBtnId){
   if(!inp||!el)return;
   var val=inp.value.trim();
   if(!val){el.style.color='var(--wt-danger)';el.textContent='Token cannot be empty';
-    setTimeout(()=>{el.textContent='';},3000);return;}
+    setTimeout(()=>{el.textContent='';},TOAST_DURATION_MS);return;}
   el.style.color='var(--wt-text-secondary)';el.textContent='Saving...';
   fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({key:key,value:val})}).then(r=>{
@@ -3418,10 +3435,10 @@ function saveCredential(key,inputId,statusId,clearBtnId){
     }else{
       el.style.color='var(--wt-danger)';el.textContent='Error: '+(d.error||'Unknown');
     }
-    setTimeout(()=>{el.textContent='';},3000);
+    setTimeout(()=>{el.textContent='';},TOAST_DURATION_MS);
   }).catch(()=>{
     el.style.color='var(--wt-danger)';el.textContent='Network error';
-    setTimeout(()=>{el.textContent='';},3000);
+    setTimeout(()=>{el.textContent='';},TOAST_DURATION_MS);
   });
 }
 
@@ -3444,10 +3461,10 @@ function clearCredential(key,inputId,statusId,clearBtnId,defaultPh){
     }else{
       el.style.color='var(--wt-danger)';el.textContent='Error: '+(d.error||'Unknown');
     }
-    setTimeout(()=>{el.textContent='';},3000);
+    setTimeout(()=>{el.textContent='';},TOAST_DURATION_MS);
   }).catch(()=>{
     el.style.color='var(--wt-danger)';el.textContent='Network error';
-    setTimeout(()=>{el.textContent='';},3000);
+    setTimeout(()=>{el.textContent='';},TOAST_DURATION_MS);
   });
 }
 
@@ -3470,7 +3487,7 @@ function showToast(msg,type){
   el.style.cssText='position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:6px;z-index:10000;font-size:14px;max-width:400px;box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity 0.3s;'
     +(type==='error'?'background:#dc3545;color:#fff;':'background:var(--wt-card-bg,#2a2a2a);color:var(--wt-text,#e0e0e0);border:1px solid var(--wt-border,#444);');
   document.body.appendChild(el);
-  setTimeout(function(){el.style.opacity='0';setTimeout(function(){el.remove();},300);},3000);
+  setTimeout(function(){el.style.opacity='0';setTimeout(function(){el.remove();},TOAST_FADE_MS);},TOAST_DURATION_MS);
 }
 
 var callLineMap={};
@@ -3488,14 +3505,14 @@ function refreshCallLineMap(){
     });
   }).catch(function(){});
 }
-setInterval(refreshCallLineMap,5000);
-setTimeout(refreshCallLineMap,500);
+setInterval(refreshCallLineMap,POLL_CALL_LINE_MAP_MS);
+setTimeout(refreshCallLineMap,DELAY_TEST_REFRESH_MS);
 
 function fmtCallBadge(cid){
   if(!cid)return'';
   var lbl=callLineMap[cid];
   if(!lbl&&!_clmPending){
-    _clmPending=setTimeout(function(){_clmPending=null;refreshCallLineMap();},300);
+    _clmPending=setTimeout(function(){_clmPending=null;refreshCallLineMap();},DELAY_DEBOUNCE_MS);
   }
   var txt=lbl?(lbl+' C'+cid):('C'+cid);
   return ' <span class="log-cid" data-cid="'+cid+'">'+txt+'</span>';
@@ -3634,7 +3651,7 @@ function runLlamaQualityTest(){
       return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
     }).then(d=>{
       status.innerHTML='<span style="color:var(--wt-accent)">Quality test running (task '+d.task_id+', '+prompts.length+' prompts)...</span>';
-      llamaQualityPoll=setInterval(()=>pollLlamaQualityTask(d.task_id),2000);
+      llamaQualityPoll=setInterval(()=>pollLlamaQualityTask(d.task_id),POLL_LLAMA_QUALITY_MS);
     }).catch(e=>{
       if(llamaQualityPoll){clearInterval(llamaQualityPoll);llamaQualityPoll=null;}
       status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -3682,7 +3699,7 @@ function runLlamaShutupTest(){
       return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
     }).then(d=>{
       status.innerHTML='<span style="color:var(--wt-accent)">Shut-up test running (task '+d.task_id+')...</span>';
-      llamaShutupPoll=setInterval(()=>pollLlamaShutupTask(d.task_id),1000);
+      llamaShutupPoll=setInterval(()=>pollLlamaShutupTask(d.task_id),POLL_LLAMA_SHUTUP_MS);
     }).catch(e=>{
       if(llamaShutupPoll){clearInterval(llamaShutupPoll);llamaShutupPoll=null;}
       status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -3726,7 +3743,7 @@ function runShutupPipelineTest(){
       return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
     }).then(d=>{
       status.innerHTML='<span style="color:var(--wt-accent)">Pipeline shut-up test running (task '+d.task_id+')...</span>';
-      shutupPipelinePoll=setInterval(()=>pollShutupPipelineTask(d.task_id),1500);
+      shutupPipelinePoll=setInterval(()=>pollShutupPipelineTask(d.task_id),POLL_SHUTUP_MS);
     }).catch(e=>{
       if(shutupPipelinePoll){clearInterval(shutupPipelinePoll);shutupPipelinePoll=null;}
       status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -3782,7 +3799,7 @@ function runKokoroQualityTest(){
       return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
     }).then(d=>{
       status.innerHTML='<span style="color:var(--wt-accent)">Quality test running (task '+d.task_id+')...</span>';
-      kokoroQualityPoll=setInterval(()=>pollKokoroQualityTask(d.task_id),2000);
+      kokoroQualityPoll=setInterval(()=>pollKokoroQualityTask(d.task_id),POLL_KOKORO_QUALITY_MS);
     }).catch(e=>{
       if(kokoroQualityPoll){clearInterval(kokoroQualityPoll);kokoroQualityPoll=null;}
       status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -3836,7 +3853,7 @@ function runKokoroBenchmark(){
       return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
     }).then(d=>{
       status.innerHTML='<span style="color:var(--wt-accent)">Benchmark running (task '+d.task_id+')...</span>';
-      kokoroBenchPoll=setInterval(()=>pollKokoroBenchTask(d.task_id),2000);
+      kokoroBenchPoll=setInterval(()=>pollKokoroBenchTask(d.task_id),POLL_KOKORO_BENCH_MS);
     }).catch(e=>{
       if(kokoroBenchPoll){clearInterval(kokoroBenchPoll);kokoroBenchPoll=null;}
       status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -3894,7 +3911,7 @@ function checkPipelineHealth(auto_refresh){
 function startPipelineHealthAutoRefresh(){
   if(pipelineHealthInterval){clearInterval(pipelineHealthInterval);pipelineHealthInterval=null;}
   checkPipelineHealth(true);
-  pipelineHealthInterval=setInterval(function(){checkPipelineHealth(true);},10000);
+  pipelineHealthInterval=setInterval(function(){checkPipelineHealth(true);},POLL_PIPELINE_HEALTH_MS);
   var btn=document.getElementById('pipelineHealthAutoBtn');
   if(btn) btn.textContent='Stop Auto-Refresh';
   btn.onclick=stopPipelineHealthAutoRefresh;
@@ -3950,7 +3967,7 @@ function runMultilineStress(){
         btn.disabled=false;
         status.innerHTML='<span style="color:var(--wt-danger)">Poll error: '+escapeHtml(String(e))+'</span>';
       });
-    },2000);
+    },POLL_STRESS_MS);
   }).catch(function(e){
     btn.disabled=false;
     status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -3979,7 +3996,7 @@ function runPipelineStressTest(){
   .then(function(r){return r.json();}).then(function(d){
     if(d.error){status.innerHTML='<span style="color:var(--wt-danger)">'+escapeHtml(d.error)+'</span>';btn.disabled=false;stopBtn.style.display='none';progress.style.display='none';return;}
     status.innerHTML='<span style="color:var(--wt-accent)">Running...</span>';
-    pstressPoll=setInterval(function(){pollPipelineStress(dur);},2000);
+    pstressPoll=setInterval(function(){pollPipelineStress(dur);},POLL_PIPELINE_STRESS_MS);
   }).catch(function(e){
     btn.disabled=false;stopBtn.style.display='none';progress.style.display='none';
     status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -4069,7 +4086,7 @@ function runTtsRoundtrip(){
       return r.json().then(function(d){throw new Error(d.error||'HTTP '+r.status);});
     }).then(function(d){
       status.innerHTML='<span style="color:var(--wt-accent)">Round-trip test running (task '+d.task_id+')... This may take several minutes.</span>';
-      ttsRoundtripPoll=setInterval(function(){pollTtsRoundtripTask(d.task_id);},3000);
+      ttsRoundtripPoll=setInterval(function(){pollTtsRoundtripTask(d.task_id);},POLL_TTS_ROUNDTRIP_MS);
     }).catch(function(e){
       btn.disabled=false;
       if(ttsRoundtripPoll){clearInterval(ttsRoundtripPoll);ttsRoundtripPoll=null;}
@@ -4137,7 +4154,7 @@ function runFullLoopTest(){
       return r.json().then(function(d){throw new Error(d.error||'HTTP '+r.status);});
     }).then(function(d){
       status.innerHTML='<span style="color:var(--wt-accent)">Full loop test running (task '+d.task_id+')... This may take several minutes.</span>';
-      fullLoopPoll=setInterval(function(){pollFullLoopTask(d.task_id);},3000);
+      fullLoopPoll=setInterval(function(){pollFullLoopTask(d.task_id);},POLL_FULL_LOOP_MS);
     }).catch(function(e){
       btn.disabled=false;
       status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
@@ -4328,7 +4345,7 @@ var trCache=[];
 
 function startTestResultsPoll(){
   stopTestResultsPoll();
-  trPollTimer=setInterval(fetchTestResultsPage,5000);
+  trPollTimer=setInterval(fetchTestResultsPage,POLL_TEST_RESULTS_MS);
 }
 function stopTestResultsPoll(){
   if(trPollTimer){clearInterval(trPollTimer);trPollTimer=null;}
@@ -4475,9 +4492,9 @@ function exportTestResultsPage(){
   URL.revokeObjectURL(url);
 }
 
-setInterval(fetchStatus,3000);
-setInterval(fetchTests,3000);
-setInterval(fetchServices,5000);
+setInterval(fetchStatus,POLL_STATUS_MS);
+setInterval(fetchTests,POLL_TESTS_MS);
+setInterval(fetchServices,POLL_SERVICES_MS);
 fetchStatus();fetchTests();fetchServices();showPage('dashboard');
 document.getElementById('statusText').textContent='Port )JS" + port_str + R"JS(';
 
@@ -4500,7 +4517,7 @@ function buildSipLinesGrid(){
   var html='';
   html+='<div style="grid-column:1/-1;display:grid;grid-template-columns:60px 60px 1fr;gap:4px;font-size:11px;font-weight:600;color:var(--wt-text-secondary);padding:0 4px">';
   html+='<div>Enable</div><div>Connect</div><div>Line</div></div>';
-  for(var i=0;i<20;i++){
+  for(var i=0;i<SIP_MAX_LINES;i++){
     var name=sipLineNames[i];
     var num=i+1;
     html+='<div style="display:grid;grid-template-columns:60px 60px 1fr;gap:4px;align-items:center;padding:4px 4px;border-radius:4px;background:var(--wt-card-hover)" id="sipLine_'+i+'">';
@@ -4519,7 +4536,7 @@ function onEnableChange(idx){
 }
 
 function enableLinesPreset(count){
-  for(var i=0;i<20;i++){
+  for(var i=0;i<SIP_MAX_LINES;i++){
     var en=document.getElementById('sipEnable_'+i);
     var cn=document.getElementById('sipConnect_'+i);
     if(i<count){en.checked=true;cn.disabled=false;}else{en.checked=false;cn.checked=false;cn.disabled=true;}
@@ -4528,7 +4545,7 @@ function enableLinesPreset(count){
 }
 
 function selectAllConnect(){
-  for(var i=0;i<20;i++){
+  for(var i=0;i<SIP_MAX_LINES;i++){
     var en=document.getElementById('sipEnable_'+i);
     var cn=document.getElementById('sipConnect_'+i);
     if(en.checked){cn.checked=true;}
@@ -4536,7 +4553,7 @@ function selectAllConnect(){
 }
 
 function deselectAllConnect(){
-  for(var i=0;i<20;i++){
+  for(var i=0;i<SIP_MAX_LINES;i++){
     document.getElementById('sipConnect_'+i).checked=false;
   }
 }
@@ -4544,7 +4561,7 @@ function deselectAllConnect(){
 function applyEnabledLines(){
   var statusDiv=document.getElementById('sipLinesStatus');
   var enabledNames=[];
-  for(var i=0;i<20;i++){
+  for(var i=0;i<SIP_MAX_LINES;i++){
     if(document.getElementById('sipEnable_'+i).checked){
       enabledNames.push(sipLineNames[i]);
     }
@@ -4562,12 +4579,12 @@ function applyEnabledLines(){
       var addNext=function(i){
         if(i>=toAdd.length){
           statusDiv.innerHTML='<span style="color:var(--wt-success)">Applied '+enabledNames.length+' line(s)</span>';
-          setTimeout(refreshSipPanel,1000);
+          setTimeout(refreshSipPanel,DELAY_SERVICE_REFRESH_MS);
           return;
         }
         fetch('/api/sip/add-line',{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({user:toAdd[i],server:'127.0.0.1',password:''})
-        }).then(function(){setTimeout(function(){addNext(i+1);},200);}).catch(function(){setTimeout(function(){addNext(i+1);},200);});
+        }).then(function(){setTimeout(function(){addNext(i+1);},DELAY_SIP_LINE_MS);}).catch(function(){setTimeout(function(){addNext(i+1);},DELAY_SIP_LINE_MS);});
       };
       addNext(0);
     });
@@ -4583,7 +4600,7 @@ function refreshSipPanel(){
     var lineUsers=lines.map(function(l){return l.user;});
     var regMap={};
     lines.forEach(function(l){regMap[l.user]=l.registered;});
-    for(var i=0;i<20;i++){
+    for(var i=0;i<SIP_MAX_LINES;i++){
       var name=sipLineNames[i];
       var en=document.getElementById('sipEnable_'+i);
       var cn=document.getElementById('sipConnect_'+i);
@@ -4613,7 +4630,7 @@ function refreshSipPanel(){
 function startConference(){
   var statusDiv=document.getElementById('sipLinesStatus');
   var users=[];
-  for(var i=0;i<20;i++){
+  for(var i=0;i<SIP_MAX_LINES;i++){
     if(document.getElementById('sipConnect_'+i).checked){
       users.push(sipLineNames[i]);
     }
@@ -4648,7 +4665,7 @@ function startSipRtpTest(){
   statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x25B6; Test running. Use Services page to start/stop SIP Client and IAP.</span>';
   refreshSipStats();
   if(sipRtpTestInterval)clearInterval(sipRtpTestInterval);
-  sipRtpTestInterval=setInterval(refreshSipStats,2000);
+  sipRtpTestInterval=setInterval(refreshSipStats,POLL_SIP_STATS_MS);
 }
 
 function stopSipRtpTest(){
@@ -4901,7 +4918,7 @@ document.querySelectorAll('#betaTestTabs [data-bs-toggle="tab"]').forEach(el=>{
   let debounceTimer=null;
   const debouncedUpdate=()=>{
     if(debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer=setTimeout(updateBetaSummaryDots,300);
+    debounceTimer=setTimeout(updateBetaSummaryDots,DELAY_DEBOUNCE_MS);
   };
   const observer=new MutationObserver(debouncedUpdate);
   ['beta-component','beta-pipeline','beta-tools'].forEach(id=>{
@@ -4970,7 +4987,7 @@ function selectModelForBenchmark(id,name){
   if(!sel.value){
     // model not in list yet, reload first
     loadModels();
-    setTimeout(()=>{sel.value=id;},500);
+    setTimeout(()=>{sel.value=id;},DELAY_MODEL_SELECT_MS);
   }
   document.getElementById('benchmarkResults').innerHTML='';
   document.getElementById('benchmarkStatus').innerHTML=
@@ -5060,7 +5077,7 @@ function runBenchmark(){
   }).then(d=>{
     document.getElementById('benchmarkStatus').innerHTML=
       '<span style="color:var(--wt-accent)">Benchmark running (task '+d.task_id+', '+testFiles.length+' files × '+iterations+' iterations)...</span>';
-    benchmarkPollInterval=setInterval(()=>pollBenchmarkTask(d.task_id),2000);
+    benchmarkPollInterval=setInterval(()=>pollBenchmarkTask(d.task_id),POLL_BENCHMARK_MS);
   }).catch(e=>{
     if(benchmarkPollInterval){clearInterval(benchmarkPollInterval);benchmarkPollInterval=null;}
     btn.disabled=false;btn.textContent='▶ Run Benchmark';
@@ -5278,7 +5295,7 @@ function pollDownloadProgress(dlId){
         delete activeDownloads[dlId];
       }
     }).catch(function(){});
-  },1000);
+  },POLL_DOWNLOAD_MS);
 }
 
 function loadModelComparison(){
@@ -5541,7 +5558,7 @@ function runLlamaBenchmark(){
   }).then(d=>{
     document.getElementById('llamaBenchmarkStatus').innerHTML=
       '<span style="color:var(--wt-accent)">Benchmark running (task '+d.task_id+')...</span>';
-    llamaBenchmarkPollInterval=setInterval(()=>pollLlamaBenchmarkTask(d.task_id),2000);
+    llamaBenchmarkPollInterval=setInterval(()=>pollLlamaBenchmarkTask(d.task_id),POLL_LLAMA_BENCH_MS);
   }).catch(e=>{
     if(llamaBenchmarkPollInterval){clearInterval(llamaBenchmarkPollInterval);llamaBenchmarkPollInterval=null;}
     btn.disabled=false;btn.textContent='\u25B6 Run Benchmark';
@@ -5714,7 +5731,7 @@ function runWhisperAccuracyTest(){
     return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
   }).then(d=>{
     resultsDiv.innerHTML='<p style="color:var(--wt-warning)">&#x23F3; Accuracy test running (task '+d.task_id+', '+selected.length+' files)...</p>';
-    accuracyPollInterval=setInterval(()=>pollAccuracyTask(d.task_id),3000);
+    accuracyPollInterval=setInterval(()=>pollAccuracyTask(d.task_id),POLL_ACCURACY_MS);
   }).catch(e=>{
     accuracyTestRunning=false;
     if(btn){btn.disabled=false;btn.textContent='Run Accuracy Test';}
