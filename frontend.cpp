@@ -1971,37 +1971,25 @@ Save outgoing audio as WAV</label>
 <div class="wt-content">
 <h2 class="wt-page-title">Beta Testing & Optimization</h2>
 
-<div class="wt-card">
-<div class="wt-card-header">
-<span class="wt-card-title">Test Audio Files</span>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshTestFiles()">&#x21BB; Refresh</button>
-</div>
-<div id="testFilesContainer">Loading test files...</div>
-</div>
-
-<div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Audio Injection</span></div>
-<div class="wt-field">
-<label>Select Test File</label>
-<select class="wt-select" id="injectFileSelect" style="width:100%;padding:8px">
-<option value="">-- Select a test file --</option>
-</select>
-</div>
-<div class="wt-field">
-<label>Inject into active testline</label>
-<select class="wt-select" id="injectLeg" style="width:100%;padding:8px">
-<option value="" disabled>-- No active testlines --</option>
-</select>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshInjectLegs()" style="margin-top:4px">&#x21BB; Refresh Legs</button>
-</div>
-<div style="display:flex;gap:8px">
-<button class="wt-btn wt-btn-primary" onclick="injectAudio()">&#x25B6; Inject Audio</button>
-</div>
-<div id="injectionStatus" style="margin-top:12px;font-size:13px"></div>
+<div id="betaTestSummary" style="display:flex;gap:16px;align-items:center;margin-bottom:16px;padding:10px 16px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius);font-size:13px">
+<span style="font-weight:600;color:var(--wt-text-secondary)">Status:</span>
+<span><span id="betaDotComponent" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--wt-text-secondary);margin-right:4px"></span>Component</span>
+<span><span id="betaDotPipeline" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--wt-text-secondary);margin-right:4px"></span>Pipeline</span>
+<span><span id="betaDotTools" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--wt-text-secondary);margin-right:4px"></span>Tools</span>
 </div>
 
+<ul class="nav wt-beta-tabs" id="betaTestTabs">
+<li><a class="nav-link active" data-tab="beta-component" onclick="switchBetaTab('beta-component')">Component Tests</a></li>
+<li><a class="nav-link" data-tab="beta-pipeline" onclick="switchBetaTab('beta-pipeline')">Pipeline Tests</a></li>
+<li><a class="nav-link" data-tab="beta-tools" onclick="switchBetaTab('beta-tools')">Tools</a></li>
+</ul>
+
+<div id="beta-component">
+
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Test SIP Client RTP packet routing and TCP connection handling with IAP service.</p>
 <div style="display:flex;gap:8px;margin-bottom:12px">
 <button class="wt-btn wt-btn-primary" onclick="startSipRtpTest()">&#x25B6; Start Test</button>
@@ -2031,17 +2019,21 @@ Save outgoing audio as WAV</label>
 <div><strong>TCP Connection Status:</strong> <span id="iapConnectionStatus">Unknown</span></div>
 <div style="margin-top:4px"><strong>Test Instructions:</strong></div>
 <ol style="margin:8px 0;padding-left:20px;font-size:12px;color:var(--wt-text-secondary)">
-<li>Start SIP Client (without IAP) → Inject audio → Verify RTP packets received but discarded</li>
-<li>Start IAP service → Verify TCP connection established</li>
-<li>Re-inject audio → Verify packets forwarded to IAP</li>
+<li>Start SIP Client (without IAP) &#x2192; Inject audio &#x2192; Verify RTP packets received but discarded</li>
+<li>Start IAP service &#x2192; Verify TCP connection established</li>
+<li>Re-inject audio &#x2192; Verify packets forwarded to IAP</li>
 <li>Stop/Start IAP multiple times to test reconnection handling</li>
 </ol>
 </div>
 </div>
 </div>
+</div>
+</div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 2: IAP Codec Quality</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: IAP Codec Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px"><strong>Codec algorithm test</strong> (does not require IAP service). Runs the exact G.711 mu-law encode/decode + 15-tap FIR half-band 8kHz&#x2192;16kHz upsample pipeline offline, measuring SNR and RMS Error per-packet. Service connectivity is tested in Test 1 above.</p>
 <div class="wt-field">
 <label>Select Test File</label>
@@ -2080,39 +2072,13 @@ Save outgoing audio as WAV</label>
 <canvas id="iapMetricsChart" style="max-height:250px"></canvas>
 </div>
 </div>
-
-<div class="wt-card">
-<div class="wt-card-header">
-<span class="wt-card-title">SIP Lines Management</span>
-<div style="display:flex;gap:8px">
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshSipPanel()">&#x21BB; Refresh</button>
 </div>
-</div>
-<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:12px">
-  Enable lines (check-field 1) to register them with the SIP provider. Connect lines (check-field 2) to start a conference call between selected lines. Up to 20 lines supported.
-</p>
-<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(1)">1 Line</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(2)">2 Lines</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(4)">4 Lines</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(6)">6 Lines</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(10)">10 Lines</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(20)">20 Lines</button>
-</div>
-<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;margin-bottom:12px" id="sipLinesGrid"></div>
-<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-<button class="wt-btn wt-btn-primary" onclick="applyEnabledLines()">&#x2705; Apply Enabled</button>
-<button class="wt-btn wt-btn-success" onclick="startConference()">&#x260E; Start Conference</button>
-<button class="wt-btn wt-btn-danger" onclick="hangupConference()">&#x1F4F5; Hangup</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="selectAllConnect()">Connect All</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="deselectAllConnect()">Disconnect All</button>
-</div>
-<div id="sipLinesStatus" style="margin-top:8px;font-size:13px"></div>
-<div id="sipProviderUsers" style="margin-top:12px;font-size:12px;color:var(--wt-text-secondary)"></div>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Whisper Accuracy Test</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Whisper Accuracy Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <div class="wt-field">
 <label>Test Files (hold Ctrl/Cmd to select multiple)</label>
 <select class="wt-select" id="accuracyTestFiles" multiple style="width:100%;padding:8px;height:120px">
@@ -2180,9 +2146,13 @@ Save outgoing audio as WAV</label>
 <div id="accuracyResults" style="margin-top:12px"></div>
 <canvas id="accuracyTrendChart" style="margin-top:12px;display:none;max-height:200px"></canvas>
 </div>
+</div>
+</div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 4: LLaMA Response Quality</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: LLaMA Response Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Send test prompts directly to LLaMA service and evaluate response quality.
   Requires: LLaMA service running. Does not require full pipeline.
@@ -2204,33 +2174,13 @@ Save outgoing audio as WAV</label>
 <div id="llamaTestResults" style="margin-top:12px"></div>
 <div id="llamaShutupResult" style="margin-top:8px"></div>
 </div>
-
-<div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 4b: Shut-Up Mechanism (Pipeline)</span></div>
-<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
-  Tests the LLaMA shut-up (interrupt / barge-in) mechanism via command port with configurable delays.
-  Measures generation-interrupt latency across scenarios: immediate, standard (200ms), late (1s), and rapid successive.
-  Also checks Kokoro and OAP status for signal propagation readiness.
-  Requires: LLaMA service running. Kokoro + OAP optional (status-checked only).
-</p>
-<div class="wt-field">
-<label>Scenarios</label>
-<select class="wt-select" id="shutupScenarios" multiple style="width:100%;padding:8px;height:80px">
-<option value="basic" selected>Basic: 200ms delay, interrupt mid-generation</option>
-<option value="early" selected>Early: 0ms delay, interrupt immediately</option>
-<option value="late" selected>Late: 1000ms delay, interrupt near end</option>
-<option value="rapid" selected>Rapid: 3 successive interrupts (100ms delay each)</option>
-</select>
 </div>
-<div style="display:flex;gap:8px;margin-top:8px">
-<button class="wt-btn wt-btn-primary" onclick="runShutupPipelineTest()">&#x25B6; Run Pipeline Shut-Up Test</button>
-</div>
-<div id="shutupPipelineStatus" style="margin-top:8px;font-size:12px"></div>
-<div id="shutupPipelineResults" style="margin-top:12px"></div>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Synthesize German phrases via Kokoro TTS and measure latency, RTF, audio quality.
   Requires: Kokoro service running. Does not require full pipeline.
@@ -2252,9 +2202,45 @@ Save outgoing audio as WAV</label>
 <div id="kokoroTestResults" style="margin-top:12px"></div>
 <div id="kokoroBenchResult" style="margin-top:8px"></div>
 </div>
+</div>
+</div>
+
+</div><!-- end beta-component -->
+
+<div id="beta-pipeline" style="display:none">
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 6: Full Pipeline Round-Trip</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4b: Shut-Up Mechanism (Pipeline)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Tests the LLaMA shut-up (interrupt / barge-in) mechanism via command port with configurable delays.
+  Measures generation-interrupt latency across scenarios: immediate, standard (200ms), late (1s), and rapid successive.
+  Also checks Kokoro and OAP status for signal propagation readiness.
+  Requires: LLaMA service running. Kokoro + OAP optional (status-checked only).
+</p>
+<div class="wt-field">
+<label>Scenarios</label>
+<select class="wt-select" id="shutupScenarios" multiple style="width:100%;padding:8px;height:80px">
+<option value="basic" selected>Basic: 200ms delay, interrupt mid-generation</option>
+<option value="early" selected>Early: 0ms delay, interrupt immediately</option>
+<option value="late" selected>Late: 1000ms delay, interrupt near end</option>
+<option value="rapid" selected>Rapid: 3 successive interrupts (100ms delay each)</option>
+</select>
+</div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button class="wt-btn wt-btn-primary" onclick="runShutupPipelineTest()">&#x25B6; Run Pipeline Shut-Up Test</button>
+</div>
+<div id="shutupPipelineStatus" style="margin-top:8px;font-size:12px"></div>
+<div id="shutupPipelineResults" style="margin-top:12px"></div>
+</div>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 6: Full Pipeline Round-Trip</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Full pipeline loop: Phrase &#x2192; Kokoro WAV &#x2192; inject &#x2192; SIP(L1) &#x2192; IAP &#x2192; VAD &#x2192; Whisper &#x2192; LLaMA &#x2192; Kokoro &#x2192; OAP &#x2192; SIP &#x2192; relay &#x2192; SIP(L2) &#x2192; IAP &#x2192; VAD &#x2192; Whisper.
   Verifies transcription of injected phrase (Line 1) and LLaMA response (Line 2).
@@ -2270,9 +2256,13 @@ Save outgoing audio as WAV</label>
 <div id="ttsRoundtripStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="ttsRoundtripResults" style="margin-top:12px"></div>
 </div>
+</div>
+</div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 6b: Full Loop File Test (WER)</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 6b: Full Loop File Test (WER)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Injects test audio files through full pipeline with 2 SIP lines. Measures Word Error Rate (WER)
   between LLaMA response text and Whisper Line 2 re-transcription of Kokoro/OAP output.
@@ -2290,9 +2280,13 @@ Save outgoing audio as WAV</label>
 <div id="fullLoopStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="fullLoopResults" style="margin-top:12px"></div>
 </div>
+</div>
+</div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 7: Pipeline Resilience Health Check</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 7: Pipeline Resilience Health Check</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Pings all 7 pipeline services via their command ports and reports interconnect status.
   Use this to verify all services are running and interconnected correctly.
@@ -2304,9 +2298,13 @@ Save outgoing audio as WAV</label>
 <div id="pipelineHealthStatus" style="font-size:12px;margin-bottom:8px"></div>
 <div id="pipelineHealthResults"></div>
 </div>
+</div>
+</div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 8: Multi-Line Command Stress Test</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 8: Multi-Line Command Stress Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Floods all 7 pipeline service command ports concurrently with PING requests from multiple simulated lines.
   Measures response success rate and latency under concurrent load.
@@ -2319,9 +2317,13 @@ Save outgoing audio as WAV</label>
 <div id="stressStatus" style="font-size:12px;margin-bottom:8px"></div>
 <div id="stressResults"></div>
 </div>
+</div>
+</div>
 
 <div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Test 9: Full Pipeline Stress Test</span></div>
+<div class="wt-card-header" style="cursor:pointer" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 9: Full Pipeline Stress Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
+<div class="wt-collapsible open">
+<div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Continuously injects test audio through the full pipeline for a configurable duration.
   Measures end-to-end latency, per-service memory, health, and throughput under sustained load.
@@ -2359,6 +2361,71 @@ Save outgoing audio as WAV</label>
   <div id="pstressThroughput" style="font-size:13px"></div>
 </div>
 <div id="pstressResults"></div>
+</div>
+</div>
+</div>
+
+</div><!-- end beta-pipeline -->
+
+<div id="beta-tools" style="display:none">
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Test Audio Files</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshTestFiles()">&#x21BB; Refresh</button>
+</div>
+<div id="testFilesContainer">Loading test files...</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Audio Injection</span></div>
+<div class="wt-field">
+<label>Select Test File</label>
+<select class="wt-select" id="injectFileSelect" style="width:100%;padding:8px">
+<option value="">-- Select a test file --</option>
+</select>
+</div>
+<div class="wt-field">
+<label>Inject into active testline</label>
+<select class="wt-select" id="injectLeg" style="width:100%;padding:8px">
+<option value="" disabled>-- No active testlines --</option>
+</select>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshInjectLegs()" style="margin-top:4px">&#x21BB; Refresh Legs</button>
+</div>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-primary" onclick="injectAudio()">&#x25B6; Inject Audio</button>
+</div>
+<div id="injectionStatus" style="margin-top:12px;font-size:13px"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">SIP Lines Management</span>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="refreshSipPanel()">&#x21BB; Refresh</button>
+</div>
+</div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:12px">
+  Enable lines (check-field 1) to register them with the SIP provider. Connect lines (check-field 2) to start a conference call between selected lines. Up to 20 lines supported.
+</p>
+<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(1)">1 Line</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(2)">2 Lines</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(4)">4 Lines</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(6)">6 Lines</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(10)">10 Lines</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="enableLinesPreset(20)">20 Lines</button>
+</div>
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;margin-bottom:12px" id="sipLinesGrid"></div>
+<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+<button class="wt-btn wt-btn-primary" onclick="applyEnabledLines()">&#x2705; Apply Enabled</button>
+<button class="wt-btn wt-btn-success" onclick="startConference()">&#x260E; Start Conference</button>
+<button class="wt-btn wt-btn-danger" onclick="hangupConference()">&#x1F4F5; Hangup</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="selectAllConnect()">Connect All</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="deselectAllConnect()">Disconnect All</button>
+</div>
+<div id="sipLinesStatus" style="margin-top:8px;font-size:13px"></div>
+<div id="sipProviderUsers" style="margin-top:12px;font-size:12px;color:var(--wt-text-secondary)"></div>
 </div>
 
 <div class="wt-card">
@@ -2405,6 +2472,8 @@ Save outgoing audio as WAV</label>
 <canvas id="metricsChart" style="max-height:300px"></canvas>
 </div>
 </div>
+
+</div><!-- end beta-tools -->
 
 </div></div>
 
@@ -4781,6 +4850,24 @@ function updateVadThresholdDisplay(val){
 }
 
 // ===== MODELS PAGE =====
+
+function switchBetaTab(tab){
+  ['beta-component','beta-pipeline','beta-tools'].forEach(function(t){
+    var el=document.getElementById(t);
+    if(el) el.style.display=(t===tab)?'':'none';
+  });
+  document.querySelectorAll('#betaTestTabs .nav-link').forEach(function(a){
+    a.classList.toggle('active',a.dataset.tab===tab);
+  });
+}
+
+function toggleCollapsible(header){
+  var body=header.nextElementSibling;
+  if(!body) return;
+  body.classList.toggle('open');
+  var arrow=header.querySelector('span:last-child');
+  if(arrow) arrow.innerHTML=body.classList.contains('open')?'&#x25BC;':'&#x25B6;';
+}
 
 function switchModelTab(tab){
   ['whisper','llama','compare'].forEach(t=>{

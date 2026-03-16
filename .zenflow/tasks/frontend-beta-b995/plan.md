@@ -216,7 +216,8 @@ CONFIGURATION section:
 
 **Verification**: Build succeeds. Dashboard loads as default page on startup.
 
-### [ ] Step: Beta Testing page reorganization with Bootstrap tabs
+### [x] Step: Beta Testing page reorganization with Bootstrap tabs
+<!-- chat-id: bcc6403b-599d-43df-8279-5f3bb9ddeddb -->
 
 Changes in `frontend.cpp` within `build_ui_pages()` (lines 1754–2193+ for the beta testing page).
 
