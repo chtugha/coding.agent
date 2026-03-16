@@ -754,7 +754,7 @@ public:
         if (resp_len == 0) return "";
 
         std::string resp(resp_len, '\0');
-        if (!recv_exact(sock, static_cast<void*>(resp.data()), resp_len, timeout_ms)) return "";
+        if (!recv_exact(sock, const_cast<char*>(resp.data()), resp_len, timeout_ms)) return "";
         return resp;
     }
 
@@ -1002,7 +1002,7 @@ private:
                     uint16_t len = ntohs(net_len);
                     if (len == 0) { mark_failed = true; break; }
                     std::string msg(len, '\0');
-                    if (!recv_exact(sock, static_cast<void*>(msg.data()), len, 2000)) { mark_failed = true; break; }
+                    if (!recv_exact(sock, const_cast<char*>(msg.data()), len, 2000)) { mark_failed = true; break; }
 
                     std::string response;
                     if (custom_handler_) {

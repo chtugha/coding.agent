@@ -4867,7 +4867,7 @@ const updateBetaSummaryDots=()=>{
   const getTabStatus=(paneId)=>{
     const pane=document.getElementById(paneId);
     if(!pane) return 'neutral';
-    const els=pane.querySelectorAll('.badge,.wt-badge,[id$="Status"],[id$="Result"]');
+    const els=pane.querySelectorAll('.badge,.wt-badge,[id$="Status"],[id$="Results"]');
     let hasPass=false,hasFail=false;
     els.forEach(el=>{
       const text=(el.textContent||'').toLowerCase();
