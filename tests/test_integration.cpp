@@ -212,6 +212,12 @@ protected:
 TEST_F(RegressionTest, LlamaSeqIdRegressionMultipleCallsAllSucceed) {
     if (!binary_exists("llama-service"))
         GTEST_SKIP() << "llama-service binary not found in " << g_bin_dir;
+    {
+        struct stat st;
+        std::string gguf = g_models_dir + "/Llama-3.2-1B-Instruct-Q8_0.gguf";
+        if (stat(gguf.c_str(), &st) != 0)
+            GTEST_SKIP() << "LLaMA model not found at " << gguf;
+    }
     std::printf("\n  === REGRESSION: llama seq_id (Bug 1) ===\n");
     std::printf("  Verifies kv_unified=true fix: all calls after the first must succeed\n");
 
@@ -238,6 +244,11 @@ TEST_F(RegressionTest, LlamaSeqIdRegressionMultipleCallsAllSucceed) {
 TEST_F(RegressionTest, NeuTTSCodecShapeRegressionSynthesisSucceeds) {
     if (!binary_exists("neutts-service"))
         GTEST_SKIP() << "neutts-service binary not found in " << g_bin_dir;
+    std::string neutts_dir = g_models_dir + "/neutts-nano-german";
+    struct stat st;
+    if (stat((neutts_dir + "/ref_codes.bin").c_str(), &st) != 0 ||
+        stat((neutts_dir + "/neucodec_decoder.mlmodelc").c_str(), &st) != 0)
+        GTEST_SKIP() << "NeuTTS model files not found in " << neutts_dir;
     std::printf("\n  === REGRESSION: NeuTTS CoreML shape (Bug 2) ===\n");
     std::printf("  Verifies COMPILED_T=256 fix: SYNTH_WAV must return WAV_RESULT\n");
 
@@ -296,6 +307,18 @@ protected:
         for (const char* bin : required) {
             if (!binary_exists(bin))
                 GTEST_SKIP() << "Pipeline binary not found: " << g_bin_dir << "/" << bin;
+        }
+
+        const char* required_models[] = {
+            "Llama-3.2-1B-Instruct-Q8_0.gguf",
+            "kokoro-german/vocab.json",
+            "kokoro-german/df_eva_voice.bin",
+        };
+        struct stat st;
+        for (const char* model : required_models) {
+            std::string path = g_models_dir + "/" + model;
+            if (stat(path.c_str(), &st) != 0)
+                GTEST_SKIP() << "Model file not found: " << path;
         }
     }
 
