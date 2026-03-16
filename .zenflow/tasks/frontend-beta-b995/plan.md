@@ -160,7 +160,8 @@ All changes in `frontend.cpp` within `serve_index()` (the `<style>` block, lines
 
 **Verification**: Build succeeds. The `page-dashboard` div exists in the DOM.
 
-### [ ] Step: Test Results page
+### [x] Step: Test Results page
+<!-- chat-id: c0adbc7f-51bc-48e0-88e5-41391a8b0063 -->
 
 **HTML** — Add new `page-test-results` div to `build_ui_pages()`:
 - Hero row: 3 metric cards (Total Tests, Pass Rate %, Avg Latency) using `.wt-metric-card` style

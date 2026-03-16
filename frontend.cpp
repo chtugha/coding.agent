@@ -104,6 +104,7 @@
 #include <cerrno>
 #include <climits>
 #include <regex>
+#include <iomanip>
 
 static constexpr int LOG_FLUSH_INTERVAL_MS = 500;
 static constexpr int UDP_BUFFER_SIZE = 4096;
@@ -1381,6 +1382,8 @@ private:
                 handle_log_level_settings(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/test_results")) == 0) {
                 handle_test_results(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/test_results_summary")) == 0) {
+                handle_test_results_summary(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/accuracy_test")) == 0) {
                 handle_whisper_accuracy_test(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/hallucination_filter")) == 0) {
@@ -1596,6 +1599,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <p class="wt-sidebar-section-title">Testing</p>
 <a class="wt-nav-item" data-page="tests" onclick="showPage('tests')">
 <span class="nav-icon">&#x1F9EA;</span>Tests<span class="nav-badge" id="testsBadge">0</span></a>
+<a class="wt-nav-item" data-page="test-results" onclick="showPage('test-results')">
+<span class="nav-icon">&#x1F4CA;</span><span class="nav-text">Test Results</span></a>
 <a class="wt-nav-item" data-page="beta-testing" onclick="showPage('beta-testing')">
 <span class="nav-icon">&#x1F3AF;</span>Beta Testing</a>
 <a class="wt-nav-item" data-page="models" onclick="showPage('models')">
@@ -1859,6 +1864,55 @@ Save outgoing audio as WAV</label>
 <div class="wt-toggle on" id="autoScrollToggle" onclick="this.classList.toggle('on')"></div></label>
 </div>
 <div class="wt-log-view" id="liveLogView" style="max-height:calc(100vh - 200px)"></div>
+</div></div>
+
+<div class="wt-page" id="page-test-results">
+<div class="wt-content">
+<h2 class="wt-page-title">Test Results</h2>
+<div class="wt-metrics-grid" style="grid-template-columns:repeat(3,1fr)">
+<div class="wt-metric-card" style="background:var(--wt-gradient-info)">
+<div class="metric-value" id="trMetricTotal">0</div>
+<div class="metric-label">Total Tests</div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-success)">
+<div class="metric-value" id="trMetricPassRate">0%</div>
+<div class="metric-label">Pass Rate</div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-hero)">
+<div class="metric-value" id="trMetricAvgLatency">0</div>
+<div class="metric-label">Avg Latency (ms)</div>
+</div>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Trends</span></div>
+<canvas id="trTrendChart" style="max-height:320px"></canvas>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Results</span>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="fetchTestResultsPage()">&#x21BB; Refresh</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="exportTestResultsPage()">&#x1F4E5; Export</button>
+</div>
+</div>
+<div class="wt-filter-bar">
+<select class="wt-select" id="trFilterType" onchange="fetchTestResultsPage()">
+<option value="">All Types</option>
+<option value="service_test">Service Tests</option>
+<option value="whisper_accuracy">Whisper Accuracy</option>
+<option value="iap_quality">IAP Quality</option>
+<option value="model_benchmark">Model Benchmark</option>
+</select>
+<select class="wt-select" id="trFilterStatus" onchange="fetchTestResultsPage()">
+<option value="">All Status</option>
+<option value="pass">Pass</option>
+<option value="fail">Fail</option>
+<option value="warn">Warn</option>
+</select>
+<input type="date" class="wt-input" id="trFilterDateFrom" onchange="fetchTestResultsPage()" style="width:auto;font-size:12px">
+<input type="date" class="wt-input" id="trFilterDateTo" onchange="fetchTestResultsPage()" style="width:auto;font-size:12px">
+</div>
+<div id="trResultsTable">No test results yet.</div>
+</div>
 </div></div>
 
 <div class="wt-page" id="page-database">
@@ -2615,6 +2669,8 @@ function showPage(p){
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
   if(p==='models'){loadModels();loadModelComparison();}
+  if(p==='test-results'){fetchTestResultsPage();startTestResultsPoll();}
+  else{stopTestResultsPoll();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
   if(p==='credentials'){loadCredentials();}
@@ -4189,6 +4245,159 @@ function exportTestResults(){
   var a=document.createElement('a');
   a.href=url;
   a.download='test_results_'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+var trChart=null;
+var trPollTimer=null;
+var trCache=[];
+
+function startTestResultsPoll(){
+  stopTestResultsPoll();
+  trPollTimer=setInterval(fetchTestResultsPage,5000);
+}
+function stopTestResultsPoll(){
+  if(trPollTimer){clearInterval(trPollTimer);trPollTimer=null;}
+}
+
+function fetchTestResultsPage(){
+  var type=document.getElementById('trFilterType').value;
+  var status=document.getElementById('trFilterStatus').value;
+  var fromD=document.getElementById('trFilterDateFrom').value;
+  var toD=document.getElementById('trFilterDateTo').value;
+  var url='/api/test_results_summary?type='+encodeURIComponent(type)+'&status='+encodeURIComponent(status);
+  if(fromD){url+='&from='+Math.floor(new Date(fromD).getTime()/1000);}
+  if(toD){url+='&to='+Math.floor(new Date(toD+'T23:59:59').getTime()/1000);}
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    trCache=d.results||[];
+    var s=d.summary||{};
+    animateCountUp(document.getElementById('trMetricTotal'),s.total||0);
+    document.getElementById('trMetricPassRate').textContent=(s.pass_rate||0).toFixed(1)+'%';
+    document.getElementById('trMetricPassRate').classList.remove('metric-updated');
+    void document.getElementById('trMetricPassRate').offsetWidth;
+    document.getElementById('trMetricPassRate').classList.add('metric-updated');
+    animateCountUp(document.getElementById('trMetricAvgLatency'),Math.round(s.avg_latency_ms||0));
+    renderTrTable(trCache);
+    renderTrTrendChart(trCache);
+  }).catch(function(e){console.error('fetchTestResultsPage',e);});
+}
+
+function renderTrTable(results){
+  var c=document.getElementById('trResultsTable');
+  if(!results||results.length===0){
+    c.innerHTML='<p style="color:var(--wt-text-secondary);font-size:13px">No test results match the filters</p>';
+    return;
+  }
+  var html='<table class="wt-table"><thead><tr><th>Type</th><th>Service</th><th>Test</th><th>Status</th><th>Latency</th><th>Time</th></tr></thead><tbody>';
+  results.forEach(function(r){
+    var ts=new Date(r.timestamp*1000).toLocaleString();
+    var st=r.status.toLowerCase();
+    var badge=st==='pass'||st==='passed'||st==='success'?'<span class="wt-badge wt-badge-success">Pass</span>'
+      :st==='fail'||st==='failed'||st==='error'?'<span class="wt-badge wt-badge-danger">Fail</span>'
+      :st==='warn'?'<span class="wt-badge wt-badge-warning">Warn</span>'
+      :'<span class="wt-badge wt-badge-secondary">'+escapeHtml(r.status)+'</span>';
+    var lat=r.metrics&&r.metrics.latency_ms?r.metrics.latency_ms.toFixed(1)+' ms':'—';
+    var typeName=r.type.replace(/_/g,' ');
+    html+='<tr><td style="font-size:12px">'+escapeHtml(typeName)+'</td><td>'+escapeHtml(r.service)+'</td><td>'+escapeHtml(r.test_type)+'</td><td>'+badge+'</td><td style="font-family:var(--wt-mono);font-size:12px">'+lat+'</td><td style="font-size:12px">'+ts+'</td></tr>';
+  });
+  html+='</tbody></table>';
+  c.innerHTML=html;
+}
+
+function renderTrTrendChart(results){
+  var canvas=document.getElementById('trTrendChart');
+  if(!canvas)return;
+  if(trChart){trChart.destroy();trChart=null;}
+  if(!results||results.length===0)return;
+  var sorted=results.slice().sort(function(a,b){return a.timestamp-b.timestamp;});
+  var labels=[];
+  var latencies=[];
+  var passRates=[];
+  var bucketSize=Math.max(1,Math.floor(sorted.length/30));
+  for(var i=0;i<sorted.length;i+=bucketSize){
+    var bucket=sorted.slice(i,i+bucketSize);
+    var avgLat=0,latCount=0,passes=0;
+    bucket.forEach(function(r){
+      if(r.metrics&&r.metrics.latency_ms&&r.metrics.latency_ms>0){avgLat+=r.metrics.latency_ms;latCount++;}
+      var s=r.status.toLowerCase();
+      if(s==='pass'||s==='passed'||s==='success')passes++;
+    });
+    labels.push(new Date(bucket[0].timestamp*1000).toLocaleDateString());
+    latencies.push(latCount>0?avgLat/latCount:0);
+    passRates.push(bucket.length>0?100*passes/bucket.length:0);
+  }
+  trChart=new Chart(canvas,{
+    type:'line',
+    data:{
+      labels:labels,
+      datasets:[{
+        label:'Latency (ms)',
+        data:latencies,
+        borderColor:'var(--wt-chart-1,#667eea)',
+        backgroundColor:'rgba(102,126,234,0.1)',
+        fill:true,
+        tension:0.3,
+        yAxisID:'y'
+      },{
+        label:'Pass Rate (%)',
+        data:passRates,
+        borderColor:'var(--wt-chart-4,#43e97b)',
+        backgroundColor:'rgba(67,233,123,0.1)',
+        fill:true,
+        tension:0.3,
+        yAxisID:'y1'
+      }]
+    },
+    options:{
+      responsive:true,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        tooltip:{
+          backgroundColor:'rgba(0,0,0,0.8)',
+          titleColor:'#fff',
+          bodyColor:'#fff',
+          borderColor:'rgba(102,126,234,0.5)',
+          borderWidth:1,
+          padding:12,
+          displayColors:true,
+          callbacks:{
+            label:function(ctx){
+              var l=ctx.dataset.label||'';
+              if(l)l+=': ';
+              l+=ctx.parsed.y.toFixed(1);
+              if(ctx.datasetIndex===0)l+=' ms';
+              else l+='%';
+              return l;
+            }
+          }
+        },
+        zoom:{
+          pan:{enabled:true,mode:'x',modifierKey:'shift'},
+          zoom:{
+            wheel:{enabled:true,speed:0.1},
+            pinch:{enabled:true},
+            mode:'x'
+          },
+          limits:{x:{min:'original',max:'original'}}
+        }
+      },
+      scales:{
+        y:{type:'linear',display:true,position:'left',title:{display:true,text:'Latency (ms)'}},
+        y1:{type:'linear',display:true,position:'right',title:{display:true,text:'Pass Rate (%)'},min:0,max:100,grid:{drawOnChartArea:false}}
+      }
+    }
+  });
+}
+
+function exportTestResultsPage(){
+  if(!trCache||trCache.length===0){alert('No test results to export');return;}
+  var json=JSON.stringify(trCache,null,2);
+  var blob=new Blob([json],{type:'application/json'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url;
+  a.download='test_results_summary_'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -9581,6 +9790,198 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
         sqlite3_finalize(stmt);
         json << "]}";
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    void handle_test_results_summary(struct mg_connection *c, struct mg_http_message *hm) {
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
+            return;
+        }
+
+        std::string query_str(hm->query.buf, hm->query.len);
+        std::string type_filter, status_filter;
+        long from_ts = 0, to_ts = 0;
+
+        auto extract_param = [&](const std::string& key) -> std::string {
+            size_t pos = query_str.find(key + "=");
+            if (pos == std::string::npos) return "";
+            size_t start = pos + key.size() + 1;
+            size_t end = query_str.find('&', start);
+            return query_str.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        };
+
+        type_filter = extract_param("type");
+        status_filter = extract_param("status");
+        std::string from_str = extract_param("from");
+        std::string to_str = extract_param("to");
+        if (!from_str.empty()) from_ts = std::atol(from_str.c_str());
+        if (!to_str.empty()) to_ts = std::atol(to_str.c_str());
+
+        std::stringstream json;
+        json << "{";
+
+        int total = 0, pass_count = 0, fail_count = 0, warn_count = 0;
+        double total_latency = 0.0;
+        int latency_count = 0;
+
+        auto build_where = [&](const std::string& ts_col, const std::string& status_col,
+                               const std::string& extra_filter = "") -> std::string {
+            std::string w = " WHERE 1=1";
+            if (!extra_filter.empty()) w += extra_filter;
+            if (!status_filter.empty()) w += " AND " + status_col + " = '" + status_filter + "'";
+            if (from_ts > 0) w += " AND " + ts_col + " >= " + std::to_string(from_ts);
+            if (to_ts > 0) w += " AND " + ts_col + " <= " + std::to_string(to_ts);
+            return w;
+        };
+
+        json << "\"results\":[";
+        bool first = true;
+
+        if (type_filter.empty() || type_filter == "service_test") {
+            std::string sql = "SELECT id, service, test_type, status, metrics_json, timestamp FROM service_test_runs"
+                + build_where("timestamp", "status") + " ORDER BY timestamp DESC LIMIT 200";
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    if (!first) json << ",";
+                    first = false;
+                    const char* st = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+                    const char* metrics = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+                    std::string status_str = st ? st : "";
+                    json << "{\"type\":\"service_test\""
+                         << ",\"id\":" << sqlite3_column_int(stmt, 0)
+                         << ",\"service\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1))) << "\""
+                         << ",\"test_type\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2))) << "\""
+                         << ",\"status\":\"" << escape_json(status_str) << "\""
+                         << ",\"metrics\":" << (metrics ? metrics : "{}")
+                         << ",\"timestamp\":" << sqlite3_column_int64(stmt, 5)
+                         << "}";
+                    total++;
+                    if (status_str == "pass" || status_str == "PASS" || status_str == "passed" || status_str == "success") pass_count++;
+                    else if (status_str == "fail" || status_str == "FAIL" || status_str == "failed" || status_str == "error") fail_count++;
+                    else if (status_str == "warn" || status_str == "WARN") warn_count++;
+                    if (metrics) {
+                        std::string m(metrics);
+                        size_t lp = m.find("\"latency_ms\":");
+                        if (lp != std::string::npos) {
+                            double lat = std::atof(m.c_str() + lp + 13);
+                            if (lat > 0) { total_latency += lat; latency_count++; }
+                        }
+                    }
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        if (type_filter.empty() || type_filter == "whisper_accuracy") {
+            std::string sql = "SELECT id, file_name, model_name, status, similarity_percent, latency_ms, timestamp FROM whisper_accuracy_tests"
+                + build_where("timestamp", "status") + " ORDER BY timestamp DESC LIMIT 200";
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    if (!first) json << ",";
+                    first = false;
+                    const char* st = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+                    std::string status_str = st ? st : "";
+                    double lat = sqlite3_column_double(stmt, 5);
+                    json << "{\"type\":\"whisper_accuracy\""
+                         << ",\"id\":" << sqlite3_column_int(stmt, 0)
+                         << ",\"service\":\"whisper\""
+                         << ",\"test_type\":\"accuracy\""
+                         << ",\"status\":\"" << escape_json(status_str) << "\""
+                         << ",\"metrics\":{\"similarity_percent\":" << sqlite3_column_double(stmt, 4)
+                         << ",\"latency_ms\":" << lat << "}"
+                         << ",\"timestamp\":" << sqlite3_column_int64(stmt, 6)
+                         << "}";
+                    total++;
+                    if (status_str == "PASS" || status_str == "pass") pass_count++;
+                    else if (status_str == "FAIL" || status_str == "fail") fail_count++;
+                    else if (status_str == "WARN" || status_str == "warn") warn_count++;
+                    if (lat > 0) { total_latency += lat; latency_count++; }
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        if (type_filter.empty() || type_filter == "iap_quality") {
+            std::string sql = "SELECT id, file_name, status, latency_ms, snr_db, timestamp FROM iap_quality_tests"
+                + build_where("timestamp", "status") + " ORDER BY timestamp DESC LIMIT 200";
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    if (!first) json << ",";
+                    first = false;
+                    const char* st = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+                    std::string status_str = st ? st : "";
+                    double lat = sqlite3_column_double(stmt, 3);
+                    json << "{\"type\":\"iap_quality\""
+                         << ",\"id\":" << sqlite3_column_int(stmt, 0)
+                         << ",\"service\":\"iap\""
+                         << ",\"test_type\":\"quality\""
+                         << ",\"status\":\"" << escape_json(status_str) << "\""
+                         << ",\"metrics\":{\"latency_ms\":" << lat
+                         << ",\"snr_db\":" << sqlite3_column_double(stmt, 4) << "}"
+                         << ",\"timestamp\":" << sqlite3_column_int64(stmt, 5)
+                         << "}";
+                    total++;
+                    if (status_str == "PASS" || status_str == "pass") pass_count++;
+                    else if (status_str == "FAIL" || status_str == "fail") fail_count++;
+                    else if (status_str == "WARN" || status_str == "warn") warn_count++;
+                    if (lat > 0) { total_latency += lat; latency_count++; }
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        if (type_filter.empty() || type_filter == "model_benchmark") {
+            std::string sql = "SELECT id, model_name, model_type, avg_accuracy, avg_latency_ms, pass_count, fail_count, timestamp FROM model_benchmark_runs"
+                + build_where("timestamp", "model_type", "") + " ORDER BY timestamp DESC LIMIT 200";
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    if (!first) json << ",";
+                    first = false;
+                    int pc = sqlite3_column_int(stmt, 5);
+                    int fc = sqlite3_column_int(stmt, 6);
+                    std::string status_str = (fc > 0) ? "fail" : "pass";
+                    double lat = sqlite3_column_double(stmt, 4);
+                    const char* mn = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+                    const char* mt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+                    json << "{\"type\":\"model_benchmark\""
+                         << ",\"id\":" << sqlite3_column_int(stmt, 0)
+                         << ",\"service\":\"" << escape_json(mt ? mt : "whisper") << "\""
+                         << ",\"test_type\":\"benchmark\""
+                         << ",\"status\":\"" << status_str << "\""
+                         << ",\"metrics\":{\"avg_accuracy\":" << sqlite3_column_double(stmt, 3)
+                         << ",\"latency_ms\":" << lat
+                         << ",\"model_name\":\"" << escape_json(mn ? mn : "") << "\""
+                         << ",\"pass_count\":" << pc
+                         << ",\"fail_count\":" << fc << "}"
+                         << ",\"timestamp\":" << sqlite3_column_int64(stmt, 7)
+                         << "}";
+                    total++;
+                    pass_count += pc;
+                    fail_count += fc;
+                    if (lat > 0) { total_latency += lat; latency_count++; }
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        json << "]";
+
+        double avg_latency = latency_count > 0 ? total_latency / latency_count : 0;
+        double pass_rate = total > 0 ? 100.0 * pass_count / total : 0;
+
+        json << ",\"summary\":{\"total\":" << total
+             << ",\"pass\":" << pass_count
+             << ",\"fail\":" << fail_count
+             << ",\"warn\":" << warn_count
+             << ",\"pass_rate\":" << std::fixed << std::setprecision(1) << pass_rate
+             << ",\"avg_latency_ms\":" << std::fixed << std::setprecision(1) << avg_latency
+             << "}}";
 
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
