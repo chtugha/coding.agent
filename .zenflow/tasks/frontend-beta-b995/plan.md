@@ -242,7 +242,8 @@ Changes in `frontend.cpp` within `build_ui_pages()` (lines 1754–2193+ for the 
 
 **Verification**: Build succeeds. Open Beta Tests page, confirm tabs work and panels are organized.
 
-### [ ] Step: JS magic numbers extraction
+### [x] Step: JS magic numbers extraction
+<!-- chat-id: cb1b2b7f-8ae1-4c49-89b2-b3580a07a06d -->
 
 All changes in `frontend.cpp` within `build_ui_js()` (lines 2435–3930+).
 
