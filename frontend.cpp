@@ -4406,7 +4406,7 @@ function exportTestResultsPage(){
 setInterval(fetchStatus,3000);
 setInterval(fetchTests,3000);
 setInterval(fetchServices,5000);
-fetchStatus();fetchTests();fetchServices();fetchDashboard();startDashboardPoll();
+fetchStatus();fetchTests();fetchServices();showPage('dashboard');
 document.getElementById('statusText').textContent='Port )JS" + port_str + R"JS(';
 
 document.addEventListener('click',function(e){
