@@ -1581,8 +1581,8 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-beta-tabs .nav-link{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
 .wt-beta-tabs .nav-link:hover{background:var(--wt-surface-sunken);color:var(--wt-text)}
 .wt-beta-tabs .nav-link.active{background:var(--wt-accent);color:#fff;box-shadow:var(--wt-shadow-sm)}
-.wt-test-summary-bar{display:flex;gap:12px;align-items:center;padding:12px 16px;background:var(--wt-surface-elevated);border-radius:var(--wt-radius);margin-bottom:16px}
-.wt-test-summary-bar .summary-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.wt-test-summary-bar{display:flex;gap:12px;align-items:center;padding:12px 16px;background:var(--wt-surface-elevated);border-radius:var(--wt-radius);margin-bottom:16px;font-size:13px}
+.wt-test-summary-bar .summary-dot{width:10px;height:10px;border-radius:50%;display:inline-block;background:var(--wt-text-secondary);margin-right:4px}
 [data-bs-theme="dark"] .wt-pipeline-hero{opacity:0.95}
 [data-bs-theme="dark"] .wt-pipeline-node{background:rgba(0,0,0,0.3);border-color:rgba(255,255,255,0.15)}
 [data-bs-theme="dark"] .wt-card{box-shadow:0 1px 4px rgba(0,0,0,0.3)}
@@ -4867,7 +4867,7 @@ const updateBetaSummaryDots=()=>{
   const getTabStatus=(paneId)=>{
     const pane=document.getElementById(paneId);
     if(!pane) return 'neutral';
-    const statuses=pane.querySelectorAll('.badge,.wt-badge,[class*="status"]');
+    const statuses=pane.querySelectorAll('.badge,.wt-badge');
     let hasPass=false,hasFail=false;
     statuses.forEach(el=>{
       const text=(el.textContent||'').toLowerCase();
@@ -4884,6 +4884,17 @@ const updateBetaSummaryDots=()=>{
     if(dot) dot.style.background=colorMap[getTabStatus('beta-'+name.toLowerCase())];
   });
 };
+
+document.addEventListener('keydown',e=>{
+  if((e.key==='Enter'||e.key===' ')&&e.target.getAttribute('role')==='button'){
+    e.preventDefault();
+    e.target.click();
+  }
+});
+
+document.querySelectorAll('#betaTestTabs [data-bs-toggle="tab"]').forEach(el=>{
+  el.addEventListener('shown.bs.tab',updateBetaSummaryDots);
+});
 
 function switchModelTab(tab){
   ['whisper','llama','compare'].forEach(t=>{
