@@ -1681,7 +1681,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div class="metric-label">Services Online</div>
 </div>
 <div class="wt-metric-card" style="background:var(--wt-gradient-info)">
-<div class="metric-value" id="dashMetricActiveCalls">0</div>
+<div class="metric-value" id="dashMetricRunningTests">0</div>
 <div class="metric-label">Running Tests</div>
 </div>
 <div class="wt-metric-card" style="background:var(--wt-gradient-hero)">
@@ -2656,7 +2656,7 @@ function formatUptime(s){
 function fetchDashboard(){
   fetch('/api/dashboard').then(r=>r.json()).then(function(d){
     animateCountUp(document.getElementById('dashMetricServicesOnline'),d.services_online);
-    animateCountUp(document.getElementById('dashMetricActiveCalls'),d.running_tests);
+    animateCountUp(document.getElementById('dashMetricRunningTests'),d.running_tests);
     animateCountUp(document.getElementById('dashMetricTestPass'),d.test_pass);
     var failEl=document.getElementById('dashMetricTestFail');
     if(d.test_fail>0){failEl.textContent=d.test_fail+' failed';failEl.className='metric-delta negative';}
