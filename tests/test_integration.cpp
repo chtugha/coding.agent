@@ -24,14 +24,17 @@ static bool binary_exists(const std::string& name) {
     return stat(path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR);
 }
 
-static bool dir_has_file_with_suffix(const std::string& dir, const std::string& suffix) {
+static bool dir_has_file_with_suffix(const std::string& dir, const std::string& suffix,
+                                     const std::string& prefix = "") {
     DIR* d = opendir(dir.c_str());
     if (!d) return false;
     struct dirent* entry;
     while ((entry = readdir(d)) != nullptr) {
         std::string name(entry->d_name);
         if (name.size() >= suffix.size() &&
-            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+            (prefix.empty() || (name.size() >= prefix.size() &&
+             name.compare(0, prefix.size(), prefix) == 0))) {
             closedir(d);
             return true;
         }
@@ -97,7 +100,7 @@ struct Pipeline {
         return {{"WHISPERTALK_MODELS_DIR", g_models_dir}};
     }
 
-    bool launch_provider(int sip_port, int /*duration_s*/ = 0, bool /*inject*/ = false) {
+    bool launch_provider(int sip_port) {
         std::vector<std::string> pargs = {
             "--port", std::to_string(sip_port)
         };
@@ -328,8 +331,8 @@ protected:
 
         if (!dir_has_file_with_suffix(g_models_dir, ".gguf"))
             GTEST_SKIP() << "No .gguf LLaMA model found in " << g_models_dir;
-        if (!dir_has_file_with_suffix(g_models_dir, ".bin"))
-            GTEST_SKIP() << "No whisper model (.bin) found in " << g_models_dir;
+        if (!dir_has_file_with_suffix(g_models_dir, ".bin", "ggml-"))
+            GTEST_SKIP() << "No whisper model (ggml-*.bin) found in " << g_models_dir;
         const char* required_models[] = {
             "kokoro-german/vocab.json",
             "kokoro-german/df_eva_voice.bin",
@@ -349,7 +352,7 @@ protected:
 TEST_F(EndToEndTest, SingleCallFullPipeline) {
     int sip_port = find_free_port();
 
-    ASSERT_TRUE(pipeline.launch_provider(sip_port, 30, true));
+    ASSERT_TRUE(pipeline.launch_provider(sip_port));
     ASSERT_TRUE(pipeline.launch_services(2, "test", "127.0.0.1", sip_port));
 
     std::printf("\n  ========== SINGLE CALL END-TO-END (real models) ==========\n");
@@ -361,7 +364,7 @@ TEST_F(EndToEndTest, SingleCallFullPipeline) {
     ASSERT_TRUE(pipeline.all_alive()) << "One or more services crashed during startup";
 
     std::printf("  All 7 services alive. Call in progress.\n");
-    std::printf("  Running call for 30 seconds (with injected 400Hz tone)...\n");
+    std::printf("  Monitoring pipeline stability for 30 seconds...\n");
 
     bool any_crashed = false;
     for (int i = 0; i < 30; i++) {
@@ -387,9 +390,9 @@ TEST_F(EndToEndTest, MultipleSequentialCalls) {
 
     std::printf("\n  ========== %d SEQUENTIAL CALLS (real models) ==========\n", CALLS);
     std::printf("  SIP provider port: %d\n", sip_port);
-    std::printf("  Each call: 2 lines, %ds duration, injected tone\n", CALL_DURATION);
+    std::printf("  Each call: 2 lines, %ds monitoring window\n", CALL_DURATION);
 
-    ASSERT_TRUE(pipeline.launch_provider(sip_port, CALL_DURATION, true));
+    ASSERT_TRUE(pipeline.launch_provider(sip_port));
     ASSERT_TRUE(pipeline.launch_services(2, "multi", "127.0.0.1", sip_port));
 
     std::this_thread::sleep_for(std::chrono::seconds(10));
@@ -413,7 +416,7 @@ TEST_F(EndToEndTest, MultipleSequentialCalls) {
             kill_process(pipeline.provider);
             std::this_thread::sleep_for(std::chrono::seconds(2));
             pipeline.provider = -1;
-            ASSERT_TRUE(pipeline.launch_provider(sip_port, CALL_DURATION, true))
+            ASSERT_TRUE(pipeline.launch_provider(sip_port))
                 << "Failed to relaunch provider for call " << (call + 2);
             std::this_thread::sleep_for(std::chrono::seconds(5));
         }
@@ -436,7 +439,7 @@ TEST_F(EndToEndTest, OneHourStressTest) {
     std::printf("  SIP port:       %d\n", sip_port);
     std::printf("  Call duration:  %ds each\n", call_duration);
 
-    ASSERT_TRUE(pipeline.launch_provider(sip_port, call_duration, true));
+    ASSERT_TRUE(pipeline.launch_provider(sip_port));
     ASSERT_TRUE(pipeline.launch_services(2, "stress", "127.0.0.1", sip_port));
 
     std::this_thread::sleep_for(std::chrono::seconds(10));
@@ -467,7 +470,7 @@ TEST_F(EndToEndTest, OneHourStressTest) {
         kill_process(pipeline.provider);
         pipeline.provider = -1;
         std::this_thread::sleep_for(std::chrono::seconds(2));
-        if (!pipeline.launch_provider(sip_port, call_duration, true)) {
+        if (!pipeline.launch_provider(sip_port)) {
             std::printf("  Failed to relaunch provider for call %d\n", call_count + 1);
             break;
         }
@@ -492,9 +495,9 @@ TEST_F(EndToEndTest, MultiLineSimultaneous) {
 
     std::printf("\n  ========== MULTI-LINE SIMULTANEOUS (%d lines, %ds) ==========\n", LINES, DURATION);
     std::printf("  SIP provider port: %d\n", sip_port);
-    std::printf("  %d simultaneous lines, injected audio\n", LINES);
+    std::printf("  %d simultaneous lines\n", LINES);
 
-    ASSERT_TRUE(pipeline.launch_provider(sip_port, DURATION, true));
+    ASSERT_TRUE(pipeline.launch_provider(sip_port));
     ASSERT_TRUE(pipeline.launch_services(LINES, "multiline", "127.0.0.1", sip_port));
 
     std::this_thread::sleep_for(std::chrono::seconds(12));
