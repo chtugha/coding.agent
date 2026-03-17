@@ -310,7 +310,8 @@ Also replace the hardcoded `20` in SIP line grid/loops with `SIP_MAX_LINES`.
 - `bin/test_integration` — expect SKIP (not FAIL) when services unavailable
 - `bin/test_kokoro_cpp` — expect test 1 PASS, tests 2–4 SKIP when model files missing
 
-### [ ] Step: Build verification and visual QA
+### [x] Step: Build verification and visual QA
+<!-- chat-id: 5fa2954f-c441-42d8-bdb5-49ba27df06b1 -->
 
 Final integration verification:
 
