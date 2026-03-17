@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 static std::string g_bin_dir;
 static std::string g_models_dir;
@@ -21,6 +22,27 @@ static bool binary_exists(const std::string& name) {
     std::string path = g_bin_dir + "/" + name;
     struct stat st;
     return stat(path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR);
+}
+
+static bool dir_has_file_with_suffix(const std::string& dir, const std::string& suffix) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return false;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != nullptr) {
+        std::string name(entry->d_name);
+        if (name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            closedir(d);
+            return true;
+        }
+    }
+    closedir(d);
+    return false;
+}
+
+static bool file_exists(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
 }
 
 static pid_t launch_process(const std::string& bin, const std::vector<std::string>& args = {},
@@ -75,12 +97,10 @@ struct Pipeline {
         return {{"WHISPERTALK_MODELS_DIR", g_models_dir}};
     }
 
-    bool launch_provider(int sip_port, int duration_s, bool inject = true) {
+    bool launch_provider(int sip_port, int /*duration_s*/ = 0, bool /*inject*/ = false) {
         std::vector<std::string> pargs = {
-            "--port", std::to_string(sip_port),
-            "--duration", std::to_string(duration_s)
+            "--port", std::to_string(sip_port)
         };
-        if (inject) pargs.push_back("--inject");
         provider = launch_process("test_sip_provider", pargs);
         if (provider <= 0) return false;
         std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -212,12 +232,8 @@ protected:
 TEST_F(RegressionTest, LlamaSeqIdRegressionMultipleCallsAllSucceed) {
     if (!binary_exists("llama-service"))
         GTEST_SKIP() << "llama-service binary not found in " << g_bin_dir;
-    {
-        struct stat st;
-        std::string gguf = g_models_dir + "/Llama-3.2-1B-Instruct-Q8_0.gguf";
-        if (stat(gguf.c_str(), &st) != 0)
-            GTEST_SKIP() << "LLaMA model not found at " << gguf;
-    }
+    if (!dir_has_file_with_suffix(g_models_dir, ".gguf"))
+        GTEST_SKIP() << "No .gguf LLaMA model found in " << g_models_dir;
     std::printf("\n  === REGRESSION: llama seq_id (Bug 1) ===\n");
     std::printf("  Verifies kv_unified=true fix: all calls after the first must succeed\n");
 
@@ -244,11 +260,12 @@ TEST_F(RegressionTest, LlamaSeqIdRegressionMultipleCallsAllSucceed) {
 TEST_F(RegressionTest, NeuTTSCodecShapeRegressionSynthesisSucceeds) {
     if (!binary_exists("neutts-service"))
         GTEST_SKIP() << "neutts-service binary not found in " << g_bin_dir;
-    std::string neutts_dir = g_models_dir + "/neutts-nano-german";
-    struct stat st;
-    if (stat((neutts_dir + "/ref_codes.bin").c_str(), &st) != 0 ||
-        stat((neutts_dir + "/neucodec_decoder.mlmodelc").c_str(), &st) != 0)
-        GTEST_SKIP() << "NeuTTS model files not found in " << neutts_dir;
+    {
+        std::string neutts_dir = g_models_dir + "/neutts-nano-german";
+        if (!file_exists(neutts_dir + "/ref_codes.bin") ||
+            !file_exists(neutts_dir + "/neucodec_decoder.mlmodelc"))
+            GTEST_SKIP() << "NeuTTS model files not found in " << neutts_dir;
+    }
     std::printf("\n  === REGRESSION: NeuTTS CoreML shape (Bug 2) ===\n");
     std::printf("  Verifies COMPILED_T=256 fix: SYNTH_WAV must return WAV_RESULT\n");
 
@@ -309,15 +326,17 @@ protected:
                 GTEST_SKIP() << "Pipeline binary not found: " << g_bin_dir << "/" << bin;
         }
 
+        if (!dir_has_file_with_suffix(g_models_dir, ".gguf"))
+            GTEST_SKIP() << "No .gguf LLaMA model found in " << g_models_dir;
+        if (!dir_has_file_with_suffix(g_models_dir, ".bin"))
+            GTEST_SKIP() << "No whisper model (.bin) found in " << g_models_dir;
         const char* required_models[] = {
-            "Llama-3.2-1B-Instruct-Q8_0.gguf",
             "kokoro-german/vocab.json",
             "kokoro-german/df_eva_voice.bin",
         };
-        struct stat st;
         for (const char* model : required_models) {
             std::string path = g_models_dir + "/" + model;
-            if (stat(path.c_str(), &st) != 0)
+            if (!file_exists(path))
                 GTEST_SKIP() << "Model file not found: " << path;
         }
     }
