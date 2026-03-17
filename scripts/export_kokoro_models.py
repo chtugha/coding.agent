@@ -48,7 +48,7 @@ import importlib.util
 import types
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.join(SCRIPT_DIR, '..')
+ROOT_DIR = os.path.realpath(os.path.join(SCRIPT_DIR, '..'))
 MODELS_DIR = os.path.join(ROOT_DIR, 'bin', 'models', 'kokoro-german')
 CONFIG_PATH = os.path.join(MODELS_DIR, 'config.json')
 MODEL_PATH = os.path.join(MODELS_DIR, 'kokoro-german-v1_1-de.pth')
@@ -115,12 +115,25 @@ def _ensure_huggingface_hub():
         return huggingface_hub
 
 
+def _find_local_file(filename, min_size=100):
+    root = os.path.realpath(os.path.join(SCRIPT_DIR, '..'))
+    candidates = [
+        os.path.join(root, 'bin', 'models', 'kokoro-german', filename),
+        os.path.join(root, 'models', 'kokoro-german', filename),
+        os.path.join(root, 'models', filename),
+        os.path.join(root, 'bin', 'models', filename),
+        os.path.join(MODELS_DIR, filename),
+    ]
+    for c in candidates:
+        if os.path.isfile(c) and os.path.getsize(c) > min_size:
+            return c
+    return None
+
+
 def download_models():
     print("\n=== Downloading models ===")
     os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(os.path.join(MODELS_DIR, 'voices'), exist_ok=True)
-
-    local_models_dir = os.path.join(ROOT_DIR, 'models')
 
     files = [
         ('kokoro-german-v1_1-de.pth', MODEL_PATH),
@@ -134,11 +147,12 @@ def download_models():
         if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
             print(f"  Already exists: {os.path.basename(local_path)}")
             continue
-        fallback = os.path.join(local_models_dir, repo_path)
-        if os.path.exists(fallback) and os.path.getsize(fallback) > 100:
-            print(f"  Copying from models/{repo_path}...")
+        found = _find_local_file(repo_path, min_size=100)
+        if found:
+            print(f"  Found locally: {found}")
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            shutil.copy2(fallback, local_path)
+            if os.path.realpath(found) != os.path.realpath(local_path):
+                shutil.copy2(found, local_path)
             print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
             continue
         missing.append((repo_path, local_path))
@@ -156,6 +170,7 @@ def download_models():
         hf_token = input("  Paste your HuggingFace token (or press Enter to try without): ").strip()
     token = hf_token if hf_token else None
 
+    still_missing = []
     for repo_path, local_path in missing:
         if os.path.exists(local_path) and os.path.getsize(local_path) <= 1000:
             os.remove(local_path)
@@ -171,12 +186,24 @@ def download_models():
             shutil.copy2(downloaded, local_path)
             print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
         except Exception as e:
-            print(f"  FAILED: {e}")
-            if '401' in str(e) or '403' in str(e) or 'Access' in str(e) or '404' in str(e):
-                print(f"  The HuggingFace repo may be private. You can manually place files in:")
-                print(f"    models/{repo_path}")
-                print(f"  Then re-run this script.")
-            sys.exit(1)
+            print(f"  HuggingFace download failed: {e}")
+            found = _find_local_file(repo_path, min_size=100)
+            if found:
+                print(f"  Found locally instead: {found}")
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                if os.path.realpath(found) != os.path.realpath(local_path):
+                    shutil.copy2(found, local_path)
+                print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
+            else:
+                still_missing.append(repo_path)
+
+    if still_missing:
+        print(f"\n  ERROR: {len(still_missing)} file(s) could not be downloaded or found locally:")
+        for f in still_missing:
+            print(f"    - {f}")
+        print(f"\n  Place them manually in: bin/models/kokoro-german/")
+        print(f"  Then re-run this script.")
+        sys.exit(1)
 
 
 def load_kokoro_model(disable_complex=True):
