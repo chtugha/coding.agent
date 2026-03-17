@@ -107,28 +107,32 @@
 #include <iomanip>
 #include <unordered_set>
 
-static constexpr int LOG_FLUSH_INTERVAL_MS = 500;
-static constexpr int UDP_BUFFER_SIZE = 4096;
-static constexpr int DB_QUERY_ROW_LIMIT = 10000;
-static constexpr int MG_POLL_TIMEOUT_MS = 100;
-static constexpr int LOG_RETENTION_DAYS = 30;
-static constexpr int SERVICE_CHECK_INTERVAL_S = 2;
-static constexpr int ASYNC_CLEANUP_INTERVAL_S = 30;
-static constexpr int RECENT_LOGS_API_LIMIT = 100;
-static constexpr int DASHBOARD_RECENT_LOGS_LIMIT = 10;
-static constexpr useconds_t SIGTERM_GRACE_US = 500000;
-static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;
-static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;
-static constexpr useconds_t SHUTDOWN_GRACE_US = 2000000;
-static constexpr useconds_t RESTART_WAIT_US = 500000;
-static constexpr int TRANSCRIPTION_SETTLE_MS = 5000;
-static constexpr int TRANSCRIPTION_POLL_MS = 150;
-static constexpr int LLAMA_RESPONSE_POLL_MS = 200;
-static constexpr int SHUTUP_INTER_ROUND_MS = 100;
-static constexpr int STRESS_POLL_MS = 100;
-static constexpr int PIPELINE_ROUND_POLL_MS = 500;
-static constexpr int ACCURACY_INTER_FILE_MS = 2000;
-static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;
+// Named constants — all timing, buffer, and limit values formerly scattered as
+// magic numbers throughout the event loop, log infrastructure, and test runners.
+// Units are indicated by the suffix: _MS (milliseconds), _S (seconds),
+// _US (microseconds), _DAYS (days). Buffer/count limits have no time suffix.
+static constexpr int LOG_FLUSH_INTERVAL_MS = 500;       // batch-INSERT cadence for log writer
+static constexpr int UDP_BUFFER_SIZE = 4096;             // max datagram size for log receiver
+static constexpr int DB_QUERY_ROW_LIMIT = 10000;         // max rows returned by /api/db/query
+static constexpr int MG_POLL_TIMEOUT_MS = 100;           // mongoose event-loop poll timeout
+static constexpr int LOG_RETENTION_DAYS = 30;             // log rotation: delete entries older than this
+static constexpr int SERVICE_CHECK_INTERVAL_S = 2;       // how often to reap dead child processes
+static constexpr int ASYNC_CLEANUP_INTERVAL_S = 30;      // how often to clean up finished async tasks
+static constexpr int RECENT_LOGS_API_LIMIT = 100;        // /api/logs/recent returns at most this many
+static constexpr int DASHBOARD_RECENT_LOGS_LIMIT = 10;   // /api/dashboard activity feed entry count
+static constexpr useconds_t SIGTERM_GRACE_US = 500000;   // 500ms grace after SIGTERM before SIGKILL
+static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;  // 200ms delay after killing ghosts
+static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;    // 100ms between stop-poll iterations
+static constexpr useconds_t SHUTDOWN_GRACE_US = 2000000;       // 2s shutdown grace period
+static constexpr useconds_t RESTART_WAIT_US = 500000;          // 500ms wait between stop and start
+static constexpr int TRANSCRIPTION_SETTLE_MS = 5000;     // settle time before reading transcription
+static constexpr int TRANSCRIPTION_POLL_MS = 150;        // poll interval for transcription log check
+static constexpr int LLAMA_RESPONSE_POLL_MS = 200;       // poll interval for LLaMA response check
+static constexpr int SHUTUP_INTER_ROUND_MS = 100;        // pause between shut-up test rounds
+static constexpr int STRESS_POLL_MS = 100;               // poll interval in pipeline stress loop
+static constexpr int PIPELINE_ROUND_POLL_MS = 500;       // poll interval for pipeline round-trip test
+static constexpr int ACCURACY_INTER_FILE_MS = 2000;      // pause between accuracy test files
+static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;    // poll interval for download progress
 
 using namespace whispertalk;
 
@@ -526,6 +530,9 @@ private:
         }
     }
 
+    // init_database() — Open SQLite DB at the absolute path db_path_, verify it
+    // is writable (not read-only), disable extension loading for security, and
+    // create all schema tables + run migrations. Called once from constructor.
     bool init_database() {
         int rc = sqlite3_open(db_path_.c_str(), &db_);
         if (rc != SQLITE_OK) {
@@ -872,6 +879,9 @@ private:
         return true;
     }
 
+    // kill_ghost_processes() — SIGTERM then SIGKILL any existing processes matching
+    // binary_name. Input sanitized: only bare names matching [a-zA-Z0-9_.-] are
+    // accepted (no paths, no shell metacharacters) to prevent popen() command injection.
     void kill_ghost_processes(const std::string& binary_name) {
         static const std::regex valid_name("^[a-zA-Z0-9_.-]+$");
         if (!std::regex_match(binary_name, valid_name)) return;
@@ -1479,6 +1489,25 @@ private:
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 )WT" + theme_css_link + R"WT(
 <style>
+/* CSS Design System — WhisperTalk custom properties.
+ *
+ * --wt-sidebar-*, --wt-bg, --wt-card-bg, --wt-border, --wt-text*: core layout and color tokens.
+ * --wt-accent, --wt-success, --wt-danger, --wt-warning: semantic status colors.
+ * --wt-gradient-*: hero/success/danger/warning/info/neutral/pipeline gradients
+ *   used by metric cards, pipeline hero, and status badges.
+ * --wt-surface-elevated/sunken: layered surfaces for depth hierarchy.
+ * --wt-chart-1..7: Chart.js dataset colors.
+ * --wt-shadow-sm/md/lg: elevation shadows (light theme).
+ * --wt-shadow-glow-success/danger: colored glow for status indicators.
+ * --wt-radius, --wt-radius-lg: border-radius tokens.
+ *
+ * Dark theme overrides: [data-bs-theme="dark"] re-maps color, surface, and
+ * shadow tokens. Pipeline hero gets reduced opacity; cards get deeper shadows.
+ *
+ * Responsive breakpoints:
+ *   @media (max-width:1024px): tighter padding, 2-col metric grid, stacked dashboard.
+ *   @media (max-width:768px): icon-only sidebar (48px), smaller metric values.
+ */
 :root{--wt-sidebar-width:240px;--wt-bg:#f5f5f7;--wt-sidebar-bg:rgba(255,255,255,0.72);--wt-card-bg:#fff;--wt-border:#d2d2d7;--wt-text:#1d1d1f;--wt-text-secondary:#86868b;--wt-accent:#0071e3;--wt-success:#34c759;--wt-danger:#ff3b30;--wt-warning:#ff9f0a;--wt-radius:12px;--wt-font:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;--wt-mono:"SF Mono",SFMono-Regular,ui-monospace,Menlo,monospace;--wt-gradient-hero:linear-gradient(135deg,#667eea 0%,#764ba2 100%);--wt-gradient-success:linear-gradient(135deg,#11998e 0%,#38ef7d 100%);--wt-gradient-danger:linear-gradient(135deg,#eb3349 0%,#f45c43 100%);--wt-gradient-warning:linear-gradient(135deg,#f7971e 0%,#ffd200 100%);--wt-gradient-info:linear-gradient(135deg,#2193b0 0%,#6dd5ed 100%);--wt-gradient-neutral:linear-gradient(135deg,#bdc3c7 0%,#2c3e50 100%);--wt-gradient-pipeline:linear-gradient(90deg,#667eea,#764ba2,#f093fb,#f5576c,#fda085,#f9d423,#38ef7d);--wt-surface-elevated:rgba(255,255,255,0.85);--wt-surface-sunken:rgba(0,0,0,0.02);--wt-chart-1:#667eea;--wt-chart-2:#764ba2;--wt-chart-3:#f093fb;--wt-chart-4:#43e97b;--wt-chart-5:#fa709a;--wt-chart-6:#fee140;--wt-chart-7:#30cfd0;--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.04),0 1px 2px rgba(0,0,0,0.06);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.08),0 2px 4px rgba(0,0,0,0.04);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.12),0 4px 8px rgba(0,0,0,0.06);--wt-shadow-glow-success:0 0 20px rgba(52,199,89,0.3);--wt-shadow-glow-danger:0 0 20px rgba(255,59,48,0.3);--wt-radius-lg:16px}
 [data-bs-theme="dark"]{--wt-bg:#1c1c1e;--wt-sidebar-bg:rgba(44,44,46,0.72);--wt-card-bg:#2c2c2e;--wt-border:#38383a;--wt-text:#f5f5f7;--wt-text-secondary:#98989d;--wt-surface-elevated:rgba(50,50,52,0.85);--wt-surface-sunken:rgba(255,255,255,0.03);--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.2);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.3);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.4)}
 *{box-sizing:border-box}
@@ -2740,6 +2769,9 @@ Save outgoing audio as WAV</label>
 var currentPage='dashboard',currentTest=null,currentSvc=null;
 var logSSE=null,svcLogSSE=null,testLogPoll=null;
 var TSP_PORT=)JS" + tsp_port_str + R"JS(;
+// JS named constants — all setInterval/setTimeout delays and limits.
+// POLL_*  = recurring poll intervals.  DELAY_* = one-shot timeouts.
+// COUNTUP_* = animation timing.  SIP_MAX_LINES = grid size limit.
 var POLL_STATUS_MS=3000,POLL_TESTS_MS=3000,POLL_SERVICES_MS=5000;
 var POLL_TEST_LOG_MS=1500,POLL_SIP_STATS_MS=2000;
 var POLL_TEST_RESULTS_MS=5000,POLL_CALL_LINE_MAP_MS=5000;
@@ -2759,6 +2791,22 @@ var POLL_PIPELINE_STRESS_MS=2000,POLL_DOWNLOAD_MS=1000;
 var TOAST_FADE_MS=300,DELAY_DEBOUNCE_MS=300;
 var COUNTUP_STEP_MS=20,COUNTUP_DURATION_MS=400;
 
+// showPage(p) — Navigation/page-transition controller.
+//
+// Page switching uses CSS visibility+opacity (not display:none) via the .wt-page
+// class. The .active class sets opacity:1, visibility:visible, pointer-events:auto
+// with position:relative; inactive pages get opacity:0, visibility:hidden,
+// pointer-events:none with position:absolute so they overlay without affecting layout.
+//
+// Critical ordering: add .active to the new page BEFORE removing from the old
+// page, so the container always has at least one position:relative child and
+// never collapses to zero height during the transition frame.
+//
+// Note: .hidden (display:none!important) is a separate mechanism used for ~50
+// inline element toggles (service config panels, test detail/overview, schema
+// views, etc.) — it is NOT used for page-level transitions.
+//
+// Each page activation may trigger data fetches and start/stop polling timers.
 function showPage(p){
   var newPage=document.getElementById('page-'+p);
   if(newPage)newPage.classList.add('active');
@@ -6180,9 +6228,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // extract_json_string() — Hand-rolled JSON string extractor.
+    // Returns the string value for a given key from a JSON object, handling
+    // escape sequences: \", \\, \n, \t, \r, \/, \b, \f. No external JSON
+    // library dependency. Validates key is preceded by '{' or ',' to avoid
+    // false matches on keys that appear inside string values.
     static std::string extract_json_string(const std::string& json, const std::string& key) {
-        // Search for the key preceded by '{' or ',' (possibly with whitespace) to
-        // avoid substring-matching a key name that appears inside a JSON value.
         std::string needle = "\"" + key + "\"";
         size_t pos = 0;
         while (true) {
@@ -9996,6 +10047,16 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // GET /api/test_results_summary — Aggregated test results for the Test Results page.
+    //
+    // Query params: type (filter by test type), status (filter by status), from/to (timestamp range).
+    // Response JSON:
+    //   { results: [{type,id,service,test_type,status,metrics,timestamp},...],
+    //     summary: {total,pass,fail,warn,avg_latency_ms} }
+    //
+    // Queries multiple DB tables: service_test_runs, whisper_accuracy_tests,
+    // model_benchmark_runs, iap_quality_tests. Results are unioned into a single array.
+    // Used by the Test Results page chart and table, polled when that page is active.
     void handle_test_results_summary(struct mg_connection *c, struct mg_http_message *hm) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
@@ -10323,6 +10384,23 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // GET /api/dashboard — Aggregated dashboard data for the main overview page.
+    //
+    // Response JSON:
+    //   { services_online, services_total, running_tests, test_pass, test_fail,
+    //     uptime_seconds, services: [{name,online,managed},...],
+    //     recent_logs: [{timestamp,service,level,message},...],
+    //     pipeline: ["SIP_CLIENT",...,"OUTBOUND_AUDIO_PROCESSOR"] }
+    //
+    // Data sources:
+    //   - services_online/total: counted from in-memory services_ vector (pid > 0)
+    //   - running_tests: counted from in-memory tests_ vector (is_running flag)
+    //   - test_pass/fail: aggregated from service_test_runs DB table (GROUP BY status)
+    //   - uptime_seconds: elapsed since start_time_ (set in constructor)
+    //   - recent_logs: last DASHBOARD_RECENT_LOGS_LIMIT entries from recent_logs_ ring buffer
+    //   - pipeline: static list defining the node order for the dashboard visualization
+    //
+    // Polled by the frontend JS every POLL_STATUS_MS (3s) when dashboard page is active.
     void handle_dashboard(struct mg_connection *c) {
         int svc_online = 0;
         int svc_total = 0;
@@ -11299,6 +11377,9 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, response.str());
     }
 
+    // strip_sql_comments() — Remove SQL comments (-- to EOL, /* ... */) while
+    // preserving string literal content. Used by is_read_only_query() to prevent
+    // comment-based bypass of the keyword guard (e.g., "SELECT --\nDROP TABLE...").
     static std::string strip_sql_comments(const std::string& sql) {
         std::string result;
         result.reserve(sql.size());
@@ -11332,6 +11413,17 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return result;
     }
 
+    // is_read_only_query() — SQL guard for /api/db/query when write mode is off.
+    //
+    // Security layers (defense-in-depth):
+    //   1. sqlite3_prepare_v2 only compiles one statement → multi-statement injection
+    //      like "SELECT 1; DROP TABLE x" is impossible.
+    //   2. strip_sql_comments() removes --, /* */ before keyword check.
+    //   3. LOAD_EXTENSION substring check → blocks SELECT load_extension('...').
+    //   4. sqlite3_db_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0) in
+    //      init_database() disables extension loading at runtime (belt-and-suspenders).
+    //   5. PRAGMA whitelist: only read-only PRAGMAs are allowed; any PRAGMA with
+    //      '=' (setting a value) is rejected.
     static bool is_read_only_query(const std::string& query) {
         std::string stripped = strip_sql_comments(query);
         size_t start = stripped.find_first_not_of(" \t\r\n");

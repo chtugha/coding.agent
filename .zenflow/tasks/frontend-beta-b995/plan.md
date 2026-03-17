@@ -332,7 +332,8 @@ Final integration verification:
 - [x] Grep for remaining bare numeric literals in setInterval/setTimeout — none found
 - [x] Verify `is_read_only_query("SELECT load_extension('...')")` returns false
 
-### [ ] Step: Documentation
+### [x] Step: Documentation
+<!-- chat-id: f34e25e3-c803-4c8a-b921-aba36be5db6d -->
 
 Produce comprehensive documentation covering all changes made in this overhaul.
 
