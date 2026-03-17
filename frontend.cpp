@@ -1,7 +1,7 @@
 // frontend.cpp — Web UI server, log aggregator, service manager, and test runner.
 //
 // The frontend is the central control plane for the WhisperTalk system. It:
-//   - Serves a single-page web application (SPA) at http://0.0.0.0:8080/
+//   - Serves a single-page web application (SPA) at http://127.0.0.1:8080/ (loopback only)
 //   - Manages the lifecycle of all 7 pipeline services (start/stop/restart/config)
 //   - Aggregates structured log entries from all services via UDP on port 22022
 //   - Stores logs in SQLite and exposes them via REST API and SSE stream
@@ -56,6 +56,10 @@
 //     GET  /api/tests/*/history             — test run history
 //     GET  /api/tests/*/log                 — test stdout/stderr log
 //     GET  /api/test_results                — pipeline WER test results from /tmp/pipeline_results_*.json
+//
+//   Dashboard / aggregated:
+//     GET  /api/dashboard                   — service statuses, recent logs, test summary, uptime, pipeline topology
+//     GET  /api/test_results_summary        — aggregated test results (service_test_runs, whisper_accuracy_tests, ...)
 //
 //   Misc:
 //     GET  /api/status                      — system uptime, service health summary

@@ -36,7 +36,7 @@ bin/frontend --port 9090
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `Fatal: database is read-only: /path/frontend.db` | `frontend.db` has wrong permissions | `chmod 644 frontend.db` or delete it (will be recreated) |
+| `Fatal: database is read-only: /path/frontend.db` | `frontend.db` has wrong permissions or ownership | Check `ls -la frontend.db` — file must be owned by the user running `bin/frontend`. Fix with `chown $(whoami) frontend.db && chmod 644 frontend.db`, or delete it (will be recreated) |
 | `Fatal: bin/frontend not found in project root` | CWD is wrong; frontend can't find itself | Run from project root: `bin/frontend` |
 | `FATAL: Log port 22022 is already in use` | Another frontend instance is running | Kill the other instance |
 

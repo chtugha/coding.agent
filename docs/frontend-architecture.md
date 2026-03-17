@@ -14,7 +14,7 @@ The frontend is a single-file C++ application (`frontend.cpp`, ~11,500 lines) th
 | `serve_index()` | Delegates to `build_ui_html()` which composes the full HTML response |
 | `build_ui_html()` | Assembles `<head>` (CSS, CDN links) + sidebar nav + `build_ui_pages()` + `build_ui_js()` |
 | `build_ui_pages()` | Returns HTML for all page divs (dashboard, tests, services, beta-testing, etc.) |
-| `build_ui_js()` | Returns all JS logic (~7000 lines): navigation, polling, fetch handlers, UI updates |
+| `build_ui_js()` | Returns all JS logic: navigation, polling, fetch handlers, UI updates |
 | `http_handler()` | Router: dispatches 50+ API endpoints to handler methods |
 | `init_database()` | Opens SQLite, verifies writable, disables load_extension, creates schema, runs migrations |
 | `discover_tests()` | Populates hardcoded test binary list (6 entries) |
@@ -113,7 +113,7 @@ UDP:22022 ─→ log_receiver_loop() ─→ enqueue_log() ─→ flush_log_queue
    }
    ```
 
-3. **Document** the endpoint in the file-header API index comment (lines 11-58).
+3. **Document** the endpoint in the file-header API index comment (search for `// HTTP API index` near the top of the file).
 
 ## 6. CSS Design System Reference
 
