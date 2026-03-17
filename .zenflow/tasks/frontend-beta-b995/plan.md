@@ -315,22 +315,22 @@ Also replace the hardcoded `20` in SIP line grid/loops with `SIP_MAX_LINES`.
 
 Final integration verification:
 
-- [ ] Full build: `cmake -DBUILD_TESTS=ON .. && make -j$(sysctl -n hw.logicalcpu)` — zero warnings, zero errors
-- [ ] Run all test binaries — confirm pass/skip results match expectations
-- [ ] Start frontend from project root: `bin/frontend` — no SQLite errors
-- [ ] Start frontend from bin dir: `cd bin && ./frontend` — no SQLite errors
-- [ ] Open `http://localhost:8080` in browser:
-  - [ ] Dashboard loads as default page with pipeline visualization
-  - [ ] Navigation sidebar matches new structure (Dashboard → Pipeline → Testing → Configuration)
-  - [ ] Pipeline diagram shows service status nodes with live updates
-  - [ ] Metric cards display data with animations
-  - [ ] Beta Tests page has 3 tabs (Component, Pipeline, Tools) that switch correctly
-  - [ ] Test Results page shows chart and table
-  - [ ] All existing pages (Services, Tests, Logs, Database, Credentials, Models) still work
-  - [ ] Theme switching still works across all 5 themes
-  - [ ] Dark mode renders correctly with overrides
-- [ ] Grep for remaining bare numeric literals in setInterval/setTimeout — none found
-- [ ] Verify `is_read_only_query("SELECT load_extension('...')")` returns false
+- [x] Full build: `cmake -DBUILD_TESTS=ON .. && make -j$(sysctl -n hw.logicalcpu)` — zero warnings, zero errors
+- [x] Run all test binaries — confirm pass/skip results match expectations
+- [x] Start frontend from project root: `bin/frontend` — no SQLite errors
+- [x] Start frontend from bin dir: `cd bin && ./frontend` — no SQLite errors
+- [x] Open `http://localhost:8080` in browser:
+  - [x] Dashboard loads as default page with pipeline visualization
+  - [x] Navigation sidebar matches new structure (Dashboard → Pipeline → Testing → Configuration)
+  - [x] Pipeline diagram shows service status nodes with live updates
+  - [x] Metric cards display data with animations
+  - [x] Beta Tests page has 3 tabs (Component, Pipeline, Tools) that switch correctly
+  - [x] Test Results page shows chart and table
+  - [x] All existing pages (Services, Tests, Logs, Database, Credentials, Models) still work
+  - [x] Theme switching still works across all 5 themes
+  - [x] Dark mode renders correctly with overrides
+- [x] Grep for remaining bare numeric literals in setInterval/setTimeout — none found
+- [x] Verify `is_read_only_query("SELECT load_extension('...')")` returns false
 
 ### [ ] Step: Documentation
 

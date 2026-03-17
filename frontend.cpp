@@ -121,6 +121,14 @@ static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;
 static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;
 static constexpr useconds_t SHUTDOWN_GRACE_US = 2000000;
 static constexpr useconds_t RESTART_WAIT_US = 500000;
+static constexpr int TRANSCRIPTION_SETTLE_MS = 5000;
+static constexpr int TRANSCRIPTION_POLL_MS = 150;
+static constexpr int LLAMA_RESPONSE_POLL_MS = 200;
+static constexpr int SHUTUP_INTER_ROUND_MS = 100;
+static constexpr int STRESS_POLL_MS = 100;
+static constexpr int PIPELINE_ROUND_POLL_MS = 500;
+static constexpr int ACCURACY_INTER_FILE_MS = 2000;
+static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;
 
 using namespace whispertalk;
 
@@ -318,6 +326,8 @@ public:
 
     bool start() {
         if (!db_ok_) {
+            std::cerr << "ERROR: Database initialization failed. Cannot start frontend server.\n";
+            std::cerr << "Check that the database path is writable: " << db_path_ << "\n";
             return false;
         }
 
@@ -350,6 +360,8 @@ public:
 
         mg_mgr_init(&mgr_);
         
+        // Security: binds to loopback only — intentionally not exposed to the network.
+        // All security assumptions (no auth, no TLS) rely on local-only access.
         std::string listen_addr = "http://127.0.0.1:" + std::to_string(http_port_);
         struct mg_connection *c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
         if (c) c->fn_data = this;
@@ -1576,6 +1588,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-metric-card .metric-delta.negative{color:rgba(255,180,180,0.95)}
 .wt-dashboard-content{display:grid;grid-template-columns:3fr 2fr;gap:16px;margin-top:16px}
 .wt-collapsible{max-height:0;overflow:hidden;transition:max-height 0.3s ease}
+/* max-height:5000px is an intentionally large value for CSS transition; actual height is determined by content. CSS transitions require a concrete max-height endpoint. */
 .wt-collapsible.open{max-height:5000px}
 .wt-beta-tabs{display:flex;gap:4px;margin-bottom:16px;border:none;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius)}
 .wt-beta-tabs .nav-link{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
@@ -2744,6 +2757,7 @@ var DELAY_MODEL_SELECT_MS=500,DELAY_SIP_ADD_REFRESH_MS=500;
 var STATUS_CLEAR_MS=5000,POLL_LLAMA_BENCH_MS=2000;
 var POLL_PIPELINE_STRESS_MS=2000,POLL_DOWNLOAD_MS=1000;
 var TOAST_FADE_MS=300,DELAY_DEBOUNCE_MS=300;
+var COUNTUP_STEP_MS=20,COUNTUP_DURATION_MS=400;
 
 function showPage(p){
   var newPage=document.getElementById('page-'+p);
@@ -2784,9 +2798,21 @@ function stopDashboardPoll(){
 }
 
 function animateCountUp(el,newVal){
+  if(!el)return;
   var text=String(newVal);
   if(el.textContent===text)return;
-  el.textContent=text;
+  var start=parseInt(el.textContent)||0;
+  var end=parseInt(newVal);
+  if(isNaN(end)||isNaN(start)){el.textContent=text;return;}
+  var steps=Math.max(1,Math.floor(COUNTUP_DURATION_MS/COUNTUP_STEP_MS));
+  var diff=end-start;
+  var step=0;
+  if(el._countTimer)clearInterval(el._countTimer);
+  el._countTimer=setInterval(function(){
+    step++;
+    if(step>=steps){el.textContent=String(end);clearInterval(el._countTimer);el._countTimer=null;}
+    else{el.textContent=String(Math.round(start+diff*(step/steps)));}
+  },COUNTUP_STEP_MS);
   el.classList.remove('metric-updated');
   void el.offsetWidth;
   el.classList.add('metric-updated');
@@ -7386,13 +7412,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
 
             if (found_new) {
-                settle_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+                settle_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(TRANSCRIPTION_SETTLE_MS);
                 if (settle_deadline > deadline) settle_deadline = deadline;
             } else if (!found_any && std::chrono::steady_clock::now() >= deadline) {
                 break;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            std::this_thread::sleep_for(std::chrono::milliseconds(TRANSCRIPTION_POLL_MS));
         }
 
         result.found = found_any;
@@ -7448,7 +7474,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     return result;
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            std::this_thread::sleep_for(std::chrono::milliseconds(LLAMA_RESPONSE_POLL_MS));
         }
         return result;
     }
@@ -7848,7 +7874,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     total_time += tm;
                     if (il <= 500) success_count++;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(SHUTUP_INTER_ROUND_MS));
             }
 
             r.interrupt_latency_ms = max_latency;
@@ -8960,7 +8986,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                             stats[s].fail++;
                         }
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(STRESS_POLL_MS));
                 }
             });
         }
@@ -9219,7 +9245,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             progress->elapsed_s.store((int)std::chrono::duration_cast<std::chrono::seconds>(
                 now - start_time).count());
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(PIPELINE_ROUND_POLL_MS));
         }
 
         progress->running.store(false);
@@ -9427,7 +9453,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 latency_ms = total_ms;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(ACCURACY_INTER_FILE_MS));
 
             double similarity = calculate_levenshtein_similarity(ground_truth, transcription);
 
@@ -10832,7 +10858,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     if (stat(tmp_path.c_str(), &st) == 0) {
                         progress->bytes_downloaded.store(st.st_size);
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(DOWNLOAD_PROGRESS_POLL_MS));
                 }
             });
 
@@ -11275,7 +11301,20 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         result.reserve(sql.size());
         size_t i = 0;
         while (i < sql.size()) {
-            if (i + 1 < sql.size() && sql[i] == '-' && sql[i + 1] == '-') {
+            if (sql[i] == '\'' ) {
+                result += sql[i++];
+                while (i < sql.size()) {
+                    if (sql[i] == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
+                        result += sql[i]; result += sql[i + 1];
+                        i += 2;
+                    } else if (sql[i] == '\'') {
+                        result += sql[i++];
+                        break;
+                    } else {
+                        result += sql[i++];
+                    }
+                }
+            } else if (i + 1 < sql.size() && sql[i] == '-' && sql[i + 1] == '-') {
                 while (i < sql.size() && sql[i] != '\n') i++;
             } else if (i + 1 < sql.size() && sql[i] == '/' && sql[i + 1] == '*') {
                 i += 2;
