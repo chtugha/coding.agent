@@ -2810,12 +2810,15 @@ function animateCountUp(el,newVal){
   if(el._countTimer)clearInterval(el._countTimer);
   el._countTimer=setInterval(function(){
     step++;
-    if(step>=steps){el.textContent=String(end);clearInterval(el._countTimer);el._countTimer=null;}
+    if(step>=steps){
+      el.textContent=String(end);
+      clearInterval(el._countTimer);el._countTimer=null;
+      el.classList.remove('metric-updated');
+      void el.offsetWidth;
+      el.classList.add('metric-updated');
+    }
     else{el.textContent=String(Math.round(start+diff*(step/steps)));}
   },COUNTUP_STEP_MS);
-  el.classList.remove('metric-updated');
-  void el.offsetWidth;
-  el.classList.add('metric-updated');
 }
 
 function formatUptime(s){
