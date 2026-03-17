@@ -1,7 +1,7 @@
 // frontend.cpp — Web UI server, log aggregator, service manager, and test runner.
 //
 // The frontend is the central control plane for the WhisperTalk system. It:
-//   - Serves a single-page web application (SPA) at http://0.0.0.0:8080/
+//   - Serves a single-page web application (SPA) at http://127.0.0.1:8080/ (loopback only)
 //   - Manages the lifecycle of all 7 pipeline services (start/stop/restart/config)
 //   - Aggregates structured log entries from all services via UDP on port 22022
 //   - Stores logs in SQLite and exposes them via REST API and SSE stream
@@ -57,6 +57,10 @@
 //     GET  /api/tests/*/log                 — test stdout/stderr log
 //     GET  /api/test_results                — pipeline WER test results from /tmp/pipeline_results_*.json
 //
+//   Dashboard / aggregated:
+//     GET  /api/dashboard                   — service statuses, recent logs, test summary, uptime, pipeline topology
+//     GET  /api/test_results_summary        — aggregated test results (service_test_runs, whisper_accuracy_tests, ...)
+//
 //   Misc:
 //     GET  /api/status                      — system uptime, service health summary
 //
@@ -107,20 +111,32 @@
 #include <iomanip>
 #include <unordered_set>
 
-static constexpr int LOG_FLUSH_INTERVAL_MS = 500;
-static constexpr int UDP_BUFFER_SIZE = 4096;
-static constexpr int DB_QUERY_ROW_LIMIT = 10000;
-static constexpr int MG_POLL_TIMEOUT_MS = 100;
-static constexpr int LOG_RETENTION_DAYS = 30;
-static constexpr int SERVICE_CHECK_INTERVAL_S = 2;
-static constexpr int ASYNC_CLEANUP_INTERVAL_S = 30;
-static constexpr int RECENT_LOGS_API_LIMIT = 100;
-static constexpr int DASHBOARD_RECENT_LOGS_LIMIT = 10;
-static constexpr useconds_t SIGTERM_GRACE_US = 500000;
-static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;
-static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;
-static constexpr useconds_t SHUTDOWN_GRACE_US = 2000000;
-static constexpr useconds_t RESTART_WAIT_US = 500000;
+// Named constants — all timing, buffer, and limit values formerly scattered as
+// magic numbers throughout the event loop, log infrastructure, and test runners.
+// Units are indicated by the suffix: _MS (milliseconds), _S (seconds),
+// _US (microseconds), _DAYS (days). Buffer/count limits have no time suffix.
+static constexpr int LOG_FLUSH_INTERVAL_MS = 500;       // batch-INSERT cadence for log writer
+static constexpr int UDP_BUFFER_SIZE = 4096;             // max datagram size for log receiver
+static constexpr int DB_QUERY_ROW_LIMIT = 10000;         // max rows returned by /api/db/query
+static constexpr int MG_POLL_TIMEOUT_MS = 100;           // mongoose event-loop poll timeout
+static constexpr int LOG_RETENTION_DAYS = 30;             // log rotation: delete entries older than this
+static constexpr int SERVICE_CHECK_INTERVAL_S = 2;       // how often to reap dead child processes
+static constexpr int ASYNC_CLEANUP_INTERVAL_S = 30;      // how often to clean up finished async tasks
+static constexpr int RECENT_LOGS_API_LIMIT = 100;        // /api/logs/recent returns at most this many
+static constexpr int DASHBOARD_RECENT_LOGS_LIMIT = 10;   // /api/dashboard activity feed entry count
+static constexpr useconds_t SIGTERM_GRACE_US = 500000;   // 500ms grace after SIGTERM before SIGKILL
+static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;  // 200ms delay after killing ghosts
+static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;    // 100ms between stop-poll iterations
+static constexpr useconds_t SHUTDOWN_GRACE_US = 2000000;       // 2s shutdown grace period
+static constexpr useconds_t RESTART_WAIT_US = 500000;          // 500ms wait between stop and start
+static constexpr int TRANSCRIPTION_SETTLE_MS = 5000;     // settle time before reading transcription
+static constexpr int TRANSCRIPTION_POLL_MS = 150;        // poll interval for transcription log check
+static constexpr int LLAMA_RESPONSE_POLL_MS = 200;       // poll interval for LLaMA response check
+static constexpr int SHUTUP_INTER_ROUND_MS = 100;        // pause between shut-up test rounds
+static constexpr int STRESS_POLL_MS = 100;               // poll interval in pipeline stress loop
+static constexpr int PIPELINE_ROUND_POLL_MS = 500;       // poll interval for pipeline round-trip test
+static constexpr int ACCURACY_INTER_FILE_MS = 2000;      // pause between accuracy test files
+static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;    // poll interval for download progress
 
 using namespace whispertalk;
 
@@ -318,6 +334,8 @@ public:
 
     bool start() {
         if (!db_ok_) {
+            std::cerr << "ERROR: Database initialization failed. Cannot start frontend server.\n";
+            std::cerr << "Check that the database path is writable: " << db_path_ << "\n";
             return false;
         }
 
@@ -350,6 +368,8 @@ public:
 
         mg_mgr_init(&mgr_);
         
+        // Security: binds to loopback only — intentionally not exposed to the network.
+        // All security assumptions (no auth, no TLS) rely on local-only access.
         std::string listen_addr = "http://127.0.0.1:" + std::to_string(http_port_);
         struct mg_connection *c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
         if (c) c->fn_data = this;
@@ -514,6 +534,9 @@ private:
         }
     }
 
+    // init_database() — Open SQLite DB at the absolute path db_path_, verify it
+    // is writable (not read-only), disable extension loading for security, and
+    // create all schema tables + run migrations. Called once from constructor.
     bool init_database() {
         int rc = sqlite3_open(db_path_.c_str(), &db_);
         if (rc != SQLITE_OK) {
@@ -860,6 +883,9 @@ private:
         return true;
     }
 
+    // kill_ghost_processes() — SIGTERM then SIGKILL any existing processes matching
+    // binary_name. Input sanitized: only bare names matching [a-zA-Z0-9_.-] are
+    // accepted (no paths, no shell metacharacters) to prevent popen() command injection.
     void kill_ghost_processes(const std::string& binary_name) {
         static const std::regex valid_name("^[a-zA-Z0-9_.-]+$");
         if (!std::regex_match(binary_name, valid_name)) return;
@@ -1467,6 +1493,25 @@ private:
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 )WT" + theme_css_link + R"WT(
 <style>
+/* CSS Design System — WhisperTalk custom properties.
+ *
+ * --wt-sidebar-*, --wt-bg, --wt-card-bg, --wt-border, --wt-text*: core layout and color tokens.
+ * --wt-accent, --wt-success, --wt-danger, --wt-warning: semantic status colors.
+ * --wt-gradient-*: hero/success/danger/warning/info/neutral/pipeline gradients
+ *   used by metric cards, pipeline hero, and status badges.
+ * --wt-surface-elevated/sunken: layered surfaces for depth hierarchy.
+ * --wt-chart-1..7: Chart.js dataset colors.
+ * --wt-shadow-sm/md/lg: elevation shadows (light theme).
+ * --wt-shadow-glow-success/danger: colored glow for status indicators.
+ * --wt-radius, --wt-radius-lg: border-radius tokens.
+ *
+ * Dark theme overrides: [data-bs-theme="dark"] re-maps color, surface, and
+ * shadow tokens. Pipeline hero gets reduced opacity; cards get deeper shadows.
+ *
+ * Responsive breakpoints:
+ *   @media (max-width:1024px): tighter padding, 2-col metric grid, stacked dashboard.
+ *   @media (max-width:768px): icon-only sidebar (48px), smaller metric values.
+ */
 :root{--wt-sidebar-width:240px;--wt-bg:#f5f5f7;--wt-sidebar-bg:rgba(255,255,255,0.72);--wt-card-bg:#fff;--wt-border:#d2d2d7;--wt-text:#1d1d1f;--wt-text-secondary:#86868b;--wt-accent:#0071e3;--wt-success:#34c759;--wt-danger:#ff3b30;--wt-warning:#ff9f0a;--wt-radius:12px;--wt-font:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;--wt-mono:"SF Mono",SFMono-Regular,ui-monospace,Menlo,monospace;--wt-gradient-hero:linear-gradient(135deg,#667eea 0%,#764ba2 100%);--wt-gradient-success:linear-gradient(135deg,#11998e 0%,#38ef7d 100%);--wt-gradient-danger:linear-gradient(135deg,#eb3349 0%,#f45c43 100%);--wt-gradient-warning:linear-gradient(135deg,#f7971e 0%,#ffd200 100%);--wt-gradient-info:linear-gradient(135deg,#2193b0 0%,#6dd5ed 100%);--wt-gradient-neutral:linear-gradient(135deg,#bdc3c7 0%,#2c3e50 100%);--wt-gradient-pipeline:linear-gradient(90deg,#667eea,#764ba2,#f093fb,#f5576c,#fda085,#f9d423,#38ef7d);--wt-surface-elevated:rgba(255,255,255,0.85);--wt-surface-sunken:rgba(0,0,0,0.02);--wt-chart-1:#667eea;--wt-chart-2:#764ba2;--wt-chart-3:#f093fb;--wt-chart-4:#43e97b;--wt-chart-5:#fa709a;--wt-chart-6:#fee140;--wt-chart-7:#30cfd0;--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.04),0 1px 2px rgba(0,0,0,0.06);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.08),0 2px 4px rgba(0,0,0,0.04);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.12),0 4px 8px rgba(0,0,0,0.06);--wt-shadow-glow-success:0 0 20px rgba(52,199,89,0.3);--wt-shadow-glow-danger:0 0 20px rgba(255,59,48,0.3);--wt-radius-lg:16px}
 [data-bs-theme="dark"]{--wt-bg:#1c1c1e;--wt-sidebar-bg:rgba(44,44,46,0.72);--wt-card-bg:#2c2c2e;--wt-border:#38383a;--wt-text:#f5f5f7;--wt-text-secondary:#98989d;--wt-surface-elevated:rgba(50,50,52,0.85);--wt-surface-sunken:rgba(255,255,255,0.03);--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.2);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.3);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.4)}
 *{box-sizing:border-box}
@@ -1576,6 +1621,7 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-metric-card .metric-delta.negative{color:rgba(255,180,180,0.95)}
 .wt-dashboard-content{display:grid;grid-template-columns:3fr 2fr;gap:16px;margin-top:16px}
 .wt-collapsible{max-height:0;overflow:hidden;transition:max-height 0.3s ease}
+/* max-height:5000px is an intentionally large value for CSS transition; actual height is determined by content. CSS transitions require a concrete max-height endpoint. */
 .wt-collapsible.open{max-height:5000px}
 .wt-beta-tabs{display:flex;gap:4px;margin-bottom:16px;border:none;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius)}
 .wt-beta-tabs .nav-link{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
@@ -2727,6 +2773,9 @@ Save outgoing audio as WAV</label>
 var currentPage='dashboard',currentTest=null,currentSvc=null;
 var logSSE=null,svcLogSSE=null,testLogPoll=null;
 var TSP_PORT=)JS" + tsp_port_str + R"JS(;
+// JS named constants — all setInterval/setTimeout delays and limits.
+// POLL_*  = recurring poll intervals.  DELAY_* = one-shot timeouts.
+// COUNTUP_* = animation timing.  SIP_MAX_LINES = grid size limit.
 var POLL_STATUS_MS=3000,POLL_TESTS_MS=3000,POLL_SERVICES_MS=5000;
 var POLL_TEST_LOG_MS=1500,POLL_SIP_STATS_MS=2000;
 var POLL_TEST_RESULTS_MS=5000,POLL_CALL_LINE_MAP_MS=5000;
@@ -2744,7 +2793,24 @@ var DELAY_MODEL_SELECT_MS=500,DELAY_SIP_ADD_REFRESH_MS=500;
 var STATUS_CLEAR_MS=5000,POLL_LLAMA_BENCH_MS=2000;
 var POLL_PIPELINE_STRESS_MS=2000,POLL_DOWNLOAD_MS=1000;
 var TOAST_FADE_MS=300,DELAY_DEBOUNCE_MS=300;
+var COUNTUP_STEP_MS=20,COUNTUP_DURATION_MS=400;
 
+// showPage(p) — Navigation/page-transition controller.
+//
+// Page switching uses CSS visibility+opacity (not display:none) via the .wt-page
+// class. The .active class sets opacity:1, visibility:visible, pointer-events:auto
+// with position:relative; inactive pages get opacity:0, visibility:hidden,
+// pointer-events:none with position:absolute so they overlay without affecting layout.
+//
+// Critical ordering: add .active to the new page BEFORE removing from the old
+// page, so the container always has at least one position:relative child and
+// never collapses to zero height during the transition frame.
+//
+// Note: .hidden (display:none!important) is a separate mechanism used for ~50
+// inline element toggles (service config panels, test detail/overview, schema
+// views, etc.) — it is NOT used for page-level transitions.
+//
+// Each page activation may trigger data fetches and start/stop polling timers.
 function showPage(p){
   var newPage=document.getElementById('page-'+p);
   if(newPage)newPage.classList.add('active');
@@ -2784,12 +2850,27 @@ function stopDashboardPoll(){
 }
 
 function animateCountUp(el,newVal){
+  if(!el)return;
   var text=String(newVal);
   if(el.textContent===text)return;
-  el.textContent=text;
-  el.classList.remove('metric-updated');
-  void el.offsetWidth;
-  el.classList.add('metric-updated');
+  var start=parseInt(el.textContent)||0;
+  var end=parseInt(newVal);
+  if(isNaN(end)||isNaN(start)){el.textContent=text;return;}
+  var steps=Math.max(1,Math.floor(COUNTUP_DURATION_MS/COUNTUP_STEP_MS));
+  var diff=end-start;
+  var step=0;
+  if(el._countTimer)clearInterval(el._countTimer);
+  el._countTimer=setInterval(function(){
+    step++;
+    if(step>=steps){
+      el.textContent=String(end);
+      clearInterval(el._countTimer);el._countTimer=null;
+      el.classList.remove('metric-updated');
+      void el.offsetWidth;
+      el.classList.add('metric-updated');
+    }
+    else{el.textContent=String(Math.round(start+diff*(step/steps)));}
+  },COUNTUP_STEP_MS);
 }
 
 function formatUptime(s){
@@ -2942,9 +3023,19 @@ function startTestDetail(){
   if(!currentTest)return;
   var args=document.getElementById('testDetailArgs').value;
   fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({test:currentTest,args:args})}).then(()=>{
-    document.getElementById('testDetailLog').textContent='Starting...';
-    setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
+    body:JSON.stringify({test:currentTest,args:args})}).then(function(r){
+    return r.json().then(function(d){
+      if(d.error){
+        document.getElementById('testDetailLog').textContent='Error: '+d.error;
+        showToast('Failed to start test: '+d.error,'error');
+      }else{
+        document.getElementById('testDetailLog').textContent='Starting...';
+        setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
+      }
+    });
+  }).catch(function(e){
+    document.getElementById('testDetailLog').textContent='Network error: '+e;
+    showToast('Failed to start test: '+e,'error');
   });
 }
 
@@ -6141,9 +6232,12 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // extract_json_string() — Hand-rolled JSON string extractor.
+    // Returns the string value for a given key from a JSON object, handling
+    // escape sequences: \", \\, \n, \t, \r, \/, \b, \f. No external JSON
+    // library dependency. Validates key is preceded by '{' or ',' to avoid
+    // false matches on keys that appear inside string values.
     static std::string extract_json_string(const std::string& json, const std::string& key) {
-        // Search for the key preceded by '{' or ',' (possibly with whitespace) to
-        // avoid substring-matching a key name that appears inside a JSON value.
         std::string needle = "\"" + key + "\"";
         size_t pos = 0;
         while (true) {
@@ -6195,64 +6289,81 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         std::string body(hm->body.buf, hm->body.len);
         std::string test_name = extract_json_string(body, "test");
         std::string custom_args = extract_json_string(body, "args");
-        
-        std::lock_guard<std::mutex> lock(tests_mutex_);
-        for (auto& test : tests_) {
-            if (test.name == test_name && !test.is_running) {
-                std::string bin_name = test.binary_path;
-                size_t slash = bin_name.rfind('/');
-                if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
-                kill_ghost_processes(bin_name);
 
-                std::vector<std::string> use_args;
-                if (!custom_args.empty()) {
-                    use_args = split_args(custom_args);
-                } else {
-                    use_args = test.default_args;
-                }
-
-                if (!is_allowed_binary(test.binary_path)) {
-                    std::cerr << "Invalid test binary path: " << test.binary_path << "\n";
-                    break;
-                }
-
-                mkdir("logs", 0755);
-                std::string log_path = "logs/" + test.name + "_" + std::to_string(time(nullptr)) + ".log";
-
-                pid_t pid = fork();
-                if (pid < 0) {
-                    std::cerr << "fork() failed for test " << test.name << ": " << strerror(errno) << "\n";
-                    break;
-                }
-                if (pid == 0) {
-                    for (int i = 3; i < 1024; ++i) close(i);
-
-                    int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd >= 0) {
-                        dup2(fd, STDOUT_FILENO);
-                        dup2(fd, STDERR_FILENO);
-                        close(fd);
-                    }
-                    
-                    std::vector<char*> argv;
-                    argv.push_back(const_cast<char*>(test.binary_path.c_str()));
-                    for (auto& a : use_args) {
-                        argv.push_back(const_cast<char*>(a.c_str()));
-                    }
-                    argv.push_back(nullptr);
-                    
-                    execv(test.binary_path.c_str(), argv.data());
-                    _exit(1);
-                }
-                test.is_running = true;
-                test.pid = pid;
-                test.start_time = time(nullptr);
-                test.log_file = log_path;
-                test.default_args = use_args;
-                break;
-            }
+        if (test_name.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing test name\"}");
+            return;
         }
-        
+
+        std::lock_guard<std::mutex> lock(tests_mutex_);
+
+        TestInfo* found = nullptr;
+        for (auto& test : tests_) {
+            if (test.name == test_name) { found = &test; break; }
+        }
+
+        if (!found) {
+            mg_http_reply(c, 404, "Content-Type: application/json\r\n", "{\"error\":\"Test not found\"}");
+            return;
+        }
+
+        if (found->is_running) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n", "{\"error\":\"Test is already running\"}");
+            return;
+        }
+
+        if (!is_allowed_binary(found->binary_path)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid test binary path\"}");
+            return;
+        }
+
+        std::string bin_name = found->binary_path;
+        size_t slash = bin_name.rfind('/');
+        if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
+        kill_ghost_processes(bin_name);
+
+        std::vector<std::string> use_args;
+        if (!custom_args.empty()) {
+            use_args = split_args(custom_args);
+        } else {
+            use_args = found->default_args;
+        }
+
+        mkdir("logs", 0755);
+        std::string log_path = "logs/" + found->name + "_" + std::to_string(time(nullptr)) + ".log";
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            std::string err_msg = std::string("{\"error\":\"Failed to start test: ") + escape_json(strerror(errno)) + "\"}";
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "%s", err_msg.c_str());
+            return;
+        }
+        if (pid == 0) {
+            for (int i = 3; i < 1024; ++i) close(i);
+
+            int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                dup2(fd, STDOUT_FILENO);
+                dup2(fd, STDERR_FILENO);
+                close(fd);
+            }
+
+            std::vector<char*> argv;
+            argv.push_back(const_cast<char*>(found->binary_path.c_str()));
+            for (auto& a : use_args) {
+                argv.push_back(const_cast<char*>(a.c_str()));
+            }
+            argv.push_back(nullptr);
+
+            execv(found->binary_path.c_str(), argv.data());
+            _exit(1);
+        }
+        found->is_running = true;
+        found->pid = pid;
+        found->start_time = time(nullptr);
+        found->log_file = log_path;
+        found->default_args = use_args;
+
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"ok\"}");
     }
 
@@ -7359,13 +7470,13 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             }
 
             if (found_new) {
-                settle_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+                settle_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(TRANSCRIPTION_SETTLE_MS);
                 if (settle_deadline > deadline) settle_deadline = deadline;
             } else if (!found_any && std::chrono::steady_clock::now() >= deadline) {
                 break;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            std::this_thread::sleep_for(std::chrono::milliseconds(TRANSCRIPTION_POLL_MS));
         }
 
         result.found = found_any;
@@ -7421,7 +7532,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     return result;
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            std::this_thread::sleep_for(std::chrono::milliseconds(LLAMA_RESPONSE_POLL_MS));
         }
         return result;
     }
@@ -7821,7 +7932,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     total_time += tm;
                     if (il <= 500) success_count++;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(SHUTUP_INTER_ROUND_MS));
             }
 
             r.interrupt_latency_ms = max_latency;
@@ -8933,7 +9044,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                             stats[s].fail++;
                         }
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(STRESS_POLL_MS));
                 }
             });
         }
@@ -9192,7 +9303,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             progress->elapsed_s.store((int)std::chrono::duration_cast<std::chrono::seconds>(
                 now - start_time).count());
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(PIPELINE_ROUND_POLL_MS));
         }
 
         progress->running.store(false);
@@ -9400,7 +9511,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                 latency_ms = total_ms;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(ACCURACY_INTER_FILE_MS));
 
             double similarity = calculate_levenshtein_similarity(ground_truth, transcription);
 
@@ -9940,6 +10051,16 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
+    // GET /api/test_results_summary — Aggregated test results for the Test Results page.
+    //
+    // Query params: type (filter by test type), status (filter by status), from/to (timestamp range).
+    // Response JSON:
+    //   { results: [{type,id,service,test_type,status,metrics,timestamp},...],
+    //     summary: {total,pass,fail,warn,avg_latency_ms} }
+    //
+    // Queries multiple DB tables: service_test_runs, whisper_accuracy_tests,
+    // model_benchmark_runs, iap_quality_tests. Results are unioned into a single array.
+    // Used by the Test Results page chart and table, polled when that page is active.
     void handle_test_results_summary(struct mg_connection *c, struct mg_http_message *hm) {
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
@@ -10267,6 +10388,23 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         }
     }
 
+    // GET /api/dashboard — Aggregated dashboard data for the main overview page.
+    //
+    // Response JSON:
+    //   { services_online, services_total, running_tests, test_pass, test_fail,
+    //     uptime_seconds, services: [{name,online,managed},...],
+    //     recent_logs: [{timestamp,service,level,message},...],
+    //     pipeline: ["SIP_CLIENT",...,"OUTBOUND_AUDIO_PROCESSOR"] }
+    //
+    // Data sources:
+    //   - services_online/total: counted from in-memory services_ vector (pid > 0)
+    //   - running_tests: counted from in-memory tests_ vector (is_running flag)
+    //   - test_pass/fail: aggregated from service_test_runs DB table (GROUP BY status)
+    //   - uptime_seconds: elapsed since start_time_ (set in constructor)
+    //   - recent_logs: last DASHBOARD_RECENT_LOGS_LIMIT entries from recent_logs_ ring buffer
+    //   - pipeline: static list defining the node order for the dashboard visualization
+    //
+    // Polled by the frontend JS every POLL_STATUS_MS (3s) when dashboard page is active.
     void handle_dashboard(struct mg_connection *c) {
         int svc_online = 0;
         int svc_total = 0;
@@ -10805,7 +10943,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     if (stat(tmp_path.c_str(), &st) == 0) {
                         progress->bytes_downloaded.store(st.st_size);
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(DOWNLOAD_PROGRESS_POLL_MS));
                 }
             });
 
@@ -11243,12 +11381,28 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, response.str());
     }
 
+    // strip_sql_comments() — Remove SQL comments (-- to EOL, /* ... */) while
+    // preserving string literal content. Used by is_read_only_query() to prevent
+    // comment-based bypass of the keyword guard (e.g., "SELECT --\nDROP TABLE...").
     static std::string strip_sql_comments(const std::string& sql) {
         std::string result;
         result.reserve(sql.size());
         size_t i = 0;
         while (i < sql.size()) {
-            if (i + 1 < sql.size() && sql[i] == '-' && sql[i + 1] == '-') {
+            if (sql[i] == '\'' ) {
+                result += sql[i++];
+                while (i < sql.size()) {
+                    if (sql[i] == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
+                        result += sql[i]; result += sql[i + 1];
+                        i += 2;
+                    } else if (sql[i] == '\'') {
+                        result += sql[i++];
+                        break;
+                    } else {
+                        result += sql[i++];
+                    }
+                }
+            } else if (i + 1 < sql.size() && sql[i] == '-' && sql[i + 1] == '-') {
                 while (i < sql.size() && sql[i] != '\n') i++;
             } else if (i + 1 < sql.size() && sql[i] == '/' && sql[i + 1] == '*') {
                 i += 2;
@@ -11263,6 +11417,17 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         return result;
     }
 
+    // is_read_only_query() — SQL guard for /api/db/query when write mode is off.
+    //
+    // Security layers (defense-in-depth):
+    //   1. sqlite3_prepare_v2 only compiles one statement → multi-statement injection
+    //      like "SELECT 1; DROP TABLE x" is impossible.
+    //   2. strip_sql_comments() removes --, /* */ before keyword check.
+    //   3. LOAD_EXTENSION substring check → blocks SELECT load_extension('...').
+    //   4. sqlite3_db_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0) in
+    //      init_database() disables extension loading at runtime (belt-and-suspenders).
+    //   5. PRAGMA whitelist: only read-only PRAGMAs are allowed; any PRAGMA with
+    //      '=' (setting a value) is rejected.
     static bool is_read_only_query(const std::string& query) {
         std::string stripped = strip_sql_comments(query);
         size_t start = stripped.find_first_not_of(" \t\r\n");

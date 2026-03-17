@@ -272,7 +272,8 @@ Also replace the hardcoded `20` in SIP line grid/loops with `SIP_MAX_LINES`.
 
 **Verification**: Build succeeds. `grep -n 'setInterval\|setTimeout' frontend.cpp` shows only named constants as the delay argument (no bare numeric literals except 0).
 
-### [ ] Step: Test infrastructure fixes
+### [x] Step: Test infrastructure fixes
+<!-- chat-id: a8edbbaa-e9e6-4078-a601-172fe2e772a9 -->
 
 **R3.1 — Graceful skip guards**:
 
@@ -309,28 +310,30 @@ Also replace the hardcoded `20` in SIP line grid/loops with `SIP_MAX_LINES`.
 - `bin/test_integration` — expect SKIP (not FAIL) when services unavailable
 - `bin/test_kokoro_cpp` — expect test 1 PASS, tests 2–4 SKIP when model files missing
 
-### [ ] Step: Build verification and visual QA
+### [x] Step: Build verification and visual QA
+<!-- chat-id: 5fa2954f-c441-42d8-bdb5-49ba27df06b1 -->
 
 Final integration verification:
 
-- [ ] Full build: `cmake -DBUILD_TESTS=ON .. && make -j$(sysctl -n hw.logicalcpu)` — zero warnings, zero errors
-- [ ] Run all test binaries — confirm pass/skip results match expectations
-- [ ] Start frontend from project root: `bin/frontend` — no SQLite errors
-- [ ] Start frontend from bin dir: `cd bin && ./frontend` — no SQLite errors
-- [ ] Open `http://localhost:8080` in browser:
-  - [ ] Dashboard loads as default page with pipeline visualization
-  - [ ] Navigation sidebar matches new structure (Dashboard → Pipeline → Testing → Configuration)
-  - [ ] Pipeline diagram shows service status nodes with live updates
-  - [ ] Metric cards display data with animations
-  - [ ] Beta Tests page has 3 tabs (Component, Pipeline, Tools) that switch correctly
-  - [ ] Test Results page shows chart and table
-  - [ ] All existing pages (Services, Tests, Logs, Database, Credentials, Models) still work
-  - [ ] Theme switching still works across all 5 themes
-  - [ ] Dark mode renders correctly with overrides
-- [ ] Grep for remaining bare numeric literals in setInterval/setTimeout — none found
-- [ ] Verify `is_read_only_query("SELECT load_extension('...')")` returns false
+- [x] Full build: `cmake -DBUILD_TESTS=ON .. && make -j$(sysctl -n hw.logicalcpu)` — zero warnings, zero errors
+- [x] Run all test binaries — confirm pass/skip results match expectations
+- [x] Start frontend from project root: `bin/frontend` — no SQLite errors
+- [x] Start frontend from bin dir: `cd bin && ./frontend` — no SQLite errors
+- [x] Open `http://localhost:8080` in browser:
+  - [x] Dashboard loads as default page with pipeline visualization
+  - [x] Navigation sidebar matches new structure (Dashboard → Pipeline → Testing → Configuration)
+  - [x] Pipeline diagram shows service status nodes with live updates
+  - [x] Metric cards display data with animations
+  - [x] Beta Tests page has 3 tabs (Component, Pipeline, Tools) that switch correctly
+  - [x] Test Results page shows chart and table
+  - [x] All existing pages (Services, Tests, Logs, Database, Credentials, Models) still work
+  - [x] Theme switching still works across all 5 themes
+  - [x] Dark mode renders correctly with overrides
+- [x] Grep for remaining bare numeric literals in setInterval/setTimeout — none found
+- [x] Verify `is_read_only_query("SELECT load_extension('...')")` returns false
 
-### [ ] Step: Documentation
+### [x] Step: Documentation
+<!-- chat-id: f34e25e3-c803-4c8a-b921-aba36be5db6d -->
 
 Produce comprehensive documentation covering all changes made in this overhaul.
 
