@@ -205,9 +205,10 @@ private:
 
             auto t1 = std::chrono::steady_clock::now();
             double pkt_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
-            latency_sum_.store(latency_sum_.load(std::memory_order_relaxed) + pkt_us, std::memory_order_relaxed);
+            double old_sum = latency_sum_.load(std::memory_order_relaxed);
+            while (!latency_sum_.compare_exchange_weak(old_sum, old_sum + pkt_us, std::memory_order_relaxed)) {}
             double cur_max = latency_max_.load(std::memory_order_relaxed);
-            if (pkt_us > cur_max) latency_max_.store(pkt_us, std::memory_order_relaxed);
+            while (pkt_us > cur_max && !latency_max_.compare_exchange_weak(cur_max, pkt_us, std::memory_order_relaxed)) {}
             uint64_t count = pkt_count_.fetch_add(1, std::memory_order_relaxed) + 1;
 
             if ((count % 500) == 0) {

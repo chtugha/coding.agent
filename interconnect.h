@@ -141,9 +141,11 @@ enum class ServiceType : uint8_t {
     LLAMA_SERVICE = 4,
     KOKORO_SERVICE = 5,
     OUTBOUND_AUDIO_PROCESSOR = 6,
-    FRONTEND = 7
+    FRONTEND = 7,
+    NEUTTS_SERVICE = 9  // shares KOKORO_SERVICE ports (13140-13142) — log identity only
 };
 
+// NEUTTS_SERVICE intentionally excluded — it occupies KOKORO_SERVICE's pipeline slot.
 inline bool is_pipeline_service(ServiceType type) {
     switch (type) {
         case ServiceType::SIP_CLIENT:
@@ -169,6 +171,7 @@ inline const char* service_type_to_string(ServiceType type) {
         case ServiceType::KOKORO_SERVICE: return "KOKORO_SERVICE";
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return "OUTBOUND_AUDIO_PROCESSOR";
         case ServiceType::FRONTEND: return "FRONTEND";
+        case ServiceType::NEUTTS_SERVICE: return "NEUTTS_SERVICE";
         default: return "UNKNOWN";
     }
 }
@@ -260,6 +263,7 @@ struct PacketTrace {
             case 4: return "LLM";
             case 5: return "KOK";
             case 6: return "OAP";
+            case 9: return "NTS";
             default: return "???";
         }
     }
@@ -289,6 +293,7 @@ inline uint16_t service_base_port(ServiceType type) {
         case ServiceType::WHISPER_SERVICE:            return 13120;
         case ServiceType::LLAMA_SERVICE:              return 13130;
         case ServiceType::KOKORO_SERVICE:             return 13140;
+        case ServiceType::NEUTTS_SERVICE:             return 13140;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR:   return 13150;
         case ServiceType::FRONTEND:                   return 13160;
         default: return 0;
@@ -660,11 +665,7 @@ public:
             }
             ended_call_ids_.insert(call_id);
             active_call_ids_.erase(call_id);
-            if (ended_call_ids_.size() > 1000) {
-                auto it = ended_call_ids_.begin();
-                std::advance(it, ended_call_ids_.size() / 2);
-                ended_call_ids_.erase(ended_call_ids_.begin(), it);
-            }
+            prune_ended_call_ids();
         }
         {
             std::lock_guard<std::mutex> lock(speech_mutex_);
@@ -763,6 +764,7 @@ private:
     std::atomic<bool> running_;
     static constexpr size_t SEND_BUF_SIZE = 65536;
     static constexpr int DOWNSTREAM_RECONNECT_MS = 200;
+    static constexpr size_t MAX_ENDED_CALL_IDS = 1000;
 
     mutable std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;
@@ -1031,6 +1033,14 @@ private:
         }
     }
 
+    void prune_ended_call_ids() {
+        if (ended_call_ids_.size() > MAX_ENDED_CALL_IDS) {
+            auto it = ended_call_ids_.begin();
+            std::advance(it, ended_call_ids_.size() / 2);
+            ended_call_ids_.erase(ended_call_ids_.begin(), it);
+        }
+    }
+
     void handle_remote_call_end(uint32_t call_id) {
         bool already_ended = false;
         {
@@ -1038,11 +1048,7 @@ private:
             if (ended_call_ids_.count(call_id) > 0) already_ended = true;
             ended_call_ids_.insert(call_id);
             active_call_ids_.erase(call_id);
-            if (ended_call_ids_.size() > 1000) {
-                auto it = ended_call_ids_.begin();
-                std::advance(it, ended_call_ids_.size() / 2);
-                ended_call_ids_.erase(ended_call_ids_.begin(), it);
-            }
+            prune_ended_call_ids();
         }
         {
             std::lock_guard<std::mutex> lock(speech_mutex_);

@@ -546,7 +546,9 @@ private:
         std::string via = get_header("Via");
         std::string cseq_str = get_header("CSeq");
         int cseq = 0;
-        if (!cseq_str.empty()) cseq = std::stoi(cseq_str.substr(0, cseq_str.find(' ')));
+        if (!cseq_str.empty()) {
+            try { cseq = std::stoi(cseq_str.substr(0, cseq_str.find(' '))); } catch (...) {}
+        }
 
         {
             std::string trying = "SIP/2.0 100 Trying\r\nVia: " + via + "\r\nFrom: " + from + "\r\nTo: " + to + "\r\nCall-ID: " + scid + "\r\nCSeq: " + std::to_string(cseq) + " INVITE\r\nContent-Length: 0\r\n\r\n";
@@ -620,7 +622,9 @@ private:
         resp << "Call-ID: " << scid << "\r\nCSeq: " << cseq << " INVITE\r\nContact: <sip:" << line->user << "@" << lip << ":" << line->local_port << ">\r\n";
         resp << "Content-Type: application/sdp\r\n";
         std::ostringstream sdp;
-        sdp << "v=0\r\no=whisper 123 456 IN IP4 " << lip << "\r\ns=-\r\nc=IN IP4 " << lip << "\r\nt=0 0\r\n";
+        auto now_ts = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        sdp << "v=0\r\no=whisper " << cid << " " << now_ts << " IN IP4 " << lip << "\r\ns=-\r\nc=IN IP4 " << lip << "\r\nt=0 0\r\n";
         sdp << "m=audio " << session->local_rtp_port << " RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
         resp << "Content-Length: " << sdp.str().length() << "\r\n\r\n" << sdp.str();
         std::string s = resp.str();
@@ -629,18 +633,39 @@ private:
     }
 
     void handle_bye(const std::string& msg, const struct sockaddr_in& sender, std::shared_ptr<SipLine> line) {
-        size_t p = msg.find("Call-ID:");
-        if (p == std::string::npos) return;
-        size_t e = msg.find("\r\n", p);
-        std::string scid = msg.substr(p + 9, e - p - 9);
+        auto get_header = [&](const std::string& h) -> std::string {
+            size_t p = msg.find(h + ":");
+            if (p == std::string::npos) return "";
+            size_t s = p + h.length() + 1;
+            while (s < msg.size() && msg[s] == ' ') s++;
+            size_t e = msg.find("\r\n", s);
+            if (e == std::string::npos) e = msg.size();
+            return msg.substr(s, e - s);
+        };
+
+        std::string scid = get_header("Call-ID");
+        if (scid.empty()) return;
+        std::string via = get_header("Via");
+        std::string from = get_header("From");
+        std::string to = get_header("To");
+        std::string cseq = get_header("CSeq");
+
         int call_id = 0;
         {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             if (calls_.count(scid)) {
                 call_id = calls_[scid]->id;
                 calls_[scid]->active = false;
-                std::string resp = "SIP/2.0 200 OK\r\nCall-ID: " + scid + "\r\n\r\n";
-                sendto(line->sip_sock, resp.c_str(), resp.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
+                std::ostringstream resp;
+                resp << "SIP/2.0 200 OK\r\n";
+                if (!via.empty()) resp << "Via: " << via << "\r\n";
+                if (!from.empty()) resp << "From: " << from << "\r\n";
+                if (!to.empty()) resp << "To: " << to << "\r\n";
+                resp << "Call-ID: " << scid << "\r\n";
+                if (!cseq.empty()) resp << "CSeq: " << cseq << "\r\n";
+                resp << "Content-Length: 0\r\n\r\n";
+                std::string s = resp.str();
+                sendto(line->sip_sock, s.c_str(), s.length(), 0, (struct sockaddr*)&sender, sizeof(sender));
             }
         }
         if (call_id > 0) {
@@ -649,18 +674,24 @@ private:
     }
 
     void handle_call_end(uint32_t call_id) {
-        std::lock_guard<std::mutex> lock(calls_mutex_);
-        for (auto it = calls_.begin(); it != calls_.end(); ++it) {
-            if (it->second->id == static_cast<int>(call_id)) {
-                log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up");
-                it->second->active = false;
-                if (it->second->rtp_thread.joinable()) {
-                    it->second->rtp_thread.detach();
+        std::thread rtp_thread_to_join;
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            for (auto it = calls_.begin(); it != calls_.end(); ++it) {
+                if (it->second->id == static_cast<int>(call_id)) {
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up");
+                    it->second->active = false;
+                    if (it->second->rtp_thread.joinable()) {
+                        rtp_thread_to_join = std::move(it->second->rtp_thread);
+                    }
+                    id_to_call_.erase(call_id);
+                    calls_.erase(it);
+                    break;
                 }
-                id_to_call_.erase(call_id);
-                calls_.erase(it);
-                break;
             }
+        }
+        if (rtp_thread_to_join.joinable()) {
+            rtp_thread_to_join.join();
         }
     }
 

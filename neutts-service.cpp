@@ -25,6 +25,7 @@
 // CMD port (Kokoro base+2 = 13142): PING, STATUS, SET_LOG_LEVEL, TEST_SYNTH.
 #include <espeak-ng/speak_lib.h>
 #include "interconnect.h"
+#include "tts-common.h"
 #include "llama.h"
 #include <atomic>
 #include <chrono>
@@ -52,56 +53,20 @@
 
 using namespace whispertalk;
 
-static const int NEUTTS_SAMPLE_RATE = 24000;
-static const size_t MAX_AUDIO_SAMPLES = 30 * NEUTTS_SAMPLE_RATE;
-static const size_t PHONEME_CACHE_MAX = 10000;
+static constexpr int NEUTTS_SAMPLE_RATE = 24000;
+static constexpr size_t MAX_AUDIO_SAMPLES = 30 * NEUTTS_SAMPLE_RATE;
+static constexpr size_t PHONEME_CACHE_MAX = 10000;
 
 static float normalize_audio(std::vector<float>& samples, float ceiling = 0.90f) {
-    float peak = 0.0f;
-    for (float s : samples) {
-        float a = std::abs(s);
-        if (a > peak) peak = a;
-    }
-    if (peak > 0.01f && std::abs(peak - ceiling) > 0.001f) {
-        float scale = ceiling / peak;
-        for (float& s : samples) s *= scale;
-    }
-    return peak;
+    return whispertalk::tts::normalize_audio(samples, ceiling);
 }
 
 static void apply_fade_in(std::vector<float>& samples, int fade_samples = 48) {
-    int n = std::min(fade_samples, (int)samples.size());
-    for (int i = 0; i < n; i++) {
-        samples[i] *= static_cast<float>(i) / static_cast<float>(n);
-    }
+    whispertalk::tts::apply_fade_in(samples, fade_samples);
 }
 
-#ifndef ESPEAK_NG_DATA_DIR
-#define ESPEAK_NG_DATA_DIR ""
-#endif
-
 static std::string resolve_espeak_data_dir() {
-    const char* env = std::getenv("ESPEAK_NG_DATA");
-    if (env && env[0] != '\0') return env;
-
-    const char* compiled = ESPEAK_NG_DATA_DIR;
-    if (compiled[0] != '\0') {
-        struct stat st;
-        if (stat(compiled, &st) == 0) return compiled;
-    }
-
-    const char* candidates[] = {
-        "./espeak-ng-data",
-        "/opt/homebrew/share/espeak-ng-data",
-        "/usr/local/share/espeak-ng-data",
-        "/usr/share/espeak-ng-data",
-        nullptr
-    };
-    for (int i = 0; candidates[i]; i++) {
-        struct stat st;
-        if (stat(candidates[i], &st) == 0) return candidates[i];
-    }
-    return "";
+    return whispertalk::tts::resolve_espeak_data_dir();
 }
 
 struct ReferenceVoice {
@@ -642,7 +607,7 @@ public:
             return false;
         }
 
-        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::KOKORO_SERVICE);
+        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::NEUTTS_SERVICE);
 
         std::printf("NeuTTS Service initialized (German, NeuTTS Nano, NeuCodec CoreML)\n");
 
@@ -725,7 +690,7 @@ private:
                     return false;
                 }
             }
-            return false;
+            return true;
         }
         ::close(sock);
         return true;
