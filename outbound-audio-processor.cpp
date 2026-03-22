@@ -107,7 +107,7 @@ static constexpr float DC_BLOCK_ALPHA = 0.9947697f;
 static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 6000;
 // Default guard window (ms) suppressing SPEECH_ACTIVE flushes immediately after TTS audio
 // arrives. Configurable at runtime via SET_SIDETONE_GUARD_MS:<ms> on the CMD port.
-static constexpr int SPEECH_ACTIVE_GUARD_MS_DEFAULT = 1500;
+static constexpr int SPEECH_ACTIVE_GUARD_MS_DEFAULT = 800;
 
 static int64_t steady_now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -122,7 +122,7 @@ struct CallState {
     std::atomic<int64_t> last_activity_ns{0};
     // Set each time new TTS audio is received from Kokoro. Used by the SPEECH_ACTIVE
     // guard to distinguish sidetone echo (arrives <500ms after playback starts) from
-    // genuine caller interruption (arrives >1500ms after last audio chunk).
+    // genuine caller interruption (arrives >800ms after last audio chunk).
     std::chrono::steady_clock::time_point last_audio_received{};
     float fir_history[AA_HALF_TAPS] = {};
     bool first_chunk = true;
@@ -588,7 +588,7 @@ private:
         // Suppress flushes that arrive within SPEECH_ACTIVE_GUARD_MS of new TTS audio.
         // PBX sidetone (loopback of outgoing audio back into the RTP stream) causes
         // spurious SPEECH_ACTIVE signals within 200-500ms of playback start.
-        // Genuine caller interruptions arrive well after 1500ms.
+        // Guard at 800ms safely filters sidetone while allowing faster barge-in.
         auto now = std::chrono::steady_clock::now();
         auto ms_since_audio = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - state->last_audio_received).count();

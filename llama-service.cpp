@@ -237,12 +237,9 @@ private:
             }
 
             if (interconnect_.is_speech_active(item.call_id)) {
-                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Waiting — speech active, deferring response (shut-up wait)");
-                while (interconnect_.is_speech_active(item.call_id) && running_) {
-                    if (interconnect_.has_ended(item.call_id)) break;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Speech ended, resuming response generation");
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
+                    "Discarding stale transcription — caller is still speaking (shut-up)");
+                continue;
             }
             if (!running_) break;
 

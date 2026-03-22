@@ -57,6 +57,10 @@
 static constexpr int VAD_SAMPLE_RATE = 16000;
 static constexpr int VAD_SAMPLES_PER_MS = VAD_SAMPLE_RATE / 1000;
 static constexpr int DISC_WARN_INTERVAL_S = 5;
+static constexpr float NOISE_FLOOR_INIT = 0.00005f;
+static constexpr float NOISE_FLOOR_HARD_MIN = 0.000005f;
+static constexpr float NOISE_FLOOR_EMA_ALPHA = 0.05f;
+static constexpr float RMS_SILENCE_GATE = 0.005f;
 
 static std::atomic<bool> g_running{true};
 static void sig_handler(int) { g_running = false; }
@@ -69,11 +73,12 @@ struct VadCall {
     bool speech_signaled = false;
     int silence_count = 0;
     int onset_count = 0;
+    int onset_gap = 0;
     // Adaptive noise floor estimate. Initialized above the G.711 μ-law codec noise
     // floor: G.711 silence bytes (0xFF/0x7F) decode to ±0.000885 → energy ~0.00000078.
     // We set min_floor at 0.000005 and init at 0.00005 to avoid false triggers while
     // still adapting to the actual ambient noise level.
-    float noise_floor = 0.00005f;
+    float noise_floor = NOISE_FLOOR_INIT;
     size_t vad_pos = 0;
     size_t speech_start = 0;
     size_t tentative_speech_start = 0;
@@ -100,7 +105,7 @@ class VadService {
     // Minimum energy threshold to distinguish speech from G.711 codec noise floor.
     // G.711 μ-law silence (0xFF/0x7F) decodes to ±0.000885 → energy ~0.00000078.
     // Set min_energy well above this to prevent false VAD triggers on silence.
-    float vad_min_energy_ = 0.00005f;
+    float vad_min_energy_ = NOISE_FLOOR_INIT;
     // vad_silence_frames_: 8 frames × 50ms = 400ms — triggers on word-boundary pauses
     //   instead of full sentence gaps. Short enough for fast turnaround, long enough
     //   to not split mid-word (German phonemes are typically <200ms).
@@ -118,6 +123,7 @@ class VadService {
     //   after a comma pause) that may produce only 1 borderline-threshold frame
     //   before exceeding it. 2 frames still prevents single-frame noise spikes.
     int vad_onset_frames_ = 2;
+    int vad_onset_gap_tolerance_ = 1;
     int speech_signal_timeout_s_ = 10;
     // vad_inactivity_flush_ms_: if no new audio arrives for 1000ms while speech is
     //   active, flush the buffer immediately (handles end-of-stream).
@@ -219,13 +225,11 @@ private:
         call.in_speech = false;
         call.silence_count = 0;
         call.onset_count = 0;
+        call.onset_gap = 0;
         call.speech_start = 0;
         call.tentative_speech_start = 0;
         call.energies_sample_origin = 0;
         call.vad_pos = 0;
-        // Reset noise floor to init value (above G.711 codec noise floor) so
-        // adaptive tracking restarts cleanly for the next speech segment.
-        call.noise_floor = 0.00005f;
         call.frame_energies.clear();
         call.speech_signaled = false;
         call.speech_sum_sq = 0.0f;
@@ -405,7 +409,7 @@ private:
                     std::lock_guard<std::mutex> cl(calls_mutex_);
                     has_calls = !calls_.empty();
                 }
-                data_cv_.wait_for(lk, std::chrono::milliseconds(has_calls ? 5 : 50));
+                data_cv_.wait_for(lk, std::chrono::milliseconds(has_calls ? 25 : 50));
             }
 
             std::vector<std::shared_ptr<VadCall>> active;
@@ -451,20 +455,18 @@ private:
                         //   Hard floor 0.000005 prevents drift below G.711 quantization noise
                         //   (G.711 silence ≈ energy 0.00000078).
                         if (!call->in_speech && call->onset_count == 0) {
-                            float nf = call->noise_floor * 0.95f + energy * 0.05f;
-                            call->noise_floor = std::max(nf, 0.000005f);
+                            float nf = call->noise_floor * (1.0f - NOISE_FLOOR_EMA_ALPHA) + energy * NOISE_FLOOR_EMA_ALPHA;
+                            call->noise_floor = std::max(nf, NOISE_FLOOR_HARD_MIN);
                         }
                         // Speech threshold = max(noise_floor × multiplier, min_energy).
                         // min_energy (0.00005) acts as absolute floor for very quiet environments.
                         float threshold = std::max(call->noise_floor * vad_threshold_mult_, vad_min_energy_);
 
                         if (energy > threshold) {
-                            // --- ONSET / SPEECH transitions ---
                             if (!call->in_speech) {
                                 call->onset_count++;
+                                call->onset_gap = 0;
                                 if (call->onset_count == 1) {
-                                    // First above-threshold frame: save tentative start including
-                                    // pre-speech context (8 frames = 400ms) for natural boundaries.
                                     size_t context = vad_frame_size_ * vad_context_frames_;
                                     call->tentative_speech_start = (pos > context) ? pos - context : 0;
                                 }
@@ -472,12 +474,9 @@ private:
                                     call->in_speech = true;
                                     call->speech_start = call->tentative_speech_start;
                                     call->frame_energies.clear();
-                                    // Pre-allocate for max chunk to avoid realloc during speech.
                                     call->frame_energies.reserve(vad_max_speech_samples_ / vad_frame_size_ + 1);
                                     call->speech_sum_sq = 0.0f;
                                     call->speech_sample_count = 0;
-                                    // Record where frame_energies[0] starts (onset confirmation frame).
-                                    // This is distinct from speech_start which includes context frames.
                                     call->energies_sample_origin = pos;
                                     if (vad_logging_enabled_) {
                                         log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
@@ -493,9 +492,16 @@ private:
                             }
                             call->silence_count = 0;
                         } else {
-                            // Below threshold: reset onset (any gap kills the onset sequence),
-                            // and if in speech, count consecutive silent frames toward speech-end.
-                            call->onset_count = 0;
+                            if (!call->in_speech && call->onset_count > 0) {
+                                call->onset_gap++;
+                                if (call->onset_gap > vad_onset_gap_tolerance_) {
+                                    call->onset_count = 0;
+                                    call->onset_gap = 0;
+                                }
+                            } else {
+                                call->onset_count = 0;
+                                call->onset_gap = 0;
+                            }
                             if (call->in_speech) {
                                 call->silence_count++;
                             }
@@ -514,7 +520,7 @@ private:
                         pos += vad_frame_size_;
 
                         // Silence-triggered speech end: enough consecutive silent frames detected.
-                        if (call->in_speech && call->silence_count > vad_silence_frames_) {
+                        if (call->in_speech && call->silence_count >= vad_silence_frames_) {
                             size_t buf_sz = call->audio_buffer.size();
                             if (call->speech_start <= pos && pos <= buf_sz) {
                                 to_send.assign(
@@ -751,7 +757,7 @@ private:
             rms = std::sqrt(sum_sq / static_cast<float>(audio.size()));
         }
 
-        if (rms < 0.005f) {
+        if (rms < RMS_SILENCE_GATE) {
             if (vad_logging_enabled_) {
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                     "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / (double)VAD_SAMPLES_PER_MS);

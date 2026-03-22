@@ -1290,11 +1290,12 @@ private:
             log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f%s)",
                              samples.size(), (long long)elapsed, raw_peak, norm_tag);
 
-            send_audio_to_downstream(ctx->call_id, samples);
+            send_audio_to_downstream(ctx->call_id, samples, &ctx->interrupted);
         }
     }
 
-    void send_audio_to_downstream(uint32_t call_id, const std::vector<float>& samples) {
+    void send_audio_to_downstream(uint32_t call_id, const std::vector<float>& samples,
+                                   std::atomic<bool>* interrupted = nullptr) {
         if (node_.downstream_state() != ConnectionState::CONNECTED) {
             std::printf("Downstream (OAP) not connected - discarding audio for call %u\n", call_id);
             return;
@@ -1305,6 +1306,11 @@ private:
         size_t total_sent = 0;
 
         for (size_t offset = 0; offset < samples.size(); offset += CHUNK_SAMPLES) {
+            if (interrupted && interrupted->load()) {
+                log_fwd_.forward(LogLevel::DEBUG, call_id, "Audio send interrupted at chunk %zu/%zu",
+                                 offset / CHUNK_SAMPLES, (samples.size() + CHUNK_SAMPLES - 1) / CHUNK_SAMPLES);
+                return;
+            }
             size_t count = std::min(CHUNK_SAMPLES, samples.size() - offset);
 
             Packet audio_pkt;
