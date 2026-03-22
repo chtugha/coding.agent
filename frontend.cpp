@@ -9970,7 +9970,7 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
                     {"WHISPER_SERVICE",          whispertalk::ServiceType::WHISPER_SERVICE},
                     {"LLAMA_SERVICE",            whispertalk::ServiceType::LLAMA_SERVICE},
                     {"KOKORO_SERVICE",           whispertalk::ServiceType::KOKORO_SERVICE},
-                    {"NEUTTS_SERVICE",           whispertalk::ServiceType::KOKORO_SERVICE},
+                    {"NEUTTS_SERVICE",           whispertalk::ServiceType::NEUTTS_SERVICE},
                     {"OUTBOUND_AUDIO_PROCESSOR", whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
                 };
                 for (const auto& m : svc_map) {

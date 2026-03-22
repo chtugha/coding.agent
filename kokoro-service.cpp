@@ -77,14 +77,6 @@ static constexpr int KOKORO_SAMPLE_RATE = 24000;
 static constexpr size_t MAX_AUDIO_SAMPLES = 10 * KOKORO_SAMPLE_RATE;
 static constexpr size_t PHONEME_CACHE_MAX = 10000;
 
-static float normalize_audio(std::vector<float>& samples, float ceiling = 0.90f) {
-    return whispertalk::tts::normalize_audio(samples, ceiling);
-}
-
-static void apply_fade_in(std::vector<float>& samples, int fade_samples = 48) {
-    whispertalk::tts::apply_fade_in(samples, fade_samples);
-}
-
 struct KokoroVocab {
     std::map<std::string, int64_t> phoneme_to_id;
 
@@ -159,9 +151,7 @@ struct KokoroVocab {
     }
 };
 
-static std::string resolve_espeak_data_dir() {
-    return whispertalk::tts::resolve_espeak_data_dir();
-}
+
 
 #ifdef KOKORO_COREML
 class CoreMLDurationModel {
@@ -615,7 +605,7 @@ public:
         return false;
 #endif
 
-        std::string espeak_data = resolve_espeak_data_dir();
+        std::string espeak_data = tts::resolve_espeak_data_dir();
         if (espeak_data.empty()) {
             std::fprintf(stderr, "Cannot find espeak-ng-data directory. "
                 "Set ESPEAK_NG_DATA env var or install espeak-ng.\n");
@@ -1142,8 +1132,8 @@ private:
 
             if (samples.empty()) return "ERROR:synthesis failed\n";
 
-            normalize_audio(samples);
-            apply_fade_in(samples);
+            tts::normalize_audio(samples);
+            tts::apply_fade_in(samples);
 
             std::ofstream out(path, std::ios::binary);
             if (!out.is_open()) return "ERROR:cannot open " + path + "\n";
@@ -1292,8 +1282,8 @@ private:
                 continue;
             }
 
-            float raw_peak = normalize_audio(samples);
-            apply_fade_in(samples);
+            float raw_peak = tts::normalize_audio(samples);
+            tts::apply_fade_in(samples);
 
             const char* norm_tag = (raw_peak > 0.01f && std::abs(raw_peak - 0.90f) > 0.001f)
                                    ? " -> normalized" : "";

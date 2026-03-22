@@ -57,18 +57,6 @@ static constexpr int NEUTTS_SAMPLE_RATE = 24000;
 static constexpr size_t MAX_AUDIO_SAMPLES = 30 * NEUTTS_SAMPLE_RATE;
 static constexpr size_t PHONEME_CACHE_MAX = 10000;
 
-static float normalize_audio(std::vector<float>& samples, float ceiling = 0.90f) {
-    return whispertalk::tts::normalize_audio(samples, ceiling);
-}
-
-static void apply_fade_in(std::vector<float>& samples, int fade_samples = 48) {
-    whispertalk::tts::apply_fade_in(samples, fade_samples);
-}
-
-static std::string resolve_espeak_data_dir() {
-    return whispertalk::tts::resolve_espeak_data_dir();
-}
-
 struct ReferenceVoice {
     std::vector<int32_t> codes;
     std::string phonemes;
@@ -263,7 +251,7 @@ public:
             return false;
         }
 
-        std::string espeak_data = resolve_espeak_data_dir();
+        std::string espeak_data = tts::resolve_espeak_data_dir();
         if (espeak_data.empty()) {
             std::fprintf(stderr, "Cannot find espeak-ng-data directory\n");
             return false;
@@ -795,8 +783,8 @@ private:
 
             if (samples.empty()) return "ERROR:synthesis failed\n";
 
-            normalize_audio(samples);
-            apply_fade_in(samples);
+            tts::normalize_audio(samples);
+            tts::apply_fade_in(samples);
 
             std::ofstream out(path, std::ios::binary);
             if (!out.is_open()) return "ERROR:cannot open " + path + "\n";
@@ -919,7 +907,7 @@ private:
                         static constexpr float STREAMING_GAIN = 0.90f;
                         for (float& s : chunk) s *= STREAMING_GAIN;
                         if (first_chunk) {
-                            apply_fade_in(chunk);
+                            tts::apply_fade_in(chunk);
                             first_chunk = false;
                         }
                         {
