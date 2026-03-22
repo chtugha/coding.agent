@@ -62,6 +62,7 @@ static constexpr int CMD_POLL_TIMEOUT_MS = 200;
 static constexpr int STALE_SESSION_SEC   = 300;
 static constexpr uint32_t TEST_PROMPT_CID  = 0xFFFFFFFE;
 static constexpr uint32_t SHUTUP_TEST_CID  = 0xFFFFFFFD;
+static constexpr long SPEECH_DISCARD_MIN_MS = 200;
 
 static const char* SYSTEM_PROMPT =
     "Du bist ein freundlicher deutscher Telefon-Assistent. "
@@ -148,6 +149,12 @@ public:
             log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                 "Speech signal: %s", active ? "ACTIVE" : "IDLE");
             if (active) {
+                {
+                    std::lock_guard<std::mutex> lock(speech_time_mutex_);
+                    if (speech_active_since_.find(call_id) == speech_active_since_.end()) {
+                        speech_active_since_[call_id] = std::chrono::steady_clock::now();
+                    }
+                }
                 std::lock_guard<std::mutex> lock(calls_mutex_);
                 auto it = calls_.find(call_id);
                 if (it != calls_.end() && it->second->generating) {
@@ -155,6 +162,9 @@ public:
                         "Speech detected — interrupting generation (shut-up)");
                     it->second->generating = false;
                 }
+            } else {
+                std::lock_guard<std::mutex> lock(speech_time_mutex_);
+                speech_active_since_.erase(call_id);
             }
         });
 
@@ -237,9 +247,22 @@ private:
             }
 
             if (interconnect_.is_speech_active(item.call_id)) {
+                long speech_ms = 0;
+                {
+                    std::lock_guard<std::mutex> lock(speech_time_mutex_);
+                    auto it = speech_active_since_.find(item.call_id);
+                    if (it != speech_active_since_.end()) {
+                        speech_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - it->second).count();
+                    }
+                }
+                if (speech_ms >= SPEECH_DISCARD_MIN_MS) {
+                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
+                        "Discarding stale transcription — caller speaking for %ldms (shut-up)", speech_ms);
+                    continue;
+                }
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
-                    "Discarding stale transcription — caller is still speaking (shut-up)");
-                continue;
+                    "Speech active only %ldms — processing transcription (may be transient)", speech_ms);
             }
             if (!running_) break;
 
@@ -467,6 +490,10 @@ private:
                 calls_.erase(it);
             }
         }
+        {
+            std::lock_guard<std::mutex> lock(speech_time_mutex_);
+            speech_active_since_.erase(call_id);
+        }
         if (call_to_clean) {
             std::lock_guard<std::mutex> llama_lock(llama_mutex_);
             llama_memory_t mem = llama_get_memory(ctx_);
@@ -622,6 +649,8 @@ private:
     std::queue<WorkItem> work_queue_;
     std::mutex work_mutex_;
     std::condition_variable work_cv_;
+    std::mutex speech_time_mutex_;
+    std::map<uint32_t, std::chrono::steady_clock::time_point> speech_active_since_;
     whispertalk::InterconnectNode interconnect_;
     whispertalk::LogForwarder log_fwd_;
 };

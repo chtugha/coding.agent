@@ -32,7 +32,8 @@
 //                          send_chunk_downstream() without rescanning the buffer.
 //
 // CMD port (VAD base+2 = 13117): accepts PING, STATUS, SET_LOG_LEVEL,
-//   SET_VAD_THRESHOLD, SET_VAD_SILENCE_MS, SET_VAD_MAX_CHUNK_MS commands.
+//   SET_VAD_THRESHOLD, SET_VAD_SILENCE_MS, SET_VAD_MAX_CHUNK_MS,
+//   SET_VAD_ONSET_GAP commands.
 //   STATUS returns: noise_floor, threshold_mult, silence_frames, max_chunk_ms,
 //   active call count, upstream/downstream state.
 #include <iostream>
@@ -352,6 +353,56 @@ private:
             std::string level = cmd.substr(14);
             log_fwd_.set_level(level.c_str());
             return "OK\n";
+        }
+        if (cmd.rfind("SET_VAD_THRESHOLD:", 0) == 0) {
+            try {
+                float val = std::stof(cmd.substr(18));
+                if (val >= 0.5f && val <= 10.0f) {
+                    vad_threshold_mult_ = val;
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD threshold set to %.2f", val);
+                    return "OK\n";
+                }
+                return "ERROR:Value out of range (0.5-10.0)\n";
+            } catch (...) { return "ERROR:Invalid value\n"; }
+        }
+        if (cmd.rfind("SET_VAD_SILENCE_MS:", 0) == 0) {
+            try {
+                int ms = std::stoi(cmd.substr(19));
+                if (ms > 0) {
+                    int frame_ms = std::max(1, (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS));
+                    vad_silence_frames_ = std::max(1, ms / frame_ms);
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD silence set to %dms (%d frames)",
+                                     vad_silence_frames_ * frame_ms, vad_silence_frames_);
+                    return "OK\n";
+                }
+                return "ERROR:Value must be > 0\n";
+            } catch (...) { return "ERROR:Invalid value\n"; }
+        }
+        if (cmd.rfind("SET_VAD_MAX_CHUNK_MS:", 0) == 0) {
+            try {
+                int ms = std::stoi(cmd.substr(21));
+                if (ms > 0) {
+                    vad_max_speech_samples_ = static_cast<size_t>(VAD_SAMPLES_PER_MS) * ms;
+                    if (vad_max_speech_samples_ < vad_min_speech_samples_ * 2) {
+                        vad_max_speech_samples_ = vad_min_speech_samples_ * 2;
+                    }
+                    int actual_ms = (int)(vad_max_speech_samples_ / VAD_SAMPLES_PER_MS);
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD max chunk set to %dms", actual_ms);
+                    return "OK\n";
+                }
+                return "ERROR:Value must be > 0\n";
+            } catch (...) { return "ERROR:Invalid value\n"; }
+        }
+        if (cmd.rfind("SET_VAD_ONSET_GAP:", 0) == 0) {
+            try {
+                int val = std::stoi(cmd.substr(18));
+                if (val >= 0 && val <= 5) {
+                    vad_onset_gap_tolerance_ = val;
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD onset gap tolerance set to %d frames", val);
+                    return "OK\n";
+                }
+                return "ERROR:Value out of range (0-5)\n";
+            } catch (...) { return "ERROR:Invalid value\n"; }
         }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
