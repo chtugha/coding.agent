@@ -940,10 +940,12 @@ private:
                 std::string vad_t = get_setting("vad_threshold", "");
                 std::string vad_s = get_setting("vad_silence_ms", "");
                 std::string vad_c = get_setting("vad_max_chunk_ms", "");
+                std::string vad_g = get_setting("vad_onset_gap", "");
                 if (!vad_w.empty()) use_args += " --vad-window-ms " + vad_w;
                 if (!vad_t.empty()) use_args += " --vad-threshold " + vad_t;
                 if (!vad_s.empty()) use_args += " --vad-silence-ms " + vad_s;
                 if (!vad_c.empty()) use_args += " --vad-max-chunk-ms " + vad_c;
+                if (!vad_g.empty()) use_args += " --vad-onset-gap " + vad_g;
             }
 
             if (args_override.empty()) {
@@ -2138,17 +2140,18 @@ Save outgoing audio as WAV</label>
 <input class="wt-input" id="accuracyModel" value="current" readonly>
 </div>
 <div style="padding:10px;background:var(--wt-card-hover);border-radius:6px;margin-top:8px;border-left:3px solid var(--wt-primary)">
-<div style="font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:6px">&#x2699; VAD Service Settings (applied on next VAD restart)</div>
-<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;font-size:12px">
-<div><strong>Window:</strong> <span id="currentVadWindow" style="color:var(--wt-primary)">50</span> ms</div>
+<div style="font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:6px">&#x2699; VAD Service Settings <span id="vadLiveIndicator" style="font-weight:400;font-size:11px;color:var(--wt-text-muted)">(loading...)</span></div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:8px;font-size:12px">
+<div><strong>Window:</strong> <span id="currentVadWindow" style="color:var(--wt-primary)">50</span> ms <span style="font-size:10px;color:var(--wt-text-muted)">(restart)</span></div>
 <div><strong>Threshold:</strong> <span id="currentVadThreshold" style="color:var(--wt-primary)">2.0</span></div>
 <div><strong>Silence:</strong> <span id="currentVadSilence" style="color:var(--wt-primary)">400</span> ms</div>
 <div><strong>Max Chunk:</strong> <span id="currentVadMaxChunk" style="color:var(--wt-primary)">8000</span> ms</div>
+<div><strong>Onset Gap:</strong> <span id="currentVadOnsetGap" style="color:var(--wt-primary)">1</span> frames</div>
 </div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
 <div class="wt-field">
-<label>VAD Window (ms): <span id="vadWindowValue">50</span></label>
+<label>VAD Window (ms): <span id="vadWindowValue">50</span> <span style="font-size:10px;color:var(--wt-text-muted)">(restart only)</span></label>
 <input type="range" id="vadWindowSlider" min="10" max="200" value="50" step="10" style="width:100%" oninput="updateVadWindowDisplay(this.value)">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
 <span>10ms</span><span>200ms</span>
@@ -2156,9 +2159,9 @@ Save outgoing audio as WAV</label>
 </div>
 <div class="wt-field">
 <label>VAD Threshold: <span id="vadThresholdValue">2.0</span></label>
-<input type="range" id="vadThresholdSlider" min="1.0" max="4.0" value="2.0" step="0.1" style="width:100%" oninput="updateVadThresholdDisplay(this.value)">
+<input type="range" id="vadThresholdSlider" min="0.5" max="10.0" value="2.0" step="0.5" style="width:100%" oninput="updateVadThresholdDisplay(this.value)">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
-<span>1.0</span><span>4.0</span>
+<span>0.5</span><span>10.0</span>
 </div>
 </div>
 <div class="wt-field">
@@ -2173,6 +2176,13 @@ Save outgoing audio as WAV</label>
 <input type="range" id="vadMaxChunkSlider" min="1000" max="10000" value="8000" step="500" style="width:100%" oninput="document.getElementById('vadMaxChunkValue').textContent=this.value">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
 <span>1000ms</span><span>10000ms</span>
+</div>
+</div>
+<div class="wt-field">
+<label>Onset Gap Tolerance: <span id="vadOnsetGapValue">1</span> frames</label>
+<input type="range" id="vadOnsetGapSlider" min="0" max="5" value="1" step="1" style="width:100%" oninput="document.getElementById('vadOnsetGapValue').textContent=this.value">
+<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
+<span>0</span><span>5</span>
 </div>
 </div>
 </div>
@@ -5757,18 +5767,24 @@ function searchHuggingFaceLlama(){
 
 function loadVadConfig(){
   fetch('/api/vad/config').then(r=>r.json()).then(d=>{
+    var li=document.getElementById('vadLiveIndicator');
+    li.textContent=d.live?'(live from running service)':'(saved settings — service offline)';
+    li.style.color=d.live?'var(--wt-success)':'var(--wt-text-muted)';
     document.getElementById('vadWindowSlider').value=d.window_ms;
     document.getElementById('vadThresholdSlider').value=d.threshold;
     document.getElementById('vadSilenceSlider').value=d.silence_ms||400;
     document.getElementById('vadMaxChunkSlider').value=d.max_chunk_ms||8000;
+    document.getElementById('vadOnsetGapSlider').value=d.onset_gap!=null?d.onset_gap:1;
     updateVadWindowDisplay(d.window_ms);
     updateVadThresholdDisplay(d.threshold);
     document.getElementById('vadSilenceValue').textContent=d.silence_ms||400;
     document.getElementById('vadMaxChunkValue').textContent=d.max_chunk_ms||8000;
+    document.getElementById('vadOnsetGapValue').textContent=d.onset_gap!=null?d.onset_gap:1;
     document.getElementById('currentVadWindow').textContent=d.window_ms;
     document.getElementById('currentVadThreshold').textContent=d.threshold;
     document.getElementById('currentVadSilence').textContent=d.silence_ms||400;
     document.getElementById('currentVadMaxChunk').textContent=d.max_chunk_ms||8000;
+    document.getElementById('currentVadOnsetGap').textContent=d.onset_gap!=null?d.onset_gap:1;
   }).catch(e=>console.error('Failed to load VAD config:',e));
 }
 
@@ -5777,18 +5793,22 @@ function saveVadConfig(){
   var threshold=document.getElementById('vadThresholdSlider').value;
   var silence_ms=document.getElementById('vadSilenceSlider').value;
   var max_chunk_ms=document.getElementById('vadMaxChunkSlider').value;
-  
+  var onset_gap=document.getElementById('vadOnsetGapSlider').value;
+
   fetch('/api/vad/config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({window_ms:window_ms,threshold:threshold,silence_ms:silence_ms,max_chunk_ms:max_chunk_ms})
+    body:JSON.stringify({window_ms:window_ms,threshold:threshold,silence_ms:silence_ms,max_chunk_ms:max_chunk_ms,onset_gap:onset_gap})
   }).then(r=>r.json()).then(d=>{
     if(d.success){
       document.getElementById('currentVadWindow').textContent=d.window_ms;
       document.getElementById('currentVadThreshold').textContent=d.threshold;
       document.getElementById('currentVadSilence').textContent=d.silence_ms;
       document.getElementById('currentVadMaxChunk').textContent=d.max_chunk_ms;
-      alert('VAD configuration saved successfully!');
+      document.getElementById('currentVadOnsetGap').textContent=d.onset_gap!=null?d.onset_gap:1;
+      var li=document.getElementById('vadLiveIndicator');
+      if(d.live){li.textContent='(applied live)';li.style.color='var(--wt-success)';}
+      else{li.textContent='(saved — will apply on next restart)';li.style.color='var(--wt-warning)';}
     }
   }).catch(e=>console.error('Failed to save VAD config:',e));
 }
@@ -9577,42 +9597,89 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
         finish_async_task(task_id, json.str());
     }
 
-    // GET/POST /api/vad/config — GET: return current VAD params from running service
-    // (via STATUS cmd). POST: send SET_VAD_* commands to the running VAD service.
+    // GET/POST /api/vad/config — GET: query running VAD service for live params via
+    // STATUS cmd, falling back to saved settings if service is down. POST: persist
+    // settings AND send SET_VAD_* commands to the running service for live tuning.
+    // window_ms is startup-only (no runtime command) — saved for next restart.
     void handle_vad_config(struct mg_connection *c, struct mg_http_message *hm) {
+        int vad_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::VAD_SERVICE);
+
         if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
             std::string body(hm->body.buf, hm->body.len);
-            
+
             std::string window_ms_str = extract_json_string(body, "window_ms");
             std::string threshold_str = extract_json_string(body, "threshold");
             std::string silence_ms_str = extract_json_string(body, "silence_ms");
             std::string max_chunk_ms_str = extract_json_string(body, "max_chunk_ms");
-            
+            std::string onset_gap_str = extract_json_string(body, "onset_gap");
+
             if (!window_ms_str.empty()) set_setting("vad_window_ms", window_ms_str);
             if (!threshold_str.empty()) set_setting("vad_threshold", threshold_str);
             if (!silence_ms_str.empty()) set_setting("vad_silence_ms", silence_ms_str);
             if (!max_chunk_ms_str.empty()) set_setting("vad_max_chunk_ms", max_chunk_ms_str);
-            
+            if (!onset_gap_str.empty()) set_setting("vad_onset_gap", onset_gap_str);
+
+            bool live = is_service_running("VAD_SERVICE");
+            std::string err;
+            if (live) {
+                if (!threshold_str.empty())
+                    tcp_command(vad_cmd_port, "SET_VAD_THRESHOLD:" + threshold_str + "\n", err, 3);
+                if (!silence_ms_str.empty())
+                    tcp_command(vad_cmd_port, "SET_VAD_SILENCE_MS:" + silence_ms_str + "\n", err, 3);
+                if (!max_chunk_ms_str.empty())
+                    tcp_command(vad_cmd_port, "SET_VAD_MAX_CHUNK_MS:" + max_chunk_ms_str + "\n", err, 3);
+                if (!onset_gap_str.empty())
+                    tcp_command(vad_cmd_port, "SET_VAD_ONSET_GAP:" + onset_gap_str + "\n", err, 3);
+            }
+
             std::string w = window_ms_str.empty() ? get_setting("vad_window_ms", "50") : window_ms_str;
             std::string t = threshold_str.empty() ? get_setting("vad_threshold", "2.0") : threshold_str;
             std::string s = silence_ms_str.empty() ? get_setting("vad_silence_ms", "400") : silence_ms_str;
             std::string m = max_chunk_ms_str.empty() ? get_setting("vad_max_chunk_ms", "8000") : max_chunk_ms_str;
-            
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
-                "{\"success\":true,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s}",
-                w.c_str(), t.c_str(), s.c_str(), m.c_str());
+            std::string g = onset_gap_str.empty() ? get_setting("vad_onset_gap", "1") : onset_gap_str;
+
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"success\":true,\"live\":%s,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s,\"onset_gap\":%s}",
+                live ? "true" : "false", w.c_str(), t.c_str(), s.c_str(), m.c_str(), g.c_str());
         } else {
-            std::string window_ms = get_setting("vad_window_ms", "50");
-            std::string threshold = get_setting("vad_threshold", "2.0");
-            std::string silence_ms = get_setting("vad_silence_ms", "400");
-            std::string max_chunk_ms = get_setting("vad_max_chunk_ms", "8000");
-            
+            std::string err;
+            std::string status = tcp_command(vad_cmd_port, "STATUS\n", err, 3);
+            bool live = err.empty() && !status.empty() && status.find("ACTIVE_CALLS:") != std::string::npos;
+
+            std::string window_ms, threshold, silence_ms, max_chunk_ms, onset_gap;
+            if (live) {
+                auto extract_field = [&](const std::string& key) -> std::string {
+                    size_t pos = status.find(key + ":");
+                    if (pos == std::string::npos) return "";
+                    pos += key.size() + 1;
+                    size_t end = status.find(':', pos);
+                    if (end == std::string::npos) {
+                        end = status.find('\n', pos);
+                        if (end == std::string::npos) end = status.size();
+                    }
+                    return status.substr(pos, end - pos);
+                };
+                window_ms = extract_field("WINDOW_MS");
+                threshold = extract_field("THRESHOLD");
+                silence_ms = extract_field("SILENCE_MS");
+                max_chunk_ms = extract_field("MAX_CHUNK_MS");
+                onset_gap = extract_field("ONSET_GAP");
+            }
+
+            if (window_ms.empty()) window_ms = get_setting("vad_window_ms", "50");
+            if (threshold.empty()) threshold = get_setting("vad_threshold", "2.0");
+            if (silence_ms.empty()) silence_ms = get_setting("vad_silence_ms", "400");
+            if (max_chunk_ms.empty()) max_chunk_ms = get_setting("vad_max_chunk_ms", "8000");
+            if (onset_gap.empty()) onset_gap = get_setting("vad_onset_gap", "1");
+
             std::stringstream json;
             json << "{"
+                 << "\"live\":" << (live ? "true" : "false") << ","
                  << "\"window_ms\":" << window_ms << ","
                  << "\"threshold\":" << threshold << ","
                  << "\"silence_ms\":" << silence_ms << ","
-                 << "\"max_chunk_ms\":" << max_chunk_ms
+                 << "\"max_chunk_ms\":" << max_chunk_ms << ","
+                 << "\"onset_gap\":" << onset_gap
                  << "}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
         }

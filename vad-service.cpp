@@ -173,6 +173,10 @@ public:
                   << std::endl;
     }
 
+    void set_onset_gap(int gap) {
+        vad_onset_gap_tolerance_.store(gap);
+    }
+
     void set_log_level(const char* level) {
         log_fwd_.set_level(level);
     }
@@ -898,6 +902,7 @@ int main(int argc, char** argv) {
     float vad_threshold = 2.0f;
     int vad_silence_ms = 400;
     int vad_max_chunk_ms = 8000;
+    int vad_onset_gap = -1;
     std::string log_level = "INFO";
 
     static struct option long_opts[] = {
@@ -905,17 +910,19 @@ int main(int argc, char** argv) {
         {"vad-threshold",    required_argument, 0, 't'},
         {"vad-silence-ms",   required_argument, 0, 's'},
         {"vad-max-chunk-ms", required_argument, 0, 'c'},
+        {"vad-onset-gap",    required_argument, 0, 'g'},
         {"log-level",        required_argument, 0, 'L'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "w:t:s:c:L:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "w:t:s:c:g:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'w': vad_window_ms = atoi(optarg); break;
             case 't': vad_threshold = atof(optarg); break;
             case 's': vad_silence_ms = atoi(optarg); break;
             case 'c': vad_max_chunk_ms = atoi(optarg); break;
+            case 'g': vad_onset_gap = atoi(optarg); break;
             case 'L': log_level = optarg; break;
             default: break;
         }
@@ -925,6 +932,8 @@ int main(int argc, char** argv) {
 
     VadService service;
     service.set_vad_params(vad_window_ms, vad_threshold, vad_silence_ms, vad_max_chunk_ms);
+    if (vad_onset_gap >= 0 && vad_onset_gap <= 5)
+        service.set_onset_gap(vad_onset_gap);
     if (!service.init()) {
         return 1;
     }
