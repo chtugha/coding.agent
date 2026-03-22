@@ -102,7 +102,7 @@ class VadService {
     // vad_frame_size_: 50ms frames (800 samples @ 16kHz) — finer granularity than 100ms
     //   for detecting short pauses between words without cutting mid-phoneme.
     size_t vad_frame_size_ = 800;
-    float vad_threshold_mult_ = 2.0f;
+    std::atomic<float> vad_threshold_mult_{2.0f};
     // Minimum energy threshold to distinguish speech from G.711 codec noise floor.
     // G.711 μ-law silence (0xFF/0x7F) decodes to ±0.000885 → energy ~0.00000078.
     // Set min_energy well above this to prevent false VAD triggers on silence.
@@ -110,10 +110,10 @@ class VadService {
     // vad_silence_frames_: 8 frames × 50ms = 400ms — triggers on word-boundary pauses
     //   instead of full sentence gaps. Short enough for fast turnaround, long enough
     //   to not split mid-word (German phonemes are typically <200ms).
-    int vad_silence_frames_ = 8;
+    std::atomic<int> vad_silence_frames_{8};
     // vad_max_speech_samples_: 8s max chunk — Whisper large-v3-turbo handles 8s
     //   chunks in ~1s on Apple Silicon. Longer chunks preserve sentence boundaries.
-    size_t vad_max_speech_samples_ = VAD_SAMPLE_RATE * 8;
+    std::atomic<size_t> vad_max_speech_samples_{VAD_SAMPLE_RATE * 8};
     // vad_min_speech_samples_: 500ms — reject clicks and noise bursts.
     size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;
     // vad_context_frames_: include 8 frames (400ms) of pre-speech context audio so the
@@ -124,7 +124,7 @@ class VadService {
     //   after a comma pause) that may produce only 1 borderline-threshold frame
     //   before exceeding it. 2 frames still prevents single-frame noise spikes.
     int vad_onset_frames_ = 2;
-    int vad_onset_gap_tolerance_ = 1;
+    std::atomic<int> vad_onset_gap_tolerance_{1};
     int speech_signal_timeout_s_ = 10;
     // vad_inactivity_flush_ms_: if no new audio arrives for 1000ms while speech is
     //   active, flush the buffer immediately (handles end-of-stream).
@@ -144,28 +144,29 @@ public:
             vad_frame_size_ = static_cast<size_t>(VAD_SAMPLES_PER_MS * window_ms);
         }
         if (threshold_mult >= 0.5f && threshold_mult <= 10.0f) {
-            vad_threshold_mult_ = threshold_mult;
+            vad_threshold_mult_.store(threshold_mult);
         }
         if (silence_ms > 0) {
             int frame_ms = std::max(1, (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS));
-            vad_silence_frames_ = silence_ms / frame_ms;
-            if (vad_silence_frames_ < 1) vad_silence_frames_ = 1;
+            int frames = silence_ms / frame_ms;
+            vad_silence_frames_.store(std::max(1, frames));
         }
         if (max_chunk_ms > 0) {
-            vad_max_speech_samples_ = static_cast<size_t>(VAD_SAMPLES_PER_MS) * max_chunk_ms;
-            if (vad_max_speech_samples_ < vad_min_speech_samples_ * 2) {
-                vad_max_speech_samples_ = vad_min_speech_samples_ * 2;
+            size_t samples = static_cast<size_t>(VAD_SAMPLES_PER_MS) * max_chunk_ms;
+            if (samples < vad_min_speech_samples_ * 2) {
+                samples = vad_min_speech_samples_ * 2;
             }
+            vad_max_speech_samples_.store(samples);
         }
         print_config();
     }
 
     void print_config() {
         int frame_ms = (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS);
-        int silence_ms = vad_silence_frames_ * frame_ms;
-        int max_ms = (int)(vad_max_speech_samples_ / VAD_SAMPLES_PER_MS);
+        int silence_ms = vad_silence_frames_.load() * frame_ms;
+        int max_ms = (int)(vad_max_speech_samples_.load() / VAD_SAMPLES_PER_MS);
         std::cout << "VAD config: window=" << frame_ms << "ms"
-                  << " threshold=" << vad_threshold_mult_
+                  << " threshold=" << vad_threshold_mult_.load()
                   << " silence=" << silence_ms << "ms"
                   << " max_chunk=" << max_ms << "ms"
                   << " min_chunk=" << (vad_min_speech_samples_ * 1000 / VAD_SAMPLE_RATE) << "ms"
@@ -358,7 +359,7 @@ private:
             try {
                 float val = std::stof(cmd.substr(18));
                 if (val >= 0.5f && val <= 10.0f) {
-                    vad_threshold_mult_ = val;
+                    vad_threshold_mult_.store(val);
                     log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD threshold set to %.2f", val);
                     return "OK\n";
                 }
@@ -370,9 +371,10 @@ private:
                 int ms = std::stoi(cmd.substr(19));
                 if (ms > 0) {
                     int frame_ms = std::max(1, (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS));
-                    vad_silence_frames_ = std::max(1, ms / frame_ms);
+                    int frames = std::max(1, ms / frame_ms);
+                    vad_silence_frames_.store(frames);
                     log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD silence set to %dms (%d frames)",
-                                     vad_silence_frames_ * frame_ms, vad_silence_frames_);
+                                     frames * frame_ms, frames);
                     return "OK\n";
                 }
                 return "ERROR:Value must be > 0\n";
@@ -382,13 +384,14 @@ private:
             try {
                 int ms = std::stoi(cmd.substr(21));
                 if (ms > 0) {
-                    vad_max_speech_samples_ = static_cast<size_t>(VAD_SAMPLES_PER_MS) * ms;
-                    if (vad_max_speech_samples_ < vad_min_speech_samples_ * 2) {
-                        vad_max_speech_samples_ = vad_min_speech_samples_ * 2;
+                    size_t samples = static_cast<size_t>(VAD_SAMPLES_PER_MS) * ms;
+                    if (samples < vad_min_speech_samples_ * 2) {
+                        samples = vad_min_speech_samples_ * 2;
                     }
-                    int actual_ms = (int)(vad_max_speech_samples_ / VAD_SAMPLES_PER_MS);
+                    vad_max_speech_samples_.store(samples);
+                    int actual_ms = (int)(samples / VAD_SAMPLES_PER_MS);
                     log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD max chunk set to %dms", actual_ms);
-                    return "OK\n";
+                    return "OK:" + std::to_string(actual_ms) + "ms\n";
                 }
                 return "ERROR:Value must be > 0\n";
             } catch (...) { return "ERROR:Invalid value\n"; }
@@ -397,7 +400,7 @@ private:
             try {
                 int val = std::stoi(cmd.substr(18));
                 if (val >= 0 && val <= 5) {
-                    vad_onset_gap_tolerance_ = val;
+                    vad_onset_gap_tolerance_.store(val);
                     log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD onset gap tolerance set to %d frames", val);
                     return "OK\n";
                 }
@@ -412,16 +415,17 @@ private:
                 if (call->speech_signaled) speech_active++;
             }
             int frame_ms = (int)(vad_frame_size_ / VAD_SAMPLES_PER_MS);
-            int silence_ms = vad_silence_frames_ * frame_ms;
-            int max_ms = (int)(vad_max_speech_samples_ / VAD_SAMPLES_PER_MS);
+            int silence_ms = vad_silence_frames_.load() * frame_ms;
+            int max_ms = (int)(vad_max_speech_samples_.load() / VAD_SAMPLES_PER_MS);
             return "ACTIVE_CALLS:" + std::to_string(calls_.size())
                 + ":SPEECH_ACTIVE:" + std::to_string(speech_active)
                 + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
                 + ":DOWNSTREAM:" + (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
                 + ":WINDOW_MS:" + std::to_string(frame_ms)
-                + ":THRESHOLD:" + format_threshold(vad_threshold_mult_)
+                + ":THRESHOLD:" + format_threshold(vad_threshold_mult_.load())
                 + ":SILENCE_MS:" + std::to_string(silence_ms)
                 + ":MAX_CHUNK_MS:" + std::to_string(max_ms)
+                + ":ONSET_GAP:" + std::to_string(vad_onset_gap_tolerance_.load())
                 + "\n";
         }
         return "ERROR:Unknown command\n";
@@ -488,6 +492,10 @@ private:
                     //       → back to IDLE                              [silence_count > vad_silence_frames_
                     //                                                    OR speech_len > vad_max_speech_samples_]
                     // A single below-threshold frame during ONSET resets onset_count to 0 (→ IDLE).
+                    const float thresh_mult = vad_threshold_mult_.load();
+                    const int silence_frames = vad_silence_frames_.load();
+                    const size_t max_speech = vad_max_speech_samples_.load();
+                    const int onset_gap_tol = vad_onset_gap_tolerance_.load();
                     size_t pos = call->vad_pos;
                     while (pos + vad_frame_size_ <= call->audio_buffer.size()) {
                         // Compute mean energy (mean of squared samples) for this frame.
@@ -511,7 +519,7 @@ private:
                         }
                         // Speech threshold = max(noise_floor × multiplier, min_energy).
                         // min_energy (0.00005) acts as absolute floor for very quiet environments.
-                        float threshold = std::max(call->noise_floor * vad_threshold_mult_, vad_min_energy_);
+                        float threshold = std::max(call->noise_floor * thresh_mult, vad_min_energy_);
 
                         if (energy > threshold) {
                             if (!call->in_speech) {
@@ -525,7 +533,7 @@ private:
                                     call->in_speech = true;
                                     call->speech_start = call->tentative_speech_start;
                                     call->frame_energies.clear();
-                                    call->frame_energies.reserve(vad_max_speech_samples_ / vad_frame_size_ + 1);
+                                    call->frame_energies.reserve(max_speech / vad_frame_size_ + 1);
                                     call->speech_sum_sq = 0.0f;
                                     call->speech_sample_count = 0;
                                     call->energies_sample_origin = pos;
@@ -545,7 +553,7 @@ private:
                         } else {
                             if (!call->in_speech && call->onset_count > 0) {
                                 call->onset_gap++;
-                                if (call->onset_gap > vad_onset_gap_tolerance_) {
+                                if (call->onset_gap > onset_gap_tol) {
                                     call->onset_count = 0;
                                     call->onset_gap = 0;
                                 }
@@ -571,7 +579,7 @@ private:
                         pos += vad_frame_size_;
 
                         // Silence-triggered speech end: enough consecutive silent frames detected.
-                        if (call->in_speech && call->silence_count >= vad_silence_frames_) {
+                        if (call->in_speech && call->silence_count >= silence_frames) {
                             size_t buf_sz = call->audio_buffer.size();
                             if (call->speech_start <= pos && pos <= buf_sz) {
                                 to_send.assign(
@@ -628,7 +636,7 @@ private:
                             break;
                         }
                         size_t speech_len = pos - call->speech_start;
-                        if (call->in_speech && speech_len > vad_max_speech_samples_) {
+                        if (call->in_speech && speech_len > max_speech) {
                             size_t split = find_smart_split_point(*call, pos);
                             size_t buf_sz = call->audio_buffer.size();
                             if (call->speech_start <= split && split <= buf_sz) {
