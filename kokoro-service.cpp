@@ -151,8 +151,6 @@ struct KokoroVocab {
     }
 };
 
-
-
 #ifdef KOKORO_COREML
 class CoreMLDurationModel {
 public:
