@@ -9620,22 +9620,41 @@ body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
             if (!onset_gap_str.empty()) set_setting("vad_onset_gap", onset_gap_str);
 
             bool live = is_service_running("VAD_SERVICE");
-            std::string err;
+            bool all_ok = true;
+            std::string actual_max_chunk;
             if (live) {
-                if (!threshold_str.empty())
-                    tcp_command(vad_cmd_port, "SET_VAD_THRESHOLD:" + threshold_str + "\n", err, 3);
-                if (!silence_ms_str.empty())
-                    tcp_command(vad_cmd_port, "SET_VAD_SILENCE_MS:" + silence_ms_str + "\n", err, 3);
-                if (!max_chunk_ms_str.empty())
-                    tcp_command(vad_cmd_port, "SET_VAD_MAX_CHUNK_MS:" + max_chunk_ms_str + "\n", err, 3);
-                if (!onset_gap_str.empty())
-                    tcp_command(vad_cmd_port, "SET_VAD_ONSET_GAP:" + onset_gap_str + "\n", err, 3);
+                std::string err, resp;
+                if (!threshold_str.empty()) {
+                    resp = tcp_command(vad_cmd_port, "SET_VAD_THRESHOLD:" + threshold_str + "\n", err, 3);
+                    if (resp.find("OK") == std::string::npos) all_ok = false;
+                }
+                if (!silence_ms_str.empty()) {
+                    resp = tcp_command(vad_cmd_port, "SET_VAD_SILENCE_MS:" + silence_ms_str + "\n", err, 3);
+                    if (resp.find("OK") == std::string::npos) all_ok = false;
+                }
+                if (!max_chunk_ms_str.empty()) {
+                    resp = tcp_command(vad_cmd_port, "SET_VAD_MAX_CHUNK_MS:" + max_chunk_ms_str + "\n", err, 3);
+                    if (resp.find("OK") == std::string::npos) {
+                        all_ok = false;
+                    } else {
+                        size_t colon = resp.find(':');
+                        size_t ms_pos = resp.find("ms");
+                        if (colon != std::string::npos && ms_pos != std::string::npos && ms_pos > colon + 1)
+                            actual_max_chunk = resp.substr(colon + 1, ms_pos - colon - 1);
+                    }
+                }
+                if (!onset_gap_str.empty()) {
+                    resp = tcp_command(vad_cmd_port, "SET_VAD_ONSET_GAP:" + onset_gap_str + "\n", err, 3);
+                    if (resp.find("OK") == std::string::npos) all_ok = false;
+                }
+                if (!all_ok) live = false;
             }
 
             std::string w = window_ms_str.empty() ? get_setting("vad_window_ms", "50") : window_ms_str;
             std::string t = threshold_str.empty() ? get_setting("vad_threshold", "2.0") : threshold_str;
             std::string s = silence_ms_str.empty() ? get_setting("vad_silence_ms", "400") : silence_ms_str;
             std::string m = max_chunk_ms_str.empty() ? get_setting("vad_max_chunk_ms", "8000") : max_chunk_ms_str;
+            if (!actual_max_chunk.empty()) m = actual_max_chunk;
             std::string g = onset_gap_str.empty() ? get_setting("vad_onset_gap", "1") : onset_gap_str;
 
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
