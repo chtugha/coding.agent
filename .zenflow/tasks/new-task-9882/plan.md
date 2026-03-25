@@ -143,6 +143,7 @@ In `build_ui_pages()` (~lines 2547–2550), replace the Models tab bar:
 **Verification**: `grep -c '"nav-item"' frontend.cpp` returns 0. `grep -c '"nav-item ' frontend.cpp` returns 0. `grep -c "wt-beta-tabs" frontend.cpp` returns 0.
 
 ### [x] Step 6: Update JavaScript — remove theme functions and Bootstrap tab listener; add switchBetaTab(); update switchModelTab()
+<!-- chat-id: 7be05078-1466-44ba-909a-e2302514b904 -->
 
 In `build_ui_js()`:
 
@@ -181,7 +182,7 @@ In `build_ui_js()`:
 
 **Verification**: `grep -c "setTheme\|toggleThemeMenu" frontend.cpp` returns 0. `grep -c 'data-bs-toggle' frontend.cpp` returns 0. `grep -c 'nav-link' frontend.cpp` returns 0.
 
-### [ ] Step 7: Build and verify
+### [x] Step 7: Build and verify
 
 Run the full build and all static source checks:
 
@@ -205,16 +206,16 @@ grep -c "serve_theme_css" frontend.cpp
 All `grep -c` commands must return `0`. Build must exit with code 0.
 
 Record results here:
-- [ ] Build: exit 0
-- [ ] `bootstrap` count: 0
-- [ ] `data-bs-` count: 0
-- [ ] `nav-link` count: 0
-- [ ] `"nav-item"` count: 0
-- [ ] `"nav-item ` (space-trailing) count: 0
-- [ ] `"tab-pane"` count: 0
-- [ ] `"tab-pane ` (space-trailing) count: 0
-- [ ] `tab-content` count: 0
-- [ ] `wt-beta-tabs` count: 0
-- [ ] `setTheme|toggleThemeMenu` count: 0
-- [ ] Theme CSS classes count: 0
-- [ ] `serve_theme_css` count: 0
+- [x] Build: exit 0
+- [x] `bootstrap` count: 0
+- [x] `data-bs-` count: 0
+- [x] `nav-link` count: 0
+- [x] `"nav-item"` count: 0
+- [x] `"nav-item ` (space-trailing) count: 0
+- [x] `"tab-pane"` count: 0
+- [x] `"tab-pane ` (space-trailing) count: 0
+- [x] `tab-content` count: 0
+- [x] `wt-beta-tabs` count: 0
+- [x] `setTheme|toggleThemeMenu` count: 0
+- [x] Theme CSS classes count: 0
+- [x] `serve_theme_css` count: 0
