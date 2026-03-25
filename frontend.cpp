@@ -2511,6 +2511,8 @@ Save outgoing audio as WAV</label>
   <button class="wt-tab-btn" role="tab" id="tabCompare" aria-selected="false" aria-controls="modelTabCompare" onclick="switchModelTab('compare')">Comparison</button>
 </div>
 
+<div class="wt-tab-panes" id="modelTabPanes">
+
 <!-- Whisper Models Panel -->
 <div class="wt-tab-pane active" id="modelTabWhisper">
 
@@ -2733,6 +2735,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 </div><!-- end modelTabCompare -->
+
+</div><!-- end modelTabPanes -->
 
 </div></div><!-- end page-models -->
 
