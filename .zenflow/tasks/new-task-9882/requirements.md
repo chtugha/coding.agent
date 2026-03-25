@@ -17,7 +17,7 @@ The Pi-hole web interface (master branch at [github.com/pi-hole/web](https://git
 
 3. **Component classes without frameworks** — Pi-hole defines components such as `.small-box`, `.chart-legend`, `.save-button-container`, `.settings-container` as standalone CSS classes with no Bootstrap grid dependency. Layout is achieved with flexbox and CSS Grid directly. This validates the approach of using `wt-*` component classes exclusively.
 
-4. **Tab/nav patterns** — Pi-hole uses Bootstrap's `nav-tabs` / `tab-pane` for its tabbed settings pages. Their v6 development moved toward a framework-free approach (Vue.js + Tailwind in v6 build chain). The lesson: Bootstrap tabs are a common pain point; removing them requires a small custom JS `switchTab()` function and `display:none`/`display:block` toggling — nothing more complex.
+4. **Tab/nav patterns** — Pi-hole (master/v5) uses Bootstrap's `nav-tabs` / `tab-pane` for its tabbed settings pages. Their v6 branch (merged Sept 2024) moved toward a Vue.js + Tailwind build chain — the more relevant reference for a framework-free single design. The v6 approach is the "how pihole-ui did it" the user is referencing: drop the Bootstrap dependency, adopt a curated design token system, and implement interactive patterns (tabs, navigation) with small, focused JS rather than a framework. The practical tab lesson applies to both versions: replacing Bootstrap tabs requires only a custom `switchTab()` function with `display:none`/`display:block` toggling — nothing more complex.
 
 5. **No theme switching** — Pi-hole (master) offers no runtime theme switching. Theme customization is via community CSS override projects (theme.park, LCARS). The base interface ships with one design. This directly supports the decision to remove WhisperTalk's five-theme system.
 
@@ -80,6 +80,7 @@ The existing default (light) `wt-*` design system is well-structured and will be
 | `--wt-font` | `-apple-system, BlinkMacSystemFont, "SF Pro Display", …` | Body font |
 | `--wt-surface-sunken` | `rgba(0,0,0,0.02)` | Recessed tab bars, inset areas |
 | `--wt-surface-elevated` | `rgba(255,255,255,0.85)` | Elevated surfaces (summary bars) |
+| `--wt-shadow-sm` | `0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.06)` | Subtle elevation for active states |
 
 All pages must use only these tokens and the `wt-*` component classes. No hardcoded colors or Bootstrap utility classes.
 
