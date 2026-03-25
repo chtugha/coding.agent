@@ -184,9 +184,9 @@ ARIA notes:
 **New markup**:
 ```html
 <div class="wt-tab-bar" id="modelTabs" role="tablist">
-  <button class="wt-tab-btn active" role="tab" id="tabWhisper" aria-selected="true" onclick="switchModelTab('whisper')">Whisper Models</button>
-  <button class="wt-tab-btn" role="tab" id="tabLlama" aria-selected="false" onclick="switchModelTab('llama')">LLaMA Models</button>
-  <button class="wt-tab-btn" role="tab" id="tabCompare" aria-selected="false" onclick="switchModelTab('compare')">Comparison</button>
+  <button class="wt-tab-btn active" role="tab" id="tabWhisper" aria-selected="true" aria-controls="modelTabWhisper" onclick="switchModelTab('whisper')">Whisper Models</button>
+  <button class="wt-tab-btn" role="tab" id="tabLlama" aria-selected="false" aria-controls="modelTabLlama" onclick="switchModelTab('llama')">LLaMA Models</button>
+  <button class="wt-tab-btn" role="tab" id="tabCompare" aria-selected="false" aria-controls="modelTabCompare" onclick="switchModelTab('compare')">Comparison</button>
 </div>
 ```
 
@@ -361,10 +361,10 @@ Expected: exits 0, `bin/frontend` updated.
 # All must return 0
 grep -c "bootstrap" frontend.cpp
 grep -c "data-bs-" frontend.cpp
-grep -c '"nav-link"' frontend.cpp
-grep -c '"nav-item"' frontend.cpp
-grep -c '"tab-pane"' frontend.cpp
-grep -c '"tab-content"' frontend.cpp
+grep -c 'nav-link' frontend.cpp
+grep -c 'nav-item' frontend.cpp
+grep -c 'tab-pane' frontend.cpp
+grep -c 'tab-content' frontend.cpp
 grep -c "setTheme\|toggleThemeMenu" frontend.cpp
 grep -c "wt-theme-dropdown\|wt-theme-menu\|wt-theme-opt" frontend.cpp
 grep -c "serve_theme_css" frontend.cpp
