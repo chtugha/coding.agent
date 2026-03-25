@@ -40,24 +40,176 @@ Save to `{@artifacts_path}/spec.md` with:
 - Delivery phases (incremental, testable milestones)
 - Verification approach using project lint/test commands
 
-### [ ] Step: Planning
+### [x] Step: Planning
+<!-- chat-id: d70a6fe6-4627-4221-9dc0-873fc3f0e255 -->
 
 Create a detailed implementation plan based on `{@artifacts_path}/spec.md`.
 
-1. Break down the work into concrete tasks
-2. Each task should reference relevant contracts and include verification steps
-3. Replace the Implementation step below with the planned tasks
+### [ ] Step 1: Remove Bootstrap CDN links and C++ theme infrastructure
 
-Rule of thumb for step size: each step should represent a coherent unit of work (e.g., implement a component, add an API endpoint). Avoid steps that are too granular (single function) or too broad (entire feature).
+Remove Bootstrap from `frontend.cpp` — all C++ side changes:
 
-Important: unit tests must be part of each implementation task, not separate tasks. Each task should implement the code and its tests together, if relevant.
+- In `serve_index()` (~line 1476): remove `std::string theme = get_setting("theme", "default");` and change `build_ui_html(theme)` → `build_ui_html()`
+- In `build_ui_html()` (~line 1482): remove the `theme` parameter from the function signature
+- Delete `dark_attr` and `theme_css_link` local variable declarations and all conditional logic (~lines 1483–1489)
+- Remove `+ dark_attr +` concatenation from the `<html lang="en">` tag (~line 1492)
+- Remove Bootstrap CSS `<link>` from `<head>` (~line 1495)
+- Remove the `theme_css_link` concatenation placeholder line (~line 1496)
+- Remove Bootstrap JS `<script>` tag from end of `<body>` (~line 1694)
+- In `http_handler()` (~line 1392): remove the `else if (mg_match(hm->uri, mg_str("/css/theme/*"), NULL))` branch
+- In `init_database()` (~line 751): remove `INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'default');`
+- Delete the entire `serve_theme_css()` method (~lines 6024–6110, ~86 lines)
 
-If the feature is trivial and doesn't warrant full specification, update this workflow to remove unnecessary steps and explain the reasoning to the user.
+**Verification**: Binary compiles with `bash scripts/build.sh`. `grep -c "serve_theme_css" frontend.cpp` returns 0. `grep -c "bootstrap" frontend.cpp` returns 0.
 
-Save to `{@artifacts_path}/plan.md`.
+### [ ] Step 2: Remove theme CSS rules and sidebar theme widget HTML
 
-### [ ] Step: Implementation
+Remove theme-related CSS and HTML from `build_ui_html()`:
 
-This step should be replaced with detailed implementation tasks from the Planning step.
+- Remove these CSS rules from the `<style>` block (~lines 1508–1640):
+  - `[data-bs-theme="dark"]{...}` — dark `:root` variable override (~line 1518)
+  - `[data-bs-theme="dark"] .wt-nav-item:hover{...}` (~line 1529)
+  - `[data-bs-theme="dark"] .wt-pipeline-hero{...}` (~line 1636)
+  - `[data-bs-theme="dark"] .wt-pipeline-node{...}` (~line 1637)
+  - `[data-bs-theme="dark"] .wt-card{...}` (~line 1638)
+  - `.wt-theme-dropdown{...}` (~line 1582)
+  - `.wt-theme-menu{...}` (~line 1583)
+  - `.wt-theme-menu.open{...}` (~line 1584)
+  - `.wt-theme-opt{...}` (~line 1585)
+  - `.wt-theme-opt:hover{...}` (~line 1586)
+  - `.wt-theme-opt.active{...}` (~line 1587)
+- Remove the entire sidebar theme widget HTML block (~lines 1677–1688): the outer `<div style="padding:8px 12px;border-top:...">` containing the `.wt-theme-dropdown` and `.wt-theme-menu`
 
-If Planning didn't replace this step, execute the tasks in `{@artifacts_path}/plan.md`, updating checkboxes as you go. Run planned tests/lint and record results in plan.md.
+**Verification**: `grep -c "data-bs-theme" frontend.cpp` returns 0. `grep -c "wt-theme-dropdown\|wt-theme-menu\|wt-theme-opt" frontend.cpp` returns 0. Binary compiles and sidebar renders without theme widget.
+
+### [ ] Step 3: Replace `.wt-beta-tabs` CSS with new `.wt-tab-bar` / `.wt-tab-btn` / `.wt-tab-pane` CSS
+
+Update the `<style>` block in `build_ui_html()`:
+
+- Remove `.wt-beta-tabs{display:flex;gap:4px;...}` base rule (~line 1630)
+- Remove `.wt-beta-tabs .nav-link{...}` (~line 1631)
+- Remove `.wt-beta-tabs .nav-link:hover{...}` (~line 1632)
+- Remove `.wt-beta-tabs .nav-link.active{...}` (~line 1633)
+- Add these replacement CSS rules in their place:
+  ```css
+  .wt-tab-bar{display:flex;gap:4px;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius);margin-bottom:16px}
+  .wt-tab-btn{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer;font-family:var(--wt-font)}
+  .wt-tab-btn:hover{background:rgba(0,0,0,0.06);color:var(--wt-text)}
+  .wt-tab-btn.active{background:var(--wt-accent);color:#fff;box-shadow:var(--wt-shadow-sm)}
+  .wt-tab-pane{display:none}
+  .wt-tab-pane.active{display:block}
+  ```
+
+**Verification**: `grep -c "wt-beta-tabs" frontend.cpp` returns 0. CSS for `.wt-tab-bar` is present in source.
+
+### [ ] Step 4: Replace Bootstrap tab markup on the Beta Testing page
+
+In `build_ui_pages()` (~lines 2031–2537), replace the Bootstrap tab bar and pane container:
+
+- Replace the `<ul class="nav wt-beta-tabs" id="betaTestTabs" role="tablist">` + three `<li>`/`<a>` elements with:
+  ```html
+  <div class="wt-tab-bar" id="betaTestTabs" role="tablist">
+    <button class="wt-tab-btn active" role="tab" id="tab-beta-component" aria-selected="true" aria-controls="beta-component" onclick="switchBetaTab('beta-component')">Component Tests</button>
+    <button class="wt-tab-btn" role="tab" id="tab-beta-pipeline" aria-selected="false" aria-controls="beta-pipeline" onclick="switchBetaTab('beta-pipeline')">Pipeline Tests</button>
+    <button class="wt-tab-btn" role="tab" id="tab-beta-tools" aria-selected="false" aria-controls="beta-tools" onclick="switchBetaTab('beta-tools')">Tools</button>
+  </div>
+  ```
+- Change `<div class="tab-content">` → `<div class="wt-tab-panes">` (~line 2037)
+- Change `<div class="tab-pane active" id="beta-component" ...>` → `<div class="wt-tab-pane active" id="beta-component" ...>` (~line 2038)
+- Change `<div class="tab-pane" id="beta-pipeline" ...>` → `<div class="wt-tab-pane" id="beta-pipeline" ...>` (~line 2269)
+- Change `<div class="tab-pane" id="beta-tools" ...>` → `<div class="wt-tab-pane" id="beta-tools" ...>` (~line 2429)
+- Update closing comment `</div><!-- end tab-content -->` → `</div><!-- end wt-tab-panes -->` (~line 2537)
+
+**Verification**: `grep -c '"tab-pane"' frontend.cpp` returns 0. `grep -c '"tab-pane ' frontend.cpp` returns 0. `grep -c 'tab-content' frontend.cpp` returns 0.
+
+### [ ] Step 5: Replace Bootstrap tab markup on the Models page
+
+In `build_ui_pages()` (~lines 2547–2550), replace the Models tab bar:
+
+- Replace `<ul class="nav wt-beta-tabs" id="modelTabs" role="tablist">` + three `<li class="nav-item"><a class="nav-link">` elements with:
+  ```html
+  <div class="wt-tab-bar" id="modelTabs" role="tablist">
+    <button class="wt-tab-btn active" role="tab" id="tabWhisper" aria-selected="true" aria-controls="modelTabWhisper" onclick="switchModelTab('whisper')">Whisper Models</button>
+    <button class="wt-tab-btn" role="tab" id="tabLlama" aria-selected="false" aria-controls="modelTabLlama" onclick="switchModelTab('llama')">LLaMA Models</button>
+    <button class="wt-tab-btn" role="tab" id="tabCompare" aria-selected="false" aria-controls="modelTabCompare" onclick="switchModelTab('compare')">Comparison</button>
+  </div>
+  ```
+
+**Verification**: `grep -c '"nav-item"' frontend.cpp` returns 0. `grep -c '"nav-item ' frontend.cpp` returns 0. `grep -c "wt-beta-tabs" frontend.cpp` returns 0.
+
+### [ ] Step 6: Update JavaScript — remove theme functions and Bootstrap tab listener; add switchBetaTab(); update switchModelTab()
+
+In `build_ui_js()`:
+
+- Remove `function setTheme(t){...}` (~lines 3574–3577)
+- Remove `function toggleThemeMenu(){...}` (~lines 3579–3581)
+- Remove the `document.addEventListener('click', function(e){ if(!e.target.closest('.wt-theme-dropdown'))... })` click-outside handler (~lines 4604–4608)
+- Remove `document.querySelectorAll('#betaTestTabs [data-bs-toggle="tab"]').forEach(...)` Bootstrap tab event listener (~lines 5016–5018)
+- Add `switchBetaTab()` function in place of the removed Bootstrap listener:
+  ```javascript
+  function switchBetaTab(tabId){
+    document.querySelectorAll('#betaTestTabs .wt-tab-btn').forEach(function(btn){
+      var active=btn.getAttribute('aria-controls')===tabId;
+      btn.classList.toggle('active',active);
+      btn.setAttribute('aria-selected',active?'true':'false');
+    });
+    document.querySelectorAll('.wt-tab-panes .wt-tab-pane').forEach(function(pane){
+      pane.classList.toggle('active',pane.id===tabId);
+    });
+    updateBetaSummaryDots();
+  }
+  ```
+- Update `switchModelTab()` (~lines 5033–5038): replace the `link.className='nav-link'+(...)` line with `classList.toggle` on `wt-tab-btn` and `aria-selected` sync:
+  ```javascript
+  function switchModelTab(tab){
+    ['whisper','llama','compare'].forEach(t=>{
+      document.getElementById('modelTab'+t.charAt(0).toUpperCase()+t.slice(1)).style.display=(t===tab)?'':'none';
+      var btn=document.getElementById('tab'+t.charAt(0).toUpperCase()+t.slice(1));
+      if(btn){
+        btn.classList.toggle('active',t===tab);
+        btn.setAttribute('aria-selected',(t===tab)?'true':'false');
+      }
+    });
+    if(tab==='compare') loadModelComparison();
+  }
+  ```
+
+**Verification**: `grep -c "setTheme\|toggleThemeMenu" frontend.cpp` returns 0. `grep -c 'data-bs-toggle' frontend.cpp` returns 0. `grep -c 'nav-link' frontend.cpp` returns 0.
+
+### [ ] Step 7: Build and verify
+
+Run the full build and all static source checks:
+
+```bash
+cd /Users/ollama/Documents/coding.agent
+bash scripts/build.sh 2>&1 | tail -20
+grep -c "bootstrap" frontend.cpp
+grep -c "data-bs-" frontend.cpp
+grep -c 'nav-link' frontend.cpp
+grep -c '"nav-item"' frontend.cpp
+grep -c '"nav-item ' frontend.cpp
+grep -c '"tab-pane"' frontend.cpp
+grep -c '"tab-pane ' frontend.cpp
+grep -c 'tab-content' frontend.cpp
+grep -c "wt-beta-tabs" frontend.cpp
+grep -c "setTheme\|toggleThemeMenu" frontend.cpp
+grep -c "wt-theme-dropdown\|wt-theme-menu\|wt-theme-opt" frontend.cpp
+grep -c "serve_theme_css" frontend.cpp
+```
+
+All `grep -c` commands must return `0`. Build must exit with code 0.
+
+Record results here:
+- [ ] Build: exit 0
+- [ ] `bootstrap` count: 0
+- [ ] `data-bs-` count: 0
+- [ ] `nav-link` count: 0
+- [ ] `"nav-item"` count: 0
+- [ ] `"nav-item ` (space-trailing) count: 0
+- [ ] `"tab-pane"` count: 0
+- [ ] `"tab-pane ` (space-trailing) count: 0
+- [ ] `tab-content` count: 0
+- [ ] `wt-beta-tabs` count: 0
+- [ ] `setTheme|toggleThemeMenu` count: 0
+- [ ] Theme CSS classes count: 0
+- [ ] `serve_theme_css` count: 0
