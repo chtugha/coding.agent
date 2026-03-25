@@ -2512,7 +2512,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <!-- Whisper Models Panel -->
-<div id="modelTabWhisper">
+<div class="wt-tab-pane active" id="modelTabWhisper">
 
 <div class="wt-card">
 <div class="wt-card-header">
@@ -2596,7 +2596,7 @@ Save outgoing audio as WAV</label>
 </div><!-- end modelTabWhisper -->
 
 <!-- LLaMA Models Panel -->
-<div id="modelTabLlama" style="display:none">
+<div class="wt-tab-pane" id="modelTabLlama">
 
 <div class="wt-card">
 <div class="wt-card-header">
@@ -2671,7 +2671,7 @@ Save outgoing audio as WAV</label>
 </div><!-- end modelTabLlama -->
 
 <!-- Comparison Panel -->
-<div id="modelTabCompare" style="display:none">
+<div class="wt-tab-pane" id="modelTabCompare">
 <div class="wt-card">
 <div class="wt-card-header">
 <span class="wt-card-title">Model Benchmark Comparison</span>
@@ -4986,7 +4986,8 @@ function switchBetaTab(tabId){
 
 function switchModelTab(tab){
   ['whisper','llama','compare'].forEach(t=>{
-    document.getElementById('modelTab'+t.charAt(0).toUpperCase()+t.slice(1)).style.display=(t===tab)?'':'none';
+    var pane=document.getElementById('modelTab'+t.charAt(0).toUpperCase()+t.slice(1));
+    if(pane) pane.classList.toggle('active',t===tab);
     var btn=document.getElementById('tab'+t.charAt(0).toUpperCase()+t.slice(1));
     if(btn){
       btn.classList.toggle('active',t===tab);
