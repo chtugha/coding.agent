@@ -1602,10 +1602,12 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-collapsible{max-height:0;overflow:hidden;transition:max-height 0.3s ease}
 /* max-height:5000px is an intentionally large value for CSS transition; actual height is determined by content. CSS transitions require a concrete max-height endpoint. */
 .wt-collapsible.open{max-height:5000px}
-.wt-beta-tabs{display:flex;gap:4px;margin-bottom:16px;border:none;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius)}
-.wt-beta-tabs .nav-link{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer}
-.wt-beta-tabs .nav-link:hover{background:var(--wt-surface-sunken);color:var(--wt-text)}
-.wt-beta-tabs .nav-link.active{background:var(--wt-accent);color:#fff;box-shadow:var(--wt-shadow-sm)}
+.wt-tab-bar{display:flex;gap:4px;padding:4px;background:var(--wt-surface-sunken);border-radius:var(--wt-radius);margin-bottom:16px}
+.wt-tab-btn{border:none;border-radius:var(--wt-radius);padding:8px 20px;font-size:13px;font-weight:500;color:var(--wt-text-secondary);background:transparent;transition:background 0.2s,color 0.2s;cursor:pointer;font-family:var(--wt-font)}
+.wt-tab-btn:hover{background:rgba(0,0,0,0.06);color:var(--wt-text)}
+.wt-tab-btn.active{background:var(--wt-accent);color:#fff;box-shadow:var(--wt-shadow-sm)}
+.wt-tab-pane{display:none}
+.wt-tab-pane.active{display:block}
 .wt-test-summary-bar{display:flex;gap:12px;align-items:center;padding:12px 16px;background:var(--wt-surface-elevated);border-radius:var(--wt-radius);margin-bottom:16px;font-size:13px}
 .wt-test-summary-bar .summary-dot{width:10px;height:10px;border-radius:50%;display:inline-block;background:var(--wt-text-secondary);margin-right:4px}
 @media (max-width:1024px){.wt-content{padding:16px 20px}.wt-metrics-grid{grid-template-columns:repeat(2,1fr)}.wt-dashboard-content{grid-template-columns:1fr}.wt-metric-card .metric-value{font-size:36px}}

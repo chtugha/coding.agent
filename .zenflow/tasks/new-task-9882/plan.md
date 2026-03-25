@@ -84,7 +84,8 @@ Remove theme-related CSS and HTML from `build_ui_html()`:
 
 **Verification**: `grep -c "data-bs-theme" frontend.cpp` returns 0. `grep -c "wt-theme-dropdown\|wt-theme-menu\|wt-theme-opt" frontend.cpp` returns 0. Binary compiles and sidebar renders without theme widget.
 
-### [ ] Step 3: Replace `.wt-beta-tabs` CSS with new `.wt-tab-bar` / `.wt-tab-btn` / `.wt-tab-pane` CSS
+### [x] Step 3: Replace `.wt-beta-tabs` CSS with new `.wt-tab-bar` / `.wt-tab-btn` / `.wt-tab-pane` CSS
+<!-- chat-id: 1c5cd24a-5be9-47bd-b82c-84b3bbb02acc -->
 
 Update the `<style>` block in `build_ui_html()`:
 
