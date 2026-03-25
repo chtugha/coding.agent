@@ -2506,15 +2506,15 @@ Save outgoing audio as WAV</label>
 
 <!-- Tab selector -->
 <div class="wt-tab-bar" id="modelTabs" role="tablist">
-  <button class="wt-tab-btn active" role="tab" id="tabWhisper" aria-selected="true" aria-controls="modelTabWhisper" onclick="switchModelTab('whisper')">Whisper Models</button>
-  <button class="wt-tab-btn" role="tab" id="tabLlama" aria-selected="false" aria-controls="modelTabLlama" onclick="switchModelTab('llama')">LLaMA Models</button>
-  <button class="wt-tab-btn" role="tab" id="tabCompare" aria-selected="false" aria-controls="modelTabCompare" onclick="switchModelTab('compare')">Comparison</button>
+<button class="wt-tab-btn active" role="tab" id="tabWhisper" aria-selected="true" aria-controls="modelTabWhisper" onclick="switchModelTab('whisper')">Whisper Models</button>
+<button class="wt-tab-btn" role="tab" id="tabLlama" aria-selected="false" aria-controls="modelTabLlama" onclick="switchModelTab('llama')">LLaMA Models</button>
+<button class="wt-tab-btn" role="tab" id="tabCompare" aria-selected="false" aria-controls="modelTabCompare" onclick="switchModelTab('compare')">Comparison</button>
 </div>
 
 <div class="wt-tab-panes" id="modelTabPanes">
 
 <!-- Whisper Models Panel -->
-<div class="wt-tab-pane active" id="modelTabWhisper">
+<div class="wt-tab-pane active" id="modelTabWhisper" role="tabpanel" aria-labelledby="tabWhisper">
 
 <div class="wt-card">
 <div class="wt-card-header">
@@ -2598,7 +2598,7 @@ Save outgoing audio as WAV</label>
 </div><!-- end modelTabWhisper -->
 
 <!-- LLaMA Models Panel -->
-<div class="wt-tab-pane" id="modelTabLlama">
+<div class="wt-tab-pane" id="modelTabLlama" role="tabpanel" aria-labelledby="tabLlama">
 
 <div class="wt-card">
 <div class="wt-card-header">
@@ -2673,7 +2673,7 @@ Save outgoing audio as WAV</label>
 </div><!-- end modelTabLlama -->
 
 <!-- Comparison Panel -->
-<div class="wt-tab-pane" id="modelTabCompare">
+<div class="wt-tab-pane" id="modelTabCompare" role="tabpanel" aria-labelledby="tabCompare">
 <div class="wt-card">
 <div class="wt-card-header">
 <span class="wt-card-title">Model Benchmark Comparison</span>
@@ -3544,7 +3544,7 @@ function showToast(msg,type){
   var el=document.createElement('div');
   el.textContent=msg;
   el.style.cssText='position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:6px;z-index:10000;font-size:14px;max-width:400px;box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity 0.3s;'
-    +(type==='error'?'background:#dc3545;color:#fff;':'background:var(--wt-card-bg,#2a2a2a);color:var(--wt-text,#e0e0e0);border:1px solid var(--wt-border,#444);');
+    +(type==='error'?'background:var(--wt-danger,#ff3b30);color:#fff;':'background:var(--wt-card-bg,#2a2a2a);color:var(--wt-text,#e0e0e0);border:1px solid var(--wt-border,#444);');
   document.body.appendChild(el);
   setTimeout(function(){el.style.opacity='0';setTimeout(function(){el.remove();},TOAST_FADE_MS);},TOAST_DURATION_MS);
 }
@@ -4949,7 +4949,7 @@ const updateBetaSummaryDots=()=>{
     if(hasPass) return 'success';
     return 'neutral';
   };
-  const colorMap={success:'var(--wt-success,#198754)',danger:'var(--wt-danger,#dc3545)',neutral:'var(--wt-text-secondary)'};
+  const colorMap={success:'var(--wt-success,#34c759)',danger:'var(--wt-danger,#ff3b30)',neutral:'var(--wt-text-secondary)'};
   ['Component','Pipeline','Tools'].forEach(name=>{
     const dot=document.getElementById('betaDot'+name);
     if(dot) dot.style.background=colorMap[getTabStatus('beta-'+name.toLowerCase())];

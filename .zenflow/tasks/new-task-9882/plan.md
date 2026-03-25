@@ -127,6 +127,7 @@ In `build_ui_pages()` (~lines 2031–2537), replace the Bootstrap tab bar and pa
 **Verification**: `grep -c '"tab-pane"' frontend.cpp` returns 0. `grep -c '"tab-pane ' frontend.cpp` returns 0. `grep -c 'tab-content' frontend.cpp` returns 0.
 
 ### [x] Step 5: Replace Bootstrap tab markup on the Models page
+<!-- chat-id: 89cf5eca-7ffd-4cb7-9c5c-3c67a16fd521 -->
 
 In `build_ui_pages()` (~lines 2547–2550), replace the Models tab bar:
 
