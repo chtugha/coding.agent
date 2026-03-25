@@ -63,7 +63,8 @@ Remove Bootstrap from `frontend.cpp` — all C++ side changes:
 
 **Verification**: Binary compiles with `bash scripts/build.sh`. `grep -c "serve_theme_css" frontend.cpp` returns 0. `grep -c "bootstrap" frontend.cpp` returns 0.
 
-### [ ] Step 2: Remove theme CSS rules and sidebar theme widget HTML
+### [x] Step 2: Remove theme CSS rules and sidebar theme widget HTML
+<!-- chat-id: d71dfcc2-a2b8-41c6-8e7c-35d5f43c635e -->
 
 Remove theme-related CSS and HTML from `build_ui_html()`:
 
