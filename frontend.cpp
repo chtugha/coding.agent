@@ -1989,14 +1989,14 @@ Save outgoing audio as WAV</label>
 <span><span id="betaDotTools" class="summary-dot"></span>Tools</span>
 </div>
 
-<ul class="nav wt-beta-tabs" id="betaTestTabs" role="tablist">
-<li role="presentation"><a class="nav-link active" id="tab-beta-component" data-bs-toggle="tab" href="#beta-component" role="tab" aria-controls="beta-component" aria-selected="true">Component Tests</a></li>
-<li role="presentation"><a class="nav-link" id="tab-beta-pipeline" data-bs-toggle="tab" href="#beta-pipeline" role="tab" aria-controls="beta-pipeline" aria-selected="false">Pipeline Tests</a></li>
-<li role="presentation"><a class="nav-link" id="tab-beta-tools" data-bs-toggle="tab" href="#beta-tools" role="tab" aria-controls="beta-tools" aria-selected="false">Tools</a></li>
-</ul>
+<div class="wt-tab-bar" id="betaTestTabs" role="tablist">
+<button class="wt-tab-btn active" role="tab" id="tab-beta-component" aria-selected="true" aria-controls="beta-component" onclick="switchBetaTab('beta-component')">Component Tests</button>
+<button class="wt-tab-btn" role="tab" id="tab-beta-pipeline" aria-selected="false" aria-controls="beta-pipeline" onclick="switchBetaTab('beta-pipeline')">Pipeline Tests</button>
+<button class="wt-tab-btn" role="tab" id="tab-beta-tools" aria-selected="false" aria-controls="beta-tools" onclick="switchBetaTab('beta-tools')">Tools</button>
+</div>
 
-<div class="tab-content">
-<div class="tab-pane active" id="beta-component" role="tabpanel" aria-labelledby="tab-beta-component">
+<div class="wt-tab-panes" id="betaTestPanes">
+<div class="wt-tab-pane active" id="beta-component" role="tabpanel" aria-labelledby="tab-beta-component">
 
 <div class="wt-card">
 <div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
@@ -2227,7 +2227,7 @@ Save outgoing audio as WAV</label>
 
 </div><!-- end beta-component -->
 
-<div class="tab-pane" id="beta-pipeline" role="tabpanel" aria-labelledby="tab-beta-pipeline">
+<div class="wt-tab-pane" id="beta-pipeline" role="tabpanel" aria-labelledby="tab-beta-pipeline">
 
 <div class="wt-card">
 <div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: Shut-Up Mechanism (Pipeline)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
@@ -2387,7 +2387,7 @@ Save outgoing audio as WAV</label>
 
 </div><!-- end beta-pipeline -->
 
-<div class="tab-pane" id="beta-tools" role="tabpanel" aria-labelledby="tab-beta-tools">
+<div class="wt-tab-pane" id="beta-tools" role="tabpanel" aria-labelledby="tab-beta-tools">
 
 <div class="wt-card">
 <div class="wt-card-header">
@@ -2495,7 +2495,7 @@ Save outgoing audio as WAV</label>
 
 </div><!-- end beta-tools -->
 
-</div><!-- end tab-content -->
+</div><!-- end wt-tab-panes -->
 
 </div></div>
 
@@ -2505,11 +2505,11 @@ Save outgoing audio as WAV</label>
 <h2 class="wt-page-title">Models & Benchmarking</h2>
 
 <!-- Tab selector -->
-<ul class="nav wt-beta-tabs" id="modelTabs" role="tablist">
-  <li class="nav-item"><a class="nav-link active" id="tabWhisper" href="#" onclick="switchModelTab('whisper');return false">Whisper Models</a></li>
-  <li class="nav-item"><a class="nav-link" id="tabLlama" href="#" onclick="switchModelTab('llama');return false">LLaMA Models</a></li>
-  <li class="nav-item"><a class="nav-link" id="tabCompare" href="#" onclick="switchModelTab('compare');return false">Comparison</a></li>
-</ul>
+<div class="wt-tab-bar" id="modelTabs" role="tablist">
+  <button class="wt-tab-btn active" role="tab" id="tabWhisper" aria-selected="true" aria-controls="modelTabWhisper" onclick="switchModelTab('whisper')">Whisper Models</button>
+  <button class="wt-tab-btn" role="tab" id="tabLlama" aria-selected="false" aria-controls="modelTabLlama" onclick="switchModelTab('llama')">LLaMA Models</button>
+  <button class="wt-tab-btn" role="tab" id="tabCompare" aria-selected="false" aria-controls="modelTabCompare" onclick="switchModelTab('compare')">Comparison</button>
+</div>
 
 <!-- Whisper Models Panel -->
 <div id="modelTabWhisper">
@@ -4959,9 +4959,17 @@ document.addEventListener('keydown',e=>{
   }
 });
 
-document.querySelectorAll('#betaTestTabs [data-bs-toggle="tab"]').forEach(el=>{
-  el.addEventListener('shown.bs.tab',updateBetaSummaryDots);
-});
+function switchBetaTab(tabId){
+  document.querySelectorAll('#betaTestTabs .wt-tab-btn').forEach(function(btn){
+    var active=btn.getAttribute('aria-controls')===tabId;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-selected',active?'true':'false');
+  });
+  document.querySelectorAll('#betaTestPanes .wt-tab-pane').forEach(function(pane){
+    pane.classList.toggle('active',pane.id===tabId);
+  });
+  updateBetaSummaryDots();
+}
 
 (()=>{
   let debounceTimer=null;
@@ -4979,8 +4987,11 @@ document.querySelectorAll('#betaTestTabs [data-bs-toggle="tab"]').forEach(el=>{
 function switchModelTab(tab){
   ['whisper','llama','compare'].forEach(t=>{
     document.getElementById('modelTab'+t.charAt(0).toUpperCase()+t.slice(1)).style.display=(t===tab)?'':'none';
-    var link=document.getElementById('tab'+t.charAt(0).toUpperCase()+t.slice(1));
-    if(link){link.className='nav-link'+(t===tab?' active':'');}
+    var btn=document.getElementById('tab'+t.charAt(0).toUpperCase()+t.slice(1));
+    if(btn){
+      btn.classList.toggle('active',t===tab);
+      btn.setAttribute('aria-selected',(t===tab)?'true':'false');
+    }
   });
   if(tab==='compare') loadModelComparison();
 }

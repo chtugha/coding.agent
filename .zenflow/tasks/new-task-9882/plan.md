@@ -105,7 +105,8 @@ Update the `<style>` block in `build_ui_html()`:
 
 **Verification**: `grep -c "wt-beta-tabs" frontend.cpp` returns 0. CSS for `.wt-tab-bar` is present in source.
 
-### [ ] Step 4: Replace Bootstrap tab markup on the Beta Testing page
+### [x] Step 4: Replace Bootstrap tab markup on the Beta Testing page
+<!-- chat-id: d7a6e692-ce4a-4101-a826-eb466af1fd2d -->
 
 In `build_ui_pages()` (~lines 2031–2537), replace the Bootstrap tab bar and pane container:
 
@@ -125,7 +126,7 @@ In `build_ui_pages()` (~lines 2031–2537), replace the Bootstrap tab bar and pa
 
 **Verification**: `grep -c '"tab-pane"' frontend.cpp` returns 0. `grep -c '"tab-pane ' frontend.cpp` returns 0. `grep -c 'tab-content' frontend.cpp` returns 0.
 
-### [ ] Step 5: Replace Bootstrap tab markup on the Models page
+### [x] Step 5: Replace Bootstrap tab markup on the Models page
 
 In `build_ui_pages()` (~lines 2547–2550), replace the Models tab bar:
 
@@ -140,7 +141,7 @@ In `build_ui_pages()` (~lines 2547–2550), replace the Models tab bar:
 
 **Verification**: `grep -c '"nav-item"' frontend.cpp` returns 0. `grep -c '"nav-item ' frontend.cpp` returns 0. `grep -c "wt-beta-tabs" frontend.cpp` returns 0.
 
-### [ ] Step 6: Update JavaScript — remove theme functions and Bootstrap tab listener; add switchBetaTab(); update switchModelTab()
+### [x] Step 6: Update JavaScript — remove theme functions and Bootstrap tab listener; add switchBetaTab(); update switchModelTab()
 
 In `build_ui_js()`:
 
