@@ -45,7 +45,8 @@ Save to `{@artifacts_path}/spec.md` with:
 
 Create a detailed implementation plan based on `{@artifacts_path}/spec.md`.
 
-### [ ] Step 1: Remove Bootstrap CDN links and C++ theme infrastructure
+### [x] Step 1: Remove Bootstrap CDN links and C++ theme infrastructure
+<!-- chat-id: 5878d3c8-f9b2-4bc1-870c-a51311350cd5 -->
 
 Remove Bootstrap from `frontend.cpp` — all C++ side changes:
 

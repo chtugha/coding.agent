@@ -748,7 +748,6 @@ private:
                 ('NEUTTS_SERVICE', 'bin/neutts-service', '', 'NeuTTS Nano German TTS (CoreML)'),
                 ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP'),
                 ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection');
-            INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'default');
             UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
             UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args='--lines 1 alice 127.0.0.1 5060' OR default_args='--lines 2 alice 127.0.0.1 5060');
         )";
@@ -1389,8 +1388,6 @@ private:
                 handle_settings(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/status")) == 0) {
                 handle_status(c);
-            } else if (mg_match(hm->uri, mg_str("/css/theme/*"), NULL)) {
-                serve_theme_css(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/models")) == 0) {
                 handle_whisper_models(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/sip/add-line")) == 0) {
@@ -1474,26 +1471,15 @@ private:
     }
 
     void serve_index(struct mg_connection *c) {
-        std::string theme = get_setting("theme", "default");
-        std::string html = build_ui_html(theme);
+        std::string html = build_ui_html();
         mg_http_reply(c, 200, "Content-Type: text/html; charset=utf-8\r\n", "%s", html.c_str());
     }
 
-    std::string build_ui_html(const std::string& theme) {
-        std::string dark_attr;
-        std::string theme_css_link;
-        if (theme == "dark") {
-            dark_attr = " data-bs-theme=\"dark\"";
-        } else if (theme == "slate" || theme == "flatly" || theme == "cyborg") {
-            theme_css_link = "<link rel=\"stylesheet\" href=\"/css/theme/" + theme + "\">";
-        }
-
+    std::string build_ui_html() {
         std::string h;
-        h += R"WT(<!DOCTYPE html><html lang="en")WT" + dark_attr + R"WT(><head><meta charset="UTF-8">
+        h += R"WT(<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WhisperTalk</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-)WT" + theme_css_link + R"WT(
 <style>
 /* CSS Design System — WhisperTalk custom properties.
  *
@@ -1674,24 +1660,11 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 <div class="wt-status-bar" id="statusBar">
 <span id="statusText">Connecting...</span>
 </div>
-<div style="padding:8px 12px;border-top:0.5px solid var(--wt-border)">
-<div class="wt-theme-dropdown" style="width:100%">
-<div class="wt-nav-item" onclick="toggleThemeMenu()" style="margin:0">
-<span class="nav-icon">&#x1F3A8;</span>Theme<span style="margin-left:auto;font-size:11px;color:var(--wt-text-secondary)" id="currentThemeName">)WT" + theme + R"WT(</span>
-</div>
-<div class="wt-theme-menu" id="themeMenu">
-<div class="wt-theme-opt)WT" + std::string(theme == "default" ? " active" : "") + R"WT(" onclick="setTheme('default')">Default</div>
-<div class="wt-theme-opt)WT" + std::string(theme == "dark" ? " active" : "") + R"WT(" onclick="setTheme('dark')">Dark</div>
-<div class="wt-theme-opt)WT" + std::string(theme == "slate" ? " active" : "") + R"WT(" onclick="setTheme('slate')">Slate</div>
-<div class="wt-theme-opt)WT" + std::string(theme == "flatly" ? " active" : "") + R"WT(" onclick="setTheme('flatly')">Flatly</div>
-<div class="wt-theme-opt)WT" + std::string(theme == "cyborg" ? " active" : "") + R"WT(" onclick="setTheme('cyborg')">Cyborg</div>
-</div></div></div>
 </aside>
 <main class="wt-main">
 )WT";
         h += build_ui_pages();
         h += R"WT(</main></div>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
@@ -6019,94 +5992,6 @@ function loadAccuracyTrendChart(){
 if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
 )JS";
         return js;
-    }
-
-    void serve_theme_css(struct mg_connection *c, struct mg_http_message *hm) {
-        std::string uri(hm->uri.buf, hm->uri.len);
-        std::string name = uri.substr(strlen("/css/theme/"));
-
-        static const char* slate_css = R"CSS(
-:root{--wt-bg:#272b30;--wt-sidebar-bg:rgba(39,43,48,0.85);--wt-card-bg:#32363b;--wt-border:#43474c;--wt-text:#c8c8c8;--wt-text-secondary:#999;--wt-accent:#5bc0de;--wt-success:#62c462;--wt-danger:#ee5f5b;--wt-warning:#f89406;--wt-surface-elevated:rgba(50,55,59,0.85);--wt-surface-sunken:rgba(255,255,255,0.03);--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.2);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.3);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.4);--wt-bg-secondary:#3a3f44;--wt-card-hover:rgba(255,255,255,0.05);--wt-primary:var(--wt-accent);--wt-text-muted:var(--wt-text-secondary)}
-body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
-.wt-sidebar{background:var(--wt-sidebar-bg) !important;border-color:var(--wt-border) !important}
-.wt-card{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important;box-shadow:0 1px 4px rgba(0,0,0,0.3) !important}
-.wt-card:hover{box-shadow:0 2px 12px rgba(0,0,0,0.2) !important}
-.wt-input,.wt-textarea,.wt-select{background:#3a3f44 !important;color:var(--wt-text) !important;border-color:var(--wt-border) !important}
-.wt-btn-secondary{background:#43474c !important;color:#c8c8c8 !important}
-.wt-nav-item{color:var(--wt-text) !important}
-.wt-nav-item:hover{background:rgba(255,255,255,0.05) !important}
-.wt-nav-item.active{background:var(--wt-accent) !important;color:#fff !important}
-.wt-table th{color:var(--wt-text-secondary) !important;border-color:var(--wt-border) !important}
-.wt-table td{border-color:var(--wt-border) !important}
-.wt-page-title{color:#fff !important}
-.wt-status-bar{border-color:var(--wt-border) !important}
-.wt-sidebar-header h1{color:#999 !important}
-.wt-sidebar-section-title{color:#777 !important}
-.wt-theme-menu{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important}
-.wt-theme-opt:hover{background:rgba(255,255,255,0.05) !important}
-.wt-pipeline-hero{opacity:0.95}
-.wt-pipeline-node{background:rgba(0,0,0,0.3) !important;border-color:rgba(255,255,255,0.15) !important}
-)CSS";
-
-        static const char* flatly_css = R"CSS(
-:root{--wt-bg:#ecf0f1;--wt-sidebar-bg:rgba(255,255,255,0.88);--wt-card-bg:#fff;--wt-border:#dce4ec;--wt-text:#2c3e50;--wt-text-secondary:#7b8a8b;--wt-accent:#18bc9c;--wt-success:#18bc9c;--wt-danger:#e74c3c;--wt-warning:#f39c12;--wt-radius:4px;--wt-bg-secondary:#dce4ec;--wt-card-hover:rgba(0,0,0,0.03);--wt-primary:var(--wt-accent);--wt-text-muted:var(--wt-text-secondary)}
-body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
-.wt-card{border-radius:var(--wt-radius) !important;border-color:var(--wt-border) !important}
-.wt-btn{border-radius:4px !important}
-.wt-input,.wt-textarea,.wt-select{border-radius:4px !important}
-.wt-nav-item{border-radius:4px !important}
-.wt-nav-item.active{background:var(--wt-accent) !important}
-.wt-badge{border-radius:3px !important}
-.wt-page-title{color:#2c3e50 !important;font-weight:800 !important}
-.wt-sidebar-header h1{color:#2c3e50 !important}
-.wt-btn-primary{background:var(--wt-accent) !important}
-.wt-btn-primary:hover{background:#15a589 !important}
-.wt-nav-item .nav-badge{background:var(--wt-accent) !important}
-.wt-log-view{border-radius:var(--wt-radius) !important}
-)CSS";
-
-        static const char* cyborg_css = R"CSS(
-:root{--wt-bg:#060606;--wt-sidebar-bg:rgba(17,17,17,0.9);--wt-card-bg:#111;--wt-border:#282828;--wt-text:#ddd;--wt-text-secondary:#888;--wt-accent:#2a9fd6;--wt-success:#77b300;--wt-danger:#cc0000;--wt-warning:#ff8800;--wt-radius:0px;--wt-radius-lg:0px;--wt-surface-elevated:rgba(17,17,17,0.85);--wt-surface-sunken:rgba(255,255,255,0.02);--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.3);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.4);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.5);--wt-bg-secondary:#1a1a1a;--wt-card-hover:rgba(255,255,255,0.04);--wt-primary:var(--wt-accent);--wt-text-muted:var(--wt-text-secondary)}
-body{background:var(--wt-bg) !important;color:var(--wt-text) !important}
-.wt-sidebar{background:var(--wt-sidebar-bg) !important;border-color:var(--wt-border) !important}
-.wt-card{background:var(--wt-card-bg) !important;border-color:var(--wt-border) !important;border-radius:0 !important;box-shadow:0 1px 4px rgba(0,0,0,0.4) !important}
-.wt-card:hover{box-shadow:0 0 10px rgba(42,159,214,0.15) !important}
-.wt-input,.wt-textarea,.wt-select{background:#1a1a1a !important;color:var(--wt-text) !important;border-color:var(--wt-border) !important;border-radius:0 !important}
-.wt-btn{border-radius:0 !important;text-transform:uppercase;font-size:11px !important;letter-spacing:1px}
-.wt-btn-primary{background:var(--wt-accent) !important}
-.wt-btn-primary:hover{background:#2186b4 !important}
-.wt-btn-secondary{background:#282828 !important;color:#aaa !important}
-.wt-nav-item{color:var(--wt-text) !important;border-radius:0 !important}
-.wt-nav-item:hover{background:rgba(42,159,214,0.1) !important}
-.wt-nav-item.active{background:var(--wt-accent) !important;color:#fff !important;border-radius:0 !important}
-.wt-nav-item .nav-badge{background:var(--wt-accent) !important;border-radius:0 !important}
-.wt-table th{color:var(--wt-accent) !important;border-color:var(--wt-border) !important;text-transform:uppercase}
-.wt-table td{border-color:var(--wt-border) !important}
-.wt-page-title{color:var(--wt-accent) !important;text-transform:uppercase;letter-spacing:2px}
-.wt-status-bar{border-color:var(--wt-border) !important}
-.wt-sidebar-header h1{color:var(--wt-accent) !important;letter-spacing:2px}
-.wt-sidebar-section-title{color:var(--wt-accent) !important;letter-spacing:1px}
-.wt-badge{border-radius:0 !important}
-.wt-log-view{border-radius:0 !important}
-.wt-theme-menu{background:#111 !important;border-color:var(--wt-border) !important;border-radius:0 !important}
-.wt-theme-opt:hover{background:rgba(42,159,214,0.1) !important}
-.wt-toggle{border-radius:2px !important}
-.wt-toggle::after{border-radius:2px !important}
-.wt-status-dot.online{box-shadow:0 0 6px var(--wt-success) !important}
-.wt-pipeline-hero{opacity:0.95}
-.wt-pipeline-node{background:rgba(0,0,0,0.4) !important;border-color:rgba(255,255,255,0.1) !important}
-)CSS";
-
-        const char* css = nullptr;
-        if (name == "slate") css = slate_css;
-        else if (name == "flatly") css = flatly_css;
-        else if (name == "cyborg") css = cyborg_css;
-
-        if (css) {
-            mg_http_reply(c, 200, "Content-Type: text/css\r\nCache-Control: no-cache\r\n", "%s", css);
-        } else {
-            mg_http_reply(c, 404, "", "Theme not found\n");
-        }
     }
 
     void serve_tests_api(struct mg_connection *c) {
