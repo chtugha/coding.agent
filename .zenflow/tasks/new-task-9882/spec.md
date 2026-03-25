@@ -362,8 +362,12 @@ Expected: exits 0, `bin/frontend` updated.
 grep -c "bootstrap" frontend.cpp
 grep -c "data-bs-" frontend.cpp
 grep -c 'nav-link' frontend.cpp
-grep -c 'nav-item' frontend.cpp
-grep -c 'tab-pane' frontend.cpp
+# nav-item: use quoted patterns to avoid matching legitimate wt-nav-item occurrences
+grep -c '"nav-item"' frontend.cpp
+grep -c '"nav-item ' frontend.cpp
+# tab-pane: use quoted patterns to avoid matching new wt-tab-pane / wt-tab-panes occurrences
+grep -c '"tab-pane"' frontend.cpp
+grep -c '"tab-pane ' frontend.cpp
 grep -c 'tab-content' frontend.cpp
 grep -c "setTheme\|toggleThemeMenu" frontend.cpp
 grep -c "wt-theme-dropdown\|wt-theme-menu\|wt-theme-opt" frontend.cpp
