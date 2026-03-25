@@ -183,6 +183,7 @@ In `build_ui_js()`:
 **Verification**: `grep -c "setTheme\|toggleThemeMenu" frontend.cpp` returns 0. `grep -c 'data-bs-toggle' frontend.cpp` returns 0. `grep -c 'nav-link' frontend.cpp` returns 0.
 
 ### [x] Step 7: Build and verify
+<!-- chat-id: 7a5668d3-38d9-4578-beed-9314a72aa19c -->
 
 Run the full build and all static source checks:
 
@@ -219,3 +220,16 @@ Record results here:
 - [x] `setTheme|toggleThemeMenu` count: 0
 - [x] Theme CSS classes count: 0
 - [x] `serve_theme_css` count: 0
+
+### Security Audit Fixes Applied
+- [x] XSS: `l.user`/`l.server`/`l.port` in sipOverviewLines — wrapped with `escapeHtml()`
+- [x] XSS: `d.languages`/`d.models` in Whisper config `<option>` values and text — wrapped with `escapeHtml()`
+- [x] XSS: `d.error` in SIP add-line status — wrapped with `escapeHtml()`
+- [x] XSS: `u.username` in SIP provider users display — wrapped with `escapeHtml()`
+- [x] XSS: `d.error`/`d.message` in conference start/hangup status — wrapped with `escapeHtml()`
+- [x] XSS: `d.error`/`d.status` in IAP single quality test row — wrapped with `escapeHtml()`
+- [x] XSS: `e` (exception) in IAP single test catch handler — wrapped with `escapeHtml(String(e))`
+- [x] XSS: `d.error`/`d.status` in IAP batch quality test rows — wrapped with `escapeHtml()`
+- [x] XSS: `e` (exception) in IAP batch catch handler — wrapped with `escapeHtml(String(e))`
+- [x] CSS class injection: `log.level` in dashboard activity feed — validated with `/^[A-Z]+$/` regex
+- [x] JSON injection: `resp` in SIP LINE_ADDED/LINE_REMOVED responses — wrapped with `escape_json()`

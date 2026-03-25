@@ -2888,7 +2888,7 @@ function fetchDashboard(){
     if(d.recent_logs&&d.recent_logs.length>0){
       var html='';
       d.recent_logs.forEach(function(log){
-        var lvlClass='log-lvl-'+log.level;
+        var lvlClass='log-lvl-'+(/^[A-Z]+$/.test(log.level)?log.level:'INFO');
         html+='<div class="wt-log-entry" style="animation:slideIn 0.3s ease">'
           +'<span class="log-ts">'+escapeHtml(log.timestamp)+'</span> '
           +'<span class="log-svc">'+escapeHtml(log.service)+'</span> '
@@ -3093,7 +3093,7 @@ function fetchServices(){
         var lines=ld.lines||[];
         if(lines.length===0){el.innerHTML='No active lines';return;}
         var reg=lines.filter(l=>l.registered).length;
-        el.innerHTML=lines.length+' line(s) ('+reg+' connected): '+lines.map(l=>l.user+'@'+l.server+':'+l.port).join(', ');
+        el.innerHTML=lines.length+' line(s) ('+reg+' connected): '+lines.map(l=>escapeHtml(l.user)+'@'+escapeHtml(l.server)+':'+escapeHtml(String(l.port))).join(', ');
       }).catch(function(){});
     }
   });
@@ -3158,8 +3158,8 @@ function loadWhisperConfig(args){
   fetch('/api/whisper/models').then(r=>r.json()).then(d=>{
     var langSel=document.getElementById('whisperLang');
     var modelSel=document.getElementById('whisperModel');
-    langSel.innerHTML=d.languages.map(l=>'<option value="'+l+'">'+l+'</option>').join('');
-    modelSel.innerHTML=d.models.map(m=>'<option value="'+m+'">'+m+'</option>').join('');
+    langSel.innerHTML=d.languages.map(l=>'<option value="'+escapeHtml(l)+'">'+escapeHtml(l)+'</option>').join('');
+    modelSel.innerHTML=d.models.map(m=>'<option value="'+escapeHtml(m)+'">'+escapeHtml(m)+'</option>').join('');
     var curLang='de',curModel='';
     var parts=args.split(/\s+/);
     for(var i=0;i<parts.length;i++){
@@ -3252,7 +3252,7 @@ function sipConnectPbx(){
       document.getElementById('sipPbxPassword').value='';
       setTimeout(sipRefreshActiveLines,DELAY_SIP_ADD_REFRESH_MS);
     } else {
-      status.innerHTML='<span style="color:var(--wt-danger)">'+(d.error||'Failed')+'</span>';
+      status.innerHTML='<span style="color:var(--wt-danger)">'+escapeHtml(d.error||'Failed')+'</span>';
     }
   }).catch(function(e){status.innerHTML='<span style="color:var(--wt-danger)">SIP Client not reachable</span>';});
 }
@@ -3883,7 +3883,7 @@ function pollKokoroQualityTask(taskId){
       html+='<td style="color:'+color+';font-weight:bold">'+r.rtf.toFixed(3)+'</td>';
       html+='<td>'+r.peak.toFixed(3)+'</td>';
       html+='<td>'+r.rms.toFixed(4)+'</td>';
-      html+='<td style="color:'+color+'">'+r.status.toUpperCase()+'</td></tr>';
+      html+='<td style="color:'+color+'">'+escapeHtml(r.status.toUpperCase())+'</td></tr>';
     });
     html+='</table>';
     if(d.summary){
@@ -4178,7 +4178,7 @@ function pollTtsRoundtripTask(taskId){
       html+='<td style="color:'+outColor+';font-weight:bold">'+(r.similarity_out||0).toFixed(1)+'%</td>';
       html+='<td style="color:'+werColor+';font-weight:bold">'+(r.wer_out!=null?r.wer_out.toFixed(1):'—')+'%</td>';
       html+='<td>'+(r.e2e_ms/1000).toFixed(1)+'s</td>';
-      html+='<td style="color:'+color+'">'+r.status+'</td>';
+      html+='<td style="color:'+color+'">'+escapeHtml(r.status)+'</td>';
       html+='</tr>';
     });
     html+='</table>';
@@ -4243,7 +4243,7 @@ function pollFullLoopTask(taskId){
       html+='<td style="color:'+werColor+';font-weight:bold">'+(r.wer!=null?r.wer.toFixed(1):'—')+'</td>';
       html+='<td style="color:'+simColor+';font-weight:bold">'+(r.similarity!=null?r.similarity.toFixed(1):'—')+'</td>';
       html+='<td>'+((r.e2e_ms||0)/1000).toFixed(1)+'s</td>';
-      html+='<td style="color:'+color+'">'+r.status+'</td>';
+      html+='<td style="color:'+color+'">'+escapeHtml(r.status)+'</td>';
       html+='</tr>';
     });
     html+='</table>';
@@ -4642,7 +4642,7 @@ function applyEnabledLines(){
       addNext(0);
     });
   }).catch(function(e){
-    statusDiv.innerHTML='<span style="color:var(--wt-danger)">Error: '+e+'</span>';
+    statusDiv.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(String(e))+'</span>';
   });
 }
 
@@ -4674,7 +4674,7 @@ function refreshSipPanel(){
     var usersDiv=document.getElementById('sipProviderUsers');
     var users=d.users||[];
     if(users.length===0){usersDiv.innerHTML='No users registered at SIP provider';return;}
-    usersDiv.innerHTML='SIP Provider: '+users.length+'/'+d.max_lines+' registered — '+users.map(function(u){return u.username;}).join(', ');
+    usersDiv.innerHTML='SIP Provider: '+users.length+'/'+d.max_lines+' registered — '+users.map(function(u){return escapeHtml(u.username);}).join(', ');
   }).catch(function(){
     document.getElementById('sipProviderUsers').innerHTML='SIP provider not reachable';
   });
@@ -4696,7 +4696,7 @@ function startConference(){
     if(d.success){
       statusDiv.innerHTML='<span style="color:var(--wt-success)">Conference started with '+d.legs+' legs</span>';
     }else{
-      statusDiv.innerHTML='<span style="color:var(--wt-danger)">Error: '+(d.error||'Failed')+'</span>';
+      statusDiv.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error||'Failed')+'</span>';
     }
   }).catch(function(e){
     statusDiv.innerHTML='<span style="color:var(--wt-danger)">SIP provider not reachable</span>';
@@ -4706,7 +4706,7 @@ function startConference(){
 function hangupConference(){
   var statusDiv=document.getElementById('sipLinesStatus');
   fetch('http://localhost:'+TSP_PORT+'/hangup',{method:'POST'}).then(r=>r.json()).then(d=>{
-    statusDiv.innerHTML='<span style="color:var(--wt-success)">'+(d.message||'Call ended')+'</span>';
+    statusDiv.innerHTML='<span style="color:var(--wt-success)">'+escapeHtml(d.message||'Call ended')+'</span>';
   }).catch(function(e){
     statusDiv.innerHTML='<span style="color:var(--wt-danger)">SIP provider not reachable</span>';
   });
@@ -4778,7 +4778,7 @@ function runIapQualityTest(){
     body:JSON.stringify({file:file})
   }).then(r=>r.json()).then(d=>{
     if(d.error){
-      statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+d.error+'</span>';
+      statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+escapeHtml(d.error)+'</span>';
       return;
     }
     
@@ -4795,7 +4795,7 @@ function runIapQualityTest(){
     html+='<td>'+(d.max_latency_ms||0).toFixed(4)+'</td>';
     html+='<td>'+d.snr.toFixed(2)+'</td>';
     html+='<td>'+d.rms_error.toFixed(2)+'</td>';
-    html+='<td style="color:'+statusColor+';font-weight:600">'+d.status+'</td>';
+    html+='<td style="color:'+statusColor+';font-weight:600">'+escapeHtml(d.status)+'</td>';
     html+='<td style="font-size:11px">'+now+'</td>';
     html+='</tr>';
     tbody.innerHTML=html+tbody.innerHTML;
@@ -4805,7 +4805,7 @@ function runIapQualityTest(){
     renderIapChart();
     
   }).catch(e=>{
-    statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+e+'</span>';
+    statusDiv.innerHTML='<span style="color:var(--wt-danger)">&#x2717; Error: '+escapeHtml(String(e))+'</span>';
   });
 }
 
@@ -4897,17 +4897,17 @@ async function runAllIapQualityTests(){
       let d=await r.json();
       if(d.error){
         failed++;
-        tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td>-</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>'+d.error+'</td></tr>';
+        tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td>-</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>'+escapeHtml(d.error)+'</td></tr>';
         continue;
       }
       if(d.status==='PASS')passed++;else failed++;
       let sc=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
       let now=new Date().toLocaleString();
-      tbody.innerHTML+='<tr><td>'+escapeHtml(d.file)+'</td><td>'+d.latency_ms.toFixed(4)+'</td><td>'+(d.max_latency_ms||0).toFixed(4)+'</td><td>'+d.snr.toFixed(2)+'</td><td>'+d.rms_error.toFixed(2)+'</td><td style="color:'+sc+';font-weight:600">'+d.status+'</td><td style="font-size:11px">'+now+'</td></tr>';
+      tbody.innerHTML+='<tr><td>'+escapeHtml(d.file)+'</td><td>'+d.latency_ms.toFixed(4)+'</td><td>'+(d.max_latency_ms||0).toFixed(4)+'</td><td>'+d.snr.toFixed(2)+'</td><td>'+d.rms_error.toFixed(2)+'</td><td style="color:'+sc+';font-weight:600">'+escapeHtml(d.status)+'</td><td style="font-size:11px">'+now+'</td></tr>';
       window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,maxLatency:d.max_latency_ms||0,status:d.status});
     }catch(e){
       failed++;
-      tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td colspan="6" style="color:var(--wt-danger)">'+e+'</td></tr>';
+      tbody.innerHTML+='<tr><td>'+escapeHtml(file)+'</td><td colspan="6" style="color:var(--wt-danger)">'+escapeHtml(String(e))+'</td></tr>';
     }
   }
   statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x2713; All tests complete: '+passed+' passed, '+failed+' failed out of '+files.length+'</span>';
@@ -5077,7 +5077,7 @@ function addWhisperModel(){
     } else {
       status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error||'unknown')+'</span>';
     }
-  }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Request failed: '+e+'</span>';});
+  }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Request failed: '+escapeHtml(String(e))+'</span>';});
 }
 
 function addLlamaModel(){
@@ -5098,7 +5098,7 @@ function addLlamaModel(){
     } else {
       status.innerHTML='<span style="color:var(--wt-danger)">Error: '+escapeHtml(d.error||'unknown')+'</span>';
     }
-  }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Request failed: '+e+'</span>';});
+  }).catch(e=>{status.innerHTML='<span style="color:var(--wt-danger)">Request failed: '+escapeHtml(String(e))+'</span>';});
 }
 
 var benchmarkPollInterval=null;
@@ -5859,7 +5859,7 @@ function pollAccuracyTask(taskId){
       html+='<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+escapeHtml(r.transcription)+'">'+escapeHtml(r.transcription)+'</td>';
       html+='<td style="font-weight:600">'+r.similarity.toFixed(2)+'%</td>';
       html+='<td>'+Math.round(r.latency_ms)+'</td>';
-      html+='<td style="color:'+statusColor+';font-weight:600">'+r.status+'</td>';
+      html+='<td style="color:'+statusColor+';font-weight:600">'+escapeHtml(r.status)+'</td>';
       html+='</tr>';
     });
     
@@ -6528,9 +6528,9 @@ if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadC
         }
 
         if (resp.find("LINE_ADDED") == 0) {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"success\":true,\"response\":\"%s\"}", resp.c_str());
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"success\":true,\"response\":\"%s\"}", escape_json(resp).c_str());
         } else {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"%s\"}", resp.c_str());
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"%s\"}", escape_json(resp).c_str());
         }
     }
 
@@ -6551,9 +6551,9 @@ if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadC
         }
 
         if (resp.find("LINE_REMOVED") == 0) {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"success\":true,\"response\":\"%s\"}", resp.c_str());
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"success\":true,\"response\":\"%s\"}", escape_json(resp).c_str());
         } else {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"%s\"}", resp.c_str());
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"%s\"}", escape_json(resp).c_str());
         }
     }
 
