@@ -248,15 +248,16 @@ Inactive nav items:
 - **Drips**: 3–4 elongated teardrop drips hanging below the abdomen (the "drip ant" signature detail)
 - **Rendering**: flat single-color fill, no gradients, with optional SVG `filter: drop-shadow` for glow
 
-**SVG specification** (32×36px viewBox, rendered at 32×32 in sidebar):
+**SVG specification** — superseded by `spec.md §3.4` which is the authoritative implementation source. The spec.md version uses `height="36"` (corrected from 32 to match the viewBox) and `fill/stroke="#ffffff"` (white on the `#8b0000` dark-red header for contrast), with the red glow filter retained. The red-fill concept SVG below is retained for design reference only:
+
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 36" width="32" height="32">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 36" width="32" height="36">
   <defs>
     <filter id="ant-glow">
       <feDropShadow dx="0" dy="0" stdDeviation="1.5" flood-color="#cf2e2e" flood-opacity="0.8"/>
     </filter>
   </defs>
-  <g fill="#cf2e2e" filter="url(#ant-glow)">
+  <g fill="#ffffff" filter="url(#ant-glow)">
     <!-- Abdomen (large lower body) -->
     <ellipse cx="16" cy="23" rx="6.5" ry="7.5"/>
     <!-- Thorax (waist connector) -->
@@ -268,29 +269,29 @@ Inactive nav items:
     <!-- Right mandible -->
     <ellipse cx="19" cy="6.5" rx="1.2" ry="1.8" transform="rotate(20 19 6.5)"/>
     <!-- Left antenna: elbow joint then globe -->
-    <line x1="14" y1="5" x2="9" y2="2.5" stroke="#cf2e2e" stroke-width="1.2" fill="none"/>
-    <line x1="9" y1="2.5" x2="6" y2="0.5" stroke="#cf2e2e" stroke-width="1.2" fill="none"/>
+    <line x1="14" y1="5" x2="9" y2="2.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
+    <line x1="9" y1="2.5" x2="6" y2="0.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
     <circle cx="5.5" cy="0.5" r="1.3"/>
     <!-- Right antenna -->
-    <line x1="18" y1="5" x2="23" y2="2.5" stroke="#cf2e2e" stroke-width="1.2" fill="none"/>
-    <line x1="23" y1="2.5" x2="26" y2="0.5" stroke="#cf2e2e" stroke-width="1.2" fill="none"/>
+    <line x1="18" y1="5" x2="23" y2="2.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
+    <line x1="23" y1="2.5" x2="26" y2="0.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
     <circle cx="26.5" cy="0.5" r="1.3"/>
     <!-- Left legs (upper, mid, lower) with elbow joints -->
-    <polyline points="13,13 7,11 5,14" stroke="#cf2e2e" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="13,16 6,15.5 4.5,18" stroke="#cf2e2e" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="12,19 6,20 5,23" stroke="#cf2e2e" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="13,13 7,11 5,14" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="13,16 6,15.5 4.5,18" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="12,19 6,20 5,23" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
     <!-- Right legs -->
-    <polyline points="19,13 25,11 27,14" stroke="#cf2e2e" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="19,16 26,15.5 27.5,18" stroke="#cf2e2e" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="20,19 26,20 27,23" stroke="#cf2e2e" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="19,13 25,11 27,14" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="19,16 26,15.5 27.5,18" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="20,19 26,20 27,23" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
     <!-- Drips hanging from abdomen (drip ant signature) -->
     <ellipse cx="13" cy="31.5" rx="1.3" ry="2"/>
     <ellipse cx="16" cy="32.5" rx="1.5" ry="2.5"/>
     <ellipse cx="19" cy="31.5" rx="1.3" ry="2"/>
     <!-- Drip connector lines -->
-    <line x1="13" y1="29.5" x2="13" y2="30" stroke="#cf2e2e" stroke-width="0.8"/>
-    <line x1="16" y1="30.5" x2="16" y2="30" stroke="#cf2e2e" stroke-width="0.8"/>
-    <line x1="19" y1="29.5" x2="19" y2="30" stroke="#cf2e2e" stroke-width="0.8"/>
+    <line x1="13" y1="29.5" x2="13" y2="32" stroke="#ffffff" stroke-width="0.8"/>
+    <line x1="16" y1="30" x2="16" y2="33" stroke="#ffffff" stroke-width="0.8"/>
+    <line x1="19" y1="29.5" x2="19" y2="32" stroke="#ffffff" stroke-width="0.8"/>
   </g>
 </svg>
 ```

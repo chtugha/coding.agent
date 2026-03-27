@@ -414,16 +414,16 @@ Changes vs current:
     <ellipse cx="13" cy="31.5" rx="1.3" ry="2"/>
     <ellipse cx="16" cy="32.5" rx="1.5" ry="2.5"/>
     <ellipse cx="19" cy="31.5" rx="1.3" ry="2"/>
-    <line x1="13" y1="29.5" x2="13" y2="30" stroke="#ffffff" stroke-width="0.8"/>
-    <line x1="16" y1="30.5" x2="16" y2="30" stroke="#ffffff" stroke-width="0.8"/>
-    <line x1="19" y1="29.5" x2="19" y2="30" stroke="#ffffff" stroke-width="0.8"/>
+    <line x1="13" y1="29.5" x2="13" y2="32" stroke="#ffffff" stroke-width="0.8"/>
+    <line x1="16" y1="30" x2="16" y2="33" stroke="#ffffff" stroke-width="0.8"/>
+    <line x1="19" y1="29.5" x2="19" y2="32" stroke="#ffffff" stroke-width="0.8"/>
   </g>
 </svg>
 <span style="font-size:16px;font-weight:700;color:#fff;letter-spacing:0.02em">Prodigy</span>
 </div>
 ```
 
-> **SVG fixes applied vs PRD**: `height="36"` (not `32`) to match viewBox `0 0 32 36`; zero-length drip connector `x2="16" y2="30.5"` corrected to `x2="16" y2="30"`; fill/stroke changed from `#cf2e2e` (red) to `#ffffff` (white) for contrast on `#8b0000` dark-red header background — the red glow filter (`flood-color="#cf2e2e"`) is retained for an edgy halo effect.
+> **SVG fixes applied vs PRD**: `height="36"` (not `32`) to match viewBox `0 0 32 36`; center drip connector corrected from `y1="30.5" y2="30"` (going upward, effectively invisible) to `y1="30" y2="33"` (downward, 3px visible stem); outer drip connectors extended from 0.5px to 2.5px (`y2="32"` instead of `y2="30"`); fill/stroke changed from `#cf2e2e` (red) to `#ffffff` (white) for contrast on `#8b0000` dark-red header background — the red glow filter (`flood-color="#cf2e2e"`) is retained for an edgy halo effect.
 
 #### Section Title HTML (lines 1624, 1631, 1640)
 
