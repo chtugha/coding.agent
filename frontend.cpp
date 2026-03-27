@@ -1479,9 +1479,13 @@ private:
         std::string h;
         h += R"WT(<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WhisperTalk</title>
+<title>Prodigy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" integrity="sha512-1ycn6IcaQQ40/MKBW2W4Rhis/DbILU74C1vSrLJxCq57o941Ym01SwNsOMqvEBFlcgUa6xLiPY/NS5R+E6ztJQ==" crossorigin="anonymous" referrerpolicy="no-referrer">
 <style>
-/* CSS Design System — WhisperTalk custom properties.
+/* CSS Design System — Prodigy custom properties.
  *
  * --wt-sidebar-*, --wt-bg, --wt-card-bg, --wt-border, --wt-text*: core layout and color tokens.
  * --wt-accent, --wt-success, --wt-danger, --wt-warning: semantic status colors.
@@ -1497,7 +1501,7 @@ private:
  *   @media (max-width:1024px): tighter padding, 2-col metric grid, stacked dashboard.
  *   @media (max-width:768px): icon-only sidebar (48px), smaller metric values.
  */
-:root{--wt-sidebar-width:240px;--wt-bg:#f5f5f7;--wt-sidebar-bg:rgba(255,255,255,0.72);--wt-card-bg:#fff;--wt-border:#d2d2d7;--wt-text:#1d1d1f;--wt-text-secondary:#86868b;--wt-accent:#0071e3;--wt-success:#34c759;--wt-danger:#ff3b30;--wt-warning:#ff9f0a;--wt-radius:12px;--wt-font:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif;--wt-mono:"SF Mono",SFMono-Regular,ui-monospace,Menlo,monospace;--wt-gradient-hero:linear-gradient(135deg,#667eea 0%,#764ba2 100%);--wt-gradient-success:linear-gradient(135deg,#11998e 0%,#38ef7d 100%);--wt-gradient-danger:linear-gradient(135deg,#eb3349 0%,#f45c43 100%);--wt-gradient-warning:linear-gradient(135deg,#f7971e 0%,#ffd200 100%);--wt-gradient-info:linear-gradient(135deg,#2193b0 0%,#6dd5ed 100%);--wt-gradient-neutral:linear-gradient(135deg,#bdc3c7 0%,#2c3e50 100%);--wt-gradient-pipeline:linear-gradient(90deg,#667eea,#764ba2,#f093fb,#f5576c,#fda085,#f9d423,#38ef7d);--wt-surface-elevated:rgba(255,255,255,0.85);--wt-surface-sunken:rgba(0,0,0,0.02);--wt-chart-1:#667eea;--wt-chart-2:#764ba2;--wt-chart-3:#f093fb;--wt-chart-4:#43e97b;--wt-chart-5:#fa709a;--wt-chart-6:#fee140;--wt-chart-7:#30cfd0;--wt-shadow-sm:0 1px 3px rgba(0,0,0,0.04),0 1px 2px rgba(0,0,0,0.06);--wt-shadow-md:0 4px 16px rgba(0,0,0,0.08),0 2px 4px rgba(0,0,0,0.04);--wt-shadow-lg:0 12px 40px rgba(0,0,0,0.12),0 4px 8px rgba(0,0,0,0.06);--wt-shadow-glow-success:0 0 20px rgba(52,199,89,0.3);--wt-shadow-glow-danger:0 0 20px rgba(255,59,48,0.3);--wt-radius-lg:16px;--wt-bg-secondary:#ededf0;--wt-card-hover:rgba(0,0,0,0.03);--wt-primary:var(--wt-accent);--wt-text-muted:var(--wt-text-secondary)}
+:root{--wt-sidebar-width:250px;--wt-bg:#ecf0f5;--wt-bg-secondary:#e8ecf0;--wt-card-bg:#ffffff;--wt-border:#d2d6de;--wt-text:#333333;--wt-text-secondary:#777777;--wt-text-muted:var(--wt-text-secondary);--wt-accent:#cf2e2e;--wt-primary:var(--wt-accent);--wt-success:#00a65a;--wt-danger:#dd4b39;--wt-warning:#f39c12;--wt-info:#00c0ef;--wt-font:"Source Sans Pro","Helvetica Neue",Helvetica,Arial,sans-serif;--wt-mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;--wt-radius:4px;--wt-radius-lg:6px;--wt-gradient-hero:linear-gradient(135deg,#cf2e2e 0%,#8b0000 100%);--wt-gradient-success:linear-gradient(135deg,#00a65a 0%,#008d4c 100%);--wt-gradient-danger:linear-gradient(135deg,#dd4b39 0%,#c0392b 100%);--wt-gradient-warning:linear-gradient(135deg,#f39c12 0%,#d68910 100%);--wt-gradient-info:linear-gradient(135deg,#00c0ef 0%,#0097bc 100%);--wt-gradient-neutral:linear-gradient(135deg,#555555 0%,#333333 100%);--wt-gradient-pipeline:linear-gradient(90deg,#cf2e2e,#8b0000,#dd4b39,#f39c12,#00a65a,#00c0ef);--wt-surface-elevated:rgba(255,255,255,0.95);--wt-surface-sunken:rgba(0,0,0,0.04);--wt-card-hover:rgba(0,0,0,0.04);--wt-chart-1:#cf2e2e;--wt-chart-2:#00a65a;--wt-chart-3:#00c0ef;--wt-chart-4:#f39c12;--wt-chart-5:#dd4b39;--wt-chart-6:#8b0000;--wt-chart-7:#4b646f;--wt-shadow-sm:0 1px 1px rgba(0,0,0,0.1);--wt-shadow-md:0 2px 4px rgba(0,0,0,0.12),0 1px 2px rgba(0,0,0,0.08);--wt-shadow-lg:0 4px 12px rgba(0,0,0,0.15),0 2px 4px rgba(0,0,0,0.1);--wt-shadow-glow-success:0 0 12px rgba(0,166,90,0.35);--wt-shadow-glow-danger:0 0 12px rgba(207,46,46,0.35);--wt-card-header-bg:#f5f5f5;--wt-sidebar-bg:#222d32;--wt-sidebar-header-bg:#8b0000;--wt-sidebar-section-bg:#1a2226;--wt-sidebar-section-text:#4b646f;--wt-sidebar-text:#b8c7ce;--wt-sidebar-active-bg:#1e282c;--wt-sidebar-active-border:#cf2e2e}
 *{box-sizing:border-box}
 body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-text);overflow:hidden;height:100vh}
 .wt-app{display:flex;height:100vh}

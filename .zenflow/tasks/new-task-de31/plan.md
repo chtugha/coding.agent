@@ -57,7 +57,8 @@ If the feature is trivial and doesn't warrant full specification, update this wo
 
 Save to `{@artifacts_path}/plan.md`.
 
-### [ ] Step: Phase 1 — CSS Tokens and Head CDN Links
+### [x] Step: Phase 1 — CSS Tokens and Head CDN Links
+<!-- chat-id: 5914b866-ea8c-4930-a41c-cd36718b64c3 -->
 
 Update `frontend.cpp`'s `build_ui_html()` function with the new CSS foundations.
 
