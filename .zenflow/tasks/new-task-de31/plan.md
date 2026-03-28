@@ -93,7 +93,8 @@ Rework the sidebar structure and nav items in `frontend.cpp`'s `build_ui_html()`
 - Replace all 9 emoji `<span class="nav-icon">` elements with Font Awesome `<i class="nav-icon fas fa-...">` elements per the icon mapping table (spec.md §3.4)
 - Verify: build succeeds; sidebar shows dark background, dark-red header, full-width `#1a2226` section rows, FA icons, active item red left-border
 
-### [ ] Step: Phase 3 — Component CSS (Cards, Buttons, Inputs, Tabs, Status Bar)
+### [x] Step: Phase 3 — Component CSS (Cards, Buttons, Inputs, Tabs, Status Bar)
+<!-- chat-id: 4850f12a-957b-4c5d-bdcf-7fb030dbd9c9 -->
 
 Apply remaining component-level CSS changes in `frontend.cpp`'s `build_ui_html()`.
 
