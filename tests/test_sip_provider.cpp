@@ -1018,7 +1018,7 @@ private:
     void send_invite(CallLeg& leg) {
         std::ostringstream sdp;
         sdp << "v=0\r\no=provider 1 1 IN IP4 " << local_ip_ << "\r\n";
-        sdp << "s=WhisperTalk Test\r\nc=IN IP4 " << local_ip_ << "\r\nt=0 0\r\n";
+        sdp << "s=Prodigy Test\r\nc=IN IP4 " << local_ip_ << "\r\nt=0 0\r\n";
         sdp << "m=audio " << leg.relay_port << " RTP/AVP 0 101\r\n";
         sdp << "a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
         std::string sdp_str = sdp.str();

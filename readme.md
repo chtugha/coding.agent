@@ -1,6 +1,6 @@
-# WhisperTalk
+# Prodigy
 
-A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. WhisperTalk integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** or **NeuTTS** (TTS) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal) with no PyTorch runtime dependency.
+A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. Prodigy integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** or **NeuTTS** (TTS) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal) with no PyTorch runtime dependency.
 
 ## Architecture
 
@@ -65,7 +65,7 @@ cmake -G Ninja -S llama-cpp -B llama-cpp/build \
   -DGGML_METAL=ON
 cmake --build llama-cpp/build -j
 
-# Build WhisperTalk
+# Build Prodigy
 cmake -G Ninja -S . -B build \
   -DCMAKE_BUILD_TYPE=Release -DKOKORO_COREML=ON -DBUILD_TESTS=ON
 cmake --build build -j

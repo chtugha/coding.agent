@@ -1,6 +1,6 @@
 # Test SIP Provider (B2BUA)
 
-A standalone Back-to-Back User Agent for end-to-end testing of the WhisperTalk pipeline. Two SIP clients connect to this provider, which bridges them so their full pipelines can have a conversation with each other.
+A standalone Back-to-Back User Agent for end-to-end testing of the Prodigy pipeline. Two SIP clients connect to this provider, which bridges them so their full pipelines can have a conversation with each other.
 
 ## Architecture
 

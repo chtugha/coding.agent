@@ -177,7 +177,7 @@ export ESPEAK_NG_DATA="$DIR/espeak-ng-data"
 export WHISPERTALK_MODELS_DIR="$DIR/models"
 
 if [[ $# -eq 0 ]]; then
-    echo "WhisperTalk Distribution"
+    echo "Prodigy Distribution"
     echo "Usage: $0 <service> [args...]"
     echo "Services: sip-client, inbound-audio-processor, whisper-service, llama-service, kokoro-service, outbound-audio-processor"
     exit 0

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Kokoro TTS service (`kokoro-service.cpp`) is a C++ implementation of the Kokoro German text-to-speech engine, optimized for Apple Silicon via CoreML (ANE). It replaces the original Python `kokoro_service.py` with a native binary that integrates with the WhisperTalk interconnect system.
+The Kokoro TTS service (`kokoro-service.cpp`) is a C++ implementation of the Kokoro German text-to-speech engine, optimized for Apple Silicon via CoreML (ANE). It replaces the original Python `kokoro_service.py` with a native binary that integrates with the Prodigy interconnect system.
 
 **Architecture**: CoreML split pipeline with HAR source on CPU
 

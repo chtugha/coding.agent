@@ -1,4 +1,4 @@
-# WhisperTalk Models
+# Prodigy Models
 
 Models are too large for git. Download them manually to this directory.
 

@@ -60,7 +60,7 @@ jobs:
             -DGGML_OPENMP=OFF
           cmake --build llama-cpp/build --config Release -j$(sysctl -n hw.ncpu)
 
-      - name: Build WhisperTalk
+      - name: Build Prodigy
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \

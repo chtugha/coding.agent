@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Export all Kokoro TTS German models for the WhisperTalk C++ CoreML pipeline.
+Export all Kokoro TTS German models for the Prodigy C++ CoreML pipeline.
 
 This script is self-contained: it downloads the Kokoro model, installs all
 dependencies in a conda environment, and exports everything needed to run
@@ -856,7 +856,7 @@ def export_voices_and_vocab(kmodel):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export Kokoro TTS models for WhisperTalk C++ CoreML pipeline")
+    parser = argparse.ArgumentParser(description="Export Kokoro TTS models for Prodigy C++ CoreML pipeline")
     parser.add_argument("--no-install", action="store_true", help="Skip conda env setup")
     parser.add_argument("--no-download", action="store_true", help="Skip model download")
     parser.add_argument("--duration-only", action="store_true", help="Export duration model only")

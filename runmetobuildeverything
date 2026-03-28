@@ -28,7 +28,7 @@ while [[ $# -gt 0 ]]; do
         --skip-deps)  SKIP_DEPS=1; shift ;;
         --no-tests)   BUILD_TESTS=OFF; shift ;;
         -h|--help)
-            echo "WhisperTalk - Build Everything"
+            echo "Prodigy - Build Everything"
             echo ""
             echo "Usage: ./runmetobuildeverything [OPTIONS]"
             echo ""
@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
             echo "Build order:"
             echo "  1. whisper.cpp (CoreML + Metal, static libs)"
             echo "  2. llama.cpp (Metal, static libs)"
-            echo "  3. WhisperTalk main project (all services)"
+            echo "  3. Prodigy main project (all services)"
             echo ""
             echo "Prerequisites: run ./runmetoinstalleverythingfirst"
             exit 0
@@ -164,20 +164,20 @@ build_llama_cpp() {
 }
 
 build_main_project() {
-    step "Building WhisperTalk"
+    step "Building Prodigy"
 
     clear_stale_cache build
-    info "Configuring WhisperTalk (CoreML, Release, tests=${BUILD_TESTS})..."
+    info "Configuring Prodigy (CoreML, Release, tests=${BUILD_TESTS})..."
     # shellcheck disable=SC2086
     cmake $CMAKE_GEN -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DKOKORO_COREML=ON \
         -DBUILD_TESTS="${BUILD_TESTS}"
 
-    info "Building WhisperTalk (-j${NCPU})..."
+    info "Building Prodigy (-j${NCPU})..."
     cmake --build build --config Release -j"${NCPU}"
 
-    info "WhisperTalk build complete"
+    info "Prodigy build complete"
 }
 
 verify_binaries() {

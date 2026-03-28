@@ -6,7 +6,7 @@ alwaysApply: true
 # SIP Client
 
 ## Overview
-The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts as the RTP gateway for the WhisperTalk system. It handles SIP registration, incoming calls (INVITE), and routes audio between the telephony network and the internal processors.
+The **SIP Client** (`sip-client-main.cpp`) is a standalone C++ program that acts as the RTP gateway for the Prodigy system. It handles SIP registration, incoming calls (INVITE), and routes audio between the telephony network and the internal processors.
 
 ## Internal Function
 - **SIP Signaling**: Implements SIP registration (with Digest MD5 authentication) and INVITE/BYE handling using raw UDP sockets. Sends `100 Trying` before `200 OK` on incoming INVITEs. NOTIFY/OPTIONS/CANCEL get `200 OK` responses to satisfy PBX keepalive probes.

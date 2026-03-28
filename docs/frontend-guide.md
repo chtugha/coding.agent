@@ -1,8 +1,8 @@
-# WhisperTalk Frontend User Guide
+# Prodigy Frontend User Guide
 
 ## Overview
 
-The WhisperTalk Frontend is a web-based control plane for the WhisperTalk real-time speech-to-speech telephony system. It runs locally at `http://localhost:8080` and provides:
+The Prodigy Frontend is a web-based control plane for the Prodigy real-time speech-to-speech telephony system. It runs locally at `http://localhost:8080` and provides:
 
 - A **Dashboard** with real-time pipeline visualization and system health
 - **Service management** for all 7 pipeline microservices

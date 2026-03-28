@@ -3,10 +3,10 @@ description: Repository Information Overview
 alwaysApply: true
 ---
 
-# WhisperTalk Information
+# Prodigy Information
 
 ## Summary
-WhisperTalk is a high-performance, real-time speech-to-speech system designed for low-latency communication. It features a simplified microservice pipeline that integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** (TTS). The system uses a standalone SIP client as an RTP gateway and is optimized for Apple Silicon (CoreML/Metal).
+Prodigy is a high-performance, real-time speech-to-speech system designed for low-latency communication. It features a simplified microservice pipeline that integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** (TTS). The system uses a standalone SIP client as an RTP gateway and is optimized for Apple Silicon (CoreML/Metal).
 
 ## Structure
 The project is organized as a linear pipeline of 7 core C++ programs.

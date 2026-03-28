@@ -3,7 +3,7 @@ description: Build Environment and Configuration Reference
 alwaysApply: true
 ---
 
-# WhisperTalk Build Reference
+# Prodigy Build Reference
 
 ## Prerequisites
 
@@ -96,7 +96,7 @@ Key flags:
 - `llama-cpp/include/` — main llama.h
 - `llama-cpp/ggml/include/` — ggml headers
 
-## CMake Flags — Main Project (WhisperTalk)
+## CMake Flags — Main Project (Prodigy)
 
 ```bash
 cmake -S . -B build \

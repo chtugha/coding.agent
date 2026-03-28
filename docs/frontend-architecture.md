@@ -1,4 +1,4 @@
-# WhisperTalk Frontend Architecture Guide
+# Prodigy Frontend Architecture Guide
 
 ## 1. Architecture Overview
 
