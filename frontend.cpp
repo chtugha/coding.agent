@@ -1505,15 +1505,14 @@ private:
 *{box-sizing:border-box}
 body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-text);overflow:hidden;height:100vh}
 .wt-app{display:flex;height:100vh}
-.wt-sidebar{width:var(--wt-sidebar-width);min-width:var(--wt-sidebar-width);background:var(--wt-sidebar-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-right:0.5px solid var(--wt-border);display:flex;flex-direction:column;padding:0;overflow-y:auto;user-select:none}
-.wt-sidebar-header{padding:20px 16px 8px;display:flex;align-items:center;gap:10px}
-.wt-sidebar-header h1{font-size:13px;font-weight:700;letter-spacing:-0.01em;color:var(--wt-text-secondary);text-transform:uppercase;margin:0}
-.wt-sidebar-section{padding:4px 8px;margin-bottom:4px}
-.wt-sidebar-section-title{font-size:11px;font-weight:600;color:var(--wt-text-secondary);text-transform:uppercase;letter-spacing:0.5px;padding:6px 8px 2px;margin:0}
-.wt-nav-item{display:flex;align-items:center;gap:8px;padding:7px 12px;margin:1px 0;border-radius:8px;cursor:pointer;font-size:13px;font-weight:400;color:var(--wt-text);text-decoration:none;transition:background 0.15s}
-.wt-nav-item:hover{background:rgba(0,0,0,0.04)}
-.wt-nav-item.active{background:var(--wt-accent);color:#fff;font-weight:500}
-.wt-nav-item .nav-icon{width:20px;text-align:center;font-size:15px}
+.wt-sidebar{width:var(--wt-sidebar-width);min-width:var(--wt-sidebar-width);background:var(--wt-sidebar-bg);border-right:1px solid rgba(0,0,0,0.1);display:flex;flex-direction:column;padding:0;overflow-y:auto;user-select:none}
+.wt-sidebar-header{background:var(--wt-sidebar-header-bg);padding:15px 15px 12px;display:flex;align-items:center;gap:10px}
+.wt-sidebar-section{padding:0;margin-bottom:0}
+.wt-sidebar-section-title{background:var(--wt-sidebar-section-bg);color:var(--wt-sidebar-section-text);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding:8px 16px 6px;margin:0}
+.wt-nav-item{display:flex;align-items:center;gap:8px;color:var(--wt-sidebar-text);border-left:3px solid transparent;padding:10px 15px;margin:0;border-radius:0;font-size:14px;font-weight:400;cursor:pointer;text-decoration:none;transition:background 0.15s}
+.wt-nav-item:hover{background:var(--wt-sidebar-active-bg);color:#fff}
+.wt-nav-item.active{background:var(--wt-sidebar-active-bg);color:#fff;font-weight:500;border-left:3px solid var(--wt-sidebar-active-border)}
+.wt-nav-item .nav-icon{width:20px;text-align:center;font-size:14px}
 .wt-nav-item .nav-badge{margin-left:auto;font-size:11px;font-weight:600;background:var(--wt-accent);color:#fff;border-radius:10px;padding:1px 7px;min-width:20px;text-align:center}
 .wt-nav-item.active .nav-badge{background:rgba(255,255,255,0.25)}
 .wt-main{flex:1;overflow:hidden;padding:0;position:relative}
@@ -1615,39 +1614,70 @@ body{margin:0;font-family:var(--wt-font);background:var(--wt-bg);color:var(--wt-
 .wt-test-summary-bar{display:flex;gap:12px;align-items:center;padding:12px 16px;background:var(--wt-surface-elevated);border-radius:var(--wt-radius);margin-bottom:16px;font-size:13px}
 .wt-test-summary-bar .summary-dot{width:10px;height:10px;border-radius:50%;display:inline-block;background:var(--wt-text-secondary);margin-right:4px}
 @media (max-width:1024px){.wt-content{padding:16px 20px}.wt-metrics-grid{grid-template-columns:repeat(2,1fr)}.wt-dashboard-content{grid-template-columns:1fr}.wt-metric-card .metric-value{font-size:36px}}
-@media (max-width:768px){.wt-sidebar{width:48px;min-width:48px}.wt-sidebar .nav-text,.wt-sidebar-section-title,.wt-sidebar-header h1{display:none}.wt-nav-item{justify-content:center;padding:12px 0}.wt-metric-card .metric-value{font-size:32px}}
+@media (max-width:768px){.wt-sidebar{width:48px;min-width:48px}.wt-sidebar .nav-text,.wt-sidebar-section-title,.wt-sidebar-header span,.wt-sidebar-header svg{display:none}.wt-nav-item{justify-content:center;padding:12px 0;border-left:none}.wt-nav-item .nav-badge{display:none}.wt-metric-card .metric-value{font-size:32px}}
 </style></head><body>
 <div class="wt-app">
 <aside class="wt-sidebar">
-<div class="wt-sidebar-header"><h1>WhisperTalk</h1></div>
+<div class="wt-sidebar-header">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 36" width="32" height="36">
+  <defs><filter id="ant-glow"><feDropShadow dx="0" dy="0" stdDeviation="1.5" flood-color="#cf2e2e" flood-opacity="0.8"/></filter></defs>
+  <g fill="#ffffff" filter="url(#ant-glow)">
+    <ellipse cx="16" cy="23" rx="6.5" ry="7.5"/>
+    <ellipse cx="16" cy="14" rx="2.8" ry="3"/>
+    <circle cx="16" cy="8.5" r="4"/>
+    <ellipse cx="13" cy="6.5" rx="1.2" ry="1.8" transform="rotate(-20 13 6.5)"/>
+    <ellipse cx="19" cy="6.5" rx="1.2" ry="1.8" transform="rotate(20 19 6.5)"/>
+    <line x1="14" y1="5" x2="9" y2="2.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
+    <line x1="9" y1="2.5" x2="6" y2="0.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
+    <circle cx="5.5" cy="0.5" r="1.3"/>
+    <line x1="18" y1="5" x2="23" y2="2.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
+    <line x1="23" y1="2.5" x2="26" y2="0.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
+    <circle cx="26.5" cy="0.5" r="1.3"/>
+    <polyline points="13,13 7,11 5,14" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="13,16 6,15.5 4.5,18" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="12,19 6,20 5,23" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="19,13 25,11 27,14" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="19,16 26,15.5 27.5,18" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <polyline points="20,19 26,20 27,23" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <ellipse cx="13" cy="31.5" rx="1.3" ry="2"/>
+    <ellipse cx="16" cy="32.5" rx="1.5" ry="2.5"/>
+    <ellipse cx="19" cy="31.5" rx="1.3" ry="2"/>
+    <line x1="13" y1="29.5" x2="13" y2="32" stroke="#ffffff" stroke-width="0.8"/>
+    <line x1="16" y1="30" x2="16" y2="33" stroke="#ffffff" stroke-width="0.8"/>
+    <line x1="19" y1="29.5" x2="19" y2="32" stroke="#ffffff" stroke-width="0.8"/>
+  </g>
+</svg>
+<span style="font-size:16px;font-weight:700;color:#fff;letter-spacing:0.02em">Prodigy</span>
+</div>
+<!-- no section title: top-level item -->
 <div class="wt-sidebar-section">
 <a class="wt-nav-item active" data-page="dashboard" onclick="showPage('dashboard')">
-<span class="nav-icon">&#x1F3E0;</span><span class="nav-text">Dashboard</span></a>
+<i class="nav-icon fas fa-tachometer-alt" aria-hidden="true"></i><span class="nav-text">Dashboard</span></a>
 </div>
 <div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Pipeline</p>
 <a class="wt-nav-item" data-page="services" onclick="showPage('services')">
-<span class="nav-icon">&#x2699;</span><span class="nav-text">Services</span><span class="nav-badge" id="svcBadge">0/6</span></a>
+<i class="nav-icon fas fa-cogs" aria-hidden="true"></i><span class="nav-text">Services</span><span class="nav-badge" id="svcBadge">0/6</span></a>
 <a class="wt-nav-item" data-page="logs" onclick="showPage('logs')">
-<span class="nav-icon">&#x1F4CB;</span><span class="nav-text">Live Logs</span></a>
+<i class="nav-icon fas fa-list-alt" aria-hidden="true"></i><span class="nav-text">Live Logs</span></a>
 </div>
 <div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Testing</p>
 <a class="wt-nav-item" data-page="tests" onclick="showPage('tests')">
-<span class="nav-icon">&#x1F9EA;</span><span class="nav-text">Test Runner</span><span class="nav-badge" id="testsBadge">0</span></a>
+<i class="nav-icon fas fa-flask" aria-hidden="true"></i><span class="nav-text">Test Runner</span><span class="nav-badge" id="testsBadge">0</span></a>
 <a class="wt-nav-item" data-page="test-results" onclick="showPage('test-results')">
-<span class="nav-icon">&#x1F4CA;</span><span class="nav-text">Test Results</span></a>
+<i class="nav-icon fas fa-chart-bar" aria-hidden="true"></i><span class="nav-text">Test Results</span></a>
 <a class="wt-nav-item" data-page="beta-testing" onclick="showPage('beta-testing')">
-<span class="nav-icon">&#x1F3AF;</span><span class="nav-text">Beta Tests</span></a>
+<i class="nav-icon fas fa-crosshairs" aria-hidden="true"></i><span class="nav-text">Beta Tests</span></a>
 </div>
 <div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Configuration</p>
 <a class="wt-nav-item" data-page="models" onclick="showPage('models')">
-<span class="nav-icon">&#x1F916;</span><span class="nav-text">Models</span></a>
+<i class="nav-icon fas fa-robot" aria-hidden="true"></i><span class="nav-text">Models</span></a>
 <a class="wt-nav-item" data-page="database" onclick="showPage('database')">
-<span class="nav-icon">&#x1F5C4;</span><span class="nav-text">Database</span></a>
+<i class="nav-icon fas fa-database" aria-hidden="true"></i><span class="nav-text">Database</span></a>
 <a class="wt-nav-item" data-page="credentials" onclick="showPage('credentials')">
-<span class="nav-icon">&#x1F511;</span><span class="nav-text">Credentials</span></a>
+<i class="nav-icon fas fa-key" aria-hidden="true"></i><span class="nav-text">Credentials</span></a>
 </div>
 <div class="wt-status-bar" id="statusBar">
 <span id="statusText">Connecting...</span>

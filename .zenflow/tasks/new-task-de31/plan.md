@@ -74,7 +74,8 @@ Update `frontend.cpp`'s `build_ui_html()` function with the new CSS foundations.
 - Replace the full `:root { ... }` CSS block with all 35 updated tokens plus 8 new tokens (sidebar + card-header) as specified in spec.md §3.2
 - Verify: build succeeds (`cd build && make frontend -j$(nproc) 2>&1 | grep -E "(error|warning)" | head -20`); `curl -s http://127.0.0.1:8080 | grep -E '(<title>|#222d32)'`
 
-### [ ] Step: Phase 2 — Sidebar HTML and CSS
+### [x] Step: Phase 2 — Sidebar HTML and CSS
+<!-- chat-id: f0c0fdb4-da2e-4b51-bf52-dbd81497f49b -->
 
 Rework the sidebar structure and nav items in `frontend.cpp`'s `build_ui_html()`.
 
