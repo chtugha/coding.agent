@@ -1,4 +1,4 @@
-// interconnect.h — WhisperTalk shared inter-service communication layer.
+// interconnect.h — Prodigy shared inter-service communication layer.
 //
 // Architecture overview:
 //   All pipeline services communicate exclusively through this header.

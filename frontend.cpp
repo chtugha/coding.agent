@@ -1,6 +1,6 @@
 // frontend.cpp — Web UI server, log aggregator, service manager, and test runner.
 //
-// The frontend is the central control plane for the WhisperTalk system. It:
+// The frontend is the central control plane for the Prodigy system. It:
 //   - Serves a single-page web application (SPA) at http://127.0.0.1:8080/ (loopback only)
 //   - Manages the lifecycle of all 7 pipeline services (start/stop/restart/config)
 //   - Aggregates structured log entries from all services via UDP on port 22022
@@ -11624,8 +11624,8 @@ int main(int argc, char* argv[]) {
 
     mkdir((project_root + "/logs").c_str(), 0755);
 
-    std::cout << "WhisperTalk Frontend Server\n";
-    std::cout << "============================\n\n";
+    std::cout << "Prodigy Frontend Server\n";
+    std::cout << "=======================\n\n";
 
     FrontendServer server(port, project_root);
     if (!server.start()) {

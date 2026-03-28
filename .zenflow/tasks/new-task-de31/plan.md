@@ -108,7 +108,8 @@ Apply remaining component-level CSS changes in `frontend.cpp`'s `build_ui_html()
 - Update `.wt-status-bar`: `background: #1a2226`, `border-top`, `color: var(--wt-sidebar-text)` (spec.md §3.3 Status Bar)
 - Verify: build succeeds; cards have grey headers with bleed; buttons use AdminLTE radii; tab active is red; status bar is dark
 
-### [ ] Step: Phase 4 — String Replacements and Build Verification
+### [x] Step: Phase 4 — String Replacements and Build Verification
+<!-- chat-id: cdf62302-8d70-42e5-8895-fec532b85a81 -->
 
 Clean up remaining "WhisperTalk" references and verify the complete implementation.
 

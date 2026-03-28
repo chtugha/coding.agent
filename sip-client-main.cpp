@@ -782,7 +782,7 @@ private:
         req << "CSeq: " << cseq << " REGISTER\r\n";
         req << "Contact: <sip:" << line->user << "@" << lip << ":" << line->local_port << ">\r\n";
         req << "Expires: 3600\r\n";
-        req << "User-Agent: WhisperTalk/1.0\r\n";
+        req << "User-Agent: Prodigy/1.0\r\n";
         if (with_auth && !line->auth_nonce.empty() && !line->password.empty()) {
             std::string uri = "sip:" + reg_server;
             std::string ha1 = md5_hex(line->user + ":" + line->auth_realm + ":" + line->password);
