@@ -22,6 +22,11 @@ The project is organized as a linear pipeline of 7 core C++ programs.
 **Build System**: CMake (Minimum version 3.22)  
 **Optimization**: macOS (Apple Silicon optimized with CoreML and MPS)
 
+## Naming Conventions
+- The project was renamed from "WhisperTalk" to "Prodigy". All user-visible strings, docs, and comments use "Prodigy".
+- **`namespace whispertalk`** and **`WHISPERTALK_MODELS_DIR`** are intentionally preserved. The C++ namespace is used ~240 times across all 7 services and shared headers (`interconnect.h`, `tts-common.h`) — renaming it would be a high-risk refactor with no user-visible benefit. The env var is a runtime contract for existing deployments. CSS custom properties also retain the `--wt-*` prefix for the same reason.
+- Do **not** reintroduce "WhisperTalk" in user-facing strings, docs, or comments. Do **not** rename `namespace whispertalk` or `WHISPERTALK_MODELS_DIR` without a dedicated refactor task.
+
 ## Mandatory Development Rules
 - **No Stubs or Simulated Features**: NEVER implement stubs, placeholder methods, simulated processes, or hardcoded return values. Every function and method MUST contain a real, working implementation. If a dependency is not yet available, the step MUST NOT be marked complete.
 - **Fix All Bugs Before Proceeding**: ALL bugs, test failures, and edge cases MUST be fixed before moving to the next step. A step is NOT complete until every test passes and every known issue is resolved. Do not defer fixes to later phases.
