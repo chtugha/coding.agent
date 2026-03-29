@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DIST_DIR="${1:-$ROOT_DIR/dist/whispertalk}"
+DIST_DIR="${1:-$ROOT_DIR/dist/prodigy}"
 
 log(){ printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 

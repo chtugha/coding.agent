@@ -113,6 +113,8 @@ Apply remaining component-level CSS changes in `frontend.cpp`'s `build_ui_html()
 
 Clean up remaining "WhisperTalk" references and verify the complete implementation.
 
+> **Note on `namespace whispertalk` and `WHISPERTALK_MODELS_DIR`**: These ~265 lowercase/uppercase occurrences are intentionally preserved. The C++ namespace (`whispertalk::ServiceType`, `whispertalk::Packet`, etc.) is used across all 7 services and `interconnect.h`/`tts-common.h` — renaming it would require touching 20+ files with high regression risk and zero user-visible benefit, identical reasoning to the `--wt-*` CSS token decision in Phase 1. The `WHISPERTALK_MODELS_DIR` env var is a runtime contract: existing deployments may have it set in shell profiles or systemd units, so changing it would break backward compatibility. If a future rename is desired, it should be a dedicated refactor task with a deprecation/alias period for the env var.
+
 - First, locate all remaining occurrences: `grep -n 'WhisperTalk' frontend.cpp | head -20` to confirm exact line numbers before editing
 - Replace "WhisperTalk system" → "Prodigy system" in C++ comment (line ~3)
 - Replace CSS comment "WhisperTalk custom properties" → "Prodigy custom properties" inside the `R"WT(` raw string (line ~1484) — do not touch the `R"WT(` / `)WT"` C++ delimiters
