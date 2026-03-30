@@ -1,0 +1,702 @@
+[
+  {
+    "timestamp": "2026-03-30 15:51:31",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "VAD chunk -> Whisper: 65600 samples (4100ms) RMS=0.1624 peak=1.6654"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:31",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 12,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:31",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Transcription (527ms, RTF=0.13):  Haben Sie eine genaue Zahl f\u00fcr die Sch\u00e4tzung?"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:32",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Response (587ms): Es gibt keine genaue Zahl, da die Sch\u00e4tzung von der Stadtverwaltung noch nicht abgeschlossen wurde."
+  },
+  {
+    "timestamp": "2026-03-30 15:51:32",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Synthesized 144000 samples in 241ms (raw_peak=0.802 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:32",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:32",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 7360 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:32",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:32",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:32",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:37",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 127200 samples (7950ms) RMS=0.1659 peak=1.2732"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:37",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (567ms, RTF=0.07):  Es gibt keine genaue Zahl, da die Sch\u00e4tzung von der Stadtverwaltung"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:37",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Discarding stale transcription \u2014 caller speaking for 4848ms (shut-up)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:38",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 48000 samples (3000ms) RMS=0.1572 peak=1.5733"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:38",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:39",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (507ms, RTF=0.17):  Noch nicht abgeschlossen."
+  },
+  {
+    "timestamp": "2026-03-30 15:51:39",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Response (361ms): Wann werden die Zahlen offiziell bekannt gegeben?"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:39",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Synthesized 144000 samples in 253ms (raw_peak=0.858 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:39",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 12,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:39",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 12,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:43",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 12,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:43",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "VAD chunk -> Whisper: 68800 samples (4300ms) RMS=0.2040 peak=1.6482"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:44",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Transcription (519ms, RTF=0.12):  Wann werden die Zahlen offiziell bekannt gegeben?"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:44",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Response (646ms): Die offizielle Bev\u00f6lkerungszahl wird in den kommenden Monaten bekannt gegeben, genau im Jahr 2024."
+  },
+  {
+    "timestamp": "2026-03-30 15:51:44",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Synthesized 144000 samples in 207ms (raw_peak=1.073 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:45",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:45",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 5280 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 71200 samples (4450ms) RMS=0.1131 peak=1.1369"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 13600 samples (850ms) RMS=0.1492 peak=0.8513"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (509ms, RTF=0.11):  Die offizielle Bev\u00f6lkerungszeit"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Speech detected \u2014 interrupting generation (shut-up)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Generation interrupted"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "LLAMA_SERVICE",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "Discarding fragment response (183ms, 3 chars, 1 words): Ist"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:47",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Response (183ms): "
+  },
+  {
+    "timestamp": "2026-03-30 15:51:48",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (483ms, RTF=0.57):  Aber"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:48",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Discarding stale transcription \u2014 caller speaking for 314ms (shut-up)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:49",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 63200 samples (3950ms) RMS=0.1454 peak=1.5857"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:49",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:49",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:49",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:50",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (512ms, RTF=0.13):  wird in den kommenden Monaten"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:50",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Discarding stale transcription \u2014 caller speaking for 348ms (shut-up)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:51",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 42400 samples (2650ms) RMS=0.0827 peak=0.6539"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:51",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:51",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (513ms, RTF=0.19):  Bekannt, gegeben, genau."
+  },
+  {
+    "timestamp": "2026-03-30 15:51:52",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Response (533ms): Sollten Sie sich Sorgen machen, dass die offizielle Zahl nicht genau ist."
+  },
+  {
+    "timestamp": "2026-03-30 15:51:52",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Synthesized 144000 samples in 228ms (raw_peak=0.845 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:52",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 12,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:52",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 12,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:58",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "VAD chunk -> Whisper: 98400 samples (6150ms) RMS=0.1900 peak=1.5957"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:58",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 12,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:58",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Transcription (561ms, RTF=0.09):  Sollten Sie sich Sorgen machen, dass die offizielle Zahl nicht genau ist,"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:59",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Response (793ms): Ja, das ist ein wichtiger Punkt, ich werde mich bem\u00fchen, genaue Informationen bereitzustellen und keine falschen Angaben zu machen."
+  },
+  {
+    "timestamp": "2026-03-30 15:51:59",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Synthesized 144000 samples in 248ms (raw_peak=0.792 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:59",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:51:59",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:00",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 15200 samples (950ms) RMS=0.0051 peak=0.0417"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:00",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:00",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:00",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:02",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 70400 samples (4400ms) RMS=0.1606 peak=1.6482"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:02",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:02",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:02",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:03",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (547ms, RTF=0.12):  Ja, das ist ein wichtiger Punkt, dich anzurechnen."
+  },
+  {
+    "timestamp": "2026-03-30 15:52:03",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Discarding stale transcription \u2014 caller speaking for 399ms (shut-up)"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:04",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 68000 samples (4250ms) RMS=0.1710 peak=1.0857"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:04",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:04",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:04",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:05",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (524ms, RTF=0.12):  Werde mich bem\u00fchen, genaue Informationen."
+  },
+  {
+    "timestamp": "2026-03-30 15:52:05",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Discarding stale transcription \u2014 caller speaking for 460ms (shut-up)"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:06",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 36000 samples (2250ms) RMS=0.1323 peak=1.1482"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:06",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:06",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (546ms, RTF=0.24):  Bereit zu schlafen."
+  },
+  {
+    "timestamp": "2026-03-30 15:52:06",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Response (344ms): Haben Sie einen ruhigen Schlaf?"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:07",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Synthesized 72000 samples in 227ms (raw_peak=0.797 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:07",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 12,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:07",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 12,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:09",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "VAD chunk -> Whisper: 49600 samples (3100ms) RMS=0.1835 peak=1.6482"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:09",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 12,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:10",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Transcription (532ms, RTF=0.17):  \u00bbHaben Sie einen ruhigen Schlaf?\u00ab"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:10",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Response (594ms): Ich habe tats\u00e4chlich einen sehr ruhigen Schlaf, ich bin immer aufgerufen!"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:11",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 12,
+    "message": "Synthesized 144000 samples in 258ms (raw_peak=0.725 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:11",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:11",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 11,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:15",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 124800 samples (7800ms) RMS=0.1669 peak=1.5870"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:15",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (536ms, RTF=0.07):  Ich habe tats\u00e4chlich einen sehr ruhigen Schlaftisch."
+  },
+  {
+    "timestamp": "2026-03-30 15:52:15",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Discarding stale transcription \u2014 caller speaking for 4609ms (shut-up)"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:16",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "VAD chunk -> Whisper: 40000 samples (2500ms) RMS=0.1718 peak=1.6482"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:16",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 11,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:17",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Transcription (495ms, RTF=0.20):  immer aufgerufen"
+  },
+  {
+    "timestamp": "2026-03-30 15:52:17",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Response (335ms): Sollten Sie stundenlang warten."
+  },
+  {
+    "timestamp": "2026-03-30 15:52:17",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 11,
+    "message": "Synthesized 72000 samples in 171ms (raw_peak=0.972 -> normalized)"
+  }
+]

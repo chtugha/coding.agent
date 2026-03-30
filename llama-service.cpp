@@ -10,7 +10,7 @@
 //              Apple Silicon Metal (n_gpu_layers=-1, all layers on GPU).
 //   Template:  llama_chat_apply_template() — uses the model's built-in chat template
 //              for correct role tagging (system/user/assistant). No manual formatting.
-//   Sampling:  Repetition penalty (last 64, 1.3×) + top_p (0.9) + temp (0.7) + dist.
+//   Sampling:  Repetition penalty (last 64, 1.1×) + top_p (0.95) + temp (0.3) + dist.
 //              Max 64 tokens per response. Stops at sentence-end (. ? !) or EOS.
 //   Context:   2048 tokens, 4 threads. Sequence IDs isolate per-call KV cache.
 //
@@ -124,9 +124,9 @@ public:
         
         vocab_ = llama_model_get_vocab(model_);
         sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
-        llama_sampler_chain_add(sampler_, llama_sampler_init_penalties(64, 1.3f, 0.0f, 0.0f));
-        llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(0.9f, 1));
-        llama_sampler_chain_add(sampler_, llama_sampler_init_temp(0.7f));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_penalties(64, 1.1f, 0.0f, 0.0f));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(0.95f, 1));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_temp(0.3f));
         llama_sampler_chain_add(sampler_, llama_sampler_init_dist(42));
         
         std::cout << "LLaMA Service optimized for Apple Silicon (Metal) initialized" << std::endl;
