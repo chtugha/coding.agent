@@ -68,7 +68,7 @@ static constexpr uint32_t SHUTUP_TEST_CID  = 0xFFFFFFFD;
 static constexpr long SPEECH_DISCARD_MIN_MS = 200;
 static constexpr size_t MIN_RESPONSE_CHARS  = 8;
 static constexpr int MIN_RESPONSE_WORDS     = 2;
-static constexpr float SIMILARITY_THRESHOLD = 0.6f;
+static constexpr float SIMILARITY_THRESHOLD = 0.75f;
 static const char* SYSTEM_PROMPT =
     "Du bist ein freundlicher deutscher Telefon-Assistent. "
     "WICHTIG: Antworte IMMER auf Deutsch, NIEMALS auf Englisch. "

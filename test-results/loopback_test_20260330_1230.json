@@ -1,0 +1,625 @@
+[
+  {
+    "timestamp": "2026-03-30 12:30:13",
+    "service": "SIP_CLIENT",
+    "level": "INFO",
+    "call_id": 0,
+    "message": "INVITE received on line 0 from 127.0.0.1:5060"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:13",
+    "service": "SIP_CLIENT",
+    "level": "INFO",
+    "call_id": 0,
+    "message": "INVITE received on line 1 from 127.0.0.1:5060"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:13",
+    "service": "SIP_CLIENT",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Accepted call on line 0 port 10009"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:13",
+    "service": "SIP_CLIENT",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Accepted call on line 1 port 10010"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:16",
+    "service": "INBOUND_AUDIO_PROCESSOR",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Created call state"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:16",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Created VAD session"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:16",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:19",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "VAD chunk -> Whisper: 39200 samples (2450ms) RMS=0.0527 peak=0.4373"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:19",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:19",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:19",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Transcription (605ms, RTF=0.25):  Bei fettiger Haut sind diese verstopft."
+  },
+  {
+    "timestamp": "2026-03-30 12:30:19",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Discarding stale transcription \u2014 caller speaking for 383ms (shut-up)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:20",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "VAD chunk -> Whisper: 23200 samples (1450ms) RMS=0.0457 peak=0.4938"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:20",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:21",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Transcription (518ms, RTF=0.36):  Abfallstoffe bleiben stecken."
+  },
+  {
+    "timestamp": "2026-03-30 12:30:21",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Created conversation context"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:21",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Response (383ms): Bist du von der Beseitigung des Abfalls in Berlin nachging?"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:21",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Started synthesis thread"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:22",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Synthesized 144000 samples in 256ms (raw_peak=0.903 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:22",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Created outbound audio state"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:22",
+    "service": "INBOUND_AUDIO_PROCESSOR",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Created call state"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:22",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Created VAD session"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:22",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:26",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:26",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "VAD chunk -> Whisper: 68800 samples (4300ms) RMS=0.1856 peak=1.6101"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:26",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Transcription (538ms, RTF=0.13):  bis du von der Beseitigung des Abfalls in Berlin nachgingst,"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:26",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Created conversation context"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:27",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Response (318ms): Hallo, ich kenne die Stadt und ihre Bem\u00fchungen."
+  },
+  {
+    "timestamp": "2026-03-30 12:30:27",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Started synthesis thread"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:27",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Synthesized 144000 samples in 257ms (raw_peak=0.917 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:27",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Created outbound audio state"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:27",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:27",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 9,
+    "message": "SPEECH_ACTIVE \u2014 flushed 4320 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:31",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:31",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "VAD chunk -> Whisper: 113600 samples (7100ms) RMS=0.1439 peak=1.6546"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:31",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Transcription (541ms, RTF=0.08):  Hallo, ich kenne die Stadt und ihre Bem\u00fchungen."
+  },
+  {
+    "timestamp": "2026-03-30 12:30:32",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Response (479ms): Wie hast du Gegenst\u00e4nde zu vermeiden gehandelt oder sie sicher entsorgt bekommen lassen?"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:32",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Synthesized 144000 samples in 219ms (raw_peak=0.688 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:32",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:32",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 10,
+    "message": "SPEECH_ACTIVE \u2014 flushed 8320 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:38",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:38",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "VAD chunk -> Whisper: 104000 samples (6500ms) RMS=0.2422 peak=1.6096"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:39",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Transcription (577ms, RTF=0.09):  Wie hast du Gegenst\u00e4nde zu vermeiden gehandelt oder sie sicher entsorgt bekommen lassen?"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:39",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Response (309ms): Ich habe mich an meine eigenen Regeln gelehrt..."
+  },
+  {
+    "timestamp": "2026-03-30 12:30:39",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Synthesized 144000 samples in 225ms (raw_peak=0.687 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:39",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:39",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 9,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:42",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:42",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "VAD chunk -> Whisper: 104000 samples (6500ms) RMS=0.1827 peak=1.6235"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:43",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Transcription (530ms, RTF=0.08):  Ich habe mich an meine eigenen Regeln gelehrt."
+  },
+  {
+    "timestamp": "2026-03-30 12:30:43",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Response (388ms): Dein Neulernen von Sicherheitsregeln gilt als Erfolg!"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:44",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Synthesized 144000 samples in 240ms (raw_peak=0.663 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:44",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:44",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 10,
+    "message": "SPEECH_ACTIVE \u2014 flushed 11680 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:48",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "VAD chunk -> Whisper: 79200 samples (4950ms) RMS=0.2332 peak=1.6482"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:48",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:49",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Transcription (544ms, RTF=0.11):  Dein Neulernen von Sicherheitsregeln gilt als Erfolg."
+  },
+  {
+    "timestamp": "2026-03-30 12:30:49",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Response (315ms): Das ist gro\u00dfartig, ich bin immer noch dabei"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:49",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Synthesized 144000 samples in 226ms (raw_peak=0.772 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:49",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:49",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 9,
+    "message": "SPEECH_ACTIVE \u2014 flushed 2560 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:53",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:53",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "VAD chunk -> Whisper: 107200 samples (6700ms) RMS=0.1799 peak=1.5857"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:53",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Transcription (538ms, RTF=0.08):  Das ist gro\u00dfartig. Ich bin immer noch dabei,"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:54",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Response (472ms): Ist der Begriff \"Sicherheit\" wieder in deinem Kopf."
+  },
+  {
+    "timestamp": "2026-03-30 12:30:54",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Synthesized 144000 samples in 241ms (raw_peak=0.673 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:54",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:54",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 10,
+    "message": "SPEECH_ACTIVE \u2014 flushed 9920 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:58",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "VAD chunk -> Whisper: 72800 samples (4550ms) RMS=0.2447 peak=1.6482"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:58",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:58",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Transcription (534ms, RTF=0.12):  Ist der Begriff Sicherheit wieder in deinem Kopf?"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:59",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Response (401ms): Ja, du hast gewusst und bist sicherer gemacht!"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:59",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Synthesized 144000 samples in 215ms (raw_peak=0.722 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:59",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:30:59",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 9,
+    "message": "SPEECH_ACTIVE \u2014 flushed 5280 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:03",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:03",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "VAD chunk -> Whisper: 115200 samples (7200ms) RMS=0.1668 peak=1.5857"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:03",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Transcription (524ms, RTF=0.07):  ja du hast gewusst und bist sicherer gemacht"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:04",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Response (487ms): Die Verantwortung liegt bei dir - deine Entscheidungen m\u00fcssen sich durchsetzen!"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:04",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 9,
+    "message": "Synthesized 144000 samples in 240ms (raw_peak=0.809 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:04",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:04",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 10,
+    "message": "SPEECH_ACTIVE \u2014 flushed 8000 bytes of audio buffer"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:10",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 10,
+    "message": "Speech signal: IDLE"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:10",
+    "service": "VAD_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "VAD chunk -> Whisper: 97600 samples (6100ms) RMS=0.1840 peak=1.8982"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:10",
+    "service": "WHISPER_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Transcription (578ms, RTF=0.09):  Die Verantwortung liegt bei dir, deine Entscheidungen m\u00fcssen sich durchsetzen."
+  },
+  {
+    "timestamp": "2026-03-30 12:31:11",
+    "service": "LLAMA_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Response (548ms): Ich habe mich entschieden: umweltfreundliche Praktiken zu verfolgen"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:11",
+    "service": "KOKORO_SERVICE",
+    "level": "INFO",
+    "call_id": 10,
+    "message": "Synthesized 144000 samples in 241ms (raw_peak=0.879 -> normalized)"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:11",
+    "service": "LLAMA_SERVICE",
+    "level": "DEBUG",
+    "call_id": 9,
+    "message": "Speech signal: ACTIVE"
+  },
+  {
+    "timestamp": "2026-03-30 12:31:11",
+    "service": "OUTBOUND_AUDIO_PROCESSOR",
+    "level": "WARN",
+    "call_id": 9,
+    "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+  }
+]
