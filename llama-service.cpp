@@ -364,6 +364,10 @@ private:
             unsigned char c = (unsigned char)s[i];
             if (c == '.' || c == '!' || c == '?' || c == ',' || c == ':' || c == ';') continue;
             if (c >= 'A' && c <= 'Z') { out += (char)(c + 32); continue; }
+            if (c == 0xC2 && i + 1 < s.size()) {
+                unsigned char c2 = (unsigned char)s[i + 1];
+                if (c2 == 0xBB || c2 == 0xAB) { i++; continue; }
+            }
             if (c == 0xC3 && i + 1 < s.size()) {
                 unsigned char c2 = (unsigned char)s[i + 1];
                 if (c2 == 0x84) { out += "\xC3\xA4"; i++; continue; }

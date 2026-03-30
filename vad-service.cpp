@@ -6,10 +6,11 @@
 // segments it into speech chunks using energy-based VAD, and forwards only
 // the speech-containing audio segments to Whisper for transcription.
 //
-// VAD strategy: Energy-based with adaptive micro-pause detection.
-// Instead of waiting for full sentence silence (1500ms), we detect short pauses (~400ms)
-// between words/phrases and submit smaller chunks (1.5-4s) to Whisper. This cuts latency
-// dramatically because Whisper inference time scales ~quadratically with input length.
+// VAD strategy: Energy-based with adaptive pause detection.
+// Instead of waiting for full sentence silence (1500ms), we detect pauses (~700ms)
+// between sentences and submit chunks (2-6s) to Whisper. This cuts latency
+// because Whisper inference time scales ~quadratically with input length.
+// 700ms tolerates German TTS comma pauses (~300-400ms) without mid-sentence splits.
 // Context coherence is maintained by Whisper's initial_prompt mechanism.
 //
 // Smart-split: When max chunk length is reached during speech, the split point is placed
@@ -61,7 +62,7 @@ static constexpr int DISC_WARN_INTERVAL_S = 5;
 static constexpr float NOISE_FLOOR_INIT = 0.00005f;
 static constexpr float NOISE_FLOOR_HARD_MIN = 0.000005f;
 static constexpr float NOISE_FLOOR_EMA_ALPHA = 0.05f;
-static constexpr float RMS_SILENCE_GATE = 0.005f;
+static constexpr float RMS_SILENCE_GATE = 0.008f;
 
 static std::atomic<bool> g_running{true};
 static void sig_handler(int) { g_running = false; }
@@ -107,10 +108,11 @@ class VadService {
     // G.711 μ-law silence (0xFF/0x7F) decodes to ±0.000885 → energy ~0.00000078.
     // Set min_energy well above this to prevent false VAD triggers on silence.
     float vad_min_energy_ = NOISE_FLOOR_INIT;
-    // vad_silence_frames_: 8 frames × 50ms = 400ms — triggers on word-boundary pauses
-    //   instead of full sentence gaps. Short enough for fast turnaround, long enough
-    //   to not split mid-word (German phonemes are typically <200ms).
-    std::atomic<int> vad_silence_frames_{8};
+    // vad_silence_frames_: 14 frames × 50ms = 700ms — triggers on sentence-boundary pauses.
+    //   400ms was too aggressive: German TTS produces ~300-400ms comma pauses which caused
+    //   mid-sentence splits (e.g., a 31-word response fragmenting into 4 VAD chunks).
+    //   700ms tolerates comma pauses while still detecting turn-taking gaps (~800ms+).
+    std::atomic<int> vad_silence_frames_{14};
     // vad_max_speech_samples_: 8s max chunk — Whisper large-v3-turbo handles 8s
     //   chunks in ~1s on Apple Silicon. Longer chunks preserve sentence boundaries.
     std::atomic<size_t> vad_max_speech_samples_{VAD_SAMPLE_RATE * 8};
@@ -789,7 +791,7 @@ private:
     // Three-gate filter before transmission:
     //   1. Minimum length gate: reject chunks shorter than vad_min_speech_samples_ (500ms)
     //      to filter out clicks and noise bursts that passed onset detection.
-    //   2. RMS energy gate: reject chunks with RMS < 0.005 (near-silence) to prevent
+    //   2. RMS energy gate: reject chunks with RMS < 0.008 (near-silence) to prevent
     //      Whisper hallucinations on effectively-silent audio that passed VAD.
     //   3. If both pass, wrap the audio in a Packet and send downstream.
     // pre_sum_sq/pre_count: pre-computed sum-of-squares from the FSM loop, avoiding
