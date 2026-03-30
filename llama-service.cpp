@@ -10,8 +10,8 @@
 //              Apple Silicon Metal (n_gpu_layers=-1, all layers on GPU).
 //   Template:  llama_chat_apply_template() — uses the model's built-in chat template
 //              for correct role tagging (system/user/assistant). No manual formatting.
-//   Sampling:  Greedy (llama_sampler_init_greedy). Max 64 tokens per response.
-//              Generation stops at sentence-ending punctuation (. ? !) or EOS token.
+//   Sampling:  Repetition penalty (last 64, 1.3×) + top_p (0.9) + temp (0.7) + dist.
+//              Max 64 tokens per response. Stops at sentence-end (. ? !) or EOS.
 //   Context:   2048 tokens, 4 threads. Sequence IDs isolate per-call KV cache.
 //
 // German system prompt:
@@ -46,6 +46,9 @@
 #include <cstring>
 #include <queue>
 #include <condition_variable>
+#include <algorithm>
+#include <sstream>
+#include <unordered_set>
 #include <poll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -63,18 +66,23 @@ static constexpr int STALE_SESSION_SEC   = 300;
 static constexpr uint32_t TEST_PROMPT_CID  = 0xFFFFFFFE;
 static constexpr uint32_t SHUTUP_TEST_CID  = 0xFFFFFFFD;
 static constexpr long SPEECH_DISCARD_MIN_MS = 200;
-
+static constexpr size_t MIN_RESPONSE_CHARS  = 8;
+static constexpr int MIN_RESPONSE_WORDS     = 2;
+static constexpr float SIMILARITY_THRESHOLD = 0.6f;
 static const char* SYSTEM_PROMPT =
     "Du bist ein freundlicher deutscher Telefon-Assistent. "
     "WICHTIG: Antworte IMMER auf Deutsch, NIEMALS auf Englisch. "
     "Halte dich SEHR KURZ: maximal 1 Satz, höchstens 15 Wörter. "
     "Sei hilfsbereit, höflich und natürlich. "
-    "Antworte mit vollständigen Sätzen.";
+    "Antworte mit vollständigen Sätzen. "
+    "Wiederhole NIEMALS den Satz des Anrufers. Stelle stattdessen eine Frage oder gib neue Information.";
 
 struct LlamaChatMessage {
     std::string role;
     std::string content;
 };
+
+static constexpr long RESPONSE_COOLDOWN_MS = 800;
 
 struct LlamaCall {
     uint32_t id;
@@ -82,6 +90,7 @@ struct LlamaCall {
     int n_past = 0;
     std::vector<LlamaChatMessage> messages;
     std::chrono::steady_clock::time_point last_activity;
+    std::chrono::steady_clock::time_point last_response_sent;
     std::atomic<bool> generating{false};
 };
 
@@ -115,7 +124,10 @@ public:
         
         vocab_ = llama_model_get_vocab(model_);
         sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
-        llama_sampler_chain_add(sampler_, llama_sampler_init_greedy());
+        llama_sampler_chain_add(sampler_, llama_sampler_init_penalties(64, 1.3f, 0.0f, 0.0f));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(0.9f, 1));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_temp(0.7f));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_dist(42));
         
         std::cout << "LLaMA Service optimized for Apple Silicon (Metal) initialized" << std::endl;
     }
@@ -239,6 +251,24 @@ private:
                 if (work_queue_.empty()) continue;
                 item = std::move(work_queue_.front());
                 work_queue_.pop();
+
+                size_t drained = 0;
+                std::queue<WorkItem> keep;
+                while (!work_queue_.empty()) {
+                    auto& qi = work_queue_.front();
+                    if (interconnect_.has_ended(qi.call_id) ||
+                        (qi.call_id == item.call_id && interconnect_.is_speech_active(qi.call_id))) {
+                        drained++;
+                    } else {
+                        keep.push(std::move(qi));
+                    }
+                    work_queue_.pop();
+                }
+                std::swap(work_queue_, keep);
+                if (drained > 0) {
+                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
+                        "Drained %zu stale/speech-active items from work queue", drained);
+                }
             }
 
             if (interconnect_.has_ended(item.call_id)) {
@@ -271,8 +301,29 @@ private:
                 continue;
             }
 
+            {
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                auto it = calls_.find(item.call_id);
+                if (it != calls_.end()) {
+                    auto since = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - it->second->last_response_sent).count();
+                    if (since < RESPONSE_COOLDOWN_MS && since > 0) {
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
+                            "Discarding transcription — response cooldown active (%ldms since last response)", since);
+                        continue;
+                    }
+                }
+            }
+
             std::string response = process_call(item.call_id, item.text);
             if (!response.empty()) {
+                {
+                    std::lock_guard<std::mutex> lock(calls_mutex_);
+                    auto it = calls_.find(item.call_id);
+                    if (it != calls_.end()) {
+                        it->second->last_response_sent = std::chrono::steady_clock::now();
+                    }
+                }
                 send_to_tts(item.call_id, response);
             }
         }
@@ -292,6 +343,58 @@ private:
         return true;
     }
 
+    static int count_words(const std::string& s) {
+        int count = 0;
+        bool in_word = false;
+        for (char c : s) {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                in_word = false;
+            } else if (!in_word) {
+                in_word = true;
+                count++;
+            }
+        }
+        return count;
+    }
+
+    static std::string normalize_lower(const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); i++) {
+            unsigned char c = (unsigned char)s[i];
+            if (c == '.' || c == '!' || c == '?' || c == ',' || c == ':' || c == ';') continue;
+            if (c >= 'A' && c <= 'Z') { out += (char)(c + 32); continue; }
+            if (c == 0xC3 && i + 1 < s.size()) {
+                unsigned char c2 = (unsigned char)s[i + 1];
+                if (c2 == 0x84) { out += "\xC3\xA4"; i++; continue; }
+                if (c2 == 0x96) { out += "\xC3\xB6"; i++; continue; }
+                if (c2 == 0x9C) { out += "\xC3\xBC"; i++; continue; }
+            }
+            out += (char)c;
+        }
+        return out;
+    }
+
+    static std::unordered_set<std::string> split_words(const std::string& s) {
+        std::unordered_set<std::string> words;
+        std::istringstream iss(s);
+        std::string w;
+        while (iss >> w) words.insert(w);
+        return words;
+    }
+
+    static float text_similarity(const std::string& a, const std::string& b) {
+        auto wa = split_words(normalize_lower(a));
+        auto wb = split_words(normalize_lower(b));
+        if (wa.empty() || wb.empty()) return 0.0f;
+        size_t intersect = 0;
+        for (const auto& w : wa) {
+            if (wb.count(w)) intersect++;
+        }
+        size_t union_sz = wa.size() + wb.size() - intersect;
+        return union_sz == 0 ? 0.0f : (float)intersect / (float)union_sz;
+    }
+
     std::string process_call(uint32_t cid, const std::string& text) {
         auto call = get_or_create_call(cid);
         call->last_activity = std::chrono::steady_clock::now();
@@ -308,6 +411,11 @@ private:
         call->generating = true;
 
         call->messages.push_back({"user", text});
+
+        static constexpr size_t MAX_HISTORY_MESSAGES = 10;
+        while (call->messages.size() > MAX_HISTORY_MESSAGES) {
+            call->messages.erase(call->messages.begin(), call->messages.begin() + 2);
+        }
 
         std::vector<llama_chat_message> chat_msgs;
         chat_msgs.reserve(call->messages.size() + 1);
@@ -414,6 +522,23 @@ private:
         if (response.empty()) {
             call->messages.pop_back();
         } else {
+            int wc = count_words(response);
+            if (response.size() < MIN_RESPONSE_CHARS || wc < MIN_RESPONSE_WORDS) {
+                log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
+                    "Discarding fragment response (%lldms, %zu chars, %d words): %s",
+                    gen_ms, response.size(), wc, response.c_str());
+                response.clear();
+            } else {
+                float sim = text_similarity(text, response);
+                if (sim > SIMILARITY_THRESHOLD) {
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
+                        "Discarding parrot response (%.0f%% similar to input): %s",
+                        sim * 100.0f, response.c_str());
+                    response.clear();
+                }
+            }
+        }
+        if (!response.empty()) {
             call->messages.push_back({"assistant", response});
         }
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Response (%lldms): %s", gen_ms, response.c_str());
