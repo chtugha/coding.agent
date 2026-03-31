@@ -1183,6 +1183,14 @@ private:
         if (cmd == "PING") {
             return "PONG\n";
         }
+        if (cmd == "PAUSE_DOWNSTREAM") {
+            node_.pause_downstream();
+            return "OK DOWNSTREAM_PAUSED\n";
+        }
+        if (cmd == "RESUME_DOWNSTREAM") {
+            node_.resume_downstream();
+            return "OK DOWNSTREAM_RESUMED\n";
+        }
         if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
             std::string level = cmd.substr(14);
             log_fwd_.set_level(level.c_str());

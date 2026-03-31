@@ -902,7 +902,7 @@ int main(int argc, char** argv) {
 
     int vad_window_ms = 50;
     float vad_threshold = 2.0f;
-    int vad_silence_ms = 400;
+    int vad_silence_ms = 700;
     int vad_max_chunk_ms = 8000;
     int vad_onset_gap = -1;
     std::string log_level = "INFO";

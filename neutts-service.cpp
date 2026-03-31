@@ -4,8 +4,8 @@
 //
 // Alternative TTS service using NeuTTS Nano German model.
 // Uses llama.cpp for backbone inference and CoreML NeuCodec for audio decoding.
-// Occupies the KOKORO_SERVICE pipeline slot (ports 13140-13142).
-// Only one TTS service (kokoro-service OR neutts-service) can run at a time.
+// Has its own pipeline slot (ports 13170-13172).
+// Both TTS services can run simultaneously; frontend switches LLaMA's downstream target.
 //
 // Inference pipeline:
 //   1. espeak-ng converts text → IPA phonemes (language="de", with stress)
@@ -22,7 +22,7 @@
 //   Pre-computed codec codes (ref_codes.bin) and phonemized text (ref_text.txt)
 //   are loaded at startup. These define the voice timbre and speaking style.
 //
-// CMD port (Kokoro base+2 = 13142): PING, STATUS, SET_LOG_LEVEL, TEST_SYNTH.
+// CMD port (NeuTTS base+2 = 13172): PING, STATUS, SET_LOG_LEVEL, TEST_SYNTH.
 #include <espeak-ng/speak_lib.h>
 #include "interconnect.h"
 #include "tts-common.h"
@@ -569,15 +569,9 @@ struct CallContext {
 
 class NeuTTSService {
 public:
-    NeuTTSService() : node_(ServiceType::KOKORO_SERVICE) {}
+    NeuTTSService() : node_(ServiceType::NEUTTS_SERVICE) {}
 
     bool initialize() {
-        if (!check_tts_exclusion()) {
-            std::fprintf(stderr, "Another TTS service is already running on port %d\n",
-                        service_cmd_port(ServiceType::KOKORO_SERVICE));
-            return false;
-        }
-
         if (!node_.initialize()) {
             std::fprintf(stderr, "Failed to initialize interconnect node\n");
             return false;
@@ -613,9 +607,8 @@ public:
     }
 
     void run() {
-        if (!node_.connect_to_downstream()) {
-            std::printf("Downstream (OAP) not available yet - will auto-reconnect\n");
-        }
+        node_.pause_downstream();
+        std::printf("NeuTTS downstream paused at startup (Kokoro is default TTS)\n");
 
         std::thread cmd_thread(&NeuTTSService::command_listener_loop, this);
 
@@ -652,40 +645,8 @@ public:
     }
 
 private:
-    bool check_tts_exclusion() {
-        uint16_t cmd_port = service_cmd_port(ServiceType::KOKORO_SERVICE);
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) return true;
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = htons(cmd_port);
-
-        struct timeval tv{1, 0};
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-            const char* ping = "PING\n";
-            send(sock, ping, strlen(ping), 0);
-            char buf[64];
-            int n = (int)recv(sock, buf, sizeof(buf) - 1, 0);
-            ::close(sock);
-            if (n > 0) {
-                buf[n] = '\0';
-                if (strstr(buf, "PONG")) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        ::close(sock);
-        return true;
-    }
-
     void command_listener_loop() {
-        uint16_t port = service_cmd_port(ServiceType::KOKORO_SERVICE);
+        uint16_t port = service_cmd_port(ServiceType::NEUTTS_SERVICE);
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) return;
 
@@ -836,6 +797,14 @@ private:
         if (cmd == "PING") {
             return "PONG\n";
         }
+        if (cmd == "PAUSE_DOWNSTREAM") {
+            node_.pause_downstream();
+            return "OK DOWNSTREAM_PAUSED\n";
+        }
+        if (cmd == "RESUME_DOWNSTREAM") {
+            node_.resume_downstream();
+            return "OK DOWNSTREAM_RESUMED\n";
+        }
         if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
             std::string level = cmd.substr(14);
             log_fwd_.set_level(level.c_str());
@@ -904,8 +873,7 @@ private:
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
                     [&](std::vector<float> chunk) {
                         if (ctx->interrupted.load()) return;
-                        static constexpr float STREAMING_GAIN = 0.90f;
-                        for (float& s : chunk) s *= STREAMING_GAIN;
+                        tts::normalize_audio(chunk);
                         if (first_chunk) {
                             tts::apply_fade_in(chunk);
                             first_chunk = false;
@@ -977,8 +945,8 @@ private:
             std::memcpy(audio_pkt.payload.data() + HEADER_SIZE,
                        samples.data() + offset, count * sizeof(float));
 
-            audio_pkt.trace.record(ServiceType::KOKORO_SERVICE, 0);
-            audio_pkt.trace.record(ServiceType::KOKORO_SERVICE, 1);
+            audio_pkt.trace.record(ServiceType::NEUTTS_SERVICE, 0);
+            audio_pkt.trace.record(ServiceType::NEUTTS_SERVICE, 1);
             if (!node_.send_to_downstream(audio_pkt)) {
                 log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio chunk to OAP");
                 break;

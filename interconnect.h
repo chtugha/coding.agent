@@ -32,6 +32,7 @@
 //   VAD (13115/13116/13117), WHISPER (13120/13121/13122)
 //   LLAMA (13130/13131/13132), KOKORO (13140/13141/13142)
 //   OAP (13150/13151/13152), FRONTEND (13160/13161/13162)
+//   NEUTTS (13170/13171/13172)
 //   Log UDP: 22022
 //
 // Usage pattern for a service:
@@ -142,10 +143,9 @@ enum class ServiceType : uint8_t {
     KOKORO_SERVICE = 5,
     OUTBOUND_AUDIO_PROCESSOR = 6,
     FRONTEND = 7,
-    NEUTTS_SERVICE = 9  // shares KOKORO_SERVICE ports (13140-13142) — log identity only
+    NEUTTS_SERVICE = 9
 };
 
-// NEUTTS_SERVICE intentionally excluded — it occupies KOKORO_SERVICE's pipeline slot.
 inline bool is_pipeline_service(ServiceType type) {
     switch (type) {
         case ServiceType::SIP_CLIENT:
@@ -154,6 +154,7 @@ inline bool is_pipeline_service(ServiceType type) {
         case ServiceType::WHISPER_SERVICE:
         case ServiceType::LLAMA_SERVICE:
         case ServiceType::KOKORO_SERVICE:
+        case ServiceType::NEUTTS_SERVICE:
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR:
             return true;
         default:
@@ -187,6 +188,7 @@ inline ServiceType upstream_of(ServiceType type) {
         case ServiceType::WHISPER_SERVICE: return ServiceType::VAD_SERVICE;
         case ServiceType::LLAMA_SERVICE: return ServiceType::WHISPER_SERVICE;
         case ServiceType::KOKORO_SERVICE: return ServiceType::LLAMA_SERVICE;
+        case ServiceType::NEUTTS_SERVICE: return ServiceType::LLAMA_SERVICE;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::KOKORO_SERVICE;
         case ServiceType::SIP_CLIENT: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         default: return ServiceType::SIP_CLIENT;
@@ -201,6 +203,7 @@ inline ServiceType downstream_of(ServiceType type) {
         case ServiceType::WHISPER_SERVICE: return ServiceType::LLAMA_SERVICE;
         case ServiceType::LLAMA_SERVICE: return ServiceType::KOKORO_SERVICE;
         case ServiceType::KOKORO_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
+        case ServiceType::NEUTTS_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::SIP_CLIENT;
         default: return ServiceType::SIP_CLIENT;
     }
@@ -282,6 +285,7 @@ struct PacketTrace {
 //   KOKORO     (base 13140): mgmt_listen=13140, data_listen=13141
 //   OAP        (base 13150): mgmt_listen=13150, data_listen=13151
 //   FRONTEND   (base 13160): mgmt_listen=13160, data_listen=13161
+//   NEUTTS     (base 13170): mgmt_listen=13170, data_listen=13171
 //
 // Data flow example: SIP sends data to IAP by connecting to IAP's data_listen (13111).
 // IAP sends management msgs to SIP by connecting to SIP's mgmt_listen (13100).
@@ -293,7 +297,7 @@ inline uint16_t service_base_port(ServiceType type) {
         case ServiceType::WHISPER_SERVICE:            return 13120;
         case ServiceType::LLAMA_SERVICE:              return 13130;
         case ServiceType::KOKORO_SERVICE:             return 13140;
-        case ServiceType::NEUTTS_SERVICE:             return 13140;
+        case ServiceType::NEUTTS_SERVICE:             return 13170;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR:   return 13150;
         case ServiceType::FRONTEND:                   return 13160;
         default: return 0;
@@ -487,6 +491,77 @@ public:
 
     ServiceType type() const { return type_; }
 
+    void set_downstream_override(ServiceType target) {
+        downstream_override_.store(static_cast<int>(target));
+        {
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            if (downstream_data_sock_ >= 0) {
+                ::shutdown(downstream_data_sock_, SHUT_RDWR);
+                close_socket(downstream_data_sock_);
+            }
+            if (downstream_mgmt_sock_ >= 0) {
+                ::shutdown(downstream_mgmt_sock_, SHUT_RDWR);
+                close_socket(downstream_mgmt_sock_);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            downstream_state_ = ConnectionState::DISCONNECTED;
+        }
+    }
+
+    void clear_downstream_override() {
+        downstream_override_.store(-1);
+        {
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            if (downstream_data_sock_ >= 0) {
+                ::shutdown(downstream_data_sock_, SHUT_RDWR);
+                close_socket(downstream_data_sock_);
+            }
+            if (downstream_mgmt_sock_ >= 0) {
+                ::shutdown(downstream_mgmt_sock_, SHUT_RDWR);
+                close_socket(downstream_mgmt_sock_);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            downstream_state_ = ConnectionState::DISCONNECTED;
+        }
+    }
+
+    ServiceType effective_downstream() const {
+        int ovr = downstream_override_.load();
+        if (ovr >= 0) return static_cast<ServiceType>(ovr);
+        return downstream_of(type_);
+    }
+
+    void pause_downstream() {
+        downstream_paused_.store(true);
+        {
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            if (downstream_data_sock_ >= 0) {
+                ::shutdown(downstream_data_sock_, SHUT_RDWR);
+                close_socket(downstream_data_sock_);
+            }
+            if (downstream_mgmt_sock_ >= 0) {
+                ::shutdown(downstream_mgmt_sock_, SHUT_RDWR);
+                close_socket(downstream_mgmt_sock_);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            downstream_state_ = ConnectionState::DISCONNECTED;
+        }
+    }
+
+    void resume_downstream() {
+        downstream_paused_.store(false);
+    }
+
+    bool is_downstream_paused() const {
+        return downstream_paused_.load();
+    }
+
     ConnectionState upstream_state() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         return upstream_state_;
@@ -502,7 +577,7 @@ public:
     bool connect_to_downstream() {
         if (!is_pipeline_service(type_)) return false;
 
-        ServiceType ds = downstream_of(type_);
+        ServiceType ds = effective_downstream();
         uint16_t ds_mgmt = service_mgmt_port(ds);
         uint16_t ds_data = service_data_port(ds);
 
@@ -762,6 +837,8 @@ public:
 private:
     ServiceType type_;
     std::atomic<bool> running_;
+    std::atomic<int> downstream_override_{-1};
+    std::atomic<bool> downstream_paused_{false};
     static constexpr size_t SEND_BUF_SIZE = 65536;
     static constexpr int DOWNSTREAM_RECONNECT_MS = 200;
     static constexpr size_t MAX_ENDED_CALL_IDS = 1000;
@@ -886,6 +963,11 @@ private:
         if (!is_pipeline_service(type_)) return;
 
         while (running_) {
+            if (downstream_paused_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(DOWNSTREAM_RECONNECT_MS));
+                continue;
+            }
+
             ConnectionState ds;
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);

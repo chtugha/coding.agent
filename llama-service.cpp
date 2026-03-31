@@ -681,6 +681,16 @@ private:
             log_fwd_.set_level(level.c_str());
             return "OK\n";
         }
+        if (cmd == "SET_TTS:KOKORO") {
+            interconnect_.clear_downstream_override();
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Downstream switched to KOKORO_SERVICE");
+            return "OK TTS=KOKORO\n";
+        }
+        if (cmd == "SET_TTS:NEUTTS") {
+            interconnect_.set_downstream_override(whispertalk::ServiceType::NEUTTS_SERVICE);
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Downstream switched to NEUTTS_SERVICE");
+            return "OK TTS=NEUTTS\n";
+        }
         if (cmd.rfind("TEST_PROMPT:", 0) == 0) {
             std::string prompt = cmd.substr(12);
             uint32_t test_cid = TEST_PROMPT_CID;

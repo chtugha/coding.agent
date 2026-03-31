@@ -1370,6 +1370,8 @@ private:
                 handle_service_stop(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/services/restart")) == 0) {
                 handle_service_restart(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/switch_tts")) == 0) {
+                handle_switch_tts(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/services/config")) == 0) {
                 handle_service_config(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/logs")) == 0) {
@@ -6416,6 +6418,35 @@ if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadC
         }
     }
 
+    void switch_tts(const std::string& target) {
+        if (target == "NEUTTS") {
+            send_negotiation_command(whispertalk::ServiceType::KOKORO_SERVICE, "PAUSE_DOWNSTREAM");
+            usleep(300000);
+            send_negotiation_command(whispertalk::ServiceType::NEUTTS_SERVICE, "RESUME_DOWNSTREAM");
+            usleep(500000);
+            send_negotiation_command(whispertalk::ServiceType::LLAMA_SERVICE, "SET_TTS:NEUTTS");
+        } else {
+            send_negotiation_command(whispertalk::ServiceType::NEUTTS_SERVICE, "PAUSE_DOWNSTREAM");
+            usleep(300000);
+            send_negotiation_command(whispertalk::ServiceType::KOKORO_SERVICE, "RESUME_DOWNSTREAM");
+            usleep(500000);
+            send_negotiation_command(whispertalk::ServiceType::LLAMA_SERVICE, "SET_TTS:KOKORO");
+        }
+    }
+
+    void handle_switch_tts(struct mg_connection *c, struct mg_http_message *hm) {
+        std::string body(hm->body.buf, hm->body.len);
+        std::string target = extract_json_string(body, "target");
+        if (target != "KOKORO" && target != "NEUTTS") {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"target must be KOKORO or NEUTTS\"}");
+            return;
+        }
+        std::thread([this, target]() { switch_tts(target); }).detach();
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"status\":\"switching\",\"target\":\"%s\"}", target.c_str());
+    }
+
     // POST /api/services/stop — Stop a running service by sending SIGTERM.
     void handle_service_stop(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
@@ -6427,6 +6458,9 @@ if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadC
         }
 
         if (stop_service(name)) {
+            if (name == "NEUTTS_SERVICE") {
+                switch_tts("KOKORO");
+            }
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"stopped\"}");
         } else {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Cannot stop service (not managed by frontend)\"}");
