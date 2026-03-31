@@ -6457,10 +6457,13 @@ if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadC
             return;
         }
 
-        if (stop_service(name)) {
-            if (name == "NEUTTS_SERVICE") {
+        if (name == "NEUTTS_SERVICE") {
+            std::thread([this, name]() {
                 switch_tts("KOKORO");
-            }
+                stop_service(name);
+            }).detach();
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"stopping\"}");
+        } else if (stop_service(name)) {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"stopped\"}");
         } else {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Cannot stop service (not managed by frontend)\"}");

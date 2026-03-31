@@ -218,7 +218,7 @@ public:
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx = 2048;
         cparams.n_threads = 4;
-        cparams.n_threads_batch = 4;
+        cparams.n_threads_batch = 8;
         ctx_ = llama_init_from_model(model_, cparams);
         if (!ctx_) {
             std::fprintf(stderr, "Failed to initialize NeuTTS context\n");
@@ -335,10 +335,13 @@ public:
         std::vector<llama_token> decode_tokens;
         int n_past;
 
-        if (prefix_n_past_ > 0) {
-            std::string suffix = build_suffix(input_phones);
-            decode_tokens = tokenize(suffix, false);
-            if (decode_tokens.empty()) return;
+        if (prefix_n_past_ > 0 && !suffix_delim_tokens_.empty()) {
+            auto phone_tokens = tokenize(input_phones, false);
+            if (phone_tokens.empty()) return;
+            decode_tokens.reserve(phone_tokens.size() + suffix_delim_tokens_.size() + ref_codes_tokens_.size());
+            decode_tokens.insert(decode_tokens.end(), phone_tokens.begin(), phone_tokens.end());
+            decode_tokens.insert(decode_tokens.end(), suffix_delim_tokens_.begin(), suffix_delim_tokens_.end());
+            decode_tokens.insert(decode_tokens.end(), ref_codes_tokens_.begin(), ref_codes_tokens_.end());
             llama_memory_seq_rm(mem, 0, prefix_n_past_, -1);
             n_past = prefix_n_past_;
         } else {
@@ -511,6 +514,11 @@ private:
             return false;
         }
 
+        suffix_delim_tokens_ = tokenize("<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>", false);
+        ref_codes_tokens_ = tokenize(ref_codes_prompt_, false);
+        std::printf("Pre-tokenized suffix: delim=%zu tokens, ref_codes=%zu tokens\n",
+                    suffix_delim_tokens_.size(), ref_codes_tokens_.size());
+
         llama_memory_t mem = llama_get_memory(ctx_);
         llama_memory_seq_rm(mem, 0, -1, -1);
 
@@ -545,6 +553,8 @@ private:
     std::unordered_map<std::string, std::string> phoneme_cache_;
     std::unordered_map<llama_token, int32_t> speech_code_lut_;
     std::vector<llama_token> prefix_tokens_;
+    std::vector<llama_token> suffix_delim_tokens_;
+    std::vector<llama_token> ref_codes_tokens_;
     int prefix_n_past_ = 0;
     ReferenceVoice ref_voice_;
     std::string ref_codes_prompt_;
@@ -873,7 +883,16 @@ private:
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
                     [&](std::vector<float> chunk) {
                         if (ctx->interrupted.load()) return;
-                        tts::normalize_audio(chunk);
+                        static constexpr float CEILING = 0.90f;
+                        float peak = 0.0f;
+                        for (float s : chunk) {
+                            float a = std::abs(s);
+                            if (a > peak) peak = a;
+                        }
+                        if (peak > CEILING) {
+                            float scale = CEILING / peak;
+                            for (float& s : chunk) s *= scale;
+                        }
                         if (first_chunk) {
                             tts::apply_fade_in(chunk);
                             first_chunk = false;
