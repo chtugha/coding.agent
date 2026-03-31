@@ -451,12 +451,6 @@ private:
                + ref_codes_prompt_;
     }
 
-    std::string build_suffix(const std::string& input_phones) {
-        return input_phones
-               + "<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>"
-               + ref_codes_prompt_;
-    }
-
     std::vector<llama_token> tokenize(const std::string& text, bool bos) {
         std::vector<llama_token> res(text.size() + 128);
         int n = llama_tokenize(vocab_, text.c_str(), text.size(),
