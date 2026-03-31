@@ -189,7 +189,7 @@ inline ServiceType upstream_of(ServiceType type) {
         case ServiceType::LLAMA_SERVICE: return ServiceType::WHISPER_SERVICE;
         case ServiceType::KOKORO_SERVICE: return ServiceType::LLAMA_SERVICE;
         case ServiceType::NEUTTS_SERVICE: return ServiceType::LLAMA_SERVICE;
-        case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::KOKORO_SERVICE;
+        case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::KOKORO_SERVICE; // default; NEUTTS may also be upstream (dynamic via set_downstream_override)
         case ServiceType::SIP_CLIENT: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         default: return ServiceType::SIP_CLIENT;
     }
