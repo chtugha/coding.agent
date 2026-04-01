@@ -1080,6 +1080,8 @@ private:
                     break;
                 }
                 default:
+                    std::fprintf(stderr, "[%s] Unknown mgmt message type %u, disconnecting upstream\n",
+                        service_type_to_string(type_), (unsigned)type_byte);
                     mark_failed = true;
                     break;
             }
@@ -1140,6 +1142,8 @@ private:
         }
     }
 
+    // Lock order: {upstream,downstream}_mutex_ → state_mutex_ (never reversed).
+    // Caller MUST hold the corresponding connection mutex.
     void mark_upstream_failed_locked() {
         close_socket(upstream_mgmt_accepted_);
         close_socket(upstream_data_accepted_);

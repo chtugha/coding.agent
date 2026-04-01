@@ -57,6 +57,22 @@ static constexpr int NEUTTS_SAMPLE_RATE = 24000;
 static constexpr size_t MAX_AUDIO_SAMPLES = 30 * NEUTTS_SAMPLE_RATE;
 static constexpr size_t PHONEME_CACHE_MAX = 10000;
 
+static constexpr int MODEL_CONTEXT_SIZE = 2048;
+static constexpr int MODEL_N_THREADS = 4;
+static constexpr int MODEL_N_THREADS_BATCH = 8;
+static constexpr int SAMPLER_TOP_K = 50;
+static constexpr float SAMPLER_TEMPERATURE = 1.0f;
+static constexpr uint32_t SAMPLER_SEED = 42;
+static constexpr int MAX_GENERATION_TOKENS = 1500;
+static constexpr int FIRST_BATCH_CODES = 16;
+static constexpr int STREAM_BATCH_CODES = 64;
+static constexpr size_t DOWNSTREAM_CHUNK_SAMPLES = 4800;
+static constexpr float AUDIO_CEILING = 0.90f;
+static constexpr int CMD_RECV_TIMEOUT_SEC = 30;
+static constexpr int CMD_POLL_TIMEOUT_MS = 200;
+static constexpr int WORKER_WAIT_TIMEOUT_MS = 500;
+static constexpr size_t CMD_BUF_SIZE = 4096;
+
 struct ReferenceVoice {
     std::vector<int32_t> codes;
     std::string phonemes;
@@ -91,6 +107,7 @@ struct ReferenceVoice {
 
     std::string codes_prompt_str() const {
         std::string result;
+        result.reserve(codes.size() * 16);
         for (int32_t c : codes) {
             result += "<|speech_" + std::to_string(c) + "|>";
         }
@@ -132,7 +149,11 @@ public:
         static constexpr int64_t SAMPLES_PER_CODE = COMPILED_SAMPLES / (COMPILED_T - 1);  // = 480
 
         int64_t actual_T = (int64_t)codes.size();
-        if (actual_T > COMPILED_T) actual_T = COMPILED_T;
+        if (actual_T > COMPILED_T) {
+            std::fprintf(stderr, "NeuCodec: input codes %lld exceed compiled limit %lld, truncating\n",
+                (long long)codes.size(), (long long)COMPILED_T);
+            actual_T = COMPILED_T;
+        }
 
         @autoreleasepool {
             NSError *error = nil;
@@ -216,9 +237,9 @@ public:
         }
 
         llama_context_params cparams = llama_context_default_params();
-        cparams.n_ctx = 2048;
-        cparams.n_threads = 4;
-        cparams.n_threads_batch = 8;
+        cparams.n_ctx = MODEL_CONTEXT_SIZE;
+        cparams.n_threads = MODEL_N_THREADS;
+        cparams.n_threads_batch = MODEL_N_THREADS_BATCH;
         ctx_ = llama_init_from_model(model_, cparams);
         if (!ctx_) {
             std::fprintf(stderr, "Failed to initialize NeuTTS context\n");
@@ -228,9 +249,9 @@ public:
         vocab_ = llama_model_get_vocab(model_);
 
         sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
-        llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(50));
-        llama_sampler_chain_add(sampler_, llama_sampler_init_temp(1.0f));
-        llama_sampler_chain_add(sampler_, llama_sampler_init_dist(42));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(SAMPLER_TOP_K));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_temp(SAMPLER_TEMPERATURE));
+        llama_sampler_chain_add(sampler_, llama_sampler_init_dist(SAMPLER_SEED));
 
         std::printf("NeuTTS backbone loaded: %s\n", gguf_path.c_str());
 
@@ -292,6 +313,7 @@ public:
         }
 
         std::string result;
+        result.reserve(text.size() * 2);
         {
             std::lock_guard<std::mutex> lock(espeak_mutex_);
             const char* ptr = text.c_str();
@@ -305,7 +327,10 @@ public:
         {
             std::lock_guard<std::mutex> lock(cache_mutex_);
             if (phoneme_cache_.size() >= PHONEME_CACHE_MAX) {
-                phoneme_cache_.clear();
+                auto it = phoneme_cache_.begin();
+                for (size_t i = 0; i < PHONEME_CACHE_MAX / 2 && it != phoneme_cache_.end(); ++i) {
+                    it = phoneme_cache_.erase(it);
+                }
             }
             phoneme_cache_[text] = result;
         }
@@ -325,9 +350,6 @@ public:
     template<typename Callback>
     void synthesize_streaming(const std::string& text, std::atomic<bool>* interrupted,
                               Callback&& callback) {
-        static constexpr int FIRST_BATCH_CODES = 16;
-        static constexpr int BATCH_CODES = 64;
-
         std::string input_phones = phonemize(text);
         if (input_phones.empty()) return;
 
@@ -370,13 +392,13 @@ public:
 
         llama_batch single = llama_batch_init(1, 0, 1);
         std::vector<int32_t> pending_codes;
-        pending_codes.reserve(BATCH_CODES + 1);
+        pending_codes.reserve(STREAM_BATCH_CODES + 1);
         size_t total_samples = 0;
         int32_t context_code = -1;
         int batch_target = FIRST_BATCH_CODES;
 
         std::vector<int32_t> input_codes;
-        input_codes.reserve(BATCH_CODES + 1);
+        input_codes.reserve(STREAM_BATCH_CODES + 1);
 
         auto flush_batch = [&]() {
             if (pending_codes.empty()) return;
@@ -399,11 +421,18 @@ public:
             }
             total_samples += chunk.size();
             callback(std::move(chunk));
-            batch_target = BATCH_CODES;
+            batch_target = STREAM_BATCH_CODES;
         };
 
         const llama_token eos = llama_vocab_eos(vocab_);
-        for (int i = 0; i < 400; i++) {
+        int gen_limit = std::min(MAX_GENERATION_TOKENS, MODEL_CONTEXT_SIZE - n_past);
+        if (gen_limit <= 0) {
+            std::fprintf(stderr, "NeuTTS: context window exhausted (n_past=%d/%d), cannot generate\n",
+                n_past, MODEL_CONTEXT_SIZE);
+            llama_batch_free(single);
+            return;
+        }
+        for (int i = 0; i < gen_limit; i++) {
             if (interrupted && interrupted->load()) break;
             if (total_samples >= MAX_AUDIO_SAMPLES) break;
 
@@ -673,16 +702,16 @@ private:
 
         while (running_) {
             struct pollfd pfd{sock, POLLIN, 0};
-            int r = poll(&pfd, 1, 200);
+            int r = poll(&pfd, 1, CMD_POLL_TIMEOUT_MS);
             if (r <= 0) continue;
 
             int csock = accept(sock, nullptr, nullptr);
             if (csock < 0) continue;
 
-            struct timeval tv{30, 0};
+            struct timeval tv{CMD_RECV_TIMEOUT_SEC, 0};
             setsockopt(csock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-            char buf[4096];
+            char buf[CMD_BUF_SIZE];
             int n = (int)recv(csock, buf, sizeof(buf) - 1, 0);
             if (n > 0) {
                 buf[n] = '\0';
@@ -854,7 +883,7 @@ private:
             std::string text;
             {
                 std::unique_lock<std::mutex> lock(ctx->queue_mutex);
-                ctx->queue_cv.wait_for(lock, std::chrono::milliseconds(500),
+                ctx->queue_cv.wait_for(lock, std::chrono::milliseconds(WORKER_WAIT_TIMEOUT_MS),
                     [&]{ return !ctx->text_queue.empty() || !ctx->active || !running_; });
                 if (!ctx->active || !running_) break;
                 if (ctx->text_queue.empty()) continue;
@@ -877,14 +906,13 @@ private:
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
                     [&](std::vector<float> chunk) {
                         if (ctx->interrupted.load()) return;
-                        static constexpr float CEILING = 0.90f;
                         float peak = 0.0f;
                         for (float s : chunk) {
                             float a = std::abs(s);
                             if (a > peak) peak = a;
                         }
-                        if (peak > CEILING) {
-                            float scale = CEILING / peak;
+                        if (peak > AUDIO_CEILING) {
+                            float scale = AUDIO_CEILING / peak;
                             for (float& s : chunk) s *= scale;
                         }
                         if (first_chunk) {
@@ -942,11 +970,10 @@ private:
     void send_audio_to_downstream(uint32_t call_id, const std::vector<float>& samples) {
         if (node_.downstream_state() != ConnectionState::CONNECTED) return;
 
-        static constexpr size_t CHUNK_SAMPLES = 4800;
         static constexpr size_t HEADER_SIZE = sizeof(int32_t);
 
-        for (size_t offset = 0; offset < samples.size(); offset += CHUNK_SAMPLES) {
-            size_t count = std::min(CHUNK_SAMPLES, samples.size() - offset);
+        for (size_t offset = 0; offset < samples.size(); offset += DOWNSTREAM_CHUNK_SAMPLES) {
+            size_t count = std::min(DOWNSTREAM_CHUNK_SAMPLES, samples.size() - offset);
 
             Packet audio_pkt;
             audio_pkt.call_id = call_id;
@@ -999,6 +1026,16 @@ private:
         }
         ctx->interrupted = true;
         ctx->active = false;
+        {
+            std::lock_guard<std::mutex> qlock(ctx->queue_mutex);
+            std::queue<std::string> empty_text;
+            std::swap(ctx->text_queue, empty_text);
+        }
+        {
+            std::lock_guard<std::mutex> alock(ctx->audio_mutex);
+            std::queue<std::vector<float>> empty_audio;
+            std::swap(ctx->audio_queue, empty_audio);
+        }
         ctx->queue_cv.notify_one();
         ctx->audio_cv.notify_all();
         if (ctx->worker.joinable()) ctx->worker.join();
@@ -1010,6 +1047,16 @@ private:
         for (auto& [id, ctx] : calls_) {
             ctx->interrupted = true;
             ctx->active = false;
+            {
+                std::lock_guard<std::mutex> qlock(ctx->queue_mutex);
+                std::queue<std::string> empty_text;
+                std::swap(ctx->text_queue, empty_text);
+            }
+            {
+                std::lock_guard<std::mutex> alock(ctx->audio_mutex);
+                std::queue<std::vector<float>> empty_audio;
+                std::swap(ctx->audio_queue, empty_audio);
+            }
             ctx->queue_cv.notify_one();
             ctx->audio_cv.notify_all();
         }
