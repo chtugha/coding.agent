@@ -59,11 +59,13 @@ TEST(PacketTest, LargePayload) {
 TEST(PortAssignmentTest, FixedPortsPerService) {
     EXPECT_EQ(service_base_port(ServiceType::SIP_CLIENT), 13100);
     EXPECT_EQ(service_base_port(ServiceType::INBOUND_AUDIO_PROCESSOR), 13110);
+    EXPECT_EQ(service_base_port(ServiceType::VAD_SERVICE), 13115);
     EXPECT_EQ(service_base_port(ServiceType::WHISPER_SERVICE), 13120);
     EXPECT_EQ(service_base_port(ServiceType::LLAMA_SERVICE), 13130);
     EXPECT_EQ(service_base_port(ServiceType::KOKORO_SERVICE), 13140);
     EXPECT_EQ(service_base_port(ServiceType::OUTBOUND_AUDIO_PROCESSOR), 13150);
     EXPECT_EQ(service_base_port(ServiceType::FRONTEND), 13160);
+    EXPECT_EQ(service_base_port(ServiceType::NEUTTS_SERVICE), 13170);
 }
 
 TEST(PortAssignmentTest, MgmtAndDataPortsAreDeterministic) {
@@ -80,11 +82,13 @@ TEST(PortAssignmentTest, NoPortConflictsAcrossServices) {
     ServiceType types[] = {
         ServiceType::SIP_CLIENT,
         ServiceType::INBOUND_AUDIO_PROCESSOR,
+        ServiceType::VAD_SERVICE,
         ServiceType::WHISPER_SERVICE,
         ServiceType::LLAMA_SERVICE,
         ServiceType::KOKORO_SERVICE,
         ServiceType::OUTBOUND_AUDIO_PROCESSOR,
-        ServiceType::FRONTEND
+        ServiceType::FRONTEND,
+        ServiceType::NEUTTS_SERVICE
     };
     for (auto t : types) {
         uint16_t mgmt = service_mgmt_port(t);
@@ -97,7 +101,7 @@ TEST(PortAssignmentTest, NoPortConflictsAcrossServices) {
         all_ports.insert(data);
         all_ports.insert(cmd);
     }
-    EXPECT_EQ(all_ports.size(), 21u);
+    EXPECT_EQ(all_ports.size(), 27u);
 }
 
 TEST(TopologyTest, UpstreamDownstreamMapping) {

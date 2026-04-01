@@ -493,40 +493,12 @@ public:
 
     void set_downstream_override(ServiceType target) {
         downstream_override_.store(static_cast<int>(target));
-        {
-            std::lock_guard<std::mutex> lock(downstream_mutex_);
-            if (downstream_data_sock_ >= 0) {
-                ::shutdown(downstream_data_sock_, SHUT_RDWR);
-                close_socket(downstream_data_sock_);
-            }
-            if (downstream_mgmt_sock_ >= 0) {
-                ::shutdown(downstream_mgmt_sock_, SHUT_RDWR);
-                close_socket(downstream_mgmt_sock_);
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            downstream_state_ = ConnectionState::DISCONNECTED;
-        }
+        mark_downstream_failed();
     }
 
     void clear_downstream_override() {
         downstream_override_.store(-1);
-        {
-            std::lock_guard<std::mutex> lock(downstream_mutex_);
-            if (downstream_data_sock_ >= 0) {
-                ::shutdown(downstream_data_sock_, SHUT_RDWR);
-                close_socket(downstream_data_sock_);
-            }
-            if (downstream_mgmt_sock_ >= 0) {
-                ::shutdown(downstream_mgmt_sock_, SHUT_RDWR);
-                close_socket(downstream_mgmt_sock_);
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            downstream_state_ = ConnectionState::DISCONNECTED;
-        }
+        mark_downstream_failed();
     }
 
     ServiceType effective_downstream() const {
@@ -537,21 +509,7 @@ public:
 
     void pause_downstream() {
         downstream_paused_.store(true);
-        {
-            std::lock_guard<std::mutex> lock(downstream_mutex_);
-            if (downstream_data_sock_ >= 0) {
-                ::shutdown(downstream_data_sock_, SHUT_RDWR);
-                close_socket(downstream_data_sock_);
-            }
-            if (downstream_mgmt_sock_ >= 0) {
-                ::shutdown(downstream_mgmt_sock_, SHUT_RDWR);
-                close_socket(downstream_mgmt_sock_);
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            downstream_state_ = ConnectionState::DISCONNECTED;
-        }
+        mark_downstream_failed();
     }
 
     void resume_downstream() {
@@ -586,14 +544,14 @@ public:
             downstream_state_ = ConnectionState::CONNECTING;
         }
 
-        int mgmt_sock = connect_to_port_with_timeout("127.0.0.1", ds_mgmt, 2000);
+        int mgmt_sock = connect_to_port_with_timeout("127.0.0.1", ds_mgmt, CONNECT_TIMEOUT_MS);
         if (mgmt_sock < 0) {
             std::lock_guard<std::mutex> lock(state_mutex_);
             downstream_state_ = ConnectionState::DISCONNECTED;
             return false;
         }
 
-        int data_sock = connect_to_port_with_timeout("127.0.0.1", ds_data, 2000);
+        int data_sock = connect_to_port_with_timeout("127.0.0.1", ds_data, CONNECT_TIMEOUT_MS);
         if (data_sock < 0) {
             ::close(mgmt_sock);
             std::lock_guard<std::mutex> lock(state_mutex_);
@@ -638,13 +596,13 @@ public:
         if (total <= SEND_BUF_SIZE) {
             thread_local uint8_t buf[SEND_BUF_SIZE];
             pkt.serialize_into(buf);
-            if (!send_all_with_timeout(sock, buf, total, 100)) {
+            if (!send_all_with_timeout(sock, buf, total, DATA_SEND_TIMEOUT_MS)) {
                 mark_downstream_failed();
                 return false;
             }
         } else {
             auto data = pkt.serialize();
-            if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
+            if (!send_all_with_timeout(sock, data.data(), data.size(), DATA_SEND_TIMEOUT_MS)) {
                 mark_downstream_failed();
                 return false;
             }
@@ -666,13 +624,13 @@ public:
         if (total <= SEND_BUF_SIZE) {
             thread_local uint8_t buf[SEND_BUF_SIZE];
             pkt.serialize_into(buf);
-            if (!send_all_with_timeout(sock, buf, total, 100)) {
+            if (!send_all_with_timeout(sock, buf, total, DATA_SEND_TIMEOUT_MS)) {
                 mark_upstream_failed();
                 return false;
             }
         } else {
             auto data = pkt.serialize();
-            if (!send_all_with_timeout(sock, data.data(), data.size(), 100)) {
+            if (!send_all_with_timeout(sock, data.data(), data.size(), DATA_SEND_TIMEOUT_MS)) {
                 mark_upstream_failed();
                 return false;
             }
@@ -692,9 +650,10 @@ public:
             return false;
         }
         bool ok = recv_packet(sock, pkt, timeout_ms);
-        if (!ok && sock >= 0) {
-            if (is_socket_dead(sock)) {
-                mark_upstream_failed();
+        if (!ok) {
+            std::lock_guard<std::mutex> lock(upstream_mutex_);
+            if (upstream_data_accepted_ == sock && is_socket_dead(sock)) {
+                mark_upstream_failed_locked();
             }
         }
         return ok;
@@ -712,9 +671,10 @@ public:
             return false;
         }
         bool ok = recv_packet(sock, pkt, timeout_ms);
-        if (!ok && sock >= 0) {
-            if (is_socket_dead(sock)) {
-                mark_downstream_failed();
+        if (!ok) {
+            std::lock_guard<std::mutex> lock(downstream_mutex_);
+            if (downstream_data_sock_ == sock && is_socket_dead(sock)) {
+                mark_downstream_failed_locked();
             }
         }
         return ok;
@@ -804,7 +764,7 @@ public:
     uint16_t frontend_log_port() const { return FRONTEND_LOG_PORT; }
 
     // Send a custom command to our downstream's mgmt channel and wait for response.
-    std::string send_custom_to_downstream(const std::string& msg, int timeout_ms = 2000) {
+    std::string send_custom_to_downstream(const std::string& msg, int timeout_ms = CUSTOM_MSG_TIMEOUT_MS) {
         int sock;
         {
             std::lock_guard<std::mutex> lock(downstream_mutex_);
@@ -812,25 +772,26 @@ public:
         }
         if (sock < 0) return "";
 
-        uint8_t buf[3 + 65535];
-        buf[0] = static_cast<uint8_t>(MgmtMsgType::CUSTOM);
         uint16_t len = static_cast<uint16_t>(std::min(msg.size(), (size_t)65535));
+        std::vector<uint8_t> buf(3 + len);
+        buf[0] = static_cast<uint8_t>(MgmtMsgType::CUSTOM);
         uint16_t net_len = htons(len);
-        memcpy(buf + 1, &net_len, 2);
-        memcpy(buf + 3, msg.data(), len);
+        memcpy(buf.data() + 1, &net_len, 2);
+        memcpy(buf.data() + 3, msg.data(), len);
 
         std::lock_guard<std::mutex> lock(send_downstream_mgmt_mutex_);
-        if (!send_all_with_timeout(sock, buf, 3 + len, timeout_ms)) return "";
+        if (!send_all_with_timeout(sock, buf.data(), buf.size(), timeout_ms)) return "";
 
         uint8_t resp_hdr[3];
         if (!recv_exact(sock, resp_hdr, 3, timeout_ms)) return "";
+        if (resp_hdr[0] != static_cast<uint8_t>(MgmtMsgType::CUSTOM)) return "";
         uint16_t resp_len;
         memcpy(&resp_len, resp_hdr + 1, 2);
         resp_len = ntohs(resp_len);
         if (resp_len == 0) return "";
 
         std::string resp(resp_len, '\0');
-        if (!recv_exact(sock, const_cast<char*>(resp.data()), resp_len, timeout_ms)) return "";
+        if (!recv_exact(sock, resp.data(), resp_len, timeout_ms)) return "";
         return resp;
     }
 
@@ -842,6 +803,18 @@ private:
     static constexpr size_t SEND_BUF_SIZE = 65536;
     static constexpr int DOWNSTREAM_RECONNECT_MS = 200;
     static constexpr size_t MAX_ENDED_CALL_IDS = 1000;
+    static constexpr int ACCEPT_POLL_TIMEOUT_MS = 50;
+    static constexpr int IDLE_POLL_MS = 100;
+    static constexpr int MGMT_RECV_TIMEOUT_MS = 500;
+    static constexpr int MGMT_SEND_TIMEOUT_MS = 100;
+    static constexpr int DATA_SEND_TIMEOUT_MS = 100;
+    static constexpr int CONNECT_TIMEOUT_MS = 2000;
+    static constexpr int CUSTOM_MSG_TIMEOUT_MS = 2000;
+    static constexpr int PAYLOAD_RECV_TIMEOUT_MS = 5000;
+    static constexpr int LISTEN_BACKLOG = 4;
+    static constexpr int TCP_KEEPALIVE_IDLE_S = 2;
+    static constexpr int TCP_KEEPALIVE_INTVL_S = 1;
+    static constexpr int TCP_KEEPALIVE_CNT = 2;
 
     mutable std::mutex call_id_mutex_;
     uint32_t max_known_call_id_;
@@ -890,14 +863,14 @@ private:
 
             if (need_mgmt && mgmt_listen_sock_ >= 0) {
                 pollfd pfd = {mgmt_listen_sock_, POLLIN, 0};
-                if (poll(&pfd, 1, 50) > 0 && (pfd.revents & POLLIN)) {
+                if (poll(&pfd, 1, ACCEPT_POLL_TIMEOUT_MS) > 0 && (pfd.revents & POLLIN)) {
                     sockaddr_in addr;
                     socklen_t len = sizeof(addr);
                     int accepted = accept(mgmt_listen_sock_, (sockaddr*)&addr, &len);
                     if (accepted >= 0) {
                         setup_socket_options(accepted);
                         std::lock_guard<std::mutex> lock(upstream_mutex_);
-                        if (upstream_mgmt_accepted_ >= 0) ::close(upstream_mgmt_accepted_);
+                        close_socket(upstream_mgmt_accepted_);
                         upstream_mgmt_accepted_ = accepted;
                         update_upstream_state();
                         std::fprintf(stderr, "[%s] Upstream mgmt connected\n",
@@ -908,14 +881,14 @@ private:
 
             if (need_data && data_listen_sock_ >= 0) {
                 pollfd pfd = {data_listen_sock_, POLLIN, 0};
-                if (poll(&pfd, 1, 50) > 0 && (pfd.revents & POLLIN)) {
+                if (poll(&pfd, 1, ACCEPT_POLL_TIMEOUT_MS) > 0 && (pfd.revents & POLLIN)) {
                     sockaddr_in addr;
                     socklen_t len = sizeof(addr);
                     int accepted = accept(data_listen_sock_, (sockaddr*)&addr, &len);
                     if (accepted >= 0) {
                         setup_socket_options(accepted);
                         std::lock_guard<std::mutex> lock(upstream_mutex_);
-                        if (upstream_data_accepted_ >= 0) ::close(upstream_data_accepted_);
+                        close_socket(upstream_data_accepted_);
                         upstream_data_accepted_ = accepted;
                         update_upstream_state();
                         std::fprintf(stderr, "[%s] Upstream data connected\n",
@@ -940,7 +913,7 @@ private:
                         update_upstream_state();
                     }
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(IDLE_POLL_MS));
             }
         }
     }
@@ -1014,12 +987,12 @@ private:
                 sock = upstream_mgmt_accepted_;
             }
             if (sock < 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(IDLE_POLL_MS));
                 continue;
             }
 
             pollfd pfd = {sock, POLLIN, 0};
-            int pr = poll(&pfd, 1, 100);
+            int pr = poll(&pfd, 1, IDLE_POLL_MS);
             if (pr <= 0) continue;
             if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
                 mark_upstream_failed();
@@ -1027,7 +1000,7 @@ private:
             }
 
             uint8_t type_byte;
-            if (!recv_exact(sock, &type_byte, 1, 500)) {
+            if (!recv_exact(sock, &type_byte, 1, MGMT_RECV_TIMEOUT_MS)) {
                 // Connection closed or errored — recv_exact returns false on EOF (n==0)
                 // and on read errors. Mark upstream failed so reconnect logic kicks in.
                 mark_upstream_failed();
@@ -1040,7 +1013,7 @@ private:
             switch (msg_type) {
                 case MgmtMsgType::CALL_END: {
                     uint32_t net_cid;
-                    if (!recv_exact(sock, &net_cid, 4, 500)) { mark_failed = true; break; }
+                    if (!recv_exact(sock, &net_cid, 4, MGMT_RECV_TIMEOUT_MS)) { mark_failed = true; break; }
                     uint32_t cid = ntohl(net_cid);
                     handle_remote_call_end(cid);
                     break;
@@ -1048,7 +1021,7 @@ private:
                 case MgmtMsgType::SPEECH_ACTIVE:
                 case MgmtMsgType::SPEECH_IDLE: {
                     uint32_t net_cid;
-                    if (!recv_exact(sock, &net_cid, 4, 500)) { mark_failed = true; break; }
+                    if (!recv_exact(sock, &net_cid, 4, MGMT_RECV_TIMEOUT_MS)) { mark_failed = true; break; }
                     uint32_t cid = ntohl(net_cid);
                     bool active = (msg_type == MgmtMsgType::SPEECH_ACTIVE);
                     bool changed = false;
@@ -1075,22 +1048,23 @@ private:
                 case MgmtMsgType::PING: {
                     uint8_t pong = static_cast<uint8_t>(MgmtMsgType::PONG);
                     std::lock_guard<std::mutex> lock(send_upstream_mgmt_mutex_);
-                    send_all_with_timeout(sock, &pong, 1, 100);
+                    send_all_with_timeout(sock, &pong, 1, MGMT_SEND_TIMEOUT_MS);
                     break;
                 }
                 case MgmtMsgType::PONG:
                     break;
                 case MgmtMsgType::CUSTOM: {
                     uint16_t net_len;
-                    if (!recv_exact(sock, &net_len, 2, 500)) { mark_failed = true; break; }
+                    if (!recv_exact(sock, &net_len, 2, MGMT_RECV_TIMEOUT_MS)) { mark_failed = true; break; }
                     uint16_t len = ntohs(net_len);
-                    if (len == 0) { mark_failed = true; break; }
-                    std::string msg(len, '\0');
-                    if (!recv_exact(sock, const_cast<char*>(msg.data()), len, 2000)) { mark_failed = true; break; }
 
                     std::string response;
-                    if (custom_handler_) {
-                        response = custom_handler_(msg);
+                    if (len > 0) {
+                        std::string msg(len, '\0');
+                        if (!recv_exact(sock, msg.data(), len, CUSTOM_MSG_TIMEOUT_MS)) { mark_failed = true; break; }
+                        if (custom_handler_) {
+                            response = custom_handler_(msg);
+                        }
                     }
 
                     uint16_t resp_len = static_cast<uint16_t>(std::min(response.size(), (size_t)65535));
@@ -1101,11 +1075,12 @@ private:
                     if (resp_len > 0) memcpy(resp_buf.data() + 3, response.data(), resp_len);
                     {
                         std::lock_guard<std::mutex> lock(send_upstream_mgmt_mutex_);
-                        send_all_with_timeout(sock, resp_buf.data(), 3 + resp_len, 2000);
+                        send_all_with_timeout(sock, resp_buf.data(), 3 + resp_len, CUSTOM_MSG_TIMEOUT_MS);
                     }
                     break;
                 }
                 default:
+                    mark_failed = true;
                     break;
             }
             if (mark_failed) {
@@ -1160,29 +1135,33 @@ private:
         memcpy(buf + 1, &net_cid, 4);
 
         std::lock_guard<std::mutex> lock(send_downstream_mgmt_mutex_);
-        if (!send_all_with_timeout(sock, buf, 5, 100)) {
+        if (!send_all_with_timeout(sock, buf, 5, MGMT_SEND_TIMEOUT_MS)) {
             // Don't mark failed for mgmt send failure — data channel matters more
         }
     }
 
-    void mark_upstream_failed() {
-        {
-            std::lock_guard<std::mutex> lock(upstream_mutex_);
-            close_socket(upstream_mgmt_accepted_);
-            close_socket(upstream_data_accepted_);
-        }
+    void mark_upstream_failed_locked() {
+        close_socket(upstream_mgmt_accepted_);
+        close_socket(upstream_data_accepted_);
         std::lock_guard<std::mutex> sl(state_mutex_);
         upstream_state_ = ConnectionState::DISCONNECTED;
     }
 
-    void mark_downstream_failed() {
-        {
-            std::lock_guard<std::mutex> lock(downstream_mutex_);
-            close_socket(downstream_mgmt_sock_);
-            close_socket(downstream_data_sock_);
-        }
+    void mark_downstream_failed_locked() {
+        close_socket(downstream_mgmt_sock_);
+        close_socket(downstream_data_sock_);
         std::lock_guard<std::mutex> sl(state_mutex_);
         downstream_state_ = ConnectionState::DISCONNECTED;
+    }
+
+    void mark_upstream_failed() {
+        std::lock_guard<std::mutex> lock(upstream_mutex_);
+        mark_upstream_failed_locked();
+    }
+
+    void mark_downstream_failed() {
+        std::lock_guard<std::mutex> lock(downstream_mutex_);
+        mark_downstream_failed_locked();
     }
 
     bool is_socket_dead(int fd) {
@@ -1215,7 +1194,7 @@ private:
             return -1;
         }
 
-        if (listen(sock, 4) < 0) {
+        if (listen(sock, LISTEN_BACKLOG) < 0) {
             ::close(sock);
             return -1;
         }
@@ -1278,28 +1257,17 @@ private:
         int keepalive = 1;
         setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
 #ifdef TCP_KEEPIDLE
-        int idle = 2;
+        int idle = TCP_KEEPALIVE_IDLE_S;
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
 #endif
 #ifdef TCP_KEEPINTVL
-        int intvl = 1;
+        int intvl = TCP_KEEPALIVE_INTVL_S;
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
 #endif
 #ifdef TCP_KEEPCNT
-        int cnt = 2;
+        int cnt = TCP_KEEPALIVE_CNT;
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
 #endif
-    }
-
-    bool send_all(int sock, const void* data, size_t len) {
-        const uint8_t* ptr = static_cast<const uint8_t*>(data);
-        size_t sent = 0;
-        while (sent < len) {
-            ssize_t n = send(sock, ptr + sent, len - sent, 0);
-            if (n <= 0) return false;
-            sent += n;
-        }
-        return true;
     }
 
     bool send_all_with_timeout(int sock, const void* data, size_t len, int timeout_ms) {
@@ -1325,16 +1293,6 @@ private:
             sent += n;
         }
         return true;
-    }
-
-    ssize_t recv_with_timeout(int sock, void* buf, size_t len, int timeout_ms) {
-        pollfd pfd = {sock, POLLIN, 0};
-        int ret = poll(&pfd, 1, timeout_ms);
-        if (ret <= 0) return -1;
-        if (pfd.revents & POLLERR) return -1;
-        if (pfd.revents & POLLIN) return recv(sock, buf, len, 0);
-        if (pfd.revents & POLLHUP) return -1;
-        return -1;
     }
 
     bool recv_exact(int sock, void* buf, size_t len, int timeout_ms) {
@@ -1382,7 +1340,7 @@ private:
 
         pkt.payload.resize(pkt.payload_size);
         if (pkt.payload_size > 0) {
-            if (!recv_exact(sock, pkt.payload.data(), pkt.payload_size, 5000)) {
+            if (!recv_exact(sock, pkt.payload.data(), pkt.payload_size, PAYLOAD_RECV_TIMEOUT_MS)) {
                 return false;
             }
         }
