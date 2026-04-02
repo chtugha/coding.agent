@@ -14,7 +14,7 @@
 //   Telephony-optimized parameters:
 //     no_speech_thold=0.9  — prevents early decoder stop on G.711 audio artifacts.
 //     entropy_thold=2.8    — tolerant of codec-induced prediction uncertainty.
-//     No initial_prompt    — prompts cause hallucination artifacts on codec audio.
+//     initial_prompt       — German sentence to anchor language detection and reduce garbling.
 //
 // Hallucination filter (default OFF, runtime-toggleable via cmd port or frontend UI):
 //   Exact-match list of known Whisper hallucination strings (e.g. "Untertitel",
@@ -381,7 +381,7 @@ private:
         wparams.audio_ctx = 0;
 
         wparams.no_context = true;
-        wparams.initial_prompt = nullptr;
+        wparams.initial_prompt = "Hallo, wie geht es Ihnen? Ich spreche Deutsch.";
 
         std::lock_guard<std::mutex> lock(whisper_mutex_);
         auto t0 = std::chrono::steady_clock::now();

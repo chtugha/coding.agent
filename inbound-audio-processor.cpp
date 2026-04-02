@@ -200,8 +200,26 @@ private:
                 state->decoded[i] = ulaw_table[rtp_payload[i]];
             }
 
+            float dec_peak = 0;
+            for (size_t i = 0; i < payload_len; ++i) {
+                float a = std::abs(state->decoded[i]);
+                if (a > dec_peak) dec_peak = a;
+            }
+
             size_t out_len = whispertalk::iap_fir_upsample_frame(
                 state->decoded, payload_len, state->pcm, state->fir_history);
+
+            float up_peak = 0;
+            for (size_t i = 0; i < out_len; ++i) {
+                float a = std::abs(state->pcm[i]);
+                if (a > up_peak) up_peak = a;
+            }
+
+            if (up_peak > 1.0f) {
+                log_fwd_.forward(whispertalk::LogLevel::WARN, pkt.call_id,
+                    "Upsampler clipping: decoded_peak=%.4f upsample_peak=%.4f gain=%.2fx",
+                    dec_peak, up_peak, dec_peak > 0 ? up_peak / dec_peak : 0.0f);
+            }
 
             auto t1 = std::chrono::steady_clock::now();
             double pkt_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
@@ -302,6 +320,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::printf("IAP build: upsampler gain=1.0 (no 2x multiply)\n");
     InboundAudioProcessor proc;
     if (!proc.init()) {
         return 1;

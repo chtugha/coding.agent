@@ -93,8 +93,9 @@ inline const float* iap_fir_coeffs() {
 
 // Polyphase FIR half-band upsample: 8kHz → 16kHz via 2× zero-stuff + 15-tap filter.
 // Exploits half-band structure: odd taps (1,3,5,9,11,13) are zero, center tap (7) = 1.0.
-//   Odd outputs:  out[2i+1] = 2.0 * x[i - 3]  (delayed passthrough, no multiply)
-//   Even outputs: out[2i]   = 2.0 * sum of 8 non-zero taps  (8 MACs vs 15 branchy iterations)
+//   Odd outputs:  out[2i+1] = x[i - 3]  (delayed passthrough)
+//   Even outputs: out[2i]   = sum of 8 non-zero taps  (8 MACs vs 15 branchy iterations)
+// Each polyphase branch has DC gain = 1.0 (even coeffs sum to 1.0, odd = center tap 1.0).
 // ~3.7× fewer operations than the naive FIR loop.
 // `history` must point to IAP_FIR_CENTER floats that persist across calls.
 // Returns number of output samples written (= in_len * 2).
@@ -119,8 +120,8 @@ inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
         const float* x = ext + i;
         float even = H0 * x[7] + H2 * x[6] + H4 * x[5] + H6 * x[4]
                    + H6 * x[3] + H4 * x[2] + H2 * x[1] + H0 * x[0];
-        out[2 * i] = even * 2.0f;
-        out[2 * i + 1] = ext[i + 4] * 2.0f;
+        out[2 * i] = even;
+        out[2 * i + 1] = ext[i + 4];
     }
 
     if (in_len >= (size_t)IAP_FIR_CENTER) {

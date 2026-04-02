@@ -11,11 +11,11 @@
 //   Template:  llama_chat_apply_template() — uses the model's built-in chat template
 //              for correct role tagging (system/user/assistant). No manual formatting.
 //   Sampling:  Repetition penalty (last 64, 1.1×) + top_p (0.95) + temp (0.3) + dist.
-//              Max 64 tokens per response. Stops at sentence-end (. ? !) or EOS.
+//              Max 96 tokens per response. Stops after 2 sentence-ends (. ? !) or EOS.
 //   Context:   2048 tokens, 4 threads. Sequence IDs isolate per-call KV cache.
 //
 // German system prompt:
-//   Enforces: always German, max 1 sentence / 15 words, polite and natural.
+//   Enforces: always German, 1-2 sentences / 25 words, substantive responses.
 //   Avg quality score ~70% across test prompts, 90% German detection rate.
 //   Avg latency ~320ms on Apple M-series.
 //
@@ -58,7 +58,7 @@
 #include "interconnect.h"
 #include "llama.h"
 
-static constexpr int MAX_RESPONSE_TOKENS = 64;
+static constexpr int MAX_RESPONSE_TOKENS = 96;
 static constexpr int TOKEN_PIECE_BUF     = 128;
 static constexpr int CMD_RECV_TIMEOUT_S  = 10;
 static constexpr int CMD_POLL_TIMEOUT_MS = 200;
@@ -69,13 +69,27 @@ static constexpr long SPEECH_DISCARD_MIN_MS = 200;
 static constexpr size_t MIN_RESPONSE_CHARS  = 8;
 static constexpr int MIN_RESPONSE_WORDS     = 2;
 static constexpr float SIMILARITY_THRESHOLD = 0.75f;
+static const char* TOPIC_CHANGES[] = {
+    "Lass uns über etwas anderes sprechen. Was machst du in deiner Freizeit?",
+    "Hast du in letzter Zeit einen interessanten Film gesehen?",
+    "Welches Buch hat dich zuletzt begeistert?",
+    "Was ist deine Meinung zum aktuellen Wetter?",
+    "Kochst du gerne? Was ist dein Lieblingsgericht?",
+    "Warst du in letzter Zeit auf einer Reise?",
+    "Hast du ein Hobby, das dich besonders begeistert?",
+    "Was denkst du über die neuesten Technologie-Trends?",
+};
+static constexpr size_t NUM_TOPIC_CHANGES = sizeof(TOPIC_CHANGES) / sizeof(TOPIC_CHANGES[0]);
 static const char* SYSTEM_PROMPT =
-    "Du bist ein freundlicher deutscher Telefon-Assistent. "
+    "Du bist ein gesprächiger deutscher Telefon-Assistent. "
     "WICHTIG: Antworte IMMER auf Deutsch, NIEMALS auf Englisch. "
-    "Halte dich SEHR KURZ: maximal 1 Satz, höchstens 15 Wörter. "
-    "Sei hilfsbereit, höflich und natürlich. "
-    "Antworte mit vollständigen Sätzen. "
-    "Wiederhole NIEMALS den Satz des Anrufers. Stelle stattdessen eine Frage oder gib neue Information.";
+    "Antworte in 1-2 Sätzen, maximal 25 Wörter. "
+    "Bringe IMMER neue Information oder stelle eine konkrete Frage zum Thema. "
+    "Vermeide leere Floskeln wie 'Gern geschehen', 'Kein Problem', 'Danke', 'Bis dann', "
+    "'Das ist eine gute Frage', 'Natürlich', 'Aber ja', 'Das stimmt'. "
+    "Beginne NIEMALS mit einer Bestätigung oder Bewertung des Gesagten. "
+    "Wiederhole NIEMALS den Satz des Anrufers. "
+    "Sei interessiert und wissend — teile Fakten, Meinungen oder Vorschläge.";
 
 struct LlamaChatMessage {
     std::string role;
@@ -175,6 +189,24 @@ public:
                     it->second->generating = false;
                 }
             } else {
+                std::string pending_text;
+                {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    auto it = pending_transcriptions_.find(call_id);
+                    if (it != pending_transcriptions_.end() && !it->second.empty()) {
+                        pending_text = std::move(it->second);
+                        pending_transcriptions_.erase(it);
+                    }
+                }
+                if (!pending_text.empty()) {
+                    {
+                        std::lock_guard<std::mutex> wlock(work_mutex_);
+                        work_queue_.push({call_id, std::move(pending_text)});
+                    }
+                    work_cv_.notify_one();
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
+                        "Speech ended — flushing accumulated transcription to work queue");
+                }
                 std::lock_guard<std::mutex> lock(speech_time_mutex_);
                 speech_active_since_.erase(call_id);
             }
@@ -252,27 +284,29 @@ private:
                 item = std::move(work_queue_.front());
                 work_queue_.pop();
 
-                size_t drained = 0;
                 std::queue<WorkItem> keep;
+                size_t merged = 0;
                 while (!work_queue_.empty()) {
-                    auto& qi = work_queue_.front();
-                    if (interconnect_.has_ended(qi.call_id) ||
-                        (qi.call_id == item.call_id && interconnect_.is_speech_active(qi.call_id))) {
-                        drained++;
+                    auto qi = std::move(work_queue_.front());
+                    work_queue_.pop();
+                    if (interconnect_.has_ended(qi.call_id)) {
+                        continue;
+                    } else if (qi.call_id == item.call_id) {
+                        item.text += " " + qi.text;
+                        merged++;
                     } else {
                         keep.push(std::move(qi));
                     }
-                    work_queue_.pop();
                 }
                 std::swap(work_queue_, keep);
-                if (drained > 0) {
+                if (merged > 0) {
                     log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
-                        "Drained %zu stale/speech-active items from work queue", drained);
+                        "Merged %zu queue items for same call", merged);
                 }
             }
 
             if (interconnect_.has_ended(item.call_id)) {
-                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Discarding stale work item — call already ended");
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Discarding — call already ended");
                 continue;
             }
 
@@ -287,17 +321,35 @@ private:
                     }
                 }
                 if (speech_ms >= SPEECH_DISCARD_MIN_MS) {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    auto& pending = pending_transcriptions_[item.call_id];
+                    if (pending.empty()) {
+                        pending = item.text;
+                    } else {
+                        pending += " " + item.text;
+                    }
                     log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
-                        "Discarding stale transcription — caller speaking for %ldms (shut-up)", speech_ms);
+                        "Accumulated transcription — caller speaking for %ldms, waiting for turn end", speech_ms);
                     continue;
                 }
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
                     "Speech active only %ldms — processing transcription (may be transient)", speech_ms);
             }
-            if (!running_) break;
 
+            {
+                std::lock_guard<std::mutex> lock(pending_mutex_);
+                auto it = pending_transcriptions_.find(item.call_id);
+                if (it != pending_transcriptions_.end() && !it->second.empty()) {
+                    item.text = it->second + " " + item.text;
+                    pending_transcriptions_.erase(it);
+                    log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id,
+                        "Prepended accumulated transcription — processing combined text");
+                }
+            }
+
+            if (!running_) break;
             if (interconnect_.has_ended(item.call_id)) {
-                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Discarding stale work item — call ended during speech wait");
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, item.call_id, "Discarding — call ended during accumulation");
                 continue;
             }
 
@@ -329,6 +381,8 @@ private:
         }
     }
 
+    int sentence_end_count_ = 0;
+
     bool is_sentence_end(const std::string& s) {
         if (s.empty()) return false;
         char last = s.back();
@@ -340,7 +394,8 @@ private:
                 (s[s.size() - 3] == ' ' || s[s.size() - 3] == '.'))
                 return false;
         }
-        return true;
+        sentence_end_count_++;
+        return sentence_end_count_ >= 2;
     }
 
     static int count_words(const std::string& s) {
@@ -397,6 +452,27 @@ private:
         }
         size_t union_sz = wa.size() + wb.size() - intersect;
         return union_sz == 0 ? 0.0f : (float)intersect / (float)union_sz;
+    }
+
+    static bool is_empty_pleasantry(const std::string& response) {
+        std::string lower = normalize_lower(response);
+        static const char* pleasantries[] = {
+            "gern geschehen", "kein problem", "vielen dank", "danke",
+            "bis dann", "bis dahin", "bis zum nächsten mal",
+            "das ist großartig", "das ist ein wichtiger punkt",
+            "das ist ein guter punkt", "das stimmt",
+            "das ist eine interessante frage", "das ist eine gute frage",
+            "aber ja", "natürlich", "selbstverständlich",
+            "genau richtig", "das freut mich", "sehr gut",
+            "gute frage", "interessante frage", "richtig",
+            nullptr
+        };
+        auto words = split_words(lower);
+        if (words.size() > 8) return false;
+        for (int i = 0; pleasantries[i]; i++) {
+            if (lower.find(pleasantries[i]) != std::string::npos) return true;
+        }
+        return false;
     }
 
     std::string process_call(uint32_t cid, const std::string& text) {
@@ -480,6 +556,7 @@ private:
         auto gen_start = std::chrono::steady_clock::now();
         std::string response;
         llama_token id;
+        sentence_end_count_ = 0;
         llama_batch single_batch = llama_batch_init(1, 0, 1);
         for (int i = 0; i < MAX_RESPONSE_TOKENS; ++i) {
             if (!call->generating) {
@@ -536,9 +613,29 @@ private:
                 float sim = text_similarity(text, response);
                 if (sim > SIMILARITY_THRESHOLD) {
                     log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
-                        "Discarding parrot response (%.0f%% similar to input): %s",
+                        "Replacing parrot response (%.0f%% similar to input) with topic change: %s",
                         sim * 100.0f, response.c_str());
-                    response.clear();
+                    call->messages.pop_back();
+                    response = TOPIC_CHANGES[topic_change_idx_.fetch_add(1) % NUM_TOPIC_CHANGES];
+                } else if (is_empty_pleasantry(response)) {
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
+                        "Replacing pleasantry with topic change: %s", response.c_str());
+                    call->messages.pop_back();
+                    response = TOPIC_CHANGES[topic_change_idx_.fetch_add(1) % NUM_TOPIC_CHANGES];
+                } else {
+                    for (auto rit = call->messages.rbegin(); rit != call->messages.rend(); ++rit) {
+                        if (rit->role == "assistant") {
+                            float hsim = text_similarity(rit->content, response);
+                            if (hsim > SIMILARITY_THRESHOLD) {
+                                log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
+                                    "Replacing repetitive response (%.0f%% similar) with topic change: %s",
+                                    hsim * 100.0f, response.c_str());
+                                call->messages.pop_back();
+                                response = TOPIC_CHANGES[topic_change_idx_.fetch_add(1) % NUM_TOPIC_CHANGES];
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -622,6 +719,10 @@ private:
         {
             std::lock_guard<std::mutex> lock(speech_time_mutex_);
             speech_active_since_.erase(call_id);
+        }
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            pending_transcriptions_.erase(call_id);
         }
         if (call_to_clean) {
             std::lock_guard<std::mutex> llama_lock(llama_mutex_);
@@ -790,6 +891,9 @@ private:
     std::condition_variable work_cv_;
     std::mutex speech_time_mutex_;
     std::map<uint32_t, std::chrono::steady_clock::time_point> speech_active_since_;
+    std::map<uint32_t, std::string> pending_transcriptions_;
+    std::mutex pending_mutex_;
+    std::atomic<uint32_t> topic_change_idx_{0};
     whispertalk::InterconnectNode interconnect_;
     whispertalk::LogForwarder log_fwd_;
 };

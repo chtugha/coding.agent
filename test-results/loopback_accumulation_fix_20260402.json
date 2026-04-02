@@ -1,0 +1,1463 @@
+{
+  "test": "loopback_kokoro_accumulation_fix",
+  "date": "2026-04-02",
+  "duration_s": 155,
+  "entries": [
+    {
+      "timestamp": "2026-04-02 03:02:36",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (518ms, RTF=0.13):  Du hast eine sehr interessante Antwort."
+    },
+    {
+      "timestamp": "2026-04-02 03:02:36",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 64800 samples (4050ms) RMS=0.1083 peak=0.7928"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:36",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:32",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:32",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:32",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 72000 samples in 214ms (raw_peak=0.599 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:32",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (475ms): Du hast eine sehr interessante Antwort!"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:32",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (594ms, RTF=0.09):  Neuronale Netzenzen sind ein wichtiger Teil der Art und Weise, wie ich lerne."
+    },
+    {
+      "timestamp": "2026-04-02 03:02:31",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 108800 samples (6800ms) RMS=0.0795 peak=0.7955"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:31",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:25",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:25",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:24",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 233ms (raw_peak=1.047 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:24",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (745ms): Neuronale Netze (NN) sind ein wichtiger Teil der Art und Weise, wie ich lerne und mich verbessere."
+    },
+    {
+      "timestamp": "2026-04-02 03:02:23",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (568ms, RTF=0.09):  Dein Programm verwendet wahrscheinlich k\u00fcnstliche Neuronen f\u00fcr das Lernen."
+    },
+    {
+      "timestamp": "2026-04-02 03:02:23",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 100800 samples (6300ms) RMS=0.1098 peak=0.8241"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:23",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:17",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:17",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:17",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 213ms (raw_peak=0.766 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:17",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (616ms): Dein Programm verwendet wahrscheinlich k\u00fcnstliche Neuronen f\u00fcr das Lernen."
+    },
+    {
+      "timestamp": "2026-04-02 03:02:16",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (600ms, RTF=0.09):  Meine F\u00e4higkeiten basieren auf einer Kombination aus maschinellen Lernprozessen."
+    },
+    {
+      "timestamp": "2026-04-02 03:02:15",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 107200 samples (6700ms) RMS=0.0946 peak=0.7928"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:15",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:09",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:09",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:09",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 257ms (raw_peak=0.847 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:09",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (929ms): Meine F\u00e4higkeiten basieren auf einer Kombination aus maschinellen Lernprozessen und gro\u00dfen Datenmengen, die ich w\u00e4hrend meiner Entwicklung trainiert wurde."
+    },
+    {
+      "timestamp": "2026-04-02 03:02:08",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (561ms, RTF=0.10):  Das ist interessant, wie funktioniert dein Programm?"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:07",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 87200 samples (5450ms) RMS=0.0998 peak=0.7616"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:07",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:02",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:02",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:02",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 226ms (raw_peak=0.763 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:02",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (470ms): Das ist interessant. Wie funktioniert dein Programm?"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:01",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (603ms, RTF=0.09):  Ich bin ein Computerprogramm, also habe ich keine Freizeit im Sinne von Pers\u00f6nlichkeit."
+    },
+    {
+      "timestamp": "2026-04-02 03:02:01",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 109600 samples (6850ms) RMS=0.1113 peak=0.7928"
+    },
+    {
+      "timestamp": "2026-04-02 03:02:01",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:54",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:54",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:54",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 232ms (raw_peak=0.708 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:54",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (798ms): Ich bin ein Computerprogramm, also habe ich keine Freizeit im Sinne von pers\u00f6nlichen Interessen oder Hobbys wie viele Menschen haben."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:53",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (563ms, RTF=0.10):  Lass uns \u00fcber etwas anderes sprechen, was machst du in deiner Freizeit?"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:52",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 93600 samples (5850ms) RMS=0.0840 peak=0.8241"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:52",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:47",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:47",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:47",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 205ms (raw_peak=0.917 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:47",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (401ms): Lass uns \u00fcber etwas anderes sprechen. Was machst du in deiner Freizeit?"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:47",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "Replacing pleasantry with topic change: Kein Problem, ich verstehe."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:46",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (527ms, RTF=0.16):  Entschuldigung, ich habe mich gerade..."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:46",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 53600 samples (3350ms) RMS=0.1073 peak=0.9627"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:46",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:43",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:43",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:43",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 72000 samples in 223ms (raw_peak=0.642 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:43",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (482ms): Entschuldigung! Ich habe mich geirrt."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:42",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (617ms, RTF=0.09):  Es gibt keine bekannte Lebensmittel, die Alpazol als Gesindesfetts\u00e4uren bezeichnen."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:42",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 107200 samples (6700ms) RMS=0.1003 peak=0.8241"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:42",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:35",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:35",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:35",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 242ms (raw_peak=0.791 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:35",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (697ms): Es gibt keine bekannte Lebensmittel, die Alpazol als ges\u00fcndes Fetts\u00e4uren bezeichnen."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:34",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (602ms, RTF=0.09):  Alpazol ist tats\u00e4chlich eine ungesunde Fetts\u00e4ure, die mit einer ausgewogenen."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:33",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 107200 samples (6700ms) RMS=0.0893 peak=0.8274"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:33",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:27",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:27",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:27",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 243ms (raw_peak=0.936 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:26",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (1060ms): Alpazol ist tats\u00e4chlich eine ungesunde Fetts\u00e4ure, die mit einer ausgewogenen Ern\u00e4hrung und regelm\u00e4\u00dfiger k\u00f6rperlicher Aktivit\u00e4t reduziert werden sollte."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:25",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (546ms, RTF=0.12):  Alpazol ist nicht ein gesunder Fetts\u00e4ure."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:25",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 72800 samples (4550ms) RMS=0.0887 peak=0.8325"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:25",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:21",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:21",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:21",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 239ms (raw_peak=0.979 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:20",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (514ms): Alpahol ist nicht ein gesunder Fetts\u00e4ure."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:20",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (616ms, RTF=0.09):  Eine ausgewogene Ern\u00e4hrung mit viel Obst, Gem\u00fcse und gesunden Fettquellen wie Alpohol."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:19",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 113600 samples (7100ms) RMS=0.1203 peak=0.8241"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:19",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:13",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:13",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:13",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 240ms (raw_peak=0.626 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:12",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (918ms): Eine ausgewogene Ern\u00e4hrung mit viel Obst, Gem\u00fcse und gesunden Fettquellen wie Avocados kann dazu beitragen, die Haut zu pflegen."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:11",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (516ms, RTF=0.17):  Das ist eine gute Balance."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:11",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 48000 samples (3000ms) RMS=0.1240 peak=0.7928"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:11",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:08",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:08",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:08",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 72000 samples in 229ms (raw_peak=0.535 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:08",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (362ms): Das ist eine gute Balance."
+    },
+    {
+      "timestamp": "2026-04-02 03:01:08",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (603ms, RTF=0.09):  Eine ausgewogene Mischung aus Obst-Gem\u00fcse-Vollkornprodukten und Milchprodukten"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:07",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 108800 samples (6800ms) RMS=0.1174 peak=0.8241"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:07",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:01",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:01",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:00",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 239ms (raw_peak=0.667 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:01:00",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (859ms): Eine ausgewogene Mischung aus Obst, Gem\u00fcse, Vollkornprodukten und Milchprodukten sorgt f\u00fcr eine optimale Hautgesundheit."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:59",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (547ms, RTF=0.11):  Es ist wichtig, eine ausgewogene Mischung zu haben."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:59",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 83200 samples (5200ms) RMS=0.0973 peak=0.8241"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:59",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:54",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:54",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:54",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 246ms (raw_peak=0.829 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:54",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (492ms): Es ist wichtig, eine ausgewogene Mischung zu haben."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:53",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (587ms, RTF=0.09):  Milchprodukte sind ein wichtiger Bestandteil einer ausgewogenen Ern\u00e4hrung da,"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:53",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 100800 samples (6300ms) RMS=0.1104 peak=0.7831"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:53",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:47",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:47",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:46",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 213ms (raw_peak=0.772 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:46",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (846ms): Milchprodukte sind ein wichtiger Bestandteil einer ausgewogenen Ern\u00e4hrung, da sie reich an Ballaststoffen und Proteinen sind."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:45",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (546ms, RTF=0.12):  Zu den Fettbewerben geh\u00f6ren auch Milchprodukte."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:45",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 72000 samples (4500ms) RMS=0.0928 peak=0.8225"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:45",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:41",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:41",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:41",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 269ms (raw_peak=0.897 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:41",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (554ms): Zu den Fettbewerben geh\u00f6ren auch Milchprodukte."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:40",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (607ms, RTF=0.09):  Vollkornreiche Lebensmittel wie Quinoza, Reis und Brot k\u00f6nnen dazu beitragen, die Fettbewerbe"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:39",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 108800 samples (6800ms) RMS=0.0855 peak=0.8044"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:39",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:33",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:33",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:33",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 243ms (raw_peak=0.972 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:32",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (900ms): Vollkornreiche Lebensmittel wie Quinoa, Reis und Brot k\u00f6nnen dazu beitragen, die Fettflecken auf der Haut zu reduzieren."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:31",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (523ms, RTF=0.12):  Vollkornprodukte sind eine gute Wahl."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:31",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 70400 samples (4400ms) RMS=0.1015 peak=0.8241"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:31",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:27",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:27",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:27",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 236ms (raw_peak=0.878 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:27",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (428ms): Vollkornprodukte sind eine gute Wahl."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:26",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (584ms, RTF=0.08):  Eine gesunde Ern\u00e4hrung mit viel Obst, Gem\u00fcse und Vollkornprodukten kann helfen."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:26",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 113600 samples (7100ms) RMS=0.1037 peak=0.7955"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:26",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:19",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:19",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:19",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 249ms (raw_peak=0.787 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:19",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (805ms): Eine gesunde Ern\u00e4hrung mit viel Obst, Gem\u00fcse und Vollkornprodukten kann helfen, die Haut gesundheitlich zu erhalten."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:18",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (515ms, RTF=0.22):  Etwas Gesundes."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:17",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:17",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 37600 samples (2350ms) RMS=0.1240 peak=0.7928"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:16",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:16",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:15",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 43200 samples in 168ms (raw_peak=0.612 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:15",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (346ms): Etwas gesundes?"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:15",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (580ms, RTF=0.09):  Eine ungesunde Ern\u00e4hrung kann die Produktion von Cholesterin im K\u00f6rper erh\u00f6hen, war es"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:14",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 106400 samples (6650ms) RMS=0.1029 peak=0.8021"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:14",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:08",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:08",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:08",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 247ms (raw_peak=0.790 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:08",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (915ms): Eine ungesunde Ern\u00e4hrung kann die Produktion von Cholesterin im K\u00f6rper erh\u00f6hen, was zu einer Verstopfung der Fettflecken f\u00fchren kann."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:07",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (532ms, RTF=0.10):  Eine ungesunde Ern\u00e4hrung kann fettige Haut sch\u00e4digen."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:06",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 81600 samples (5100ms) RMS=0.1066 peak=0.7928"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:06",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:02",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:02",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:01",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 240ms (raw_peak=0.753 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:01",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (474ms): Eine ungesunde Ern\u00e4hrung kann Fettige Haut sch\u00e4digen."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:01",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (589ms, RTF=0.09):  Eine ungesunde Ern\u00e4hrung ist ein h\u00e4ufiges Problem bei der Behandlung Fettiger."
+    },
+    {
+      "timestamp": "2026-04-02 03:00:00",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 108000 samples (6750ms) RMS=0.1118 peak=0.7928"
+    },
+    {
+      "timestamp": "2026-04-02 03:00:00",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:54",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:54",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:53",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 237ms (raw_peak=0.778 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:53",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (619ms): Eine ungesunde Ern\u00e4hrung ist ein h\u00e4ufiges Problem bei der Behandlung fettiger Haut."
+    },
+    {
+      "timestamp": "2026-04-02 02:59:53",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (607ms, RTF=0.09):  Fettige Haut kann durch eine Vielzahl von Faktoren verursacht werden, einschlie\u00dflich einer."
+    },
+    {
+      "timestamp": "2026-04-02 02:59:52",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 107200 samples (6700ms) RMS=0.0980 peak=0.7616"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:52",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:46",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "WARN",
+      "message": "SPEECH_ACTIVE \u2014 flushed 0 bytes of audio buffer"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:46",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:45",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Created outbound audio state"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:45",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 244ms (raw_peak=0.776 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:45",
+      "service": "KOKORO_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Started synthesis thread"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:45",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Response (852ms): Fettige Haut kann durch eine Vielzahl von Faktoren verursacht werden, einschlie\u00dflich einer Umgebung, aber auch genetische Veranlagung und bestimmte Medikamente."
+    },
+    {
+      "timestamp": "2026-04-02 02:59:44",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Created conversation context"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:44",
+      "service": "WHISPER_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Transcription (598ms, RTF=0.09):  Fettige Haut kann durch eine Vielzahl von Faktoren verursacht werden, einschlie\u00dflich einer Umgebung."
+    },
+    {
+      "timestamp": "2026-04-02 02:59:44",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 107200 samples (6700ms) RMS=0.1270 peak=0.7850"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:44",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:37",
+      "service": "LLAMA_SERVICE",
+      "call_id": 6,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:37",
+      "service": "VAD_SERVICE",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Created VAD session"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:37",
+      "service": "INBOUND_AUDIO_PROCESSOR",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Created call state"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:37",
+      "service": "OUTBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Created outbound audio state"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:37",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Synthesized 144000 samples in 246ms (raw_peak=0.569 -> normalized)"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:37",
+      "service": "KOKORO_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Started synthesis thread"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:37",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Response (1657ms): Fettige Haut kann durch eine Vielzahl von Faktoren verursacht werden, einschlie\u00dflich einer ungesunden Ern\u00e4hrung, mangelnder Bewegung und bestimmten Medikamenten. Eine der m\u00f6glichen Ursachen f\u00fcr verstopfte Fettflecken auf der Haut ist die Aufnahme von fettigen Abfallstoffen, wie z.B. Fettreste oder Fette aus Lebensmitteln."
+    },
+    {
+      "timestamp": "2026-04-02 02:59:35",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Created conversation context"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:35",
+      "service": "WHISPER_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Transcription (613ms, RTF=0.14):  Bei fettiger Haut sind diese verstopft. Abfallstoffe bleiben stecken."
+    },
+    {
+      "timestamp": "2026-04-02 02:59:34",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "VAD chunk -> Whisper: 72000 samples (4500ms) RMS=0.0233 peak=0.2469"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:34",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: IDLE"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:29",
+      "service": "LLAMA_SERVICE",
+      "call_id": 5,
+      "level": "DEBUG",
+      "message": "Speech signal: ACTIVE"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:29",
+      "service": "VAD_SERVICE",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Created VAD session"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:29",
+      "service": "INBOUND_AUDIO_PROCESSOR",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Created call state"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:27",
+      "service": "SIP_CLIENT",
+      "call_id": 5,
+      "level": "INFO",
+      "message": "Accepted call on line 0 port 10005"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:27",
+      "service": "SIP_CLIENT",
+      "call_id": 6,
+      "level": "INFO",
+      "message": "Accepted call on line 1 port 10006"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:27",
+      "service": "SIP_CLIENT",
+      "call_id": 0,
+      "level": "INFO",
+      "message": "INVITE received on line 1 from 127.0.0.1:5060"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:27",
+      "service": "SIP_CLIENT",
+      "call_id": 0,
+      "level": "INFO",
+      "message": "INVITE received on line 0 from 127.0.0.1:5060"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:26",
+      "service": "KOKORO_SERVICE",
+      "call_id": 4,
+      "level": "INFO",
+      "message": "Call ended, cleaning up synthesis thread"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:26",
+      "service": "WHISPER_SERVICE",
+      "call_id": 4,
+      "level": "INFO",
+      "message": "Call ended, cleared buffered packets"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:26",
+      "service": "VAD_SERVICE",
+      "call_id": 4,
+      "level": "INFO",
+      "message": "Call ended, closing VAD session"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:26",
+      "service": "KOKORO_SERVICE",
+      "call_id": 3,
+      "level": "INFO",
+      "message": "Call ended, cleaning up synthesis thread"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:26",
+      "service": "WHISPER_SERVICE",
+      "call_id": 3,
+      "level": "INFO",
+      "message": "Call ended, cleared buffered packets"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:26",
+      "service": "VAD_SERVICE",
+      "call_id": 3,
+      "level": "INFO",
+      "message": "Call ended, closing VAD session"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:26",
+      "service": "SIP_CLIENT",
+      "call_id": 4,
+      "level": "INFO",
+      "message": "Call ended, cleaning up"
+    },
+    {
+      "timestamp": "2026-04-02 02:59:26",
+      "service": "SIP_CLIENT",
+      "call_id": 3,
+      "level": "INFO",
+      "message": "Call ended, cleaning up"
+    }
+  ]
+}
