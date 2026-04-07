@@ -2,7 +2,7 @@
   "test": "loopback_kokoro_accumulation_fix",
   "date": "2026-04-02",
   "duration_s": 155,
-  "entries": [
+  "logs": [
     {
       "timestamp": "2026-04-02 03:02:36",
       "service": "WHISPER_SERVICE",
