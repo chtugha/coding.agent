@@ -1,7 +1,10 @@
 #pragma once
+// NOTE: This file defines a member function of FrontendServer.
+// It must be included AFTER the full class definition in frontend.cpp.
+// It is not self-contained and cannot be used as a standalone header.
 #include <string>
 
-std::string FrontendServer::build_ui_js() {
+inline std::string FrontendServer::build_ui_js() {
     std::string port_str = std::to_string(http_port_);
     std::string tsp_port_str = std::to_string(TEST_SIP_PROVIDER_PORT);
     std::string js = R"JS(
@@ -701,6 +704,8 @@ setTimeout(reconnectLogSSE,SSE_RECONNECT_MS);
   };
 }
 
+// Level filter is client-side only (no SSE reconnect) — messages are already streaming.
+// Service filter triggers reconnectLogSSE() because it changes the SSE URL query parameter.
 function applyLogLevelFilter(){
   var svc=document.getElementById('logServiceFilter').value;
   var lvl=document.getElementById('logLevelFilter').value;

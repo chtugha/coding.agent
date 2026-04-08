@@ -1,7 +1,10 @@
 #pragma once
+// NOTE: This file defines a member function of FrontendServer.
+// It must be included AFTER the full class definition in frontend.cpp.
+// It is not self-contained and cannot be used as a standalone header.
 #include <string>
 
-std::string FrontendServer::build_ui_pages() {
+inline std::string FrontendServer::build_ui_pages() {
         return R"PG(
 <div class="wt-page active" id="page-dashboard">
 <div class="wt-content">

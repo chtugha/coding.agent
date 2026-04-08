@@ -1762,31 +1762,52 @@ private:
                 else if (next == 'b') { result += '\b'; pos += 2; }
                 else if (next == 'f') { result += '\f'; pos += 2; }
                 else if (next == 'u' && pos + 5 < json.size()) {
-                    char hex[5] = {json[pos+2], json[pos+3], json[pos+4], json[pos+5], '\0'};
-                    uint32_t cp = static_cast<uint32_t>(std::strtoul(hex, nullptr, 16));
-                    pos += 6;
-                    if (cp >= 0xD800 && cp <= 0xDBFF && pos + 5 < json.size() && json[pos] == '\\' && json[pos+1] == 'u') {
-                        char hex2[5] = {json[pos+2], json[pos+3], json[pos+4], json[pos+5], '\0'};
-                        uint32_t low = static_cast<uint32_t>(std::strtoul(hex2, nullptr, 16));
-                        if (low >= 0xDC00 && low <= 0xDFFF) {
-                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                            pos += 6;
-                        }
-                    }
-                    if (cp < 0x80) {
-                        result += static_cast<char>(cp);
-                    } else if (cp < 0x800) {
-                        result += static_cast<char>(0xC0 | (cp >> 6));
-                        result += static_cast<char>(0x80 | (cp & 0x3F));
-                    } else if (cp < 0x10000) {
-                        result += static_cast<char>(0xE0 | (cp >> 12));
-                        result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-                        result += static_cast<char>(0x80 | (cp & 0x3F));
+                    auto is_hex = [](char c) { return (c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F'); };
+                    char h0=json[pos+2], h1=json[pos+3], h2=json[pos+4], h3=json[pos+5];
+                    if (!is_hex(h0) || !is_hex(h1) || !is_hex(h2) || !is_hex(h3)) {
+                        result += "\xEF\xBF\xBD";
+                        pos += 6;
                     } else {
-                        result += static_cast<char>(0xF0 | (cp >> 18));
-                        result += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-                        result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-                        result += static_cast<char>(0x80 | (cp & 0x3F));
+                        char hex[5] = {h0, h1, h2, h3, '\0'};
+                        uint32_t cp = static_cast<uint32_t>(std::strtoul(hex, nullptr, 16));
+                        pos += 6;
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            if (pos + 5 < json.size() && json[pos] == '\\' && json[pos+1] == 'u' &&
+                                is_hex(json[pos+2]) && is_hex(json[pos+3]) && is_hex(json[pos+4]) && is_hex(json[pos+5])) {
+                                char hex2[5] = {json[pos+2], json[pos+3], json[pos+4], json[pos+5], '\0'};
+                                uint32_t low = static_cast<uint32_t>(std::strtoul(hex2, nullptr, 16));
+                                if (low >= 0xDC00 && low <= 0xDFFF) {
+                                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                                    pos += 6;
+                                } else {
+                                    result += "\xEF\xBF\xBD";
+                                    continue;
+                                }
+                            } else {
+                                result += "\xEF\xBF\xBD";
+                                continue;
+                            }
+                        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                            result += "\xEF\xBF\xBD";
+                            continue;
+                        }
+                        if (cp == 0) {
+                            result += "\xEF\xBF\xBD";
+                        } else if (cp < 0x80) {
+                            result += static_cast<char>(cp);
+                        } else if (cp < 0x800) {
+                            result += static_cast<char>(0xC0 | (cp >> 6));
+                            result += static_cast<char>(0x80 | (cp & 0x3F));
+                        } else if (cp < 0x10000) {
+                            result += static_cast<char>(0xE0 | (cp >> 12));
+                            result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                            result += static_cast<char>(0x80 | (cp & 0x3F));
+                        } else {
+                            result += static_cast<char>(0xF0 | (cp >> 18));
+                            result += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                            result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                            result += static_cast<char>(0x80 | (cp & 0x3F));
+                        }
                     }
                 }
                 else { result += json[pos]; pos++; }
