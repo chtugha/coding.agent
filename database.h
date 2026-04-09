@@ -288,7 +288,15 @@ inline void FrontendServer::handle_db_query(struct mg_connection *c, struct mg_h
     }
 
     {
-        std::string upper_query = query;
+        std::string stripped = strip_sql_comments(query);
+        std::string normalized;
+        bool in_space = false;
+        for (char c : stripped) {
+            if (std::isspace((unsigned char)c)) {
+                if (!in_space) { normalized += ' '; in_space = true; }
+            } else { normalized += c; in_space = false; }
+        }
+        std::string upper_query = normalized;
         for (auto& ch : upper_query) ch = toupper(ch);
         if (upper_query.find("DROP TABLE") != std::string::npos ||
             upper_query.find("DROP INDEX") != std::string::npos ||
