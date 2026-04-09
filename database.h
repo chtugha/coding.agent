@@ -297,6 +297,12 @@ inline void FrontendServer::handle_db_query(struct mg_connection *c, struct mg_h
                          "{\"error\":\"DROP TABLE, DROP INDEX, and TRUNCATE are blocked for safety.\"}");
             return;
         }
+        if (upper_query.find("ATTACH") != std::string::npos ||
+            upper_query.find("DETACH") != std::string::npos) {
+            mg_http_reply(c, 403, "Content-Type: application/json\r\n",
+                         "{\"error\":\"ATTACH and DETACH are not allowed.\"}");
+            return;
+        }
     }
 
     sqlite3_stmt* stmt;

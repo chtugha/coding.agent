@@ -759,7 +759,9 @@ private:
                 return false;
             }
             if (pid == 0) {
-                for (int i = 3; i < (int)sysconf(_SC_OPEN_MAX); ++i) close(i);
+                long max_fd = sysconf(_SC_OPEN_MAX);
+                if (max_fd < 0) max_fd = 1024;
+                for (int i = 3; i < (int)max_fd; ++i) close(i);
 
                 int fd = open(svc.log_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 if (fd >= 0) {
@@ -1469,7 +1471,9 @@ private:
             return;
         }
         if (pid == 0) {
-            for (int i = 3; i < 1024; ++i) close(i);
+            long max_fd = sysconf(_SC_OPEN_MAX);
+            if (max_fd < 0) max_fd = 1024;
+            for (int i = 3; i < (int)max_fd; ++i) close(i);
 
             int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {

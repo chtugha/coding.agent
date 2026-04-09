@@ -55,3 +55,28 @@ This file catalogues complex logic decisions and their resolution paths during t
 - **Problem**: Modernizing ~3200 lines of JS while preserving all HTML onclick handler references and DOM ID bindings.
 - **Path**: javascript.h — all named functions kept as function declarations (hoisted), all anonymous callbacks converted to arrows, all var→const/let, all concatenation→template literals
 - **Resolution**: Systematic pass through all sections: dashboard, services, tests, beta-testing, models, database, credentials. Zero remaining var declarations or anonymous function callbacks. Build verified clean.
+
+## 10. SQL Injection via LIMIT Parameter
+- **Problem**: handle_whisper_accuracy_results() concatenated a raw query string parameter directly into a SQL LIMIT clause, allowing arbitrary SQL injection.
+- **Path**: frontend.cpp → handle_whisper_accuracy_results(), limit_str from URL query concatenated into SQL string
+- **Resolution**: Parse limit to int with atoi(), range-validate (1-1000), then use std::to_string() for safe concatenation.
+
+## 11. Argument Injection in Service Start
+- **Problem**: VAD settings and log_level from the database were appended to command-line args without validation, allowing injection of arbitrary flags via crafted setting values.
+- **Path**: frontend.cpp → start_service(), vad_w/t/s/c/g and log_level settings concatenated into use_args
+- **Resolution**: Added is_numeric() lambda to validate all VAD settings. Added space-check for log_level to reject values containing spaces.
+
+## 12. XSS via HTML Attribute Injection in onclick Handlers
+- **Problem**: Service and test card rendering used safeAttr (backslash-escape only) inside onclick="fn('${safeAttr}')" — insufficient against HTML entity injection.
+- **Path**: javascript.h → service card rendering and test card rendering, safeAttr pattern
+- **Resolution**: Replaced with data-* attributes + this.dataset.* access, eliminating inline string interpolation in event handlers entirely.
+
+## 13. ATTACH DATABASE Arbitrary File Read
+- **Problem**: In write mode, a user could run ATTACH DATABASE to mount arbitrary files on disk as SQLite databases and read their contents, bypassing all query restrictions.
+- **Path**: database.h → handle_db_query(), no check for ATTACH/DETACH keywords
+- **Resolution**: Added unconditional blocklist for ATTACH and DETACH keywords alongside existing DROP TABLE/TRUNCATE guards.
+
+## 14. sysconf(_SC_OPEN_MAX) Error Handling
+- **Problem**: sysconf(_SC_OPEN_MAX) can return -1 on error; casting to int produces a negative loop bound that silently skips FD cleanup in forked child processes.
+- **Path**: frontend.cpp → two fork() sites (start_service and handle_test_start)
+- **Resolution**: Store return in long, check for < 0, fall back to 1024 on error before the close loop.
