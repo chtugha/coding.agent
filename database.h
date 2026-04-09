@@ -197,6 +197,10 @@ inline bool FrontendServer::init_database() {
         "ALTER TABLE iap_quality_tests DROP COLUMN thd_percent",
         nullptr
     };
+    if (sqlite3_libversion_number() < 3035000) {
+        std::cerr << "Warning: SQLite " << sqlite3_libversion()
+                  << " lacks DROP COLUMN support (requires >=3.35.0); some migrations will be skipped\n";
+    }
     for (int i = 0; migrations[i]; i++) {
         sqlite3_exec(db_, migrations[i], nullptr, nullptr, nullptr);
     }

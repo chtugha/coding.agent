@@ -86,6 +86,8 @@
 #include "mongoose.h"
 #include "sqlite3.h"
 #include "css.h"
+#include "fonts.h"
+#include "vendors.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -1070,14 +1072,10 @@ private:
         h += R"WT(<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Prodigy</title>
-<style>
-@font-face{font-family:'Orbitron';font-style:normal;font-weight:400 900;font-display:swap;src:local('Orbitron')}
-@font-face{font-family:'Space Mono';font-style:normal;font-weight:400;font-display:swap;src:local('Space Mono')}
-@font-face{font-family:'Space Mono';font-style:normal;font-weight:700;font-display:swap;src:local('Space Mono Bold')}
-</style>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" integrity="sha512-1ycn6IcaQQ40/MKBW2W4Rhis/DbILU74C1vSrLJxCq57o941Ym01SwNsOMqvEBFlcgUa6xLiPY/NS5R+E6ztJQ==" crossorigin="anonymous" referrerpolicy="no-referrer">
 )WT";
         h += "<style>";
+        h += get_embedded_fonts_css();
+        h += get_fontawesome_css();
         h += get_frontend_css();
         h += "</style>";
         h += R"WT(</head><body>
@@ -1147,13 +1145,12 @@ private:
 <main class="wt-main">
 )WT";
         h += build_ui_pages();
-        h += R"WT(</main></div>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
-<script>
-)WT" + build_ui_js() + R"WT(
-</script></body></html>)WT";
+        h += R"WT(</main></div>)WT";
+        h += "<script>" + get_chartjs() + "</script>";
+        h += "<script>" + get_hammerjs() + "</script>";
+        h += "<script>" + get_chartjs_zoom_plugin() + "</script>";
+        h += "<script>" + build_ui_js() + "</script>";
+        h += R"WT(</body></html>)WT";
         return h;
     }
 
@@ -5260,7 +5257,7 @@ private:
             json << "\"service\":\"" << escape_json(svc ? svc : "") << "\",";
             json << "\"test_type\":\"" << escape_json(tt ? tt : "") << "\",";
             json << "\"status\":\"" << escape_json(st ? st : "") << "\",";
-            json << "\"metrics\":" << (metrics ? metrics : "{}") << ",";
+            json << "\"metrics\":" << (metrics && metrics[0] == '{' ? metrics : "{}") << ",";
             json << "\"timestamp\":" << sqlite3_column_int64(stmt, 5);
             json << "}";
             count++;
