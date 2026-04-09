@@ -287,6 +287,18 @@ inline void FrontendServer::handle_db_query(struct mg_connection *c, struct mg_h
         return;
     }
 
+    {
+        std::string upper_query = query;
+        for (auto& ch : upper_query) ch = toupper(ch);
+        if (upper_query.find("DROP TABLE") != std::string::npos ||
+            upper_query.find("DROP INDEX") != std::string::npos ||
+            upper_query.find("TRUNCATE") != std::string::npos) {
+            mg_http_reply(c, 403, "Content-Type: application/json\r\n",
+                         "{\"error\":\"DROP TABLE, DROP INDEX, and TRUNCATE are blocked for safety.\"}");
+            return;
+        }
+    }
+
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {

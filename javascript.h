@@ -75,7 +75,7 @@ function fetchStatus(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
 document.getElementById('statusText').textContent=
   `${d.services_online} services \u2022 ${d.running_tests} tests \u2022 ${d.sse_connections} SSE`;
-document.getElementById('svcBadge').textContent=`${d.services_online}/6`;
+document.getElementById('svcBadge').textContent=`${d.services_online}/${d.services_total||6}`;
   }).catch(()=>{document.getElementById('statusText').textContent='Disconnected';});
 }
 
@@ -204,9 +204,8 @@ c.innerHTML=d.tests.map(t=>{
     :(t.exit_code>0?`<span class="wt-badge wt-badge-danger">Failed (${escapeHtml(String(t.exit_code))})</span>`
     :'<span class="wt-badge wt-badge-secondary">Idle</span>'));
   const eName=escapeHtml(t.name),eDesc=escapeHtml(t.description),ePath=escapeHtml(t.binary_path);
-  const safeAttr=t.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
   const dotState=t.is_running?'running':(t.exit_code===0&&t.end_time?'online':'offline');
-  return `<div class="wt-card" style="cursor:pointer" onclick="showTestDetail('${safeAttr}')">`
+  return `<div class="wt-card" style="cursor:pointer" data-test-name="${escapeHtml(t.name)}" onclick="showTestDetail(this.dataset.testName)">`
     +`<div class="wt-card-header"><span class="wt-card-title">`
     +`<span class="wt-status-dot ${dotState}"></span>`
     +`${eName}</span>${status}</div>`
@@ -317,14 +316,14 @@ c.innerHTML=d.services.map(s=>{
     'VAD_SERVICE':'Voice Activity Detection','WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM','KOKORO_SERVICE':'Kokoro TTS',
     'NEUTTS_SERVICE':'NeuTTS Nano German','OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP'};
   const eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
-  const safeAttr=s.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  const svcAttr=escapeHtml(s.name);
   let btns='<div style="margin-top:6px;display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">';
-  if(!s.online) btns+=`<button class="wt-btn wt-btn-primary" style="font-size:11px;padding:2px 8px" onclick="quickSvcStart('${safeAttr}')">&#x25B6; Start</button>`;
-  if(s.managed&&s.online) btns+=`<button class="wt-btn wt-btn-danger" style="font-size:11px;padding:2px 8px" onclick="quickSvcStop('${safeAttr}')">&#x25A0; Stop</button>`;
-  if(s.managed&&s.online) btns+=`<button class="wt-btn wt-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="quickSvcRestart('${safeAttr}')">&#x21BB; Restart</button>`;
-  btns+=`<button class="wt-btn wt-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="showSvcDetail('${safeAttr}')">&#x2699; Config</button>`;
+  if(!s.online) btns+=`<button class="wt-btn wt-btn-primary" style="font-size:11px;padding:2px 8px" data-svc="${svcAttr}" onclick="quickSvcStart(this.dataset.svc)">&#x25B6; Start</button>`;
+  if(s.managed&&s.online) btns+=`<button class="wt-btn wt-btn-danger" style="font-size:11px;padding:2px 8px" data-svc="${svcAttr}" onclick="quickSvcStop(this.dataset.svc)">&#x25A0; Stop</button>`;
+  if(s.managed&&s.online) btns+=`<button class="wt-btn wt-btn-secondary" style="font-size:11px;padding:2px 8px" data-svc="${svcAttr}" onclick="quickSvcRestart(this.dataset.svc)">&#x21BB; Restart</button>`;
+  btns+=`<button class="wt-btn wt-btn-secondary" style="font-size:11px;padding:2px 8px" data-svc="${svcAttr}" onclick="showSvcDetail(this.dataset.svc)">&#x2699; Config</button>`;
   btns+='</div>';
-  return `<div class="wt-card" style="cursor:pointer" onclick="showSvcDetail('${safeAttr}')">`
+  return `<div class="wt-card" style="cursor:pointer" data-svc="${svcAttr}" onclick="showSvcDetail(this.dataset.svc)">`
     +`<div class="wt-card-header"><span class="wt-card-title">`
     +`<span class="wt-status-dot ${s.online?'online':'offline'}"></span>`
     +`${eName}</span>${status}</div>`
@@ -1273,8 +1272,7 @@ function startPipelineHealthAutoRefresh(){
   checkPipelineHealth(true);
   pipelineHealthInterval=setInterval(()=>checkPipelineHealth(true),POLL_PIPELINE_HEALTH_MS);
   const btn=document.getElementById('pipelineHealthAutoBtn');
-  if(btn) btn.textContent='Stop Auto-Refresh';
-  btn.onclick=stopPipelineHealthAutoRefresh;
+  if(btn){btn.textContent='Stop Auto-Refresh';btn.onclick=stopPipelineHealthAutoRefresh;}
 }
 
 function stopPipelineHealthAutoRefresh(){
@@ -3218,7 +3216,6 @@ window.accuracyChart=new Chart(ctx,{
   }).catch(e=>console.error('Failed to load accuracy trend:',e));
 }
 
-if(currentPage==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();}
 )JS";
     return js;
 }

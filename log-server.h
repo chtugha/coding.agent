@@ -122,6 +122,7 @@ inline void FrontendServer::flush_log_queue() {
     sqlite3_finalize(stmt);
     if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
         std::cerr << "flush_log_queue: COMMIT failed: " << sqlite3_errmsg(db_) << "\n";
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
     }
 }
 

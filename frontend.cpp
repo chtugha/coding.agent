@@ -719,23 +719,33 @@ private:
 
             std::string use_args = args_override.empty() ? svc.default_args : args_override;
 
+            auto is_numeric = [](const std::string& s) {
+                if (s.empty()) return false;
+                bool has_dot = false;
+                for (size_t i = 0; i < s.size(); i++) {
+                    if (s[i] == '.' && !has_dot) { has_dot = true; continue; }
+                    if (!isdigit(s[i])) return false;
+                }
+                return true;
+            };
+
             if (name == "VAD_SERVICE" && args_override.empty()) {
                 std::string vad_w = get_setting("vad_window_ms", "");
                 std::string vad_t = get_setting("vad_threshold", "");
                 std::string vad_s = get_setting("vad_silence_ms", "");
                 std::string vad_c = get_setting("vad_max_chunk_ms", "");
                 std::string vad_g = get_setting("vad_onset_gap", "");
-                if (!vad_w.empty()) use_args += " --vad-window-ms " + vad_w;
-                if (!vad_t.empty()) use_args += " --vad-threshold " + vad_t;
-                if (!vad_s.empty()) use_args += " --vad-silence-ms " + vad_s;
-                if (!vad_c.empty()) use_args += " --vad-max-chunk-ms " + vad_c;
-                if (!vad_g.empty()) use_args += " --vad-onset-gap " + vad_g;
+                if (!vad_w.empty() && is_numeric(vad_w)) use_args += " --vad-window-ms " + vad_w;
+                if (!vad_t.empty() && is_numeric(vad_t)) use_args += " --vad-threshold " + vad_t;
+                if (!vad_s.empty() && is_numeric(vad_s)) use_args += " --vad-silence-ms " + vad_s;
+                if (!vad_c.empty() && is_numeric(vad_c)) use_args += " --vad-max-chunk-ms " + vad_c;
+                if (!vad_g.empty() && is_numeric(vad_g)) use_args += " --vad-onset-gap " + vad_g;
             }
 
             if (args_override.empty()) {
                 std::string ll_key = "log_level_" + name;
                 std::string ll = get_setting(ll_key, "");
-                if (!ll.empty()) use_args += " --log-level " + ll;
+                if (!ll.empty() && ll.find(' ') == std::string::npos) use_args += " --log-level " + ll;
             }
 
             auto argv_strings = split_args(use_args);
@@ -749,7 +759,7 @@ private:
                 return false;
             }
             if (pid == 0) {
-                for (int i = 3; i < 1024; ++i) close(i);
+                for (int i = 3; i < (int)sysconf(_SC_OPEN_MAX); ++i) close(i);
 
                 int fd = open(svc.log_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 if (fd >= 0) {
@@ -1497,8 +1507,6 @@ private:
             if (test.name == test_name && test.is_running) {
                 if (test.pid > 0) {
                     kill(test.pid, SIGTERM);
-                    test.is_running = false;
-                    test.end_time = time(nullptr);
                 }
                 break;
             }
@@ -1776,6 +1784,15 @@ private:
             if (port_val < 1 || port_val > 65535) port_val = 5060;
         }
 
+        auto has_space_or_ctrl = [](const std::string& s) {
+            for (char ch : s) if (ch <= ' ' || ch == 127) return true;
+            return false;
+        };
+        if (has_space_or_ctrl(user) || has_space_or_ctrl(server) || has_space_or_ctrl(password)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Fields must not contain spaces or control characters\"}");
+            return;
+        }
+
         std::string cmd = "ADD_LINE " + user + " " + (server.empty() ? "127.0.0.1" : server);
         cmd += " " + std::to_string(port_val);
         cmd += " " + (password.empty() ? "-" : password);
@@ -1800,6 +1817,12 @@ private:
         if (idx_str.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing 'index'\"}");
             return;
+        }
+        for (char ch : idx_str) {
+            if (!isdigit(ch)) {
+                mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Index must be numeric\"}");
+                return;
+            }
         }
 
         std::string cmd = "REMOVE_LINE " + idx_str;
@@ -2641,9 +2664,9 @@ private:
 
         result.found = found_any;
         if (!found_any) {
-            std::cerr << "DEBUG: No Whisper transcription received within " 
+            std::cerr << "No Whisper transcription received within " 
                       << timeout_ms << "ms for seq > " << after_seq 
-                      << " (current seq: " << log_seq_.load() << ")" << std::endl;
+                      << " (current seq: " << log_seq_.load() << ")\n";
         }
         return result;
     }
@@ -4798,9 +4821,13 @@ private:
             if (!actual_max_chunk.empty()) m = actual_max_chunk;
             std::string g = onset_gap_str.empty() ? get_setting("vad_onset_gap", "1") : onset_gap_str;
 
+            auto safe_num = [](const std::string& v, const char* fallback) -> const char* {
+                for (char ch : v) if (!isdigit(ch) && ch != '.') return fallback;
+                return v.c_str();
+            };
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
                 "{\"success\":true,\"live\":%s,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s,\"onset_gap\":%s}",
-                live ? "true" : "false", w.c_str(), t.c_str(), s.c_str(), m.c_str(), g.c_str());
+                live ? "true" : "false", safe_num(w,"50"), safe_num(t,"2.0"), safe_num(s,"400"), safe_num(m,"8000"), safe_num(g,"1"));
         } else {
             std::string err;
             std::string status = tcp_command(vad_cmd_port, "STATUS\n", err, 3);
@@ -4902,6 +4929,10 @@ private:
             }
 
             if (!dir.empty()) {
+                if (dir.find("..") != std::string::npos || dir[0] == '/') {
+                    mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid directory path\"}");
+                    return;
+                }
                 std::string dir_cmd = "SET_SAVE_WAV_DIR:" + dir + "\n";
                 tcp_command(oap_cmd_port, dir_cmd, err, 3);
                 if (!err.empty()) {
@@ -4945,14 +4976,16 @@ private:
     // GET /api/whisper/accuracy_results — Returns paginated Whisper accuracy test
     // results from SQLite, grouped by test_run_id with PASS/WARN/FAIL counts.
     void handle_whisper_accuracy_results(struct mg_connection *c, struct mg_http_message *hm) {
-        std::string limit_str = "20";
+        int limit_val = 20;
         if (hm->query.len > 0) {
             std::string query(hm->query.buf, hm->query.len);
             size_t limit_pos = query.find("limit=");
             if (limit_pos != std::string::npos) {
-                limit_str = query.substr(limit_pos + 6);
+                std::string limit_str = query.substr(limit_pos + 6);
                 size_t amp = limit_str.find('&');
                 if (amp != std::string::npos) limit_str = limit_str.substr(0, amp);
+                int parsed = atoi(limit_str.c_str());
+                if (parsed > 0 && parsed <= 1000) limit_val = parsed;
             }
         }
         
@@ -4966,7 +4999,7 @@ private:
                          "FROM whisper_accuracy_tests "
                          "GROUP BY test_run_id "
                          "ORDER BY timestamp DESC "
-                         "LIMIT " + limit_str;
+                         "LIMIT " + std::to_string(limit_val);
         
         sqlite3_stmt* stmt;
         std::stringstream json;
