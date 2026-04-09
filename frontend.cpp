@@ -5257,7 +5257,13 @@ private:
             json << "\"service\":\"" << escape_json(svc ? svc : "") << "\",";
             json << "\"test_type\":\"" << escape_json(tt ? tt : "") << "\",";
             json << "\"status\":\"" << escape_json(st ? st : "") << "\",";
-            json << "\"metrics\":" << (metrics && metrics[0] == '{' ? metrics : "{}") << ",";
+            std::string metrics_safe = "{}";
+            if (metrics && metrics[0] == '{') {
+                std::string ms(metrics);
+                auto last = ms.find_last_not_of(" \t\r\n");
+                if (last != std::string::npos && ms[last] == '}') metrics_safe = ms;
+            }
+            json << "\"metrics\":" << metrics_safe << ",";
             json << "\"timestamp\":" << sqlite3_column_int64(stmt, 5);
             json << "}";
             count++;
@@ -5354,7 +5360,9 @@ private:
                     std::string status_str = st ? st : "";
                     std::string metrics_safe = "{}";
                     if (metrics && metrics[0] == '{') {
-                        metrics_safe = metrics;
+                        std::string ms(metrics);
+                        auto last = ms.find_last_not_of(" \t\r\n");
+                        if (last != std::string::npos && ms[last] == '}') metrics_safe = ms;
                     }
                     json << "{\"type\":\"service_test\""
                          << ",\"id\":" << sqlite3_column_int(stmt, 0)
