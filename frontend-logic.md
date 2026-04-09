@@ -80,3 +80,8 @@ This file catalogues complex logic decisions and their resolution paths during t
 - **Problem**: sysconf(_SC_OPEN_MAX) can return -1 on error; casting to int produces a negative loop bound that silently skips FD cleanup in forked child processes.
 - **Path**: frontend.cpp → two fork() sites (start_service and handle_test_start)
 - **Resolution**: Store return in long, check for < 0, fall back to 1024 on error before the close loop.
+
+## 15. CDN Elimination — Self-Contained Frontend
+- **Problem**: Frontend loaded Orbitron/Space Mono from Google Fonts CDN, Font Awesome from cdnjs, and Chart.js/Hammer.js/chartjs-plugin-zoom from jsdelivr. This leaked user IPs to third parties and broke offline operation.
+- **Path**: Initially replaced Google Fonts with @font-face src:local() — this failed because Orbitron/Space Mono are not system fonts. Then downloaded actual woff2 files from Google Fonts and embedded as base64 data URIs in fonts.h (~67KB). Font Awesome CSS + fa-solid-900.woff2 also embedded in fonts.h with dead .eot references stripped. Chart.js, Hammer.js, chartjs-plugin-zoom embedded as raw string literals in vendors.h.
+- **Resolution**: All external CDN dependencies eliminated. Frontend makes zero network requests at runtime. Binary size increased to ~2.4MB but is fully self-contained for offline operation.

@@ -292,9 +292,11 @@ inline void FrontendServer::handle_db_query(struct mg_connection *c, struct mg_h
         for (auto& ch : upper_query) ch = toupper(ch);
         if (upper_query.find("DROP TABLE") != std::string::npos ||
             upper_query.find("DROP INDEX") != std::string::npos ||
+            upper_query.find("DROP VIEW") != std::string::npos ||
+            upper_query.find("DROP TRIGGER") != std::string::npos ||
             upper_query.find("TRUNCATE") != std::string::npos) {
             mg_http_reply(c, 403, "Content-Type: application/json\r\n",
-                         "{\"error\":\"DROP TABLE, DROP INDEX, and TRUNCATE are blocked for safety.\"}");
+                         "{\"error\":\"DROP TABLE, DROP INDEX, DROP VIEW, DROP TRIGGER, and TRUNCATE are blocked for safety.\"}");
             return;
         }
         if (upper_query.find("ATTACH") != std::string::npos ||

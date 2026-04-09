@@ -1870,12 +1870,15 @@ private:
             std::string server_s = fields.size() > 3 ? fields[3] : "";
             std::string port_s = fields.size() > 4 ? fields[4] : "5060";
             std::string local_ip_s = fields.size() > 5 ? fields[5] : "";
+            int idx_val = atoi(idx_s.c_str());
+            int port_val = atoi(port_s.c_str());
+            if (port_val < 1 || port_val > 65535) port_val = 5060;
             if (!first) json << ",";
-            json << "{\"index\":" << idx_s
+            json << "{\"index\":" << idx_val
                  << ",\"user\":\"" << escape_json(user_s) << "\""
                  << ",\"registered\":" << (status_s == "registered" ? "true" : "false")
                  << ",\"server\":\"" << escape_json(server_s) << "\""
-                 << ",\"port\":" << (port_s.empty() ? "5060" : port_s)
+                 << ",\"port\":" << port_val
                  << ",\"local_ip\":\"" << escape_json(local_ip_s) << "\"}";
             first = false;
         }

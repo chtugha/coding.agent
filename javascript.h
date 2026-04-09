@@ -526,7 +526,7 @@ lines.forEach(l=>{
     +`<span style="color:var(--wt-text-secondary);font-size:11px;font-family:var(--wt-mono)">${escapeHtml(serverInfo+localInfo)}</span>`
     +regBadge
     +`<span style="flex:1"></span>`
-    +`<button class="wt-btn wt-btn-danger" style="font-size:10px;padding:1px 6px" onclick="sipHangupLine(${l.index})">Hangup</button>`
+    +`<button class="wt-btn wt-btn-danger" style="font-size:10px;padding:1px 6px" data-line-index="${l.index}" onclick="sipHangupLine(parseInt(this.dataset.lineIndex))">Hangup</button>`
     +'</div>';
 });
 html+='</div>';
