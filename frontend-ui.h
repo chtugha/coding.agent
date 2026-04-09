@@ -9,13 +9,15 @@ inline std::string FrontendServer::build_ui_pages() {
 <div class="wt-page active" id="page-dashboard">
 <div class="wt-content">
 
-<div class="wt-pipeline-hero">
+<div class="wt-pipeline-hero" style="border-radius:var(--wt-radius-lg);position:relative">
+<div style="position:absolute;top:0;left:0;right:0;bottom:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px);pointer-events:none;border-radius:inherit;z-index:0"></div>
+<div style="position:relative;z-index:1">
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
 <div>
-<div class="wt-headline" style="color:#fff">Pipeline Overview</div>
-<div style="font-size:13px;opacity:0.7;margin-top:4px">Real-time service health and data flow</div>
+<div class="wt-headline" style="color:#fff;text-shadow:0 0 20px rgba(255,45,149,0.4)">Pipeline Overview</div>
+<div style="font-size:11px;opacity:0.5;margin-top:4px;font-family:var(--wt-body);letter-spacing:0.05em">REAL-TIME SERVICE HEALTH &amp; DATA FLOW</div>
 </div>
-<div id="dashHealthBadge" style="padding:6px 16px;border-radius:20px;font-size:13px;font-weight:600;background:rgba(255,255,255,0.2);color:#fff">Checking...</div>
+<div id="dashHealthBadge" style="padding:6px 16px;border-radius:var(--wt-radius);font-size:11px;font-weight:700;font-family:var(--wt-font);background:rgba(0,0,0,0.4);color:var(--wt-accent-cyan);border:1px solid rgba(0,255,245,0.3);letter-spacing:0.05em">CHECKING...</div>
 </div>
 <div class="pipeline-flow">
 <div class="wt-pipeline-node" id="pipeline-node-SIP_CLIENT"><span class="node-label">SIP</span><span class="node-status offline" id="pipeline-status-SIP_CLIENT"></span></div>
@@ -33,22 +35,23 @@ inline std::string FrontendServer::build_ui_pages() {
 <div class="wt-pipeline-node" id="pipeline-node-OUTBOUND_AUDIO_PROCESSOR"><span class="node-label">OAP</span><span class="node-status offline" id="pipeline-status-OUTBOUND_AUDIO_PROCESSOR"></span></div>
 </div>
 </div>
+</div>
 
 <div class="wt-metrics-grid">
-<div class="wt-metric-card" style="background:var(--wt-gradient-success)">
+<div class="wt-metric-card" style="background:var(--wt-gradient-success);border-radius:var(--wt-radius-lg);border:1px solid rgba(0,255,159,0.3)">
 <div class="metric-value" id="dashMetricServicesOnline">0</div>
 <div class="metric-label">Services Online</div>
 </div>
-<div class="wt-metric-card" style="background:var(--wt-gradient-info)">
+<div class="wt-metric-card" style="background:var(--wt-gradient-info);border-radius:var(--wt-radius-lg);border:1px solid rgba(0,255,245,0.3)">
 <div class="metric-value" id="dashMetricRunningTests">0</div>
 <div class="metric-label">Running Tests</div>
 </div>
-<div class="wt-metric-card" style="background:var(--wt-gradient-hero)">
+<div class="wt-metric-card" style="background:var(--wt-gradient-hero);border-radius:var(--wt-radius-lg);border:1px solid rgba(255,45,149,0.3)">
 <div class="metric-value" id="dashMetricTestPass">0</div>
 <div class="metric-label">Tests Passed</div>
 <div class="metric-delta" id="dashMetricTestFail"></div>
 </div>
-<div class="wt-metric-card" style="background:var(--wt-gradient-neutral)">
+<div class="wt-metric-card" style="background:var(--wt-gradient-neutral);border-radius:var(--wt-radius-lg);border:1px solid rgba(106,106,128,0.3)">
 <div class="metric-value" id="dashMetricUptime">0s</div>
 <div class="metric-label">Uptime</div>
 </div>
@@ -56,14 +59,14 @@ inline std::string FrontendServer::build_ui_pages() {
 
 <div class="wt-dashboard-content">
 <div>
-<div class="wt-card" style="max-height:400px;display:flex;flex-direction:column">
-<div class="wt-card-header"><span class="wt-card-title">Activity Feed</span></div>
-<div id="dashActivityFeed" style="flex:1;overflow-y:auto;font-size:12px;font-family:var(--wt-mono);line-height:1.8"></div>
+<div class="wt-card" style="max-height:400px;display:flex;flex-direction:column;border-radius:var(--wt-radius-lg);border-color:rgba(0,255,245,0.15)">
+<div class="wt-card-header" style="border-radius:var(--wt-radius-lg) var(--wt-radius-lg) 0 0"><span class="wt-card-title">Real-Time Feed</span><span id="dashFeedPulse" style="width:8px;height:8px;border-radius:50%;background:var(--wt-accent-cyan);box-shadow:0 0 8px var(--wt-accent-cyan);animation:neonPulse 2s infinite"></span></div>
+<div id="dashActivityFeed" style="flex:1;overflow-y:auto;font-size:11px;font-family:var(--wt-mono);line-height:1.8"></div>
 </div>
 </div>
 <div>
-<div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Quick Actions</span></div>
+<div class="wt-card" style="border-radius:var(--wt-radius-lg);border-color:rgba(255,45,149,0.15)">
+<div class="wt-card-header" style="border-radius:var(--wt-radius-lg) var(--wt-radius-lg) 0 0"><span class="wt-card-title">Quick Actions</span></div>
 <div style="display:flex;flex-direction:column;gap:8px">
 <button class="wt-btn wt-btn-primary" style="width:100%;justify-content:center" onclick="dashStartAll()">&#x25B6; Start All Services</button>
 <button class="wt-btn wt-btn-danger" style="width:100%;justify-content:center" onclick="dashStopAll()">&#x25A0; Stop All Services</button>

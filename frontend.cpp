@@ -535,228 +535,7 @@ private:
         }
     }
 
-    // init_database() — Open SQLite DB at the absolute path db_path_, verify it
-    // is writable (not read-only), disable extension loading for security, and
-    // create all schema tables + run migrations. Called once from constructor.
-    bool init_database() {
-        int rc = sqlite3_open(db_path_.c_str(), &db_);
-        if (rc != SQLITE_OK) {
-            std::cerr << "Cannot open database: " << sqlite3_errmsg(db_) << "\n";
-            db_ = nullptr;
-            return false;
-        }
-
-        if (sqlite3_db_readonly(db_, "main") == 1) {
-            std::cerr << "Fatal: database is read-only: " << db_path_ << "\n";
-            sqlite3_close(db_);
-            db_ = nullptr;
-            return false;
-        }
-
-        int cfg_rc = sqlite3_db_config(db_, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr);
-        if (cfg_rc != SQLITE_OK) {
-            std::cerr << "Warning: could not disable SQLite extension loading (rc="
-                      << cfg_rc << ")\n";
-        }
-
-        const char* schema = R"(
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                service TEXT NOT NULL,
-                call_id INTEGER,
-                level TEXT,
-                message TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_logs_service ON logs(service);
-            CREATE INDEX IF NOT EXISTS idx_logs_service_ts ON logs(service, timestamp);
-            
-            CREATE TABLE IF NOT EXISTS test_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_name TEXT NOT NULL,
-                start_time INTEGER,
-                end_time INTEGER,
-                exit_code INTEGER,
-                arguments TEXT,
-                log_file TEXT
-            );
-            
-            CREATE TABLE IF NOT EXISTS service_status (
-                service TEXT PRIMARY KEY,
-                status TEXT,
-                last_seen INTEGER,
-                call_count INTEGER,
-                ports TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS service_config (
-                service TEXT PRIMARY KEY,
-                binary_path TEXT NOT NULL,
-                default_args TEXT DEFAULT '',
-                description TEXT DEFAULT '',
-                auto_start INTEGER DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS testfiles (
-                name TEXT PRIMARY KEY,
-                size_bytes INTEGER,
-                duration_sec REAL,
-                sample_rate INTEGER,
-                channels INTEGER,
-                ground_truth TEXT,
-                last_modified INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS whisper_accuracy_tests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_run_id INTEGER,
-                file_name TEXT,
-                model_name TEXT,
-                ground_truth TEXT,
-                transcription TEXT,
-                similarity_percent REAL,
-                latency_ms INTEGER,
-                status TEXT,
-                timestamp INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS iap_quality_tests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_name TEXT,
-                latency_ms REAL,
-                snr_db REAL,
-                rms_error_pct REAL,
-                max_latency_ms REAL,
-                status TEXT,
-                timestamp INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS models (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                service TEXT,
-                name TEXT,
-                path TEXT,
-                backend TEXT,
-                size_mb INTEGER,
-                config_json TEXT,
-                added_timestamp INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS model_benchmark_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                model_id INTEGER,
-                model_name TEXT,
-                model_type TEXT DEFAULT 'whisper',
-                backend TEXT,
-                test_files TEXT,
-                iterations INTEGER,
-                files_tested INTEGER,
-                avg_accuracy REAL,
-                avg_latency_ms INTEGER,
-                p50_latency_ms INTEGER,
-                p95_latency_ms INTEGER,
-                p99_latency_ms INTEGER,
-                memory_mb INTEGER,
-                pass_count INTEGER DEFAULT 0,
-                fail_count INTEGER DEFAULT 0,
-                avg_tokens REAL,
-                interrupt_latency_ms REAL,
-                german_pct REAL,
-                timestamp INTEGER,
-                FOREIGN KEY(model_id) REFERENCES models(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS tts_validation_tests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                line1_call_id INTEGER,
-                line2_call_id INTEGER,
-                original_text TEXT,
-                tts_transcription TEXT,
-                similarity_percent REAL,
-                phoneme_errors TEXT,
-                timestamp INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS sip_lines (
-                line_id INTEGER PRIMARY KEY,
-                username TEXT,
-                password TEXT,
-                server TEXT,
-                port INTEGER,
-                status TEXT,
-                last_registered INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS service_test_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                service TEXT,
-                test_type TEXT,
-                status TEXT,
-                metrics_json TEXT,
-                timestamp INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS test_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_name TEXT,
-                service TEXT,
-                status TEXT,
-                details TEXT,
-                timestamp INTEGER
-            );
-        )";
-
-        char* errmsg = nullptr;
-        rc = sqlite3_exec(db_, schema, nullptr, nullptr, &errmsg);
-        if (rc != SQLITE_OK) {
-            std::cerr << "SQL error: " << errmsg << "\n";
-            sqlite3_free(errmsg);
-        }
-
-        const char* migrations[] = {
-            "ALTER TABLE model_benchmark_runs ADD COLUMN model_name TEXT",
-            "ALTER TABLE model_benchmark_runs ADD COLUMN model_type TEXT DEFAULT 'whisper'",
-            "ALTER TABLE model_benchmark_runs ADD COLUMN backend TEXT",
-            "ALTER TABLE model_benchmark_runs ADD COLUMN files_tested INTEGER",
-            "ALTER TABLE model_benchmark_runs ADD COLUMN pass_count INTEGER DEFAULT 0",
-            "ALTER TABLE model_benchmark_runs ADD COLUMN fail_count INTEGER DEFAULT 0",
-            "ALTER TABLE model_benchmark_runs ADD COLUMN avg_tokens REAL",
-            "ALTER TABLE model_benchmark_runs ADD COLUMN interrupt_latency_ms REAL",
-            "ALTER TABLE model_benchmark_runs ADD COLUMN german_pct REAL",
-            "ALTER TABLE iap_quality_tests ADD COLUMN rms_error_pct REAL",
-            "ALTER TABLE iap_quality_tests ADD COLUMN max_latency_ms REAL",
-            "ALTER TABLE iap_quality_tests DROP COLUMN thd_percent",
-            nullptr
-        };
-        for (int i = 0; migrations[i]; i++) {
-            sqlite3_exec(db_, migrations[i], nullptr, nullptr, nullptr);
-        }
-
-        const char* seed = R"(
-            INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
-                ('SIP_CLIENT', 'bin/sip-client', '', 'SIP client / RTP gateway'),
-                ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
-                ('VAD_SERVICE', 'bin/vad-service', '', 'Voice Activity Detection + speech segmentation'),
-                ('WHISPER_SERVICE', 'bin/whisper-service', '--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (Metal)'),
-                ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
-                ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
-                ('NEUTTS_SERVICE', 'bin/neutts-service', '', 'NeuTTS Nano German TTS (CoreML)'),
-                ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP'),
-                ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection');
-            UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
-            UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args='--lines 1 alice 127.0.0.1 5060' OR default_args='--lines 2 alice 127.0.0.1 5060');
-        )";
-        sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
-
-        rotate_logs();
-        return true;
-    }
+    bool init_database();
 
     void discover_tests() {
         std::lock_guard<std::mutex> lock(tests_mutex_);
@@ -832,8 +611,11 @@ private:
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             ServiceInfo svc;
-            svc.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            svc.binary_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            const char* name_col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            const char* path_col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (!name_col || !path_col) continue;
+            svc.name = name_col;
+            svc.binary_path = path_col;
             const char* args = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
             svc.default_args = args ? args : "";
             const char* desc = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
@@ -1112,41 +894,7 @@ private:
         }
     }
 
-    void log_receiver_loop() {
-        int sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (sock < 0) {
-            std::cerr << "Failed to create log socket\n";
-            return;
-        }
-
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = htons(log_port_);
-
-        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            std::cerr << "Failed to bind log socket to port " << log_port_ << "\n";
-            close(sock);
-            return;
-        }
-
-        struct timeval tv;
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-        char buffer[UDP_BUFFER_SIZE];
-        while (!s_sigint_received) {
-            ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
-            if (n > 0) {
-                buffer[n] = '\0';
-                process_log_message(std::string(buffer, n));
-            }
-        }
-
-        close(sock);
-    }
+    void log_receiver_loop();
 
     static ServiceType parse_service_type(const std::string& name) {
         if (name == "SIP_CLIENT") return ServiceType::SIP_CLIENT;
@@ -1161,179 +909,17 @@ private:
         return ServiceType::SIP_CLIENT;
     }
 
-    void process_log_message(const std::string& msg) {
-        // Expected datagram format: "<SERVICE> <LEVEL> <CALL_ID> <message>"
-        // Malformed datagrams (e.g. stray UDP traffic) are silently dropped here
-        // to prevent garbage entries in the DB and UI.
-        if (msg.empty()) return;
-
-        size_t p1 = msg.find(' ');
-        size_t p2 = (p1 != std::string::npos) ? msg.find(' ', p1 + 1) : std::string::npos;
-        size_t p3 = (p2 != std::string::npos) ? msg.find(' ', p2 + 1) : std::string::npos;
-
-        if (p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos) {
-            return;
-        }
-
-        LogEntry entry;
-
-        time_t now = time(nullptr);
-        char timebuf[64];
-        struct tm tm_buf;
-        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime_r(&now, &tm_buf));
-        entry.timestamp = timebuf;
-
-        entry.service = parse_service_type(msg.substr(0, p1));
-        entry.level = msg.substr(p1 + 1, p2 - p1 - 1);
-        try {
-            entry.call_id = static_cast<uint32_t>(std::stoul(msg.substr(p2 + 1, p3 - p2 - 1)));
-        } catch (const std::exception&) {
-            entry.call_id = 0;
-        }
-        entry.message = msg.substr(p3 + 1);
-
-        {
-            std::lock_guard<std::mutex> lock(logs_mutex_);
-            entry.seq = ++log_seq_;
-            if (recent_logs_.size() >= MAX_RECENT_LOGS) {
-                recent_logs_.pop_front();
-            }
-            recent_logs_.push_back(entry);
-        }
-
-        enqueue_log(entry);
-
-        {
-            std::lock_guard<std::mutex> lock(sse_queue_mutex_);
-            sse_queue_.push_back(entry);
-        }
-    }
+    void process_log_message(const std::string& msg);
 
     std::mutex log_queue_mutex_;
     std::vector<LogEntry> log_queue_;
 
-    // Async SQLite write design: enqueue_log() just appends to log_queue_ under a
-    // mutex (O(1), <1µs). The main event loop calls flush_log_queue() every 500ms,
-    // which batches all pending entries into a single BEGIN/COMMIT transaction —
-    // typically < 1ms for hundreds of rows. No dedicated writer thread is needed.
-    void enqueue_log(const LogEntry& entry) {
-        std::lock_guard<std::mutex> lock(log_queue_mutex_);
-        log_queue_.push_back(entry);
-    }
-
-    void flush_log_queue() {
-        std::vector<LogEntry> batch;
-        {
-            std::lock_guard<std::mutex> lock(log_queue_mutex_);
-            if (log_queue_.empty()) return;
-            batch.swap(log_queue_);
-        }
-
-        if (!db_) return;
-
-        if (sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr) != SQLITE_OK) {
-            std::cerr << "flush_log_queue: BEGIN failed: " << sqlite3_errmsg(db_) << "\n";
-            return;
-        }
-        const char* sql = "INSERT INTO logs (timestamp, service, call_id, level, message) VALUES (?, ?, ?, ?, ?)";
-        sqlite3_stmt* stmt;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-            std::cerr << "flush_log_queue: prepare failed: " << sqlite3_errmsg(db_) << "\n";
-            sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
-            return;
-        }
-        for (const auto& entry : batch) {
-            sqlite3_bind_text(stmt, 1, entry.timestamp.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 2, service_type_to_string(entry.service), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(stmt, 3, static_cast<int>(entry.call_id));
-            sqlite3_bind_text(stmt, 4, entry.level.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 5, entry.message.c_str(), -1, SQLITE_TRANSIENT);
-            if (sqlite3_step(stmt) != SQLITE_DONE) {
-                std::cerr << "flush_log_queue: insert failed: " << sqlite3_errmsg(db_) << "\n";
-            }
-            sqlite3_reset(stmt);
-        }
-        sqlite3_finalize(stmt);
-        if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
-            std::cerr << "flush_log_queue: COMMIT failed: " << sqlite3_errmsg(db_) << "\n";
-        }
-    }
-
-    void rotate_logs() {
-        if (!db_) return;
-        static const std::string sql =
-            "DELETE FROM logs WHERE timestamp < datetime('now', '-"
-            + std::to_string(LOG_RETENTION_DAYS) + " days')";
-        sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, nullptr);
-    }
-
-    // GET /api/logs/stream — SSE live log stream. Registers the connection for
-    // push-based log delivery. Max MAX_SSE_CONNECTIONS enforced (503 if exceeded).
-    void handle_sse_stream(struct mg_connection *c, struct mg_http_message *hm) {
-        {
-            std::lock_guard<std::mutex> lock(sse_mutex_);
-            if (sse_connections_.size() >= MAX_SSE_CONNECTIONS) {
-                mg_http_reply(c, 503, "", "Too many SSE connections\n");
-                return;
-            }
-        }
-
-        char service_filter[30] = {0};
-        mg_http_get_var(&hm->query, "service", service_filter, sizeof(service_filter));
-
-        c->data[0] = 'S';
-        memset(c->data + 1, 0, MG_DATA_SIZE - 1);
-        if (service_filter[0]) {
-            strncpy(c->data + 1, service_filter, MG_DATA_SIZE - 2);
-        }
-
-        mg_printf(c,
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream; charset=utf-8\r\n"
-            "Cache-Control: no-cache\r\n"
-            "Connection: keep-alive\r\n"
-            "Transfer-Encoding: chunked\r\n\r\n");
-
-        {
-            std::lock_guard<std::mutex> lock(sse_mutex_);
-            sse_connections_.push_back(c);
-        }
-    }
-
-    void remove_sse_connection(struct mg_connection *c) {
-        std::lock_guard<std::mutex> lock(sse_mutex_);
-        sse_connections_.erase(
-            std::remove(sse_connections_.begin(), sse_connections_.end(), c),
-            sse_connections_.end());
-    }
-
-    void flush_sse_queue() {
-        std::vector<LogEntry> batch;
-        {
-            std::lock_guard<std::mutex> lock(sse_queue_mutex_);
-            if (sse_queue_.empty()) return;
-            batch.swap(sse_queue_);
-        }
-
-        std::lock_guard<std::mutex> lock(sse_mutex_);
-        if (sse_connections_.empty()) return;
-
-        for (const auto& entry : batch) {
-            std::string svc = service_type_to_string(entry.service);
-            std::string json = "{\"timestamp\":\"" + escape_json(entry.timestamp) +
-                "\",\"service\":\"" + escape_json(svc) +
-                "\",\"level\":\"" + escape_json(entry.level) +
-                "\",\"call_id\":" + std::to_string(entry.call_id) +
-                ",\"message\":\"" + escape_json(entry.message) + "\"}";
-            std::string sse_msg = "data: " + json + "\n\n";
-
-            for (auto* c : sse_connections_) {
-                std::string filter(c->data + 1, strnlen(c->data + 1, MG_DATA_SIZE - 1));
-                if (!filter.empty() && svc != filter) continue;
-                mg_http_printf_chunk(c, "%s", sse_msg.c_str());
-            }
-        }
-    }
+    void enqueue_log(const LogEntry& entry);
+    void flush_log_queue();
+    void rotate_logs();
+    void handle_sse_stream(struct mg_connection *c, struct mg_http_message *hm);
+    void remove_sse_connection(struct mg_connection *c);
+    void flush_sse_queue();
 
     static void http_handler_static(struct mg_connection *c, int ev, void *ev_data) {
         FrontendServer* self = static_cast<FrontendServer*>(c->fn_data);
@@ -1484,9 +1070,11 @@ private:
         h += R"WT(<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Prodigy</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+@font-face{font-family:'Orbitron';font-style:normal;font-weight:400 900;font-display:swap;src:local('Orbitron')}
+@font-face{font-family:'Space Mono';font-style:normal;font-weight:400;font-display:swap;src:local('Space Mono')}
+@font-face{font-family:'Space Mono';font-style:normal;font-weight:700;font-display:swap;src:local('Space Mono Bold')}
+</style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" integrity="sha512-1ycn6IcaQQ40/MKBW2W4Rhis/DbILU74C1vSrLJxCq57o941Ym01SwNsOMqvEBFlcgUa6xLiPY/NS5R+E6ztJQ==" crossorigin="anonymous" referrerpolicy="no-referrer">
 )WT";
         h += "<style>";
@@ -1496,35 +1084,32 @@ private:
 <div class="wt-app">
 <aside class="wt-sidebar">
 <div class="wt-sidebar-header">
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 36" width="32" height="36">
-  <defs><filter id="ant-glow"><feDropShadow dx="0" dy="0" stdDeviation="1.5" flood-color="#cf2e2e" flood-opacity="0.8"/></filter></defs>
-  <g fill="#ffffff" filter="url(#ant-glow)">
-    <ellipse cx="16" cy="23" rx="6.5" ry="7.5"/>
-    <ellipse cx="16" cy="14" rx="2.8" ry="3"/>
-    <circle cx="16" cy="8.5" r="4"/>
-    <ellipse cx="13" cy="6.5" rx="1.2" ry="1.8" transform="rotate(-20 13 6.5)"/>
-    <ellipse cx="19" cy="6.5" rx="1.2" ry="1.8" transform="rotate(20 19 6.5)"/>
-    <line x1="14" y1="5" x2="9" y2="2.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
-    <line x1="9" y1="2.5" x2="6" y2="0.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
-    <circle cx="5.5" cy="0.5" r="1.3"/>
-    <line x1="18" y1="5" x2="23" y2="2.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
-    <line x1="23" y1="2.5" x2="26" y2="0.5" stroke="#ffffff" stroke-width="1.2" fill="none"/>
-    <circle cx="26.5" cy="0.5" r="1.3"/>
-    <polyline points="13,13 7,11 5,14" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="13,16 6,15.5 4.5,18" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="12,19 6,20 5,23" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="19,13 25,11 27,14" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="19,16 26,15.5 27.5,18" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <polyline points="20,19 26,20 27,23" stroke="#ffffff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-    <ellipse cx="13" cy="31.5" rx="1.3" ry="2"/>
-    <ellipse cx="16" cy="32.5" rx="1.5" ry="2.5"/>
-    <ellipse cx="19" cy="31.5" rx="1.3" ry="2"/>
-    <line x1="13" y1="29.5" x2="13" y2="32" stroke="#ffffff" stroke-width="0.8"/>
-    <line x1="16" y1="30" x2="16" y2="33" stroke="#ffffff" stroke-width="0.8"/>
-    <line x1="19" y1="29.5" x2="19" y2="32" stroke="#ffffff" stroke-width="0.8"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="28" height="28">
+  <defs>
+    <linearGradient id="neon-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff2d95"/>
+      <stop offset="50%" stop-color="#b026ff"/>
+      <stop offset="100%" stop-color="#00fff5"/>
+    </linearGradient>
+    <filter id="neon-glow">
+      <feDropShadow dx="0" dy="0" stdDeviation="2" flood-color="#ff2d95" flood-opacity="0.6"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="1" flood-color="#00fff5" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <g filter="url(#neon-glow)">
+    <polygon points="16,1 29.86,9 29.86,23 16,31 2.14,23 2.14,9" fill="none" stroke="url(#neon-grad)" stroke-width="1.5"/>
+    <text x="16" y="20" text-anchor="middle" font-family="Orbitron,monospace" font-size="15" font-weight="700" fill="url(#neon-grad)">P</text>
+    <line x1="6" y1="6" x2="3" y2="3" stroke="#ff2d95" stroke-width="0.8" opacity="0.5"/>
+    <line x1="26" y1="6" x2="29" y2="3" stroke="#00fff5" stroke-width="0.8" opacity="0.5"/>
+    <line x1="6" y1="26" x2="3" y2="29" stroke="#b026ff" stroke-width="0.8" opacity="0.5"/>
+    <line x1="26" y1="26" x2="29" y2="29" stroke="#00fff5" stroke-width="0.8" opacity="0.5"/>
+    <circle cx="3" cy="3" r="1" fill="#ff2d95" opacity="0.6"/>
+    <circle cx="29" cy="3" r="1" fill="#00fff5" opacity="0.6"/>
+    <circle cx="3" cy="29" r="1" fill="#b026ff" opacity="0.6"/>
+    <circle cx="29" cy="29" r="1" fill="#00fff5" opacity="0.6"/>
   </g>
 </svg>
-<span style="font-size:16px;font-weight:700;color:#fff;letter-spacing:0.02em">Prodigy</span>
+<span class="header-text">PRODIGY</span>
 </div>
 <div class="wt-sidebar-section">
 <a class="wt-nav-item active" data-page="dashboard" onclick="showPage('dashboard')">
@@ -2263,11 +1848,11 @@ private:
             std::string local_ip_s = fields.size() > 5 ? fields[5] : "";
             if (!first) json << ",";
             json << "{\"index\":" << idx_s
-                 << ",\"user\":\"" << user_s << "\""
+                 << ",\"user\":\"" << escape_json(user_s) << "\""
                  << ",\"registered\":" << (status_s == "registered" ? "true" : "false")
-                 << ",\"server\":\"" << server_s << "\""
+                 << ",\"server\":\"" << escape_json(server_s) << "\""
                  << ",\"port\":" << (port_s.empty() ? "5060" : port_s)
-                 << ",\"local_ip\":\"" << local_ip_s << "\"}";
+                 << ",\"local_ip\":\"" << escape_json(local_ip_s) << "\"}";
             first = false;
         }
 
@@ -2543,11 +2128,16 @@ private:
             return;
         }
 
+        if (file.find("..") != std::string::npos || file[0] == '/') {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid file path\"}");
+            return;
+        }
+
         std::string wav_path = "Testfiles/" + file;
         IapWavData wav = load_wav_for_iap(wav_path);
         if (!wav.error.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n",
-                "{\"error\":\"WAV load failed: %s\"}", wav.error.c_str());
+                "{\"error\":\"WAV load failed: %s\"}", escape_json(wav.error).c_str());
             return;
         }
         if (wav.samples.empty()) {
@@ -3596,9 +3186,12 @@ private:
             if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
                 sqlite3_bind_int(stmt, 1, model_id);
                 if (sqlite3_step(stmt) == SQLITE_ROW) {
-                    model_name = (const char*)sqlite3_column_text(stmt, 0);
-                    model_path = (const char*)sqlite3_column_text(stmt, 1);
-                    model_backend = (const char*)sqlite3_column_text(stmt, 2);
+                    const char* mn = (const char*)sqlite3_column_text(stmt, 0);
+                    const char* mp = (const char*)sqlite3_column_text(stmt, 1);
+                    const char* mb = (const char*)sqlite3_column_text(stmt, 2);
+                    model_name = mn ? mn : "";
+                    model_path = mp ? mp : "";
+                    model_backend = mb ? mb : "";
                 }
                 sqlite3_finalize(stmt);
             }
@@ -5621,7 +5214,7 @@ private:
 
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
                 "{\"success\":true,\"service\":\"%s\",\"level\":\"%s\",\"live_update\":%s}", 
-                service.c_str(), level.c_str(), live_update ? "true" : "false");
+                escape_json(service).c_str(), escape_json(level).c_str(), live_update ? "true" : "false");
         }
     }
 
@@ -5911,35 +5504,7 @@ private:
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
-    // GET /api/db/schema — Returns all SQLite table names and their CREATE statements.
-    void handle_db_schema(struct mg_connection *c) {
-        if (!db_) {
-            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
-            return;
-        }
-
-        sqlite3_stmt* stmt;
-        const char* sql = "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name";
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB error\"}");
-            return;
-        }
-
-        std::stringstream json;
-        json << "{\"tables\":[";
-        int count = 0;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            if (count > 0) json << ",";
-            const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            const char* ddl = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            json << "{\"name\":\"" << escape_json(name ? name : "") << "\","
-                 << "\"sql\":\"" << escape_json(ddl ? ddl : "") << "\"}";
-            count++;
-        }
-        sqlite3_finalize(stmt);
-        json << "]}";
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
-    }
+    void handle_db_schema(struct mg_connection *c);
 
     // GET/POST /api/settings — GET: return all key-value pairs from settings table.
     // POST: upsert a key-value pair into settings table.
@@ -6173,17 +5738,21 @@ private:
             return;
         }
         
+        auto safe_col = [&](int col) -> std::string {
+            const char* t = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
+            return t ? t : "";
+        };
         std::map<std::string, std::vector<std::string>> models_by_type;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string service = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            std::string service = safe_col(1);
             std::stringstream model_json;
             model_json << "{\"id\":" << sqlite3_column_int(stmt, 0)
                       << ",\"service\":\"" << escape_json(service) << "\""
-                      << ",\"name\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2))) << "\""
-                      << ",\"path\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3))) << "\""
-                      << ",\"backend\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4))) << "\""
+                      << ",\"name\":\"" << escape_json(safe_col(2)) << "\""
+                      << ",\"path\":\"" << escape_json(safe_col(3)) << "\""
+                      << ",\"backend\":\"" << escape_json(safe_col(4)) << "\""
                       << ",\"size_mb\":" << sqlite3_column_int(stmt, 5)
-                      << ",\"config_json\":\"" << escape_json(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6))) << "\""
+                      << ",\"config_json\":\"" << escape_json(safe_col(6)) << "\""
                       << ",\"added_timestamp\":" << sqlite3_column_int(stmt, 7) << "}";
             models_by_type[service].push_back(model_json.str());
         }
@@ -6842,10 +6411,14 @@ private:
             return;
         }
         
-        std::string model_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        std::string model_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        std::string backend = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        std::string config = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        const char* mn_raw = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* mp_raw = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* be_raw = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        const char* cf_raw = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        std::string model_name = mn_raw ? mn_raw : "";
+        std::string model_path = mp_raw ? mp_raw : "";
+        std::string backend = be_raw ? be_raw : "";
+        std::string config = cf_raw ? cf_raw : "";
         sqlite3_finalize(stmt);
         
         std::stringstream files_json;
@@ -7090,88 +6663,12 @@ private:
         return false;
     }
 
-    // POST /api/db/write_mode — Toggle write mode for the SQL query endpoint.
-    // When disabled (default), only SELECT/EXPLAIN/PRAGMA queries are allowed.
-    void handle_db_write_mode(struct mg_connection *c, struct mg_http_message *hm) {
-        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                         "{\"write_mode\":%s}", db_write_mode_ ? "true" : "false");
-        } else {
-            std::string body(hm->body.buf, hm->body.len);
-            std::string enabled = extract_json_string(body, "enabled");
-            db_write_mode_ = (enabled == "true" || enabled == "1");
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                         "{\"write_mode\":%s}", db_write_mode_ ? "true" : "false");
-        }
-    }
-
-    // POST /api/db/query — Execute a SQL query against the SQLite database.
-    // Read-only by default; write queries require db_write_mode_ to be enabled.
-    // Returns rows as JSON array of column-name→value objects.
-    void handle_db_query(struct mg_connection *c, struct mg_http_message *hm) {
-        std::string body(hm->body.buf, hm->body.len);
-        std::string query = extract_json_string(body, "query");
-        
-        if (!db_) {
-            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Database not available\"}");
-            return;
-        }
-
-        if (query.empty()) {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Empty query\"}");
-            return;
-        }
-
-        if (!db_write_mode_ && !is_read_only_query(query)) {
-            mg_http_reply(c, 403, "Content-Type: application/json\r\n",
-                         "{\"error\":\"Write mode is disabled. Only SELECT, EXPLAIN, and PRAGMA queries are allowed. Enable write mode via POST /api/db/write_mode.\"}");
-            return;
-        }
-
-        sqlite3_stmt* stmt;
-        int rc = sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
-        if (rc != SQLITE_OK) {
-            std::string error = sqlite3_errmsg(db_);
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n", 
-                         "{\"error\":\"%s\"}", escape_json(error).c_str());
-            return;
-        }
-
-        std::stringstream json;
-        json << "{\"rows\":[";
-        
-        int row_count = 0;
-        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            if (row_count >= DB_QUERY_ROW_LIMIT) break;
-            if (row_count > 0) json << ",";
-            json << "{";
-            
-            int col_count = sqlite3_column_count(stmt);
-            for (int i = 0; i < col_count; i++) {
-                if (i > 0) json << ",";
-                const char* col_name = sqlite3_column_name(stmt, i);
-                json << "\"" << escape_json(col_name ? col_name : "") << "\":";
-                
-                const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
-                if (text) {
-                    json << "\"" << escape_json(text) << "\"";
-                } else {
-                    json << "null";
-                }
-            }
-            
-            json << "}";
-            row_count++;
-        }
-        
-        json << "],\"affected\":" << sqlite3_changes(db_)
-             << ",\"truncated\":" << (row_count >= DB_QUERY_ROW_LIMIT ? "true" : "false") << "}";
-        sqlite3_finalize(stmt);
-        
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
-    }
+    void handle_db_write_mode(struct mg_connection *c, struct mg_http_message *hm);
+    void handle_db_query(struct mg_connection *c, struct mg_http_message *hm);
 };
 
+#include "log-server.h"
+#include "database.h"
 #include "javascript.h"
 #include "frontend-ui.h"
 
