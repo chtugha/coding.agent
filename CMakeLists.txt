@@ -335,6 +335,7 @@ endif()
 
 # 9. Tomedo Crawl (RAG sidecar)
 add_executable(tomedo-crawl tomedo-crawl.cpp mongoose.c sqlite3.c)
+target_include_directories(tomedo-crawl PRIVATE ${CMAKE_SOURCE_DIR}/third_party/hnswlib)
 target_link_libraries(tomedo-crawl PRIVATE Threads::Threads)
 target_compile_definitions(tomedo-crawl PRIVATE MG_ENABLE_PACKED_FS=0)
 if(APPLE)
