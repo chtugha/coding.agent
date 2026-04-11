@@ -132,10 +132,11 @@ static int tomedo_connect_nonblock() {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
     int flags = fcntl(sock, F_GETFL, 0);
+    if (flags == -1) flags = 0;
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(13181);
+    addr.sin_port = htons(whispertalk::service_base_port(whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE) + 1);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     connect(sock, (struct sockaddr*)&addr, sizeof(addr));
     struct pollfd pfd{sock, POLLOUT, 0};
@@ -150,6 +151,7 @@ static int tomedo_connect_nonblock() {
         close(sock);
         return -1;
     }
+    fcntl(sock, F_SETFL, flags);
     return sock;
 }
 
