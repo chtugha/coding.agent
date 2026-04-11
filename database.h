@@ -92,7 +92,11 @@ inline bool FrontendServer::validate_schema() {
     auto table_exists = [this](const char* table_name) -> bool {
         std::string sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            std::cerr << "  Error: could not query sqlite_master for " << table_name
+                      << ": " << sqlite3_errmsg(db_) << "\n";
+            return false;
+        }
         sqlite3_bind_text(stmt, 1, table_name, -1, SQLITE_STATIC);
         bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
         sqlite3_finalize(stmt);
