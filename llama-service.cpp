@@ -53,12 +53,19 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <cstdio>
+#include <climits>
 #include "interconnect.h"
 #include "llama.h"
 
 static constexpr int MAX_RESPONSE_TOKENS = 96;
+static constexpr int RAG_TIMEOUT_MS = 150;
+static constexpr size_t RAG_MAX_RESPONSE_BYTES = 256 * 1024;
 static constexpr int TOKEN_PIECE_BUF     = 128;
 static constexpr int CMD_RECV_TIMEOUT_S  = 10;
 static constexpr int CMD_POLL_TIMEOUT_MS = 200;
@@ -102,6 +109,8 @@ struct LlamaCall {
     uint32_t id;
     uint32_t seq_id;
     int n_past = 0;
+    bool greeted = false;
+    int patient_id = -1;
     std::vector<LlamaChatMessage> messages;
     std::chrono::steady_clock::time_point last_activity;
     std::chrono::steady_clock::time_point last_response_sent;
@@ -115,8 +124,12 @@ struct WorkItem {
 
 class LlamaService {
 public:
-    LlamaService(const std::string& model_path) 
+    LlamaService(const std::string& model_path,
+                 const std::string& rag_host = "127.0.0.1",
+                 int rag_port = 13181) 
         : running_(true),
+          rag_host_(rag_host),
+          rag_port_(rag_port),
           interconnect_(whispertalk::ServiceType::LLAMA_SERVICE) {
         llama_backend_init();
         llama_model_params mparams = llama_model_default_params();
@@ -162,6 +175,18 @@ public:
         std::cout << "Interconnect initialized (peer-to-peer)" << std::endl;
 
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::LLAMA_SERVICE);
+
+        {
+            std::string health = rag_http_get("/health");
+            rag_available_ = !health.empty();
+            if (rag_available_) {
+                log_fwd_.forward(whispertalk::LogLevel::INFO, 0,
+                    "RAG service reachable at %s:%d", rag_host_.c_str(), rag_port_);
+            } else {
+                log_fwd_.forward(whispertalk::LogLevel::INFO, 0,
+                    "RAG service not available — will skip enrichment");
+            }
+        }
 
         if (!interconnect_.connect_to_downstream()) {
             std::cout << "Downstream (Kokoro) not available yet - will auto-reconnect" << std::endl;
@@ -218,6 +243,7 @@ public:
     void set_log_level(const char* level) {
         log_fwd_.set_level(level);
     }
+
 
     void run() {
         std::thread receiver_thread(&LlamaService::receiver_loop, this);
@@ -454,6 +480,178 @@ private:
         return union_sz == 0 ? 0.0f : (float)intersect / (float)union_sz;
     }
 
+    std::string rag_http_get(const std::string& path) {
+        struct addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        struct addrinfo* res = nullptr;
+        if (getaddrinfo(rag_host_.c_str(), std::to_string(rag_port_).c_str(), &hints, &res) != 0 || !res)
+            return "";
+        int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (sock < 0) { freeaddrinfo(res); return ""; }
+        int flags = fcntl(sock, F_GETFL, 0);
+        if (flags == -1) flags = 0;
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+        connect(sock, res->ai_addr, res->ai_addrlen);
+        freeaddrinfo(res);
+        struct pollfd pfd{sock, POLLOUT, 0};
+        if (poll(&pfd, 1, RAG_TIMEOUT_MS) <= 0 || !(pfd.revents & POLLOUT)) {
+            close(sock);
+            return "";
+        }
+        int conn_err = 0;
+        socklen_t conn_len = sizeof(conn_err);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &conn_err, &conn_len);
+        if (conn_err != 0) {
+            close(sock);
+            return "";
+        }
+        fcntl(sock, F_SETFL, flags);
+        struct timeval stv{};
+        stv.tv_usec = RAG_TIMEOUT_MS * 1000;
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
+        std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + rag_host_ + ":" +
+                          std::to_string(rag_port_) + "\r\nConnection: close\r\n\r\n";
+        ssize_t sent = send(sock, req.c_str(), req.size(), 0);
+        if (sent <= 0) {
+            close(sock);
+            return "";
+        }
+        std::string response;
+        char buf[4096];
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(RAG_TIMEOUT_MS);
+        while (response.size() < RAG_MAX_RESPONSE_BYTES) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) break;
+            struct pollfd rpfd{sock, POLLIN, 0};
+            if (poll(&rpfd, 1, (int)remaining) <= 0 || !(rpfd.revents & POLLIN)) break;
+            ssize_t n = recv(sock, buf, sizeof(buf), 0);
+            if (n <= 0) break;
+            response.append(buf, n);
+        }
+        close(sock);
+        size_t hdr_end = response.find("\r\n\r\n");
+        if (hdr_end == std::string::npos) return "";
+        return response.substr(hdr_end + 4);
+    }
+
+    static int json_brace_depth(const std::string& json, size_t end) {
+        int depth = 0;
+        bool in_str = false;
+        for (size_t i = 0; i < end; i++) {
+            if (in_str) {
+                if (json[i] == '\\') { i++; continue; }
+                if (json[i] == '"') in_str = false;
+            } else {
+                if (json[i] == '"') in_str = true;
+                else if (json[i] == '{') depth++;
+                else if (json[i] == '}') depth--;
+            }
+        }
+        return depth;
+    }
+
+    static std::string extract_json_string(const std::string& json, const std::string& key) {
+        std::string search = "\"" + key + "\":";
+        size_t pos = 0;
+        while ((pos = json.find(search, pos)) != std::string::npos) {
+            if (json_brace_depth(json, pos) == 1) break;
+            pos += search.size();
+        }
+        if (pos == std::string::npos) return "";
+        pos += search.size();
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+        if (pos >= json.size() || json[pos] != '"') return "";
+        pos++;
+        std::string result;
+        while (pos < json.size() && json[pos] != '"') {
+            if (json[pos] == '\\' && pos + 1 < json.size()) {
+                pos++;
+                if (json[pos] == 'n') result += '\n';
+                else if (json[pos] == 't') result += '\t';
+                else if (json[pos] == '\\') result += '\\';
+                else result += json[pos];
+            } else {
+                result += json[pos];
+            }
+            pos++;
+        }
+        return result;
+    }
+
+    static int extract_json_int(const std::string& json, const std::string& key, int fallback) {
+        std::string search = "\"" + key + "\":";
+        size_t pos = 0;
+        while ((pos = json.find(search, pos)) != std::string::npos) {
+            if (json_brace_depth(json, pos) == 1) break;
+            pos += search.size();
+        }
+        if (pos == std::string::npos) return fallback;
+        pos += search.size();
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+        if (pos >= json.size()) return fallback;
+        bool neg = false;
+        if (json[pos] == '-') { neg = true; pos++; }
+        if (pos >= json.size() || !std::isdigit((unsigned char)json[pos])) return fallback;
+        long long val = 0;
+        while (pos < json.size() && std::isdigit((unsigned char)json[pos])) {
+            val = val * 10 + (json[pos] - '0');
+            if (val > INT_MAX) { val = INT_MAX; break; }
+            pos++;
+        }
+        return neg ? (int)(-val) : (int)val;
+    }
+
+    static std::string extract_rag_text(const std::string& json_body) {
+        std::string result;
+        size_t pos = 0;
+        std::string search = "\"text\":\"";
+        while ((pos = json_body.find(search, pos)) != std::string::npos) {
+            pos += search.size();
+            std::string text;
+            while (pos < json_body.size() && json_body[pos] != '"') {
+                if (json_body[pos] == '\\' && pos + 1 < json_body.size()) {
+                    pos++;
+                    if (json_body[pos] == 'n') text += '\n';
+                    else if (json_body[pos] == 't') text += '\t';
+                    else if (json_body[pos] == '\\') text += '\\';
+                    else text += json_body[pos];
+                } else {
+                    text += json_body[pos];
+                }
+                pos++;
+            }
+            if (!text.empty()) {
+                if (!result.empty()) result += "\n";
+                result += text;
+            }
+        }
+        return result;
+    }
+
+    std::string rag_get_caller(uint32_t call_id) {
+        return rag_http_get("/caller/" + std::to_string(call_id));
+    }
+
+    std::string rag_query(const std::string& text, int top_k, int patient_id) {
+        std::string encoded;
+        for (unsigned char c : text) {
+            if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                encoded += (char)c;
+            } else {
+                char buf[4];
+                std::snprintf(buf, sizeof(buf), "%%%02X", c);
+                encoded += buf;
+            }
+        }
+        std::string path = "/query?text=" + encoded + "&top_k=" + std::to_string(top_k);
+        if (patient_id >= 0) {
+            path += "&patient_id=" + std::to_string(patient_id);
+        }
+        return rag_http_get(path);
+    }
+
     static bool is_empty_pleasantry(const std::string& response) {
         std::string lower = normalize_lower(response);
         static const char* pleasantries[] = {
@@ -479,6 +677,48 @@ private:
         auto call = get_or_create_call(cid);
         call->last_activity = std::chrono::steady_clock::now();
 
+        std::string greeting_hint;
+        std::string rag_ctx;
+        if (rag_available_) {
+            if (!call->greeted) {
+                std::string caller_json = rag_get_caller(cid);
+                if (caller_json.empty()) {
+                    rag_available_ = false;
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
+                        "RAG service unreachable — disabling enrichment for remaining calls");
+                } else {
+                    std::string status = extract_json_string(caller_json, "status");
+                    if (status == "found") {
+                        std::string name = extract_json_string(caller_json, "name");
+                        int pid = extract_json_int(caller_json, "patient_id", -1);
+                        call->patient_id = pid;
+                        if (!name.empty()) {
+                            greeting_hint = "Der Anrufer heißt " + name + ".";
+                            log_fwd_.forward(whispertalk::LogLevel::INFO, cid,
+                                "Caller identified: %s (patient_id=%d)", name.c_str(), pid);
+                        }
+                    }
+                    call->greeted = true;
+                }
+            }
+            if (rag_available_) {
+                std::string rag_body = rag_query(text, 3, call->patient_id);
+                if (rag_body.empty()) {
+                    rag_available_ = false;
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
+                        "RAG service unreachable — disabling enrichment for remaining calls");
+                } else {
+                    rag_ctx = extract_rag_text(rag_body);
+                    if (!rag_ctx.empty()) {
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid,
+                            "RAG context retrieved (%zu bytes)", rag_ctx.size());
+                    } else {
+                        log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid, "RAG returned no matching chunks");
+                    }
+                }
+            }
+        }
+
         {
             bool was_generating = call->generating.exchange(true);
             if (was_generating) {
@@ -497,9 +737,13 @@ private:
             call->messages.erase(call->messages.begin(), call->messages.begin() + 2);
         }
 
+        std::string sys_prompt = SYSTEM_PROMPT;
+        if (!greeting_hint.empty()) sys_prompt += "\n\n" + greeting_hint;
+        if (!rag_ctx.empty()) sys_prompt += "\n\nKontextinformation aus Praxissystem:\n" + rag_ctx;
+
         std::vector<llama_chat_message> chat_msgs;
         chat_msgs.reserve(call->messages.size() + 1);
-        chat_msgs.push_back({"system", SYSTEM_PROMPT});
+        chat_msgs.push_back({"system", sys_prompt.c_str()});
         
         for (const auto& m : call->messages) {
             chat_msgs.push_back({m.role.c_str(), m.content.c_str()});
@@ -878,6 +1122,9 @@ private:
 
     std::atomic<bool> running_;
     std::atomic<int> cmd_sock_{-1};
+    const std::string rag_host_;
+    const int rag_port_;
+    std::atomic<bool> rag_available_{false};
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;
@@ -908,22 +1155,28 @@ int main(int argc, char** argv) {
 #endif
     std::string model_path = models_dir + "/Llama-3.2-1B-Instruct-Q8_0.gguf";
     std::string log_level = "INFO";
+    std::string rag_host = "127.0.0.1";
+    int rag_port = 13181;
 
     static struct option long_opts[] = {
-        {"log-level", required_argument, 0, 'L'},
+        {"log-level",  required_argument, 0, 'L'},
+        {"rag-host",   required_argument, 0, 'H'},
+        {"rag-port",   required_argument, 0, 'P'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "L:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "L:H:P:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'L': log_level = optarg; break;
+            case 'H': rag_host = optarg; break;
+            case 'P': rag_port = std::atoi(optarg); break;
             default: break;
         }
     }
     if (optind < argc) model_path = argv[optind];
 
     try {
-        LlamaService service(model_path);
+        LlamaService service(model_path, rag_host, rag_port);
         if (!service.init()) {
             return 1;
         }
