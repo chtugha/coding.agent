@@ -190,7 +190,10 @@
 #include "mongoose.h"
 #include "sqlite3.h"
 #include "interconnect.h"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include "hnswlib.h"
+#pragma GCC diagnostic pop
 
 namespace {
 
@@ -497,9 +500,12 @@ public:
         int fetch_k = (patient_id_filter >= 0) ? top_k * 4 : top_k;
 
         // Phase 1: ANN search — lock held only for HNSW, released before Phase 2.
+        // Snapshot db_ while the lock is held to guard against a concurrent close().
         std::vector<std::pair<float, size_t>> candidates;
+        sqlite3* db_snap = nullptr;
         {
             std::lock_guard<std::mutex> lk(mutex_);
+            db_snap = db_;
             if (!hnsw_ || hnsw_->getCurrentElementCount() == 0) return {};
             if (static_cast<int>(query_vec.size()) != dim_) return {};
             int actual_k = std::min(fetch_k,
@@ -516,10 +522,12 @@ public:
         // Phase 2: SQLite text fetch — safe without mutex_ because sqlite3.c is
         // compiled with SQLITE_THREADSAFE=1 (serialized mode), which serialises
         // all operations on this handle internally.
+        if (!db_snap) return {};
+
         std::vector<QueryResult> results;
         results.reserve(static_cast<size_t>(top_k));
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_,
+        if (sqlite3_prepare_v2(db_snap,
                 "SELECT text, source, patient_id FROM chunks WHERE id=?",
                 -1, &stmt, nullptr) != SQLITE_OK)
             return results;
@@ -714,44 +722,6 @@ static long long json_get_int64(const std::string& body, const std::string& key,
         if (body[pos] != '-' && (body[pos] < '0' || body[pos] > '9')) return fallback;
         return std::atoll(body.c_str() + pos);
     }
-}
-
-static std::vector<std::string> json_get_array_strings(const std::string& body, const std::string& key) {
-    std::vector<std::string> result;
-    std::string needle = "\"" + key + "\"";
-    size_t search_from = 0;
-    size_t pos;
-    while (true) {
-        pos = body.find(needle, search_from);
-        if (pos == std::string::npos) return result;
-        if (is_json_key_position(body, pos)) break;
-        search_from = pos + 1;
-    }
-    pos += needle.size();
-    while (pos < body.size() && (body[pos] == ' ' || body[pos] == ':' || body[pos] == '\t')) ++pos;
-    if (pos >= body.size() || body[pos] != '[') return result;
-    ++pos;
-    while (pos < body.size()) {
-        while (pos < body.size() && body[pos] != '"' && body[pos] != ']') ++pos;
-        if (pos >= body.size() || body[pos] == ']') break;
-        ++pos;
-        std::string item;
-        while (pos < body.size() && body[pos] != '"') {
-            if (body[pos] == '\\' && pos + 1 < body.size()) {
-                ++pos;
-                if (body[pos] == '"') item += '"';
-                else if (body[pos] == '\\') item += '\\';
-                else if (body[pos] == 'n') item += '\n';
-                else item += body[pos];
-            } else {
-                item += body[pos];
-            }
-            ++pos;
-        }
-        if (pos < body.size()) ++pos;
-        result.push_back(std::move(item));
-    }
-    return result;
 }
 
 static std::string json_get_string(const std::string& body, const std::string& key);
@@ -1209,14 +1179,6 @@ static HttpResponse https_get(const std::string& host, int port,
     return https_request("GET", host, port, path, "", pem_path, timeout_ms);
 }
 
-static HttpResponse https_post(const std::string& host, int port,
-                                const std::string& path,
-                                const std::string& body,
-                                const std::string& pem_path,
-                                int timeout_ms = 10000) {
-    return https_request("POST", host, port, path, body, pem_path, timeout_ms);
-}
-
 // ============================================================
 // Plain HTTP client (for Ollama — no TLS)
 // ============================================================
@@ -1362,6 +1324,13 @@ static size_t utf8_codepoint_count(const char* s, size_t len) {
     return count;
 }
 
+static std::string trim_whitespace(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return {};
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
 static std::vector<std::string> chunk_text(const std::string& text,
                                             int chunk_tokens = 512,
                                             int overlap_tokens = 64) {
@@ -1373,32 +1342,16 @@ static std::vector<std::string> chunk_text(const std::string& text,
         char c = text[i];
         cur += c;
         if (c == '.' || c == '!' || c == '?' || c == '\n') {
-            std::string trimmed = cur;
-            while (!trimmed.empty() &&
-                   (trimmed.front() == ' ' || trimmed.front() == '\t' ||
-                    trimmed.front() == '\r' || trimmed.front() == '\n'))
-                trimmed.erase(trimmed.begin());
-            while (!trimmed.empty() &&
-                   (trimmed.back() == ' ' || trimmed.back() == '\t' ||
-                    trimmed.back() == '\r' || trimmed.back() == '\n'))
-                trimmed.pop_back();
+            std::string trimmed = trim_whitespace(cur);
             if (!trimmed.empty())
-                sentences.push_back(trimmed);
+                sentences.push_back(std::move(trimmed));
             cur.clear();
         }
     }
     if (!cur.empty()) {
-        std::string trimmed = cur;
-        while (!trimmed.empty() &&
-               (trimmed.front() == ' ' || trimmed.front() == '\t' ||
-                trimmed.front() == '\r' || trimmed.front() == '\n'))
-            trimmed.erase(trimmed.begin());
-        while (!trimmed.empty() &&
-               (trimmed.back() == ' ' || trimmed.back() == '\t' ||
-                trimmed.back() == '\r' || trimmed.back() == '\n'))
-            trimmed.pop_back();
+        std::string trimmed = trim_whitespace(cur);
         if (!trimmed.empty())
-            sentences.push_back(trimmed);
+            sentences.push_back(std::move(trimmed));
     }
 
     if (sentences.empty()) return {};
@@ -1731,18 +1684,27 @@ static std::string extract_next_appointment(const std::string& body) {
     return result;
 }
 
-static std::string fetch_patient_context(int patient_id, const TomedoConfig& cfg) {
+struct PatientContext {
+    std::string text;
+    std::string nachname;
+    std::string vorname;
+    PatientPhones phones;
+};
+
+static PatientContext fetch_patient_context_full(int patient_id, const TomedoConfig& cfg) {
+    PatientContext ctx;
+
     std::string base = "/" + cfg.tomedo_db;
     std::string pid = std::to_string(patient_id);
 
     auto detail_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
         base + "/patient/" + pid, cfg.tomedo_cert_pem, 15000);
-    if (detail_resp.status != 200) return {};
+    if (detail_resp.status != 200) return ctx;
 
-    std::string nachname = json_get_string(detail_resp.body, "nachname");
-    std::string vorname = json_get_string(detail_resp.body, "vorname");
+    ctx.nachname = json_get_string(detail_resp.body, "nachname");
+    ctx.vorname = json_get_string(detail_resp.body, "vorname");
     long long geb = json_get_int64(detail_resp.body, "geburtsDatum", 0);
-    PatientPhones phones = fetch_patient_phones(detail_resp.body);
+    ctx.phones = fetch_patient_phones(detail_resp.body);
 
     auto rel_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
         base + "/patient/" + pid + "/patientenDetailsRelationen"
@@ -1768,7 +1730,7 @@ static std::string fetch_patient_context(int patient_id, const TomedoConfig& cfg
         termin = extract_next_appointment(termin_resp.body);
 
     std::ostringstream doc;
-    doc << "Patient: " << vorname << " " << nachname
+    doc << "Patient: " << ctx.vorname << " " << ctx.nachname
         << " (ID " << patient_id << "), geb. " << format_epoch_ms(geb) << "\n";
     if (!diagnosen.empty())
         doc << "Diagnosen: " << diagnosen << "\n";
@@ -1776,76 +1738,50 @@ static std::string fetch_patient_context(int patient_id, const TomedoConfig& cfg
         doc << "Medikamente: " << medikamente << "\n";
     if (!termin.empty())
         doc << "Naechster Termin: " << termin << "\n";
-    if (!phones.telefon.empty())
-        doc << "Telefon: " << phones.telefon << "\n";
-    if (!phones.handy.empty())
-        doc << "Handy: " << phones.handy << "\n";
+    if (!ctx.phones.telefon.empty())
+        doc << "Telefon: " << ctx.phones.telefon << "\n";
+    if (!ctx.phones.handy.empty())
+        doc << "Handy: " << ctx.phones.handy << "\n";
 
-    return doc.str();
+    ctx.text = doc.str();
+    return ctx;
 }
 
 // ============================================================
-// Background phone crawl (populates phone_index from Tomedo)
+// Unified crawl: RAG chunks + phone index in a single pass
 // ============================================================
 
-static int run_phone_crawl(const std::vector<PatientRef>& patients,
-                           const TomedoConfig& cfg, sqlite3* db,
-                           long long since_ts = 0) {
-    LOG_INFO("Phone crawl starting (%d patients, since_ts=%lld)",
-             (int)patients.size(), since_ts);
-
-    int phone_count = 0;
-    std::string base = "/" + cfg.tomedo_db;
-    for (size_t i = 0; i < patients.size(); ++i) {
-        if (s_quit.load()) break;
-        if (since_ts > 0 && patients[i].zuletzt_aufgerufen > 0 &&
-            patients[i].zuletzt_aufgerufen <= since_ts)
-            continue;
-        int pid = patients[i].ident;
-        auto resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
-            base + "/patient/" + std::to_string(pid),
-            cfg.tomedo_cert_pem, 15000);
-        if (resp.status != 200) continue;
-
-        std::string nachname = json_get_string(resp.body, "nachname");
-        std::string vorname_val = json_get_string(resp.body, "vorname");
-        PatientPhones ph = fetch_patient_phones(resp.body);
-
-        auto store_phone = [&](const std::string& raw) {
-            if (raw.empty()) return;
-            std::string digits = normalize_phone(raw);
-            if (digits.size() >= 4) {
-                phone_index_upsert(db, digits, pid, nachname, vorname_val);
-                ++phone_count;
-            }
-        };
-        store_phone(ph.telefon);
-        store_phone(ph.telefon2);
-        store_phone(ph.handy);
-        store_phone(ph.telefon3);
-
-        if ((i + 1) % 100 == 0) {
-            LOG_INFO("Phone crawl: %d/%d patients processed, %d phones",
-                     (int)(i + 1), (int)patients.size(), phone_count);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-    }
-    LOG_INFO("Phone crawl complete: %d phones indexed from %d patients",
-             phone_count, (int)patients.size());
-    return phone_count;
+static void index_patient_phones(sqlite3* db, int patient_id,
+                                  const std::string& nachname,
+                                  const std::string& vorname,
+                                  const PatientPhones& ph) {
+    auto store_phone = [&](const std::string& raw) {
+        if (raw.empty()) return;
+        std::string digits = normalize_phone(raw);
+        if (digits.size() >= 4)
+            phone_index_upsert(db, digits, patient_id, nachname, vorname);
+    };
+    store_phone(ph.telefon);
+    store_phone(ph.telefon2);
+    store_phone(ph.handy);
+    store_phone(ph.telefon3);
 }
-
-// ============================================================
-// Full RAG crawl (enumerate patients -> embed chunks -> upsert)
-// ============================================================
 
 static int run_full_crawl(const std::vector<PatientRef>& patients,
                           const TomedoConfig& cfg, VectorStore& store,
-                          long long since_ts = 0) {
-    LOG_INFO("Full RAG crawl starting (%d patients, since_ts=%lld)",
-             (int)patients.size(), since_ts);
+                          sqlite3* phone_db, long long since_ts = 0) {
+    int processed = 0;
+    for (const auto& p : patients) {
+        if (since_ts > 0 && p.zuletzt_aufgerufen > 0 &&
+            p.zuletzt_aufgerufen <= since_ts)
+            continue;
+        ++processed;
+    }
+    LOG_INFO("Crawl starting (%d patients total, %d to process, since_ts=%lld)",
+             (int)patients.size(), processed, since_ts);
 
     int total_chunks = 0;
+    int phone_count = 0;
     for (size_t i = 0; i < patients.size(); ++i) {
         if (s_quit.load()) break;
         if (since_ts > 0 && patients[i].zuletzt_aufgerufen > 0 &&
@@ -1853,16 +1789,24 @@ static int run_full_crawl(const std::vector<PatientRef>& patients,
             continue;
 
         int pid = patients[i].ident;
-        std::string doc = fetch_patient_context(pid, cfg);
-        if (doc.empty()) continue;
+        auto pctx = fetch_patient_context_full(pid, cfg);
 
-        auto chunks = chunk_text(doc);
+        if (phone_db) {
+            index_patient_phones(phone_db, pid, pctx.nachname, pctx.vorname, pctx.phones);
+            if (!pctx.phones.telefon.empty() || !pctx.phones.telefon2.empty() ||
+                !pctx.phones.handy.empty() || !pctx.phones.telefon3.empty())
+                ++phone_count;
+        }
+
+        if (pctx.text.empty()) continue;
+
+        auto chunks = chunk_text(pctx.text);
         std::string source = "patient/" + std::to_string(pid);
         for (size_t ci = 0; ci < chunks.size(); ++ci) {
             if (s_quit.load()) break;
             auto emb = embed_text(chunks[ci], cfg);
             if (emb.empty()) {
-                LOG_DEBUG("Full RAG crawl: embed_text empty for patient=%d chunk=%d", pid, (int)ci);
+                LOG_DEBUG("Crawl: embed_text empty for patient=%d chunk=%d", pid, (int)ci);
                 continue;
             }
             std::string chunk_source = source + "/chunk" + std::to_string(ci);
@@ -1871,13 +1815,13 @@ static int run_full_crawl(const std::vector<PatientRef>& patients,
         }
 
         if ((i + 1) % 50 == 0 || i + 1 == patients.size()) {
-            LOG_INFO("Full RAG crawl: %d/%d patients, %d chunks so far",
-                     (int)(i + 1), (int)patients.size(), total_chunks);
+            LOG_INFO("Crawl: %d/%d patients, %d chunks, %d phones so far",
+                     (int)(i + 1), (int)patients.size(), total_chunks, phone_count);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
-    LOG_INFO("Full RAG crawl complete: %d chunks from %d patients",
-             total_chunks, (int)patients.size());
+    LOG_INFO("Crawl complete: %d chunks, %d phones from %d patients",
+             total_chunks, phone_count, (int)patients.size());
     return total_chunks;
 }
 
@@ -2247,9 +2191,9 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
     }
 }
 
-// mgr is initialized in start() and owned exclusively by the event-loop thread
-// after start() returns. Do not touch mgr from any other thread. mg_mgr_free()
-// is called inside the event-loop thread on shutdown.
+// mgr is initialized in start(). The event-loop thread polls it until s_quit.
+// mg_mgr_free() is called from main() via free_mgr(), after g_query_pool.shutdown()
+// ensures no worker thread can call mg_wakeup on this mgr.
 struct HttpServer {
     struct mg_mgr mgr;
     std::thread   thread;
@@ -2349,8 +2293,7 @@ int main(int argc, char** argv) {
         auto do_crawl = [&](long long ts) {
             auto patients = enumerate_patients(cfg);
             if (!patients.empty()) {
-                run_phone_crawl(patients, cfg, phone_db, ts);
-                run_full_crawl(patients, cfg, g_vector_store, ts);
+                run_full_crawl(patients, cfg, g_vector_store, phone_db, ts);
             }
             g_last_crawl_time.store(static_cast<long>(
                 std::chrono::duration_cast<std::chrono::seconds>(
