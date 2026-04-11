@@ -170,6 +170,7 @@
 #include <mutex>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <vector>
 #include <algorithm>
@@ -1234,7 +1235,7 @@ static std::string http_read_all_plain(int fd, int timeout_ms) {
             if (errno == EINTR) continue;
             break;
         }
-        if (pr == 0) break;
+        if (pr == 0) continue;
         ssize_t n = ::read(fd, buf, sizeof(buf));
         if (n <= 0) break;
         result.append(buf, static_cast<size_t>(n));
@@ -1279,8 +1280,20 @@ static HttpResponse http_post_plain(const std::string& url, const std::string& b
         << body;
 
     std::string raw_req = req.str();
-    ssize_t written = ::write(fd, raw_req.c_str(), raw_req.size());
-    if (written <= 0) { close(fd); return fail; }
+    {
+        const char* data = raw_req.c_str();
+        size_t remaining = raw_req.size();
+        while (remaining > 0) {
+            ssize_t n = ::write(fd, data, remaining);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                close(fd); return fail;
+            }
+            if (n == 0) { close(fd); return fail; }
+            data += n;
+            remaining -= static_cast<size_t>(n);
+        }
+    }
 
     std::string raw_resp = http_read_all_plain(fd, timeout_ms);
     close(fd);
@@ -1316,7 +1329,6 @@ static std::vector<float> embed_text(const std::string& text, const TomedoConfig
     ++pos;
 
     std::vector<float> result;
-    result.reserve(768);
     while (pos < resp.body.size()) {
         while (pos < resp.body.size() &&
                (resp.body[pos] == ' ' || resp.body[pos] == '\t' ||
@@ -1512,6 +1524,7 @@ struct PatientRef {
     std::string nachname;
     std::string vorname;
     long long geburts_datum = 0;
+    long long zuletzt_aufgerufen = 0;
 };
 
 static std::vector<PatientRef> parse_patient_array(const std::string& json) {
@@ -1540,6 +1553,7 @@ static std::vector<PatientRef> parse_patient_array(const std::string& json) {
         p.nachname = json_get_string(obj, "nachname");
         p.vorname = json_get_string(obj, "vorname");
         p.geburts_datum = json_get_int64(obj, "geburtsDatum", 0);
+        p.zuletzt_aufgerufen = json_get_int64(obj, "zuletztAufgerufen", 0);
         if (p.ident > 0)
             result.push_back(std::move(p));
         pos = obj_end;
@@ -1774,19 +1788,19 @@ static std::string fetch_patient_context(int patient_id, const TomedoConfig& cfg
 // Background phone crawl (populates phone_index from Tomedo)
 // ============================================================
 
-static int run_phone_crawl(const TomedoConfig& cfg, sqlite3* db) {
-    LOG_INFO("Phone crawl starting...");
-    auto patients = enumerate_patients(cfg);
-    if (patients.empty()) {
-        LOG_WARN("Phone crawl: no patients returned");
-        return 0;
-    }
-    LOG_INFO("Phone crawl: %d patients to process", (int)patients.size());
+static int run_phone_crawl(const std::vector<PatientRef>& patients,
+                           const TomedoConfig& cfg, sqlite3* db,
+                           long long since_ts = 0) {
+    LOG_INFO("Phone crawl starting (%d patients, since_ts=%lld)",
+             (int)patients.size(), since_ts);
 
     int phone_count = 0;
     std::string base = "/" + cfg.tomedo_db;
     for (size_t i = 0; i < patients.size(); ++i) {
         if (s_quit.load()) break;
+        if (since_ts > 0 && patients[i].zuletzt_aufgerufen > 0 &&
+            patients[i].zuletzt_aufgerufen <= since_ts)
+            continue;
         int pid = patients[i].ident;
         auto resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
             base + "/patient/" + std::to_string(pid),
@@ -1825,18 +1839,18 @@ static int run_phone_crawl(const TomedoConfig& cfg, sqlite3* db) {
 // Full RAG crawl (enumerate patients -> embed chunks -> upsert)
 // ============================================================
 
-static int run_full_crawl(const TomedoConfig& cfg, VectorStore& store) {
-    LOG_INFO("Full RAG crawl starting...");
-    auto patients = enumerate_patients(cfg);
-    if (patients.empty()) {
-        LOG_WARN("Full RAG crawl: no patients returned");
-        return 0;
-    }
-    LOG_INFO("Full RAG crawl: %d patients to process", (int)patients.size());
+static int run_full_crawl(const std::vector<PatientRef>& patients,
+                          const TomedoConfig& cfg, VectorStore& store,
+                          long long since_ts = 0) {
+    LOG_INFO("Full RAG crawl starting (%d patients, since_ts=%lld)",
+             (int)patients.size(), since_ts);
 
     int total_chunks = 0;
     for (size_t i = 0; i < patients.size(); ++i) {
         if (s_quit.load()) break;
+        if (since_ts > 0 && patients[i].zuletzt_aufgerufen > 0 &&
+            patients[i].zuletzt_aufgerufen <= since_ts)
+            continue;
 
         int pid = patients[i].ident;
         std::string doc = fetch_patient_context(pid, cfg);
@@ -1949,12 +1963,172 @@ public:
 ResolveQueue g_resolve_queue;
 
 // ============================================================
+// HttpContext — passed as fn_data to every Mongoose connection
+// ============================================================
+
+struct HttpContext {
+    const TomedoConfig* cfg = nullptr;
+    struct mg_mgr*      mgr = nullptr;
+};
+
+// ============================================================
+// Pending query responses — written by worker threads, read by Mongoose thread
+// ============================================================
+
+struct PendingResponse {
+    int         status = 200;
+    std::string json;
+};
+
+static std::mutex                                         g_pending_mutex;
+static std::unordered_map<unsigned long, PendingResponse> g_pending_responses;
+static std::unordered_set<unsigned long>                  g_inflight_query_ids;
+static std::unordered_set<unsigned long>                  g_cancelled_queries;
+
+static std::string build_query_json(const std::vector<QueryResult>& results) {
+    std::ostringstream j;
+    j << "{\"results\":[";
+    for (size_t i = 0; i < results.size(); ++i) {
+        if (i) j << ",";
+        float safe_score = std::isfinite(results[i].score) ? results[i].score : 0.0f;
+        j << "{"
+          << "\"text\":\""     << json_escape(results[i].text)   << "\","
+          << "\"source\":\""   << json_escape(results[i].source) << "\","
+          << "\"patient_id\":" << results[i].patient_id          << ","
+          << "\"score\":"      << safe_score
+          << "}";
+    }
+    j << "]}";
+    return j.str();
+}
+
+// ============================================================
+// QueryWorkerPool — embeds text off the Mongoose event-loop thread
+// ============================================================
+
+static constexpr size_t QUERY_POOL_MAX_QUEUE = 32;
+
+class QueryWorkerPool {
+    struct Job {
+        unsigned long      conn_id;
+        struct mg_mgr*     mgr;
+        std::string        text;
+        int                top_k;
+        int                patient_id_filter;
+        const TomedoConfig* cfg;
+    };
+
+    std::queue<Job>         queue_;
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    bool                    stop_ = false;
+    std::vector<std::thread> workers_;
+
+    void worker_func() {
+        while (true) {
+            Job job;
+            {
+                std::unique_lock<std::mutex> lk(mutex_);
+                cv_.wait(lk, [this]{ return stop_ || !queue_.empty(); });
+                if (stop_ && queue_.empty()) return;
+                job = std::move(queue_.front());
+                queue_.pop();
+            }
+
+            PendingResponse pr;
+            auto emb = embed_text(job.text, *job.cfg);
+            if (emb.empty()) {
+                pr.status = 503;
+                pr.json   = "{\"error\":\"embedding_unavailable\"}";
+            } else {
+                auto results = g_vector_store.query(emb, job.top_k, job.patient_id_filter);
+                pr.status = 200;
+                pr.json   = build_query_json(results);
+            }
+
+            bool should_wake = false;
+            {
+                std::lock_guard<std::mutex> lk(g_pending_mutex);
+                if (g_cancelled_queries.erase(job.conn_id) == 0) {
+                    g_pending_responses[job.conn_id] = std::move(pr);
+                    should_wake = true;
+                }
+            }
+            if (should_wake)
+                mg_wakeup(job.mgr, job.conn_id, "Q", 1);
+        }
+    }
+
+public:
+    void start(int n = 4) {
+        workers_.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i)
+            workers_.emplace_back([this]{ worker_func(); });
+    }
+
+    bool enqueue(unsigned long conn_id, struct mg_mgr* mgr,
+                 const std::string& text, int top_k, int patient_id_filter,
+                 const TomedoConfig* cfg) {
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            if (queue_.size() >= QUERY_POOL_MAX_QUEUE) return false;
+            queue_.push({conn_id, mgr, text, top_k, patient_id_filter, cfg});
+        }
+        cv_.notify_one();
+        return true;
+    }
+
+    void shutdown() {
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (auto& t : workers_)
+            if (t.joinable()) t.join();
+    }
+
+    ~QueryWorkerPool() { shutdown(); }
+};
+
+QueryWorkerPool g_query_pool;
+
+// ============================================================
 // Mongoose HTTP server
 // ============================================================
 
 void http_handler(struct mg_connection *c, int ev, void *ev_data) {
+    if (ev == MG_EV_WAKEUP) {
+        PendingResponse pr;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lk(g_pending_mutex);
+            auto it = g_pending_responses.find(c->id);
+            if (it != g_pending_responses.end()) {
+                pr    = std::move(it->second);
+                found = true;
+                g_pending_responses.erase(it);
+            }
+            g_inflight_query_ids.erase(c->id);
+        }
+        if (found)
+            mg_http_reply(c, pr.status, "Content-Type: application/json\r\n",
+                          "%s", pr.json.c_str());
+        return;
+    }
+
+    if (ev == MG_EV_CLOSE) {
+        std::lock_guard<std::mutex> lk(g_pending_mutex);
+        g_pending_responses.erase(c->id);
+        if (g_inflight_query_ids.erase(c->id))
+            g_cancelled_queries.insert(c->id);
+        return;
+    }
+
     if (ev != MG_EV_HTTP_MSG) return;
     struct mg_http_message *hm = (struct mg_http_message *)ev_data;
+    auto* ctx = static_cast<HttpContext*>(c->fn_data);
+    const TomedoConfig& cfg = *ctx->cfg;
 
     if (mg_strcmp(hm->uri, mg_str("/health")) == 0) {
         long lc = g_last_crawl_time.load();
@@ -2001,29 +2175,19 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
             return;
         }
 
-        auto emb = embed_text(query_text, *static_cast<const TomedoConfig*>(c->fn_data));
-        if (emb.empty()) {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                          "{\"error\":\"embedding_unavailable\"}");
+        {
+            std::lock_guard<std::mutex> lk(g_pending_mutex);
+            g_inflight_query_ids.insert(c->id);
+        }
+        if (!g_query_pool.enqueue(c->id, ctx->mgr, query_text, top_k, patient_id_filter, &cfg)) {
+            {
+                std::lock_guard<std::mutex> lk(g_pending_mutex);
+                g_inflight_query_ids.erase(c->id);
+            }
+            mg_http_reply(c, 429, "Content-Type: application/json\r\n",
+                          "{\"error\":\"too_many_requests\"}");
             return;
         }
-
-        auto results = g_vector_store.query(emb, top_k, patient_id_filter);
-
-        std::ostringstream j;
-        j << "{\"results\":[";
-        for (size_t i = 0; i < results.size(); ++i) {
-            if (i) j << ",";
-            float safe_score = std::isfinite(results[i].score) ? results[i].score : 0.0f;
-            j << "{"
-              << "\"text\":\""    << json_escape(results[i].text)   << "\","
-              << "\"source\":\""  << json_escape(results[i].source) << "\","
-              << "\"patient_id\":" << results[i].patient_id          << ","
-              << "\"score\":"      << safe_score
-              << "}";
-        }
-        j << "]}";
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
 
     } else if (mg_strcmp(hm->uri, mg_str("/caller")) == 0 &&
                mg_strcmp(hm->method, mg_str("POST")) == 0) {
@@ -2090,12 +2254,19 @@ struct HttpServer {
     struct mg_mgr mgr;
     std::thread   thread;
     std::string   listen_addr;
+    HttpContext   ctx;
 
     bool start(const TomedoConfig& cfg) {
         listen_addr = "http://" + cfg.api_host + ":" + std::to_string(cfg.api_port);
         mg_mgr_init(&mgr);
-        struct mg_connection *c = mg_http_listen(&mgr, listen_addr.c_str(), http_handler,
-                                                 const_cast<TomedoConfig*>(&cfg));
+        if (!mg_wakeup_init(&mgr)) {
+            LOG_ERROR("mg_wakeup_init failed — cannot serve /query asynchronously");
+            mg_mgr_free(&mgr);
+            return false;
+        }
+        ctx.cfg = &cfg;
+        ctx.mgr = &mgr;
+        struct mg_connection *c = mg_http_listen(&mgr, listen_addr.c_str(), http_handler, &ctx);
         if (!c) {
             LOG_ERROR("Failed to listen on %s", listen_addr.c_str());
             mg_mgr_free(&mgr);
@@ -2105,10 +2276,11 @@ struct HttpServer {
             while (!s_quit.load()) {
                 mg_mgr_poll(&mgr, MG_POLL_TIMEOUT_MS);
             }
-            mg_mgr_free(&mgr);
         });
         return true;
     }
+
+    void free_mgr() { mg_mgr_free(&mgr); }
 
     ~HttpServer() {
         if (thread.joinable()) thread.join();
@@ -2162,6 +2334,7 @@ int main(int argc, char** argv) {
     g_phone_db = phone_db;
 
     g_resolve_queue.start();
+    g_query_pool.start(4);
 
     std::thread expiry_thread([]() {
         while (!s_quit.load()) {
@@ -2172,11 +2345,21 @@ int main(int argc, char** argv) {
     });
 
     std::thread crawl_thread([&cfg, phone_db]() {
-        run_phone_crawl(cfg, phone_db);
-        run_full_crawl(cfg, g_vector_store);
-        g_last_crawl_time.store(static_cast<long>(
-            std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count()));
+        long long since_ts = 0;
+        auto do_crawl = [&](long long ts) {
+            auto patients = enumerate_patients(cfg);
+            if (!patients.empty()) {
+                run_phone_crawl(patients, cfg, phone_db, ts);
+                run_full_crawl(patients, cfg, g_vector_store, ts);
+            }
+            g_last_crawl_time.store(static_cast<long>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()));
+        };
+        do_crawl(since_ts);
+        since_ts = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
         while (!s_quit.load()) {
             for (int i = 0; i < cfg.crawl_interval_sec && !s_quit.load(); ++i) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -2184,17 +2367,17 @@ int main(int argc, char** argv) {
             }
             if (s_quit.load()) break;
             g_crawl_requested.store(false);
-            run_phone_crawl(cfg, phone_db);
-            run_full_crawl(cfg, g_vector_store);
-            g_last_crawl_time.store(static_cast<long>(
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count()));
+            do_crawl(since_ts);
+            since_ts = static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
         }
     });
 
     HttpServer srv;
     if (!srv.start(cfg)) {
         s_quit.store(true);
+        g_query_pool.shutdown();
         g_resolve_queue.shutdown();
         crawl_thread.join();
         expiry_thread.join();
@@ -2204,7 +2387,9 @@ int main(int argc, char** argv) {
 
     LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
 
+    g_query_pool.shutdown();
     srv.join();
+    srv.free_mgr();
     g_resolve_queue.shutdown();
     crawl_thread.join();
     expiry_thread.join();
