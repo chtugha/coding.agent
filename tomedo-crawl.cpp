@@ -227,7 +227,10 @@ static TomedoConfig parse_config(const std::string& path) {
         else if (key == "tomedo_user")        cfg.tomedo_user = val;
         else if (key == "tomedo_pass")        cfg.tomedo_pass = val;
         else if (key == "tomedo_cert_pem")    cfg.tomedo_cert_pem = val;
-        else if (key == "crawl_interval_sec") cfg.crawl_interval_sec = parse_int(val, cfg.crawl_interval_sec);
+        else if (key == "crawl_interval_sec") {
+            int v = parse_int(val, cfg.crawl_interval_sec);
+            cfg.crawl_interval_sec = (v > 0) ? v : cfg.crawl_interval_sec;
+        }
         else if (key == "ollama_url")         cfg.ollama_url = val;
         else if (key == "ollama_model")       cfg.ollama_model = val;
         else if (key == "api_host")           cfg.api_host = val;
