@@ -450,6 +450,13 @@ public:
                 {
                     std::unique_lock<std::mutex> lk(mutex_);
                     cv_.wait(lk, [this]{ return stop_ || !queue_.empty(); });
+                    // Drain remaining jobs after stop_ is set so in-flight
+                    // caller registrations complete. NOTE (Step 5): when
+                    // resolve_caller makes a live TLS/HTTP call (~1-5 s each),
+                    // any jobs queued before SIGINT will run to completion.
+                    // If that is unacceptable, change this to
+                    //   if (stop_) return;
+                    // to abandon pending jobs on shutdown.
                     if (stop_ && queue_.empty()) return;
                     job = std::move(queue_.front());
                     queue_.pop();
@@ -615,6 +622,7 @@ int main(int argc, char** argv) {
     HttpServer srv;
     if (!srv.start(cfg)) {
         s_quit.store(true);
+        g_resolve_queue.shutdown();
         expiry_thread.join();
         return 1;
     }
