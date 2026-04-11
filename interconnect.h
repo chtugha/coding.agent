@@ -144,7 +144,8 @@ enum class ServiceType : uint8_t {
     KOKORO_SERVICE = 5,
     OUTBOUND_AUDIO_PROCESSOR = 6,
     FRONTEND = 7,
-    NEUTTS_SERVICE = 9
+    NEUTTS_SERVICE = 9,
+    TOMEDO_CRAWL_SERVICE = 10
 };
 
 inline bool is_pipeline_service(ServiceType type) {
@@ -174,6 +175,7 @@ inline const char* service_type_to_string(ServiceType type) {
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return "OUTBOUND_AUDIO_PROCESSOR";
         case ServiceType::FRONTEND: return "FRONTEND";
         case ServiceType::NEUTTS_SERVICE: return "NEUTTS_SERVICE";
+        case ServiceType::TOMEDO_CRAWL_SERVICE: return "TOMEDO_CRAWL";
         default: return "UNKNOWN";
     }
 }
@@ -269,6 +271,7 @@ struct PacketTrace {
             case 6: return "OAP";
             case 7: return "FRN";
             case 9: return "NTS";
+            case 10: return "RAG";
             default: return "???";
         }
     }
@@ -288,6 +291,7 @@ struct PacketTrace {
 //   OAP        (base 13150): mgmt_listen=13150, data_listen=13151
 //   FRONTEND   (base 13160): mgmt_listen=13160, data_listen=13161
 //   NEUTTS     (base 13170): mgmt_listen=13170, data_listen=13171
+//   TOMEDO_CRAWL (base 13180): mgmt_listen=13180, data_listen=13181
 //
 // Data flow example: SIP sends data to IAP by connecting to IAP's data_listen (13111).
 // IAP sends management msgs to SIP by connecting to SIP's mgmt_listen (13100).
@@ -302,6 +306,7 @@ inline uint16_t service_base_port(ServiceType type) {
         case ServiceType::NEUTTS_SERVICE:             return 13170;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR:   return 13150;
         case ServiceType::FRONTEND:                   return 13160;
+        case ServiceType::TOMEDO_CRAWL_SERVICE:       return 13180;
         default: return 0;
     }
 }
