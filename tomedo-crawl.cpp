@@ -164,7 +164,9 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
+#include <queue>
 #include <unordered_map>
 #include <vector>
 #include <signal.h>
@@ -361,7 +363,15 @@ static std::string json_escape(const std::string& s) {
             case '\n': out += "\\n";  break;
             case '\r': out += "\\r";  break;
             case '\t': out += "\\t";  break;
-            default:   out += c;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char buf[7];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+                break;
         }
     }
     return out;
@@ -421,6 +431,57 @@ static void resolve_caller(int call_id, const std::string& /*phone*/) {
 }
 
 // ============================================================
+// ResolveQueue — bounded single-background-thread worker queue
+// ============================================================
+
+class ResolveQueue {
+    struct Job { int call_id; std::string phone; };
+    std::queue<Job>          queue_;
+    std::mutex               mutex_;
+    std::condition_variable  cv_;
+    bool                     stop_ = false;
+    std::thread              worker_;
+
+public:
+    void start() {
+        worker_ = std::thread([this]() {
+            while (true) {
+                Job job;
+                {
+                    std::unique_lock<std::mutex> lk(mutex_);
+                    cv_.wait(lk, [this]{ return stop_ || !queue_.empty(); });
+                    if (stop_ && queue_.empty()) return;
+                    job = std::move(queue_.front());
+                    queue_.pop();
+                }
+                resolve_caller(job.call_id, job.phone);
+            }
+        });
+    }
+
+    void enqueue(int call_id, const std::string& phone) {
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            queue_.push({call_id, phone});
+        }
+        cv_.notify_one();
+    }
+
+    void shutdown() {
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_one();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    ~ResolveQueue() { shutdown(); }
+};
+
+ResolveQueue g_resolve_queue;
+
+// ============================================================
 // Mongoose HTTP server
 // ============================================================
 
@@ -450,16 +511,14 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
             return;
         }
         g_caller_store.register_caller(call_id, phone);
-        std::thread([call_id, phone]() {
-            resolve_caller(call_id, phone);
-        }).detach();
+        g_resolve_queue.enqueue(call_id, phone);
         mg_http_reply(c, 202, "Content-Type: application/json\r\n",
                       "{\"status\":\"pending\"}");
 
     } else {
         struct mg_str caps[1] = {};
-        if (mg_match(hm->uri, mg_str("/caller/*"), caps) &&
-            mg_strcmp(hm->method, mg_str("GET")) == 0) {
+        bool is_caller_wildcard = mg_match(hm->uri, mg_str("/caller/*"), caps);
+        if (is_caller_wildcard && mg_strcmp(hm->method, mg_str("GET")) == 0) {
             int call_id = std::atoi(std::string(caps[0].buf, caps[0].len).c_str());
             CallerRecord rec;
             if (!g_caller_store.get(call_id, rec)) {
@@ -481,8 +540,7 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
                 j << "\"vorname\":\"" << json_escape(rec.vorname) << "\"";
             j << "}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
-        } else if (mg_match(hm->uri, mg_str("/caller/*"), caps) &&
-                   mg_strcmp(hm->method, mg_str("DELETE")) == 0) {
+        } else if (is_caller_wildcard && mg_strcmp(hm->method, mg_str("DELETE")) == 0) {
             int call_id = std::atoi(std::string(caps[0].buf, caps[0].len).c_str());
             g_caller_store.remove(call_id);
             mg_http_reply(c, 204, "", "");
@@ -544,6 +602,8 @@ int main(int argc, char** argv) {
     LOG_INFO("tomedo-crawl starting (api=%s:%d, db=%s)",
              cfg.api_host.c_str(), cfg.api_port, cfg.db_path.c_str());
 
+    g_resolve_queue.start();
+
     std::thread expiry_thread([]() {
         while (!s_quit.load()) {
             for (int i = 0; i < 300 && !s_quit.load(); ++i)
@@ -562,6 +622,7 @@ int main(int argc, char** argv) {
     LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
 
     srv.join();
+    g_resolve_queue.shutdown();
     expiry_thread.join();
 
     LOG_INFO("tomedo-crawl stopped");
