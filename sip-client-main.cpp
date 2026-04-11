@@ -112,6 +112,89 @@ static std::string extract_sip_field(const std::string& header, const std::strin
 
 static constexpr int RTP_PORT_BASE = 10000;
 
+static std::string extract_phone_from_sip_from(const std::string& from) {
+    size_t start = from.find("<sip:");
+    size_t scheme_len = 5;
+    if (start == std::string::npos) {
+        start = from.find("<sips:");
+        scheme_len = 6;
+    }
+    if (start == std::string::npos) return "";
+    start += scheme_len;
+    size_t at = from.find('@', start);
+    size_t gt = from.find('>', start);
+    size_t end = (at != std::string::npos && at < gt) ? at : gt;
+    if (end == std::string::npos) return "";
+    return from.substr(start, end - start);
+}
+
+static int tomedo_connect_nonblock() {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(13181);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    connect(sock, (struct sockaddr*)&addr, sizeof(addr));
+    struct pollfd pfd{sock, POLLOUT, 0};
+    if (poll(&pfd, 1, 50) <= 0 || !(pfd.revents & POLLOUT)) {
+        close(sock);
+        return -1;
+    }
+    int conn_err = 0;
+    socklen_t conn_len = sizeof(conn_err);
+    getsockopt(sock, SOL_SOCKET, SO_ERROR, &conn_err, &conn_len);
+    if (conn_err != 0) {
+        close(sock);
+        return -1;
+    }
+    return sock;
+}
+
+static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {
+    int sock = tomedo_connect_nonblock();
+    if (sock < 0) {
+        fprintf(stderr, "SIP_CLIENT DEBUG call=%u: tomedo-crawl not reachable, caller lookup skipped\n", call_id);
+        return;
+    }
+    std::string escaped;
+    for (char c : phone) {
+        if (c == '"' || c == '\\') escaped += '\\';
+        escaped += c;
+    }
+    std::ostringstream body;
+    body << "{\"call_id\":" << call_id << ",\"phone_number\":\"" << escaped << "\"}";
+    std::string b = body.str();
+    std::ostringstream req;
+    req << "POST /caller HTTP/1.1\r\n"
+        << "Host: 127.0.0.1:13181\r\n"
+        << "Content-Type: application/json\r\n"
+        << "Content-Length: " << b.size() << "\r\n"
+        << "Connection: close\r\n\r\n"
+        << b;
+    std::string r = req.str();
+    send(sock, r.c_str(), r.size(), 0);
+    close(sock);
+}
+
+static void delete_tomedo_caller(uint32_t call_id) {
+    int sock = tomedo_connect_nonblock();
+    if (sock < 0) {
+        fprintf(stderr, "SIP_CLIENT DEBUG call=%u: tomedo-crawl not reachable, caller lookup skipped\n", call_id);
+        return;
+    }
+    std::ostringstream req;
+    req << "DELETE /caller/" << call_id << " HTTP/1.1\r\n"
+        << "Host: 127.0.0.1:13181\r\n"
+        << "Content-Length: 0\r\n"
+        << "Connection: close\r\n\r\n";
+    std::string r = req.str();
+    send(sock, r.c_str(), r.size(), 0);
+    close(sock);
+}
+
 struct CallSession {
     int id;
     int line_index;
@@ -132,6 +215,7 @@ struct CallSession {
     std::atomic<uint64_t> rtp_fwd_count{0};    // Packets successfully forwarded to IAP
     std::atomic<uint64_t> rtp_discard_count{0}; // Packets discarded (IAP not connected)
     std::chrono::steady_clock::time_point start_time;
+    std::string caller_number;
 
     CallSession(int i, int line, std::string scid) : id(i), line_index(line), sip_call_id(scid) {
         ssrc = arc4random();
@@ -614,6 +698,15 @@ private:
             id_to_call_[cid] = session;
         }
 
+        std::string phone = extract_phone_from_sip_from(from);
+        if (!phone.empty()) {
+            session->caller_number = phone;
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid, "Caller phone extracted: %s", phone.c_str());
+            std::thread([cid, phone]() { notify_tomedo_crawl(cid, phone); }).detach();
+        } else {
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid, "Could not extract phone from From header: %s", from.c_str());
+        }
+
         session->rtp_thread = std::thread(&SipClient::rtp_receiver_loop, this, session);
 
         std::string lip = line->local_ip.empty() ? local_ip_ : line->local_ip;
@@ -674,6 +767,7 @@ private:
     }
 
     void handle_call_end(uint32_t call_id) {
+        std::thread([call_id]() { delete_tomedo_caller(call_id); }).detach();
         std::thread rtp_thread_to_join;
         {
             std::lock_guard<std::mutex> lock(calls_mutex_);
