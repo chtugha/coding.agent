@@ -176,16 +176,19 @@ public:
 
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::LLAMA_SERVICE);
 
-        {
+        if (resolve_rag_addr()) {
             std::string health = rag_http_get("/health");
-            rag_available_ = !health.empty();
-            if (rag_available_) {
+            if (!health.empty()) {
                 log_fwd_.forward(whispertalk::LogLevel::INFO, 0,
                     "RAG service reachable at %s:%d", rag_host_.c_str(), rag_port_);
             } else {
                 log_fwd_.forward(whispertalk::LogLevel::INFO, 0,
-                    "RAG service not available — will skip enrichment");
+                    "RAG service not responding — will retry on first call");
             }
+        } else {
+            log_fwd_.forward(whispertalk::LogLevel::WARN, 0,
+                "RAG DNS resolution failed for %s:%d — RAG disabled",
+                rag_host_.c_str(), rag_port_);
         }
 
         if (!interconnect_.connect_to_downstream()) {
@@ -480,20 +483,55 @@ private:
         return union_sz == 0 ? 0.0f : (float)intersect / (float)union_sz;
     }
 
-    std::string rag_http_get(const std::string& path) {
+    bool resolve_rag_addr() {
         struct addrinfo hints{};
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
         struct addrinfo* res = nullptr;
         if (getaddrinfo(rag_host_.c_str(), std::to_string(rag_port_).c_str(), &hints, &res) != 0 || !res)
-            return "";
-        int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-        if (sock < 0) { freeaddrinfo(res); return ""; }
+            return false;
+        memcpy(&rag_addr_, res->ai_addr, res->ai_addrlen);
+        rag_addrlen_ = res->ai_addrlen;
+        freeaddrinfo(res);
+        rag_addr_resolved_ = true;
+        return true;
+    }
+
+    bool is_rag_available() {
+        if (!rag_addr_resolved_) return false;
+        int64_t disabled = rag_disabled_until_.load(std::memory_order_relaxed);
+        if (disabled == 0) return true;
+        auto now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        return now >= disabled;
+    }
+
+    void rag_record_success() {
+        rag_fail_count_.store(0, std::memory_order_relaxed);
+        rag_disabled_until_.store(0, std::memory_order_relaxed);
+    }
+
+    void rag_record_failure(uint32_t cid) {
+        int fails = rag_fail_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (fails >= RAG_FAIL_THRESHOLD) {
+            auto cooldown_end = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count() + RAG_COOLDOWN_SEC;
+            rag_disabled_until_.store(cooldown_end, std::memory_order_relaxed);
+            rag_fail_count_.store(0, std::memory_order_relaxed);
+            log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
+                "RAG service: %d consecutive failures — disabling for %ds",
+                RAG_FAIL_THRESHOLD, RAG_COOLDOWN_SEC);
+        }
+    }
+
+    std::string rag_http_get(const std::string& path) {
+        if (!rag_addr_resolved_) return "";
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return "";
         int flags = fcntl(sock, F_GETFL, 0);
         if (flags == -1) flags = 0;
         fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-        connect(sock, res->ai_addr, res->ai_addrlen);
-        freeaddrinfo(res);
+        connect(sock, (struct sockaddr*)&rag_addr_, rag_addrlen_);
         struct pollfd pfd{sock, POLLOUT, 0};
         if (poll(&pfd, 1, RAG_TIMEOUT_MS) <= 0 || !(pfd.revents & POLLOUT)) {
             close(sock);
@@ -531,6 +569,13 @@ private:
             response.append(buf, n);
         }
         close(sock);
+        size_t status_end = response.find("\r\n");
+        if (status_end == std::string::npos) return "";
+        std::string status_line = response.substr(0, status_end);
+        size_t sp1 = status_line.find(' ');
+        if (sp1 == std::string::npos) return "";
+        int http_status = std::atoi(status_line.c_str() + sp1 + 1);
+        if (http_status < 200 || http_status >= 300) return "";
         size_t hdr_end = response.find("\r\n\r\n");
         if (hdr_end == std::string::npos) return "";
         return response.substr(hdr_end + 4);
@@ -679,14 +724,13 @@ private:
 
         std::string greeting_hint;
         std::string rag_ctx;
-        if (rag_available_) {
+        if (is_rag_available()) {
             if (!call->greeted) {
                 std::string caller_json = rag_get_caller(cid);
                 if (caller_json.empty()) {
-                    rag_available_ = false;
-                    log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
-                        "RAG service unreachable — disabling enrichment for remaining calls");
+                    rag_record_failure(cid);
                 } else {
+                    rag_record_success();
                     std::string status = extract_json_string(caller_json, "status");
                     if (status == "found") {
                         std::string name = extract_json_string(caller_json, "name");
@@ -701,13 +745,12 @@ private:
                     call->greeted = true;
                 }
             }
-            if (rag_available_) {
+            if (is_rag_available()) {
                 std::string rag_body = rag_query(text, 3, call->patient_id);
                 if (rag_body.empty()) {
-                    rag_available_ = false;
-                    log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
-                        "RAG service unreachable — disabling enrichment for remaining calls");
+                    rag_record_failure(cid);
                 } else {
+                    rag_record_success();
                     rag_ctx = extract_rag_text(rag_body);
                     if (!rag_ctx.empty()) {
                         log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid,
@@ -1124,7 +1167,13 @@ private:
     std::atomic<int> cmd_sock_{-1};
     const std::string rag_host_;
     const int rag_port_;
-    std::atomic<bool> rag_available_{false};
+    struct sockaddr_storage rag_addr_{};
+    socklen_t rag_addrlen_{0};
+    bool rag_addr_resolved_{false};
+    std::atomic<int> rag_fail_count_{0};
+    static constexpr int RAG_FAIL_THRESHOLD = 3;
+    static constexpr int RAG_COOLDOWN_SEC = 30;
+    std::atomic<int64_t> rag_disabled_until_{0};
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;
