@@ -76,7 +76,11 @@ inline bool FrontendServer::validate_schema() {
         std::vector<std::string> cols;
         std::string pragma = "PRAGMA table_info(" + std::string(table_name) + ")";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, pragma.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return cols;
+        if (sqlite3_prepare_v2(db_, pragma.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            std::cerr << "  Error: could not query PRAGMA table_info for " << table_name
+                      << ": " << sqlite3_errmsg(db_) << "\n";
+            return cols;
+        }
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char* col_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
             if (col_name) cols.emplace_back(col_name);
@@ -95,7 +99,6 @@ inline bool FrontendServer::validate_schema() {
         return exists;
     };
 
-    bool had_issues = false;
     bool has_errors = false;
 
     for (const auto& table : canonical) {
@@ -103,11 +106,11 @@ inline bool FrontendServer::validate_schema() {
 
         if (existing.empty()) {
             if (table_exists(table.name)) {
-                std::cout << "  Warning: table " << table.name << " exists but has no columns\n";
+                std::cerr << "  Error: table " << table.name << " exists but has no columns\n";
             } else {
-                std::cout << "  Missing table: " << table.name << " — created by init\n";
+                std::cerr << "  Error: table missing after init: " << table.name << "\n";
             }
-            had_issues = true;
+            has_errors = true;
             continue;
         }
 
@@ -117,38 +120,14 @@ inline bool FrontendServer::validate_schema() {
                 if (ec == col) { found = true; break; }
             }
             if (!found) {
-                std::cout << "  Missing column: " << table.name << "." << col << " — expected to be added by init\n";
-                had_issues = true;
+                std::cerr << "  Error: column missing after init: " << table.name << "." << col << "\n";
+                has_errors = true;
             }
         }
     }
 
-    if (had_issues) {
-        bool still_broken = false;
-        for (const auto& table : canonical) {
-            if (!table_exists(table.name)) {
-                std::cerr << "Error: table still missing after init: " << table.name << "\n";
-                still_broken = true;
-                continue;
-            }
-            auto post_cols = get_columns(table.name);
-            for (const auto& col : table.columns) {
-                bool found = false;
-                for (const auto& ec : post_cols) {
-                    if (ec == col) { found = true; break; }
-                }
-                if (!found) {
-                    std::cerr << "Error: column still missing after init: " << table.name << "." << col << "\n";
-                    still_broken = true;
-                }
-            }
-        }
-        if (still_broken) {
-            has_errors = true;
-            std::cerr << "Database schema has unresolved issues.\n";
-        } else {
-            std::cout << "Database schema updated successfully.\n";
-        }
+    if (has_errors) {
+        std::cerr << "Database schema has unresolved issues.\n";
     } else {
         std::cout << "Database schema is up to date.\n";
     }
