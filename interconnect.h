@@ -267,6 +267,7 @@ struct PacketTrace {
             case 4: return "LLM";
             case 5: return "KOK";
             case 6: return "OAP";
+            case 7: return "FRN";
             case 9: return "NTS";
             default: return "???";
         }
