@@ -982,7 +982,9 @@ static int tcp_connect(const std::string& host, int port, int timeout_ms) {
     if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }
     if (rc < 0) {
         struct pollfd pfd{fd, POLLOUT, 0};
-        if (poll(&pfd, 1, timeout_ms) <= 0) { close(fd); return -1; }
+        int pr;
+        do { pr = poll(&pfd, 1, timeout_ms); } while (pr < 0 && errno == EINTR);
+        if (pr <= 0) { close(fd); return -1; }
         int err = 0; socklen_t len = sizeof(err);
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
         if (err != 0) { close(fd); return -1; }
@@ -1003,7 +1005,11 @@ static std::string ssl_read_all(SSL* ssl, int timeout_ms) {
         if (remaining <= 0) break;
         struct pollfd pfd{fd, POLLIN, 0};
         int pr = poll(&pfd, 1, static_cast<int>(std::min(remaining, (long long)1000)));
-        if (pr <= 0) break;
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) break;
         int n = SSL_read(ssl, buf, sizeof(buf));
         if (n <= 0) {
             int err = SSL_get_error(ssl, n);
@@ -1109,7 +1115,10 @@ static std::string g_ssl_ctx_pem;
 
 static SSL_CTX* get_shared_ssl_ctx(const std::string& pem_path) {
     std::lock_guard<std::mutex> lk(g_ssl_ctx_mutex);
-    if (g_ssl_ctx && g_ssl_ctx_pem == pem_path) return g_ssl_ctx;
+    if (g_ssl_ctx && g_ssl_ctx_pem == pem_path) {
+        SSL_CTX_up_ref(g_ssl_ctx);
+        return g_ssl_ctx;
+    }
     if (g_ssl_ctx) { SSL_CTX_free(g_ssl_ctx); g_ssl_ctx = nullptr; }
     SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) return nullptr;
@@ -1127,6 +1136,7 @@ static SSL_CTX* get_shared_ssl_ctx(const std::string& pem_path) {
     }
     g_ssl_ctx = ctx;
     g_ssl_ctx_pem = pem_path;
+    SSL_CTX_up_ref(g_ssl_ctx);
     return ctx;
 }
 
@@ -1146,7 +1156,7 @@ static HttpResponse https_request(const std::string& method,
     if (!ctx) return fail;
 
     int fd = tcp_connect(host, port, timeout_ms);
-    if (fd < 0) return fail;
+    if (fd < 0) { SSL_CTX_free(ctx); return fail; }
 
     SSL* ssl = SSL_new(ctx);
     SSL_set_fd(ssl, fd);
@@ -1156,7 +1166,7 @@ static HttpResponse https_request(const std::string& method,
         char err_buf[256];
         ERR_error_string_n(err, err_buf, sizeof(err_buf));
         LOG_ERROR("HTTPS: SSL_connect to %s:%d failed: %s", host.c_str(), port, err_buf);
-        SSL_free(ssl); close(fd);
+        SSL_free(ssl); close(fd); SSL_CTX_free(ctx);
         return fail;
     }
 
@@ -1174,7 +1184,7 @@ static HttpResponse https_request(const std::string& method,
     int written = SSL_write(ssl, raw_req.c_str(), static_cast<int>(raw_req.size()));
     if (written <= 0) {
         LOG_ERROR("HTTPS: SSL_write failed for %s %s", method.c_str(), path.c_str());
-        SSL_free(ssl); close(fd);
+        SSL_free(ssl); close(fd); SSL_CTX_free(ctx);
         return fail;
     }
 
@@ -1182,6 +1192,7 @@ static HttpResponse https_request(const std::string& method,
     SSL_shutdown(ssl);
     SSL_free(ssl);
     close(fd);
+    SSL_CTX_free(ctx);
 
     return parse_http_response(raw_resp);
 }
