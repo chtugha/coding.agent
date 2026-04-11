@@ -27,6 +27,7 @@ endif()
 # Dependencies
 find_package(Threads REQUIRED)
 
+
 # Headers
 include_directories(
     ${CMAKE_SOURCE_DIR}
@@ -334,9 +335,27 @@ if(APPLE)
 endif()
 
 # 9. Tomedo Crawl (RAG sidecar)
+# OpenSSL is STATICALLY linked (.a) so the binary has zero runtime dependencies
+# beyond system libraries. Build-time only: requires openssl headers + .a files
+# (e.g. `brew install openssl@3` on macOS).
+find_package(OpenSSL REQUIRED)
+# Force static archives — find_package prefers .dylib on macOS, but we need .a
+# to produce a standalone binary with no Homebrew runtime dependency.
+get_filename_component(_OPENSSL_LIB_DIR "${OPENSSL_SSL_LIBRARY}" DIRECTORY)
+if(EXISTS "${_OPENSSL_LIB_DIR}/libssl.a" AND EXISTS "${_OPENSSL_LIB_DIR}/libcrypto.a")
+    set(OPENSSL_STATIC_SSL    "${_OPENSSL_LIB_DIR}/libssl.a")
+    set(OPENSSL_STATIC_CRYPTO "${_OPENSSL_LIB_DIR}/libcrypto.a")
+else()
+    message(FATAL_ERROR "Static OpenSSL libraries not found in ${_OPENSSL_LIB_DIR}")
+endif()
 add_executable(tomedo-crawl tomedo-crawl.cpp mongoose.c sqlite3.c)
-target_include_directories(tomedo-crawl PRIVATE ${CMAKE_SOURCE_DIR}/third_party/hnswlib)
-target_link_libraries(tomedo-crawl PRIVATE Threads::Threads)
+target_include_directories(tomedo-crawl PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/hnswlib
+    ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(tomedo-crawl PRIVATE
+    Threads::Threads
+    ${OPENSSL_STATIC_SSL}
+    ${OPENSSL_STATIC_CRYPTO})
 target_compile_definitions(tomedo-crawl PRIVATE MG_ENABLE_PACKED_FS=0)
 if(APPLE)
     target_link_libraries(tomedo-crawl PRIVATE "-framework CoreFoundation")

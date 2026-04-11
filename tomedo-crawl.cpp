@@ -172,7 +172,19 @@
 #include <unordered_map>
 #include <memory>
 #include <vector>
+#include <algorithm>
+#include <ctime>
 #include <signal.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #include "mongoose.h"
 #include "sqlite3.h"
@@ -276,6 +288,7 @@ whispertalk::LogForwarder g_log;
 
 
 std::atomic<long> g_last_crawl_time{0};
+std::atomic<bool> g_crawl_requested{false};
 
 constexpr int MG_POLL_TIMEOUT_MS = 100;
 
@@ -680,6 +693,139 @@ static bool is_json_key_position(const std::string& body, size_t pos) {
     return true;
 }
 
+static long long json_get_int64(const std::string& body, const std::string& key, long long fallback) {
+    std::string needle = "\"" + key + "\"";
+    size_t search_from = 0;
+    while (true) {
+        auto pos = body.find(needle, search_from);
+        if (pos == std::string::npos) return fallback;
+        if (!is_json_key_position(body, pos)) {
+            search_from = pos + 1;
+            continue;
+        }
+        pos += needle.size();
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+        if (pos >= body.size() || body[pos] != ':') {
+            search_from = pos;
+            continue;
+        }
+        ++pos;
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+        if (pos >= body.size()) return fallback;
+        if (body[pos] != '-' && (body[pos] < '0' || body[pos] > '9')) return fallback;
+        return std::atoll(body.c_str() + pos);
+    }
+}
+
+static std::vector<std::string> json_get_array_strings(const std::string& body, const std::string& key) {
+    std::vector<std::string> result;
+    std::string needle = "\"" + key + "\"";
+    size_t search_from = 0;
+    size_t pos;
+    while (true) {
+        pos = body.find(needle, search_from);
+        if (pos == std::string::npos) return result;
+        if (is_json_key_position(body, pos)) break;
+        search_from = pos + 1;
+    }
+    pos += needle.size();
+    while (pos < body.size() && (body[pos] == ' ' || body[pos] == ':' || body[pos] == '\t')) ++pos;
+    if (pos >= body.size() || body[pos] != '[') return result;
+    ++pos;
+    while (pos < body.size()) {
+        while (pos < body.size() && body[pos] != '"' && body[pos] != ']') ++pos;
+        if (pos >= body.size() || body[pos] == ']') break;
+        ++pos;
+        std::string item;
+        while (pos < body.size() && body[pos] != '"') {
+            if (body[pos] == '\\' && pos + 1 < body.size()) {
+                ++pos;
+                if (body[pos] == '"') item += '"';
+                else if (body[pos] == '\\') item += '\\';
+                else if (body[pos] == 'n') item += '\n';
+                else item += body[pos];
+            } else {
+                item += body[pos];
+            }
+            ++pos;
+        }
+        if (pos < body.size()) ++pos;
+        result.push_back(std::move(item));
+    }
+    return result;
+}
+
+static std::string json_get_string(const std::string& body, const std::string& key);
+
+static std::string json_get_nested_string(const std::string& body,
+                                           const std::string& outer_key,
+                                           const std::string& inner_key) {
+    std::string needle = "\"" + outer_key + "\"";
+    size_t search_from = 0;
+    size_t pos;
+    while (true) {
+        pos = body.find(needle, search_from);
+        if (pos == std::string::npos) return {};
+        if (is_json_key_position(body, pos)) break;
+        search_from = pos + 1;
+    }
+    pos += needle.size();
+    while (pos < body.size() && body[pos] != '{') ++pos;
+    if (pos >= body.size()) return {};
+    int depth = 1;
+    size_t obj_start = pos;
+    ++pos;
+    while (pos < body.size() && depth > 0) {
+        if (body[pos] == '{') ++depth;
+        else if (body[pos] == '}') --depth;
+        else if (body[pos] == '"') {
+            ++pos;
+            while (pos < body.size() && body[pos] != '"') {
+                if (body[pos] == '\\') ++pos;
+                ++pos;
+            }
+        }
+        ++pos;
+    }
+    std::string sub = body.substr(obj_start, pos - obj_start);
+    return json_get_string(sub, inner_key);
+}
+
+static std::string json_get_deep_string(const std::string& body,
+                                         const std::string& k1,
+                                         const std::string& k2,
+                                         const std::string& k3) {
+    std::string needle = "\"" + k1 + "\"";
+    size_t search_from = 0;
+    size_t pos;
+    while (true) {
+        pos = body.find(needle, search_from);
+        if (pos == std::string::npos) return {};
+        if (is_json_key_position(body, pos)) break;
+        search_from = pos + 1;
+    }
+    pos += needle.size();
+    while (pos < body.size() && body[pos] != '{') ++pos;
+    if (pos >= body.size()) return {};
+    int depth = 1;
+    size_t obj_start = pos;
+    ++pos;
+    while (pos < body.size() && depth > 0) {
+        if (body[pos] == '{') ++depth;
+        else if (body[pos] == '}') --depth;
+        else if (body[pos] == '"') {
+            ++pos;
+            while (pos < body.size() && body[pos] != '"') {
+                if (body[pos] == '\\') ++pos;
+                ++pos;
+            }
+        }
+        ++pos;
+    }
+    std::string outer_sub = body.substr(obj_start, pos - obj_start);
+    return json_get_nested_string(outer_sub, k2, k3);
+}
+
 static std::string json_get_string(const std::string& body, const std::string& key) {
     std::string needle = "\"" + key + "\"";
     size_t search_from = 0;
@@ -803,11 +949,677 @@ static int json_get_int(const std::string& body, const std::string& key, int fal
 }
 
 // ============================================================
-// Caller resolution (stub — real lookup added in Step 5)
+// HTTPS client (OpenSSL, statically linked — no runtime dependency)
 // ============================================================
 
-static void resolve_caller(int call_id, const std::string& /*phone*/) {
-    g_caller_store.update(call_id, LookupStatus::NOT_FOUND, -1, "", "");
+struct HttpResponse {
+    int status = 0;
+    std::string body;
+};
+
+static int tcp_connect(const std::string& host, int port, int timeout_ms) {
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        struct addrinfo hints{}, *res = nullptr;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res)
+            return -1;
+        std::memcpy(&addr.sin_addr,
+            &reinterpret_cast<struct sockaddr_in*>(res->ai_addr)->sin_addr,
+            sizeof(addr.sin_addr));
+        freeaddrinfo(res);
+    }
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    int rc = connect(fd, (struct sockaddr*)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }
+    if (rc < 0) {
+        struct pollfd pfd{fd, POLLOUT, 0};
+        if (poll(&pfd, 1, timeout_ms) <= 0) { close(fd); return -1; }
+        int err = 0; socklen_t len = sizeof(err);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+        if (err != 0) { close(fd); return -1; }
+    }
+
+    fcntl(fd, F_SETFL, flags);
+    return fd;
+}
+
+static std::string ssl_read_all(SSL* ssl, int timeout_ms) {
+    std::string result;
+    char buf[8192];
+    int fd = SSL_get_fd(ssl);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (true) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) break;
+        struct pollfd pfd{fd, POLLIN, 0};
+        int pr = poll(&pfd, 1, static_cast<int>(std::min(remaining, (long long)1000)));
+        if (pr <= 0) break;
+        int n = SSL_read(ssl, buf, sizeof(buf));
+        if (n <= 0) {
+            int err = SSL_get_error(ssl, n);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) continue;
+            break;
+        }
+        result.append(buf, static_cast<size_t>(n));
+    }
+    return result;
+}
+
+static std::string decode_chunked(const std::string& body) {
+    std::string result;
+    size_t pos = 0;
+    while (pos < body.size()) {
+        auto crlf = body.find("\r\n", pos);
+        if (crlf == std::string::npos || crlf == pos) break;
+        size_t chunk_size = 0;
+        for (size_t i = pos; i < crlf; ++i) {
+            char c = body[i];
+            chunk_size <<= 4;
+            if (c >= '0' && c <= '9')      chunk_size |= static_cast<size_t>(c - '0');
+            else if (c >= 'a' && c <= 'f') chunk_size |= static_cast<size_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') chunk_size |= static_cast<size_t>(c - 'A' + 10);
+            else if (c == ';') break;
+            else break;
+        }
+        if (chunk_size == 0) break;
+        pos = crlf + 2;
+        if (pos + chunk_size > body.size()) {
+            result.append(body, pos, body.size() - pos);
+            break;
+        }
+        result.append(body, pos, chunk_size);
+        pos += chunk_size + 2;
+    }
+    return result;
+}
+
+static bool header_contains(const std::string& headers, const std::string& name,
+                             const std::string& value) {
+    std::string lname;
+    lname.reserve(name.size());
+    for (char c : name) lname += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    std::string lval;
+    lval.reserve(value.size());
+    for (char c : value) lval += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    size_t pos = 0;
+    while (pos < headers.size()) {
+        auto line_end = headers.find('\n', pos);
+        if (line_end == std::string::npos) line_end = headers.size();
+        auto colon = headers.find(':', pos);
+        if (colon != std::string::npos && colon < line_end) {
+            std::string hdr_name;
+            for (size_t i = pos; i < colon; ++i)
+                hdr_name += static_cast<char>(std::tolower(static_cast<unsigned char>(headers[i])));
+            while (!hdr_name.empty() && hdr_name.back() == ' ') hdr_name.pop_back();
+            if (hdr_name == lname) {
+                size_t vstart = colon + 1;
+                while (vstart < line_end && headers[vstart] == ' ') ++vstart;
+                std::string hdr_val;
+                for (size_t i = vstart; i < line_end; ++i) {
+                    char c = headers[i];
+                    if (c == '\r') continue;
+                    hdr_val += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                if (hdr_val.find(lval) != std::string::npos) return true;
+            }
+        }
+        pos = line_end + 1;
+    }
+    return false;
+}
+
+static HttpResponse parse_http_response(const std::string& raw) {
+    HttpResponse resp;
+    if (raw.size() < 12 || raw.substr(0, 5) != "HTTP/") return resp;
+    auto sp = raw.find(' ', 5);
+    if (sp == std::string::npos) return resp;
+    resp.status = std::atoi(raw.c_str() + sp + 1);
+    auto hdr_end = raw.find("\r\n\r\n");
+    size_t body_start;
+    std::string headers;
+    if (hdr_end == std::string::npos) {
+        hdr_end = raw.find("\n\n");
+        if (hdr_end == std::string::npos) return resp;
+        headers = raw.substr(0, hdr_end);
+        body_start = hdr_end + 2;
+    } else {
+        headers = raw.substr(0, hdr_end);
+        body_start = hdr_end + 4;
+    }
+    resp.body = raw.substr(body_start);
+    if (header_contains(headers, "Transfer-Encoding", "chunked"))
+        resp.body = decode_chunked(resp.body);
+    return resp;
+}
+
+static SSL_CTX* g_ssl_ctx = nullptr;
+static std::mutex g_ssl_ctx_mutex;
+static std::string g_ssl_ctx_pem;
+
+static SSL_CTX* get_shared_ssl_ctx(const std::string& pem_path) {
+    std::lock_guard<std::mutex> lk(g_ssl_ctx_mutex);
+    if (g_ssl_ctx && g_ssl_ctx_pem == pem_path) return g_ssl_ctx;
+    if (g_ssl_ctx) { SSL_CTX_free(g_ssl_ctx); g_ssl_ctx = nullptr; }
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) return nullptr;
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+    if (!pem_path.empty()) {
+        if (SSL_CTX_use_certificate_file(ctx, pem_path.c_str(), SSL_FILETYPE_PEM) != 1 ||
+            SSL_CTX_use_PrivateKey_file(ctx, pem_path.c_str(), SSL_FILETYPE_PEM) != 1) {
+            unsigned long err = ERR_get_error();
+            char err_buf[256];
+            ERR_error_string_n(err, err_buf, sizeof(err_buf));
+            LOG_ERROR("HTTPS: failed to load client cert/key from %s: %s", pem_path.c_str(), err_buf);
+            SSL_CTX_free(ctx);
+            return nullptr;
+        }
+    }
+    g_ssl_ctx = ctx;
+    g_ssl_ctx_pem = pem_path;
+    return ctx;
+}
+
+static void cleanup_shared_ssl_ctx() {
+    std::lock_guard<std::mutex> lk(g_ssl_ctx_mutex);
+    if (g_ssl_ctx) { SSL_CTX_free(g_ssl_ctx); g_ssl_ctx = nullptr; }
+}
+
+static HttpResponse https_request(const std::string& method,
+                                   const std::string& host, int port,
+                                   const std::string& path,
+                                   const std::string& req_body,
+                                   const std::string& pem_path,
+                                   int timeout_ms) {
+    HttpResponse fail;
+    SSL_CTX* ctx = get_shared_ssl_ctx(pem_path);
+    if (!ctx) return fail;
+
+    int fd = tcp_connect(host, port, timeout_ms);
+    if (fd < 0) return fail;
+
+    SSL* ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, fd);
+    SSL_set_tlsext_host_name(ssl, host.c_str());
+    if (SSL_connect(ssl) != 1) {
+        unsigned long err = ERR_get_error();
+        char err_buf[256];
+        ERR_error_string_n(err, err_buf, sizeof(err_buf));
+        LOG_ERROR("HTTPS: SSL_connect to %s:%d failed: %s", host.c_str(), port, err_buf);
+        SSL_free(ssl); close(fd);
+        return fail;
+    }
+
+    std::ostringstream req;
+    req << method << " " << path << " HTTP/1.1\r\n"
+        << "Host: " << host << ":" << port << "\r\n"
+        << "Connection: close\r\n";
+    if (!req_body.empty()) {
+        req << "Content-Type: application/json\r\n"
+            << "Content-Length: " << req_body.size() << "\r\n";
+    }
+    req << "\r\n" << req_body;
+
+    std::string raw_req = req.str();
+    int written = SSL_write(ssl, raw_req.c_str(), static_cast<int>(raw_req.size()));
+    if (written <= 0) {
+        LOG_ERROR("HTTPS: SSL_write failed for %s %s", method.c_str(), path.c_str());
+        SSL_free(ssl); close(fd);
+        return fail;
+    }
+
+    std::string raw_resp = ssl_read_all(ssl, timeout_ms);
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(fd);
+
+    return parse_http_response(raw_resp);
+}
+
+static HttpResponse https_get(const std::string& host, int port,
+                               const std::string& path,
+                               const std::string& pem_path,
+                               int timeout_ms = 10000) {
+    return https_request("GET", host, port, path, "", pem_path, timeout_ms);
+}
+
+static HttpResponse https_post(const std::string& host, int port,
+                                const std::string& path,
+                                const std::string& body,
+                                const std::string& pem_path,
+                                int timeout_ms = 10000) {
+    return https_request("POST", host, port, path, body, pem_path, timeout_ms);
+}
+
+// ============================================================
+// Phone index (local SQLite table for phone -> patient mapping)
+// ============================================================
+
+static bool phone_index_init(sqlite3* db) {
+    const char* sql =
+        "CREATE TABLE IF NOT EXISTS phone_index ("
+        "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  phone      TEXT NOT NULL,"
+        "  patient_id INTEGER NOT NULL,"
+        "  name       TEXT,"
+        "  vorname    TEXT"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_phone_digits ON phone_index(phone);"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_phone_patient ON phone_index(phone, patient_id);";
+    char* errmsg = nullptr;
+    int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errmsg);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("phone_index_init: %s", errmsg ? errmsg : "unknown");
+        sqlite3_free(errmsg);
+        return false;
+    }
+    return true;
+}
+
+static void phone_index_upsert(sqlite3* db, const std::string& phone,
+                                int patient_id, const std::string& name,
+                                const std::string& vorname) {
+    if (phone.empty()) return;
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db,
+        "INSERT OR REPLACE INTO phone_index(phone, patient_id, name, vorname)"
+        " VALUES(?,?,?,?)", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return;
+    sqlite3_bind_text(stmt, 1, phone.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, patient_id);
+    sqlite3_bind_text(stmt, 3, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, vorname.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+static std::string normalize_phone(const std::string& raw) {
+    std::string digits;
+    for (char c : raw) {
+        if (c >= '0' && c <= '9') digits += c;
+    }
+    return digits;
+}
+
+struct PhoneLookupResult {
+    bool found = false;
+    int patient_id = -1;
+    std::string name;
+    std::string vorname;
+};
+
+static PhoneLookupResult phone_index_lookup(sqlite3* db, const std::string& phone) {
+    PhoneLookupResult r;
+    std::string digits = normalize_phone(phone);
+    if (digits.size() < 4) return r;
+    std::string pattern = "%" + digits.substr(digits.size() > 6 ? digits.size() - 6 : 0) + "%";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT patient_id, name, vorname FROM phone_index WHERE phone LIKE ? LIMIT 1",
+        -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return r;
+    sqlite3_bind_text(stmt, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        r.found = true;
+        r.patient_id = sqlite3_column_int(stmt, 0);
+        const char* n = (const char*)sqlite3_column_text(stmt, 1);
+        const char* v = (const char*)sqlite3_column_text(stmt, 2);
+        r.name = n ? n : "";
+        r.vorname = v ? v : "";
+    }
+    sqlite3_finalize(stmt);
+    return r;
+}
+
+// ============================================================
+// Tomedo patient enumeration + context fetch
+// ============================================================
+
+struct PatientRef {
+    int ident = 0;
+    std::string nachname;
+    std::string vorname;
+    long long geburts_datum = 0;
+};
+
+static std::vector<PatientRef> parse_patient_array(const std::string& json) {
+    std::vector<PatientRef> result;
+    size_t pos = 0;
+    while (pos < json.size()) {
+        auto obj_start = json.find('{', pos);
+        if (obj_start == std::string::npos) break;
+        int depth = 1;
+        size_t obj_end = obj_start + 1;
+        while (obj_end < json.size() && depth > 0) {
+            if (json[obj_end] == '{') ++depth;
+            else if (json[obj_end] == '}') --depth;
+            else if (json[obj_end] == '"') {
+                ++obj_end;
+                while (obj_end < json.size() && json[obj_end] != '"') {
+                    if (json[obj_end] == '\\') ++obj_end;
+                    ++obj_end;
+                }
+            }
+            ++obj_end;
+        }
+        std::string obj = json.substr(obj_start, obj_end - obj_start);
+        PatientRef p;
+        p.ident = json_get_int(obj, "ident", 0);
+        p.nachname = json_get_string(obj, "nachname");
+        p.vorname = json_get_string(obj, "vorname");
+        p.geburts_datum = json_get_int64(obj, "geburtsDatum", 0);
+        if (p.ident > 0)
+            result.push_back(std::move(p));
+        pos = obj_end;
+    }
+    return result;
+}
+
+static std::vector<PatientRef> enumerate_patients(const TomedoConfig& cfg) {
+    std::string path = "/" + cfg.tomedo_db + "/patient?flach=true";
+    auto resp = https_get(cfg.tomedo_host, cfg.tomedo_port, path, cfg.tomedo_cert_pem, 60000);
+    if (resp.status != 200) {
+        LOG_ERROR("enumerate_patients: HTTP %d", resp.status);
+        return {};
+    }
+    return parse_patient_array(resp.body);
+}
+
+static std::string format_epoch_ms(long long epoch_ms) {
+    if (epoch_ms == 0) return "unbekannt";
+    time_t secs = static_cast<time_t>(epoch_ms / 1000);
+    struct tm tm{};
+    localtime_r(&secs, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%d.%m.%Y", &tm);
+    return buf;
+}
+
+static std::string format_epoch_ms_datetime(long long epoch_ms) {
+    if (epoch_ms == 0) return "unbekannt";
+    time_t secs = static_cast<time_t>(epoch_ms / 1000);
+    struct tm tm{};
+    localtime_r(&secs, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%d.%m.%Y, %H:%M Uhr", &tm);
+    return buf;
+}
+
+struct PatientPhones {
+    std::string telefon;
+    std::string telefon2;
+    std::string handy;
+    std::string telefon3;
+};
+
+static PatientPhones fetch_patient_phones(const std::string& body) {
+    PatientPhones ph;
+    ph.telefon  = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "telefon");
+    ph.telefon2 = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "telefon2");
+    ph.handy    = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "handyNummer");
+    ph.telefon3 = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "telefon3");
+    return ph;
+}
+
+static std::string extract_diagnosen(const std::string& body) {
+    std::string result;
+    std::string needle = "\"diagnosen\"";
+    auto pos = body.find(needle);
+    if (pos == std::string::npos) return result;
+    pos += needle.size();
+    while (pos < body.size() && body[pos] != '[') ++pos;
+    if (pos >= body.size()) return result;
+    ++pos;
+    int count = 0;
+    while (pos < body.size() && count < 20) {
+        auto obj_start = body.find('{', pos);
+        if (obj_start == std::string::npos) break;
+        auto arr_end = body.find(']', pos);
+        if (arr_end != std::string::npos && arr_end < obj_start) break;
+        int depth = 1;
+        size_t obj_end = obj_start + 1;
+        while (obj_end < body.size() && depth > 0) {
+            if (body[obj_end] == '{') ++depth;
+            else if (body[obj_end] == '}') --depth;
+            else if (body[obj_end] == '"') {
+                ++obj_end;
+                while (obj_end < body.size() && body[obj_end] != '"') {
+                    if (body[obj_end] == '\\') ++obj_end;
+                    ++obj_end;
+                }
+            }
+            ++obj_end;
+        }
+        std::string obj = body.substr(obj_start, obj_end - obj_start);
+        std::string freitext = json_get_string(obj, "freitext");
+        std::string typ = json_get_string(obj, "typ");
+        if (!freitext.empty()) {
+            if (!result.empty()) result += ", ";
+            result += freitext;
+            if (!typ.empty()) result += " (" + typ + ")";
+            ++count;
+        }
+        pos = obj_end;
+    }
+    return result;
+}
+
+static std::string extract_medications(const std::string& body) {
+    std::string result;
+    size_t pos = 0;
+    int count = 0;
+    while (pos < body.size() && count < 20) {
+        auto obj_start = body.find('{', pos);
+        if (obj_start == std::string::npos) break;
+        int depth = 1;
+        size_t obj_end = obj_start + 1;
+        while (obj_end < body.size() && depth > 0) {
+            if (body[obj_end] == '{') ++depth;
+            else if (body[obj_end] == '}') --depth;
+            else if (body[obj_end] == '"') {
+                ++obj_end;
+                while (obj_end < body.size() && body[obj_end] != '"') {
+                    if (body[obj_end] == '\\') ++obj_end;
+                    ++obj_end;
+                }
+            }
+            ++obj_end;
+        }
+        std::string obj = body.substr(obj_start, obj_end - obj_start);
+        std::string name = json_get_string(obj, "nameBeiVerordnung");
+        if (!name.empty()) {
+            std::string df = json_get_string(obj, "dosierungFrueh");
+            std::string dm = json_get_string(obj, "dosierungMittag");
+            std::string da = json_get_string(obj, "dosierungAbend");
+            if (!result.empty()) result += "; ";
+            result += name;
+            if (!df.empty() || !dm.empty() || !da.empty()) {
+                result += " " + (df.empty() ? "0" : df) + "-"
+                              + (dm.empty() ? "0" : dm) + "-"
+                              + (da.empty() ? "0" : da);
+            }
+            ++count;
+        }
+        pos = obj_end;
+    }
+    return result;
+}
+
+static std::string extract_next_appointment(const std::string& body) {
+    long long now_ms = static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    long long best_begin = 0;
+    std::string best_info;
+    size_t pos = 0;
+    while (pos < body.size()) {
+        auto obj_start = body.find('{', pos);
+        if (obj_start == std::string::npos) break;
+        int depth = 1;
+        size_t obj_end = obj_start + 1;
+        while (obj_end < body.size() && depth > 0) {
+            if (body[obj_end] == '{') ++depth;
+            else if (body[obj_end] == '}') --depth;
+            else if (body[obj_end] == '"') {
+                ++obj_end;
+                while (obj_end < body.size() && body[obj_end] != '"') {
+                    if (body[obj_end] == '\\') ++obj_end;
+                    ++obj_end;
+                }
+            }
+            ++obj_end;
+        }
+        std::string obj = body.substr(obj_start, obj_end - obj_start);
+        long long beginn = json_get_int64(obj, "beginn", 0);
+        if (beginn > now_ms) {
+            if (best_begin == 0 || beginn < best_begin) {
+                best_begin = beginn;
+                best_info = json_get_string(obj, "info");
+            }
+        }
+        pos = obj_end;
+    }
+    if (best_begin == 0) return {};
+    std::string result = format_epoch_ms_datetime(best_begin);
+    if (!best_info.empty()) result += " (" + best_info + ")";
+    return result;
+}
+
+static std::string fetch_patient_context(int patient_id, const TomedoConfig& cfg) {
+    std::string base = "/" + cfg.tomedo_db;
+    std::string pid = std::to_string(patient_id);
+
+    auto detail_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
+        base + "/patient/" + pid, cfg.tomedo_cert_pem, 15000);
+    if (detail_resp.status != 200) return {};
+
+    std::string nachname = json_get_string(detail_resp.body, "nachname");
+    std::string vorname = json_get_string(detail_resp.body, "vorname");
+    long long geb = json_get_int64(detail_resp.body, "geburtsDatum", 0);
+    PatientPhones phones = fetch_patient_phones(detail_resp.body);
+
+    auto rel_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
+        base + "/patient/" + pid + "/patientenDetailsRelationen"
+        "?limitScheine=true&limitKartei=50&limitMedikamentenPlan=50"
+        "&limitVerordnungen=50&limitZeiterfassungen=true&limitBehandlungsfaelle=true",
+        cfg.tomedo_cert_pem, 15000);
+    std::string diagnosen;
+    if (rel_resp.status == 200)
+        diagnosen = extract_diagnosen(rel_resp.body);
+
+    auto med_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
+        base + "/patient/" + pid + "/patientenDetailsRelationen/medikamentenPlan",
+        cfg.tomedo_cert_pem, 15000);
+    std::string medikamente;
+    if (med_resp.status == 200)
+        medikamente = extract_medications(med_resp.body);
+
+    auto termin_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
+        base + "/patient/" + pid + "/termine?flach=true",
+        cfg.tomedo_cert_pem, 15000);
+    std::string termin;
+    if (termin_resp.status == 200)
+        termin = extract_next_appointment(termin_resp.body);
+
+    std::ostringstream doc;
+    doc << "Patient: " << vorname << " " << nachname
+        << " (ID " << patient_id << "), geb. " << format_epoch_ms(geb) << "\n";
+    if (!diagnosen.empty())
+        doc << "Diagnosen: " << diagnosen << "\n";
+    if (!medikamente.empty())
+        doc << "Medikamente: " << medikamente << "\n";
+    if (!termin.empty())
+        doc << "Naechster Termin: " << termin << "\n";
+    if (!phones.telefon.empty())
+        doc << "Telefon: " << phones.telefon << "\n";
+    if (!phones.handy.empty())
+        doc << "Handy: " << phones.handy << "\n";
+
+    return doc.str();
+}
+
+// ============================================================
+// Background phone crawl (populates phone_index from Tomedo)
+// ============================================================
+
+static int run_phone_crawl(const TomedoConfig& cfg, sqlite3* db) {
+    LOG_INFO("Phone crawl starting...");
+    auto patients = enumerate_patients(cfg);
+    if (patients.empty()) {
+        LOG_WARN("Phone crawl: no patients returned");
+        return 0;
+    }
+    LOG_INFO("Phone crawl: %d patients to process", (int)patients.size());
+
+    int phone_count = 0;
+    std::string base = "/" + cfg.tomedo_db;
+    for (size_t i = 0; i < patients.size(); ++i) {
+        if (s_quit.load()) break;
+        int pid = patients[i].ident;
+        auto resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
+            base + "/patient/" + std::to_string(pid),
+            cfg.tomedo_cert_pem, 15000);
+        if (resp.status != 200) continue;
+
+        std::string nachname = json_get_string(resp.body, "nachname");
+        std::string vorname_val = json_get_string(resp.body, "vorname");
+        PatientPhones ph = fetch_patient_phones(resp.body);
+
+        auto store_phone = [&](const std::string& raw) {
+            if (raw.empty()) return;
+            std::string digits = normalize_phone(raw);
+            if (digits.size() >= 4) {
+                phone_index_upsert(db, digits, pid, nachname, vorname_val);
+                ++phone_count;
+            }
+        };
+        store_phone(ph.telefon);
+        store_phone(ph.telefon2);
+        store_phone(ph.handy);
+        store_phone(ph.telefon3);
+
+        if ((i + 1) % 100 == 0) {
+            LOG_INFO("Phone crawl: %d/%d patients processed, %d phones",
+                     (int)(i + 1), (int)patients.size(), phone_count);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    LOG_INFO("Phone crawl complete: %d phones indexed from %d patients",
+             phone_count, (int)patients.size());
+    return phone_count;
+}
+
+// ============================================================
+// Caller resolution (uses local phone_index)
+// ============================================================
+
+static sqlite3* g_phone_db = nullptr;
+
+static void resolve_caller(int call_id, const std::string& phone) {
+    if (!g_phone_db || phone.empty()) {
+        g_caller_store.update(call_id, LookupStatus::NOT_FOUND, -1, "", "");
+        return;
+    }
+    auto result = phone_index_lookup(g_phone_db, phone);
+    if (result.found) {
+        LOG_INFO("Caller resolved: call_id=%d -> patient=%d %s %s",
+                 call_id, result.patient_id, result.vorname.c_str(), result.name.c_str());
+        g_caller_store.update(call_id, LookupStatus::FOUND,
+                              result.patient_id, result.name, result.vorname);
+    } else {
+        LOG_DEBUG("Caller not found in phone_index: call_id=%d phone=%s", call_id, phone.c_str());
+        g_caller_store.update(call_id, LookupStatus::NOT_FOUND, -1, "", "");
+    }
 }
 
 // ============================================================
@@ -944,6 +1756,12 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         mg_http_reply(c, 202, "Content-Type: application/json\r\n",
                       "{\"status\":\"pending\"}");
 
+    } else if (mg_strcmp(hm->uri, mg_str("/crawl/trigger")) == 0 &&
+               mg_strcmp(hm->method, mg_str("POST")) == 0) {
+        g_crawl_requested.store(true);
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+                      "{\"status\":\"crawl_triggered\"}");
+
     } else {
         struct mg_str caps[1] = {};
         bool is_caller_wildcard = mg_match(hm->uri, mg_str("/caller/*"), caps);
@@ -1045,6 +1863,20 @@ int main(int argc, char** argv) {
     }
     g_vector_store.rebuild_index();
 
+    sqlite3* phone_db = nullptr;
+    if (sqlite3_open(cfg.db_path.c_str(), &phone_db) != SQLITE_OK) {
+        LOG_ERROR("Failed to open phone_index DB");
+        return 1;
+    }
+    sqlite3_exec(phone_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(phone_db, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
+    if (!phone_index_init(phone_db)) {
+        LOG_ERROR("Failed to init phone_index table");
+        sqlite3_close(phone_db);
+        return 1;
+    }
+    g_phone_db = phone_db;
+
     g_resolve_queue.start();
 
     std::thread expiry_thread([]() {
@@ -1055,11 +1887,32 @@ int main(int argc, char** argv) {
         }
     });
 
+    std::thread crawl_thread([&cfg, phone_db]() {
+        run_phone_crawl(cfg, phone_db);
+        g_last_crawl_time.store(static_cast<long>(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()));
+        while (!s_quit.load()) {
+            for (int i = 0; i < cfg.crawl_interval_sec && !s_quit.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (g_crawl_requested.load()) break;
+            }
+            if (s_quit.load()) break;
+            g_crawl_requested.store(false);
+            run_phone_crawl(cfg, phone_db);
+            g_last_crawl_time.store(static_cast<long>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()));
+        }
+    });
+
     HttpServer srv;
     if (!srv.start(cfg)) {
         s_quit.store(true);
         g_resolve_queue.shutdown();
+        crawl_thread.join();
         expiry_thread.join();
+        sqlite3_close(phone_db);
         return 1;
     }
 
@@ -1067,7 +1920,11 @@ int main(int argc, char** argv) {
 
     srv.join();
     g_resolve_queue.shutdown();
+    crawl_thread.join();
     expiry_thread.join();
+    sqlite3_close(phone_db);
+    g_phone_db = nullptr;
+    cleanup_shared_ssl_ctx();
 
     LOG_INFO("tomedo-crawl stopped");
     return 0;
