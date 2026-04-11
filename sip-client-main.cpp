@@ -175,7 +175,10 @@ static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {
         << "Connection: close\r\n\r\n"
         << b;
     std::string r = req.str();
-    send(sock, r.c_str(), r.size(), 0);
+    ssize_t sent = send(sock, r.c_str(), r.size(), 0);
+    if (sent < 0 || static_cast<size_t>(sent) < r.size()) {
+        fprintf(stderr, "SIP_CLIENT DEBUG call=%u: tomedo-crawl send failed (sent=%zd/%zu)\n", call_id, sent, r.size());
+    }
     close(sock);
 }
 
@@ -191,7 +194,10 @@ static void delete_tomedo_caller(uint32_t call_id) {
         << "Content-Length: 0\r\n"
         << "Connection: close\r\n\r\n";
     std::string r = req.str();
-    send(sock, r.c_str(), r.size(), 0);
+    ssize_t sent = send(sock, r.c_str(), r.size(), 0);
+    if (sent < 0 || static_cast<size_t>(sent) < r.size()) {
+        fprintf(stderr, "SIP_CLIENT DEBUG call=%u: tomedo-crawl delete send failed (sent=%zd/%zu)\n", call_id, sent, r.size());
+    }
     close(sock);
 }
 
@@ -692,15 +698,18 @@ private:
             raddr.sin_port = htons(session->local_rtp_port);
         }
 
+        std::string phone = extract_phone_from_sip_from(from);
+        if (!phone.empty()) {
+            session->caller_number = phone;
+        }
+
         {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             calls_[scid] = session;
             id_to_call_[cid] = session;
         }
 
-        std::string phone = extract_phone_from_sip_from(from);
         if (!phone.empty()) {
-            session->caller_number = phone;
             log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid, "Caller phone extracted: %s", phone.c_str());
             std::thread([cid, phone]() { notify_tomedo_crawl(cid, phone); }).detach();
         } else {
