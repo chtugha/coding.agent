@@ -377,49 +377,79 @@ static std::string json_escape(const std::string& s) {
     return out;
 }
 
+static bool is_json_key_position(const std::string& body, size_t pos) {
+    if (pos == 0) return true;
+    for (size_t i = pos; i > 0; --i) {
+        char ch = body[i - 1];
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') continue;
+        return ch == '{' || ch == ',' || ch == '[';
+    }
+    return true;
+}
+
 static std::string json_get_string(const std::string& body, const std::string& key) {
     std::string needle = "\"" + key + "\"";
-    auto pos = body.find(needle);
-    if (pos == std::string::npos) return {};
-    pos += needle.size();
-    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
-    if (pos >= body.size() || body[pos] != ':') return {};
-    ++pos;
-    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
-    if (pos >= body.size() || body[pos] != '"') return {};
-    ++pos;
-    std::string result;
-    while (pos < body.size() && body[pos] != '"') {
-        if (body[pos] == '\\' && pos + 1 < body.size()) {
-            ++pos;
-            switch (body[pos]) {
-                case '"':  result += '"';  break;
-                case '\\': result += '\\'; break;
-                case 'n':  result += '\n'; break;
-                case 'r':  result += '\r'; break;
-                case 't':  result += '\t'; break;
-                default:   result += body[pos]; break;
-            }
-        } else {
-            result += body[pos];
+    size_t search_from = 0;
+    while (true) {
+        auto pos = body.find(needle, search_from);
+        if (pos == std::string::npos) return {};
+        if (!is_json_key_position(body, pos)) {
+            search_from = pos + 1;
+            continue;
+        }
+        pos += needle.size();
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+        if (pos >= body.size() || body[pos] != ':') {
+            search_from = pos;
+            continue;
         }
         ++pos;
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+        if (pos >= body.size() || body[pos] != '"') return {};
+        ++pos;
+        std::string result;
+        while (pos < body.size() && body[pos] != '"') {
+            if (body[pos] == '\\' && pos + 1 < body.size()) {
+                ++pos;
+                switch (body[pos]) {
+                    case '"':  result += '"';  break;
+                    case '\\': result += '\\'; break;
+                    case 'n':  result += '\n'; break;
+                    case 'r':  result += '\r'; break;
+                    case 't':  result += '\t'; break;
+                    default:   result += body[pos]; break;
+                }
+            } else {
+                result += body[pos];
+            }
+            ++pos;
+        }
+        return result;
     }
-    return result;
 }
 
 static int json_get_int(const std::string& body, const std::string& key, int fallback) {
     std::string needle = "\"" + key + "\"";
-    auto pos = body.find(needle);
-    if (pos == std::string::npos) return fallback;
-    pos += needle.size();
-    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
-    if (pos >= body.size() || body[pos] != ':') return fallback;
-    ++pos;
-    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
-    if (pos >= body.size()) return fallback;
-    if (body[pos] != '-' && (body[pos] < '0' || body[pos] > '9')) return fallback;
-    return std::atoi(body.c_str() + pos);
+    size_t search_from = 0;
+    while (true) {
+        auto pos = body.find(needle, search_from);
+        if (pos == std::string::npos) return fallback;
+        if (!is_json_key_position(body, pos)) {
+            search_from = pos + 1;
+            continue;
+        }
+        pos += needle.size();
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+        if (pos >= body.size() || body[pos] != ':') {
+            search_from = pos;
+            continue;
+        }
+        ++pos;
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+        if (pos >= body.size()) return fallback;
+        if (body[pos] != '-' && (body[pos] < '0' || body[pos] > '9')) return fallback;
+        return std::atoi(body.c_str() + pos);
+    }
 }
 
 // ============================================================
@@ -536,6 +566,7 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
             std::ostringstream j;
             j << "{\"status\":\"" << lookup_status_str(rec.status) << "\","
               << "\"call_id\":" << rec.call_id << ","
+              << "\"phone_number\":\"" << json_escape(rec.phone_number) << "\","
               << "\"patient_id\":" << rec.patient_id << ",";
             if (rec.name.empty())
                 j << "\"name\":null,";
@@ -613,9 +644,9 @@ int main(int argc, char** argv) {
 
     std::thread expiry_thread([]() {
         while (!s_quit.load()) {
+            g_caller_store.expire_old();
             for (int i = 0; i < 300 && !s_quit.load(); ++i)
                 std::this_thread::sleep_for(std::chrono::seconds(1));
-            g_caller_store.expire_old();
         }
     });
 
