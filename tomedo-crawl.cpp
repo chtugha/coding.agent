@@ -157,11 +157,16 @@
 // ============================================================
 
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include <fstream>
 #include <string>
 #include <thread>
 #include <atomic>
+#include <chrono>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 #include <signal.h>
 
 #include "mongoose.h"
@@ -262,6 +267,160 @@ std::atomic<long> g_last_crawl_time{0};
 constexpr int MG_POLL_TIMEOUT_MS = 100;
 
 // ============================================================
+// CallerStore — thread-safe in-memory caller identity tracking
+// ============================================================
+
+enum class LookupStatus { PENDING, FOUND, NOT_FOUND, ERROR };
+
+static const char* lookup_status_str(LookupStatus s) {
+    switch (s) {
+        case LookupStatus::PENDING:   return "pending";
+        case LookupStatus::FOUND:     return "found";
+        case LookupStatus::NOT_FOUND: return "not_found";
+        case LookupStatus::ERROR:     return "error";
+    }
+    return "error";
+}
+
+struct CallerRecord {
+    int call_id = 0;
+    std::string phone_number;
+    LookupStatus status = LookupStatus::PENDING;
+    int patient_id = -1;
+    std::string name;
+    std::string vorname;
+    std::chrono::steady_clock::time_point created_at;
+};
+
+class CallerStore {
+    mutable std::mutex mutex_;
+    std::unordered_map<int, CallerRecord> map_;
+    static constexpr int TTL_SECONDS = 3600;
+public:
+    void register_caller(int call_id, const std::string& phone) {
+        CallerRecord rec;
+        rec.call_id = call_id;
+        rec.phone_number = phone;
+        rec.status = LookupStatus::PENDING;
+        rec.created_at = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lk(mutex_);
+        map_[call_id] = std::move(rec);
+    }
+
+    void update(int call_id, LookupStatus st, int patient_id,
+                const std::string& name, const std::string& vorname) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        auto it = map_.find(call_id);
+        if (it == map_.end()) return;
+        it->second.status = st;
+        it->second.patient_id = patient_id;
+        it->second.name = name;
+        it->second.vorname = vorname;
+    }
+
+    bool get(int call_id, CallerRecord& out) const {
+        std::lock_guard<std::mutex> lk(mutex_);
+        auto it = map_.find(call_id);
+        if (it == map_.end()) return false;
+        out = it->second;
+        return true;
+    }
+
+    bool remove(int call_id) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        return map_.erase(call_id) > 0;
+    }
+
+    void expire_old() {
+        auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lk(mutex_);
+        for (auto it = map_.begin(); it != map_.end(); ) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                now - it->second.created_at).count();
+            if (age > TTL_SECONDS)
+                it = map_.erase(it);
+            else
+                ++it;
+        }
+    }
+};
+
+CallerStore g_caller_store;
+
+// ============================================================
+// JSON helpers (hand-rolled, no external library)
+// ============================================================
+
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 4);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;
+        }
+    }
+    return out;
+}
+
+static std::string json_get_string(const std::string& body, const std::string& key) {
+    std::string needle = "\"" + key + "\"";
+    auto pos = body.find(needle);
+    if (pos == std::string::npos) return {};
+    pos += needle.size();
+    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+    if (pos >= body.size() || body[pos] != ':') return {};
+    ++pos;
+    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+    if (pos >= body.size() || body[pos] != '"') return {};
+    ++pos;
+    std::string result;
+    while (pos < body.size() && body[pos] != '"') {
+        if (body[pos] == '\\' && pos + 1 < body.size()) {
+            ++pos;
+            switch (body[pos]) {
+                case '"':  result += '"';  break;
+                case '\\': result += '\\'; break;
+                case 'n':  result += '\n'; break;
+                case 'r':  result += '\r'; break;
+                case 't':  result += '\t'; break;
+                default:   result += body[pos]; break;
+            }
+        } else {
+            result += body[pos];
+        }
+        ++pos;
+    }
+    return result;
+}
+
+static int json_get_int(const std::string& body, const std::string& key, int fallback) {
+    std::string needle = "\"" + key + "\"";
+    auto pos = body.find(needle);
+    if (pos == std::string::npos) return fallback;
+    pos += needle.size();
+    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+    if (pos >= body.size() || body[pos] != ':') return fallback;
+    ++pos;
+    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+    if (pos >= body.size()) return fallback;
+    if (body[pos] != '-' && (body[pos] < '0' || body[pos] > '9')) return fallback;
+    return std::atoi(body.c_str() + pos);
+}
+
+// ============================================================
+// Caller resolution (stub — real lookup added in Step 5)
+// ============================================================
+
+static void resolve_caller(int call_id, const std::string& /*phone*/) {
+    g_caller_store.update(call_id, LookupStatus::NOT_FOUND, -1, "", "");
+}
+
+// ============================================================
 // Mongoose HTTP server
 // ============================================================
 
@@ -279,8 +438,58 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         else         j << lc;
         j << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
+
+    } else if (mg_strcmp(hm->uri, mg_str("/caller")) == 0 &&
+               mg_strcmp(hm->method, mg_str("POST")) == 0) {
+        std::string body(hm->body.buf, hm->body.len);
+        int call_id = json_get_int(body, "call_id", -1);
+        std::string phone = json_get_string(body, "phone_number");
+        if (call_id < 0) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"missing call_id\"}");
+            return;
+        }
+        g_caller_store.register_caller(call_id, phone);
+        std::thread([call_id, phone]() {
+            resolve_caller(call_id, phone);
+        }).detach();
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+                      "{\"status\":\"pending\"}");
+
     } else {
-        mg_http_reply(c, 404, "", "Not Found\n");
+        struct mg_str caps[1] = {};
+        if (mg_match(hm->uri, mg_str("/caller/*"), caps) &&
+            mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            int call_id = std::atoi(std::string(caps[0].buf, caps[0].len).c_str());
+            CallerRecord rec;
+            if (!g_caller_store.get(call_id, rec)) {
+                mg_http_reply(c, 404, "Content-Type: application/json\r\n",
+                              "{\"error\":\"not found\"}");
+                return;
+            }
+            std::ostringstream j;
+            j << "{\"status\":\"" << lookup_status_str(rec.status) << "\","
+              << "\"call_id\":" << rec.call_id << ","
+              << "\"patient_id\":" << rec.patient_id << ",";
+            if (rec.name.empty())
+                j << "\"name\":null,";
+            else
+                j << "\"name\":\"" << json_escape(rec.name) << "\",";
+            if (rec.vorname.empty())
+                j << "\"vorname\":null";
+            else
+                j << "\"vorname\":\"" << json_escape(rec.vorname) << "\"";
+            j << "}";
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
+        } else if (mg_match(hm->uri, mg_str("/caller/*"), caps) &&
+                   mg_strcmp(hm->method, mg_str("DELETE")) == 0) {
+            int call_id = std::atoi(std::string(caps[0].buf, caps[0].len).c_str());
+            g_caller_store.remove(call_id);
+            mg_http_reply(c, 204, "", "");
+        } else {
+            mg_http_reply(c, 404, "", "Not Found\n");
+        }
+        return;
     }
 }
 
@@ -335,12 +544,25 @@ int main(int argc, char** argv) {
     LOG_INFO("tomedo-crawl starting (api=%s:%d, db=%s)",
              cfg.api_host.c_str(), cfg.api_port, cfg.db_path.c_str());
 
+    std::thread expiry_thread([]() {
+        while (!s_quit.load()) {
+            for (int i = 0; i < 300 && !s_quit.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            g_caller_store.expire_old();
+        }
+    });
+
     HttpServer srv;
-    if (!srv.start(cfg)) return 1;
+    if (!srv.start(cfg)) {
+        s_quit.store(true);
+        expiry_thread.join();
+        return 1;
+    }
 
     LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
 
     srv.join();
+    expiry_thread.join();
 
     LOG_INFO("tomedo-crawl stopped");
     return 0;
