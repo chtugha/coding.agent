@@ -333,8 +333,16 @@ if(APPLE)
     target_link_libraries(frontend PRIVATE "-framework CoreFoundation")
 endif()
 
+# 9. Tomedo Crawl (RAG sidecar)
+add_executable(tomedo-crawl tomedo-crawl.cpp mongoose.c sqlite3.c)
+target_link_libraries(tomedo-crawl PRIVATE Threads::Threads)
+target_compile_definitions(tomedo-crawl PRIVATE MG_ENABLE_PACKED_FS=0)
+if(APPLE)
+    target_link_libraries(tomedo-crawl PRIVATE "-framework CoreFoundation")
+endif()
+
 # Install
-set(INSTALL_TARGETS sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service frontend)
+set(INSTALL_TARGETS sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service frontend tomedo-crawl)
 if(TARGET kokoro-service)
     list(APPEND INSTALL_TARGETS kokoro-service)
 endif()

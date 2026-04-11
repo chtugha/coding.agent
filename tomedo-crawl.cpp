@@ -155,5 +155,180 @@
 //   sleep between batches to avoid hammering the server.
 //
 // ============================================================
-// Implementation begins in Step 2 (skeleton) through Step 6 (full).
+
+#include <iostream>
+#include <sstream>
+#include <fstream>
+#include <string>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <cstdarg>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#include "mongoose.h"
+#include "sqlite3.h"
+#include "interconnect.h"
+
+namespace {
+
+static std::atomic<bool> s_quit{false};
+
+static void sig_handler(int) { s_quit.store(true); }
+
 // ============================================================
+// Config
+// ============================================================
+
+struct TomeдоConfig {
+    std::string tomedo_host      = "192.168.10.9";
+    int         tomedo_port      = 8443;
+    std::string tomedo_db        = "tomedo_live";
+    std::string tomedo_user      = "";
+    std::string tomedo_pass      = "";
+    std::string tomedo_cert_pem  = "/etc/tomedo-crawl/client.pem";
+    int         crawl_interval_sec = 3600;
+    std::string ollama_url       = "http://127.0.0.1:11434";
+    std::string ollama_model     = "nomic-embed-text";
+    std::string api_host         = "127.0.0.1";
+    int         api_port         = 13181;
+    std::string log_host         = "127.0.0.1";
+    int         log_port         = 22022;
+    std::string db_path          = "tomedo-crawl.db";
+};
+
+static TomeдоConfig parse_config(const std::string& path) {
+    TomeдоConfig cfg;
+    std::ifstream f(path);
+    if (!f.is_open()) return cfg;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+        while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
+        while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) val.pop_back();
+        if (key == "tomedo_host")          cfg.tomedo_host = val;
+        else if (key == "tomedo_port")     cfg.tomedo_port = std::stoi(val);
+        else if (key == "tomedo_db")       cfg.tomedo_db = val;
+        else if (key == "tomedo_user")     cfg.tomedo_user = val;
+        else if (key == "tomedo_pass")     cfg.tomedo_pass = val;
+        else if (key == "tomedo_cert_pem") cfg.tomedo_cert_pem = val;
+        else if (key == "crawl_interval_sec") cfg.crawl_interval_sec = std::stoi(val);
+        else if (key == "ollama_url")      cfg.ollama_url = val;
+        else if (key == "ollama_model")    cfg.ollama_model = val;
+        else if (key == "api_host")        cfg.api_host = val;
+        else if (key == "api_port")        cfg.api_port = std::stoi(val);
+        else if (key == "log_host")        cfg.log_host = val;
+        else if (key == "log_port")        cfg.log_port = std::stoi(val);
+        else if (key == "db_path")         cfg.db_path = val;
+    }
+    return cfg;
+}
+
+// ============================================================
+// LogForwarder (re-use from interconnect.h via ServiceType)
+// ============================================================
+
+static whispertalk::LogForwarder g_log;
+
+#define LOG_INFO(fmt, ...)  g_log.forward(whispertalk::LogLevel::INFO,  0, fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  g_log.forward(whispertalk::LogLevel::WARN,  0, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) g_log.forward(whispertalk::LogLevel::ERROR, 0, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...) g_log.forward(whispertalk::LogLevel::DEBUG, 0, fmt, ##__VA_ARGS__)
+
+// ============================================================
+// State (stubs — filled in later steps)
+// ============================================================
+
+static std::atomic<int>  g_indexed_docs{0};
+static std::atomic<long> g_last_crawl_time{0};
+
+// ============================================================
+// Mongoose HTTP server
+// ============================================================
+
+static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
+    if (ev != MG_EV_HTTP_MSG) return;
+    struct mg_http_message *hm = (struct mg_http_message *)ev_data;
+
+    if (mg_strcmp(hm->uri, mg_str("/health")) == 0) {
+        long lc = g_last_crawl_time.load();
+        std::ostringstream j;
+        j << "{\"status\":\"ok\","
+          << "\"indexed_docs\":" << g_indexed_docs.load() << ","
+          << "\"last_crawl\":";
+        if (lc == 0) j << "null";
+        else         j << lc;
+        j << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
+    } else {
+        mg_http_reply(c, 404, "", "Not Found\n");
+    }
+}
+
+struct HttpServer {
+    struct mg_mgr mgr;
+    std::thread   thread;
+    std::string   listen_addr;
+
+    void start(const TomeдоConfig& cfg) {
+        listen_addr = "http://" + cfg.api_host + ":" + std::to_string(cfg.api_port);
+        mg_mgr_init(&mgr);
+        struct mg_connection *c = mg_http_listen(&mgr, listen_addr.c_str(), http_handler, nullptr);
+        if (!c) {
+            LOG_ERROR("Failed to listen on %s", listen_addr.c_str());
+            mg_mgr_free(&mgr);
+            return;
+        }
+        thread = std::thread([this]() {
+            while (!s_quit.load()) {
+                mg_mgr_poll(&mgr, 100);
+            }
+            mg_mgr_free(&mgr);
+        });
+    }
+
+    void join() {
+        if (thread.joinable()) thread.join();
+    }
+};
+
+} // namespace
+
+int main(int argc, char** argv) {
+    signal(SIGINT,  sig_handler);
+    signal(SIGTERM, sig_handler);
+
+    std::string config_path = "tomedo-crawl.ini";
+    if (argc >= 2) config_path = argv[1];
+
+    TomeдоConfig cfg = parse_config(config_path);
+
+    g_log.init(static_cast<uint16_t>(cfg.log_port),
+               whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE);
+
+    LOG_INFO("tomedo-crawl starting (api=%s:%d, db=%s)",
+             cfg.api_host.c_str(), cfg.api_port, cfg.db_path.c_str());
+
+    HttpServer srv;
+    srv.start(cfg);
+
+    std::cout << "tomedo-crawl HTTP server started on "
+              << srv.listen_addr << "\n";
+    std::cout << "GET /health for status\n";
+
+    srv.join();
+
+    LOG_INFO("tomedo-crawl stopped");
+    return 0;
+}
