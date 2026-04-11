@@ -202,7 +202,10 @@ static int parse_int(const std::string& val, int fallback) {
 static TomedoConfig parse_config(const std::string& path) {
     TomedoConfig cfg;
     std::ifstream f(path);
-    if (!f.is_open()) return cfg;
+    if (!f.is_open()) {
+        std::fprintf(stderr, "tomedo-crawl: config file '%s' not found, using defaults\n", path.c_str());
+        return cfg;
+    }
     std::string line;
     while (std::getline(f, line)) {
         if (line.empty() || line[0] == '#') continue;
@@ -273,6 +276,9 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
     }
 }
 
+// mgr is initialized in start() and owned exclusively by the event-loop thread
+// after start() returns. Do not touch mgr from any other thread. mg_mgr_free()
+// is called inside the event-loop thread on shutdown.
 struct HttpServer {
     struct mg_mgr mgr;
     std::thread   thread;
@@ -321,7 +327,7 @@ int main(int argc, char** argv) {
 
     HttpServer srv;
     if (!srv.start(cfg)) {
-        std::cerr << "tomedo-crawl: exiting\n";
+        LOG_ERROR("HTTP server failed to start, exiting");
         return 1;
     }
 
