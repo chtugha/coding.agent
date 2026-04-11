@@ -3,6 +3,8 @@
 #include <sys/stat.h>
 #include <cstdio>
 #include <ctime>
+#include <cerrno>
+#include <cctype>
 #include <iostream>
 
 inline bool database_exists(const std::string& db_path) {
@@ -26,16 +28,14 @@ inline bool backup_database(const std::string& db_path) {
 }
 
 inline char prompt_database_action(const std::string& db_path) {
+    std::cout << "\nExisting database found: " << db_path << "\n";
+    std::cout << "  [R] Reuse existing database\n";
+    std::cout << "  [N] Create new database (backs up existing)\n";
     while (true) {
-        std::cout << "\nExisting database found: " << db_path << "\n";
-        std::cout << "  [R] Reuse existing database\n";
-        std::cout << "  [N] Create new database (backs up existing)\n";
         std::cout << "Choice [R/N]: ";
         std::cout.flush();
         std::string line;
-        if (!std::getline(std::cin, line)) {
-            return 'R';
-        }
+        if (!std::getline(std::cin, line)) return 'R';
         if (line.empty()) continue;
         char ch = static_cast<char>(toupper(static_cast<unsigned char>(line[0])));
         if (ch == 'R' || ch == 'N') return ch;
