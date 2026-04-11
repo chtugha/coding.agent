@@ -1,5 +1,47 @@
 #pragma once
 #include <string>
+#include <sys/stat.h>
+#include <cstdio>
+#include <ctime>
+#include <iostream>
+
+inline bool database_exists(const std::string& db_path) {
+    struct stat st;
+    return stat(db_path.c_str(), &st) == 0;
+}
+
+inline bool backup_database(const std::string& db_path) {
+    char timestamp[20];
+    time_t now = time(nullptr);
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    strftime(timestamp, sizeof(timestamp), "%Y%m%dT%H%M%S", &tm_buf);
+    std::string backup_path = db_path + ".bak." + timestamp;
+    if (rename(db_path.c_str(), backup_path.c_str()) != 0) {
+        std::cerr << "Error: failed to backup database to " << backup_path << ": " << strerror(errno) << "\n";
+        return false;
+    }
+    std::cout << "Database backed up to: " << backup_path << "\n";
+    return true;
+}
+
+inline char prompt_database_action(const std::string& db_path) {
+    while (true) {
+        std::cout << "\nExisting database found: " << db_path << "\n";
+        std::cout << "  [R] Reuse existing database\n";
+        std::cout << "  [N] Create new database (backs up existing)\n";
+        std::cout << "Choice [R/N]: ";
+        std::cout.flush();
+        std::string line;
+        if (!std::getline(std::cin, line)) {
+            return 'R';
+        }
+        if (line.empty()) continue;
+        char ch = static_cast<char>(toupper(static_cast<unsigned char>(line[0])));
+        if (ch == 'R' || ch == 'N') return ch;
+        std::cout << "Invalid choice. Please enter R or N.\n";
+    }
+}
 
 inline bool FrontendServer::init_database() {
     int rc = sqlite3_open(db_path_.c_str(), &db_);

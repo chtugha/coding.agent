@@ -45,7 +45,8 @@ Save to `{@artifacts_path}/spec.md` with:
 
 Replaced the Implementation step with concrete tasks below.
 
-### [ ] Step: Add utility functions and --db flag parsing
+### [x] Step: Add utility functions and --db flag parsing
+<!-- chat-id: 7752e02b-fea4-4870-8f76-c9519f53ff66 -->
 
 Add the following free functions to `database.h` (before the `FrontendServer` inline methods):
 - `database_exists(const std::string& db_path) -> bool` — `stat()` check for file existence

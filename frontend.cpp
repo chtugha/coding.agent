@@ -6800,8 +6800,50 @@ int main(int argc, char* argv[]) {
     }
 
     uint16_t port = 8080;
-    if (argc > 2 && strcmp(argv[1], "--port") == 0) {
-        port = static_cast<uint16_t>(atoi(argv[2]));
+    std::string db_mode;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            port = static_cast<uint16_t>(atoi(argv[++i]));
+        } else if (strcmp(argv[i], "--db") == 0 && i + 1 < argc) {
+            db_mode = argv[++i];
+        }
+    }
+
+    std::string db_path = project_root + "/frontend.db";
+
+    if (db_mode == "new") {
+        if (database_exists(db_path)) {
+            if (!backup_database(db_path)) {
+                std::cerr << "Error: failed to backup existing database. Aborting.\n";
+                return 1;
+            }
+        }
+        std::cout << "Creating new database.\n";
+    } else if (db_mode == "reuse") {
+        if (!database_exists(db_path)) {
+            std::cerr << "Error: --db reuse specified but no database found at " << db_path << "\n";
+            return 1;
+        }
+        std::cout << "Reusing existing database.\n";
+    } else if (db_mode.empty()) {
+        if (!database_exists(db_path)) {
+            std::cout << "No existing database found. Creating new database...\n";
+        } else {
+            char choice = prompt_database_action(db_path);
+            if (choice == 'N') {
+                if (!backup_database(db_path)) {
+                    std::cerr << "Error: failed to backup existing database. Aborting.\n";
+                    return 1;
+                }
+                std::cout << "Creating new database.\n";
+            } else {
+                std::cout << "Reusing existing database.\n";
+                db_mode = "reuse";
+            }
+        }
+    } else {
+        std::cerr << "Error: unknown --db mode '" << db_mode << "'. Use 'new' or 'reuse'.\n";
+        return 1;
     }
 
     mkdir((project_root + "/logs").c_str(), 0755);
