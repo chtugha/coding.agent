@@ -161,16 +161,8 @@
 #include <fstream>
 #include <string>
 #include <thread>
-#include <mutex>
 #include <atomic>
-#include <chrono>
-#include <cstring>
-#include <cstdarg>
 #include <signal.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #include "mongoose.h"
 #include "sqlite3.h"
@@ -178,15 +170,15 @@
 
 namespace {
 
-static std::atomic<bool> s_quit{false};
+std::atomic<bool> s_quit{false};
 
-static void sig_handler(int) { s_quit.store(true); }
+void sig_handler(int) { s_quit.store(true); }
 
 // ============================================================
 // Config
 // ============================================================
 
-struct TomeдоConfig {
+struct TomedoConfig {
     std::string tomedo_host      = "192.168.10.9";
     int         tomedo_port      = 8443;
     std::string tomedo_db        = "tomedo_live";
@@ -198,13 +190,17 @@ struct TomeдоConfig {
     std::string ollama_model     = "nomic-embed-text";
     std::string api_host         = "127.0.0.1";
     int         api_port         = 13181;
-    std::string log_host         = "127.0.0.1";
     int         log_port         = 22022;
     std::string db_path          = "tomedo-crawl.db";
 };
 
-static TomeдоConfig parse_config(const std::string& path) {
-    TomeдоConfig cfg;
+static int parse_int(const std::string& val, int fallback) {
+    try { return std::stoi(val); }
+    catch (...) { return fallback; }
+}
+
+static TomedoConfig parse_config(const std::string& path) {
+    TomedoConfig cfg;
     std::ifstream f(path);
     if (!f.is_open()) return cfg;
     std::string line;
@@ -217,20 +213,19 @@ static TomeдоConfig parse_config(const std::string& path) {
         while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
         while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
         while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) val.pop_back();
-        if (key == "tomedo_host")          cfg.tomedo_host = val;
-        else if (key == "tomedo_port")     cfg.tomedo_port = std::stoi(val);
-        else if (key == "tomedo_db")       cfg.tomedo_db = val;
-        else if (key == "tomedo_user")     cfg.tomedo_user = val;
-        else if (key == "tomedo_pass")     cfg.tomedo_pass = val;
-        else if (key == "tomedo_cert_pem") cfg.tomedo_cert_pem = val;
-        else if (key == "crawl_interval_sec") cfg.crawl_interval_sec = std::stoi(val);
-        else if (key == "ollama_url")      cfg.ollama_url = val;
-        else if (key == "ollama_model")    cfg.ollama_model = val;
-        else if (key == "api_host")        cfg.api_host = val;
-        else if (key == "api_port")        cfg.api_port = std::stoi(val);
-        else if (key == "log_host")        cfg.log_host = val;
-        else if (key == "log_port")        cfg.log_port = std::stoi(val);
-        else if (key == "db_path")         cfg.db_path = val;
+        if (key == "tomedo_host")             cfg.tomedo_host = val;
+        else if (key == "tomedo_port")        cfg.tomedo_port = parse_int(val, cfg.tomedo_port);
+        else if (key == "tomedo_db")          cfg.tomedo_db = val;
+        else if (key == "tomedo_user")        cfg.tomedo_user = val;
+        else if (key == "tomedo_pass")        cfg.tomedo_pass = val;
+        else if (key == "tomedo_cert_pem")    cfg.tomedo_cert_pem = val;
+        else if (key == "crawl_interval_sec") cfg.crawl_interval_sec = parse_int(val, cfg.crawl_interval_sec);
+        else if (key == "ollama_url")         cfg.ollama_url = val;
+        else if (key == "ollama_model")       cfg.ollama_model = val;
+        else if (key == "api_host")           cfg.api_host = val;
+        else if (key == "api_port")           cfg.api_port = parse_int(val, cfg.api_port);
+        else if (key == "log_port")           cfg.log_port = parse_int(val, cfg.log_port);
+        else if (key == "db_path")            cfg.db_path = val;
     }
     return cfg;
 }
@@ -239,7 +234,7 @@ static TomeдоConfig parse_config(const std::string& path) {
 // LogForwarder (re-use from interconnect.h via ServiceType)
 // ============================================================
 
-static whispertalk::LogForwarder g_log;
+whispertalk::LogForwarder g_log;
 
 #define LOG_INFO(fmt, ...)  g_log.forward(whispertalk::LogLevel::INFO,  0, fmt, ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...)  g_log.forward(whispertalk::LogLevel::WARN,  0, fmt, ##__VA_ARGS__)
@@ -250,14 +245,16 @@ static whispertalk::LogForwarder g_log;
 // State (stubs — filled in later steps)
 // ============================================================
 
-static std::atomic<int>  g_indexed_docs{0};
-static std::atomic<long> g_last_crawl_time{0};
+std::atomic<int>  g_indexed_docs{0};
+std::atomic<long> g_last_crawl_time{0};
+
+constexpr int MG_POLL_TIMEOUT_MS = 100;
 
 // ============================================================
 // Mongoose HTTP server
 // ============================================================
 
-static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
+void http_handler(struct mg_connection *c, int ev, void *ev_data) {
     if (ev != MG_EV_HTTP_MSG) return;
     struct mg_http_message *hm = (struct mg_http_message *)ev_data;
 
@@ -281,21 +278,22 @@ struct HttpServer {
     std::thread   thread;
     std::string   listen_addr;
 
-    void start(const TomeдоConfig& cfg) {
+    bool start(const TomedoConfig& cfg) {
         listen_addr = "http://" + cfg.api_host + ":" + std::to_string(cfg.api_port);
         mg_mgr_init(&mgr);
         struct mg_connection *c = mg_http_listen(&mgr, listen_addr.c_str(), http_handler, nullptr);
         if (!c) {
             LOG_ERROR("Failed to listen on %s", listen_addr.c_str());
             mg_mgr_free(&mgr);
-            return;
+            return false;
         }
         thread = std::thread([this]() {
             while (!s_quit.load()) {
-                mg_mgr_poll(&mgr, 100);
+                mg_mgr_poll(&mgr, MG_POLL_TIMEOUT_MS);
             }
             mg_mgr_free(&mgr);
         });
+        return true;
     }
 
     void join() {
@@ -312,20 +310,22 @@ int main(int argc, char** argv) {
     std::string config_path = "tomedo-crawl.ini";
     if (argc >= 2) config_path = argv[1];
 
-    TomeдоConfig cfg = parse_config(config_path);
+    TomedoConfig cfg = parse_config(config_path);
 
-    g_log.init(static_cast<uint16_t>(cfg.log_port),
-               whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE);
+    uint16_t log_port = (cfg.log_port > 0 && cfg.log_port <= 65535)
+                        ? static_cast<uint16_t>(cfg.log_port) : 22022;
+    g_log.init(log_port, whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE);
 
     LOG_INFO("tomedo-crawl starting (api=%s:%d, db=%s)",
              cfg.api_host.c_str(), cfg.api_port, cfg.db_path.c_str());
 
     HttpServer srv;
-    srv.start(cfg);
+    if (!srv.start(cfg)) {
+        std::cerr << "tomedo-crawl: exiting\n";
+        return 1;
+    }
 
-    std::cout << "tomedo-crawl HTTP server started on "
-              << srv.listen_addr << "\n";
-    std::cout << "GET /health for status\n";
+    LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
 
     srv.join();
 
