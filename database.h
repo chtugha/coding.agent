@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <sys/stat.h>
 #include <cstdio>
 #include <ctime>
@@ -49,88 +50,110 @@ inline bool FrontendServer::validate_schema() {
         return false;
     }
 
-    struct CanonicalColumn {
-        const char* name;
-    };
     struct CanonicalTable {
         const char* name;
-        std::vector<CanonicalColumn> columns;
+        std::vector<const char*> columns;
     };
 
     std::vector<CanonicalTable> canonical = {
-        {"logs", {{"id"}, {"timestamp"}, {"service"}, {"call_id"}, {"level"}, {"message"}}},
-        {"test_runs", {{"id"}, {"test_name"}, {"start_time"}, {"end_time"}, {"exit_code"}, {"arguments"}, {"log_file"}}},
-        {"service_status", {{"service"}, {"status"}, {"last_seen"}, {"call_count"}, {"ports"}}},
-        {"service_config", {{"service"}, {"binary_path"}, {"default_args"}, {"description"}, {"auto_start"}}},
-        {"settings", {{"key"}, {"value"}}},
-        {"testfiles", {{"name"}, {"size_bytes"}, {"duration_sec"}, {"sample_rate"}, {"channels"}, {"ground_truth"}, {"last_modified"}}},
-        {"whisper_accuracy_tests", {{"id"}, {"test_run_id"}, {"file_name"}, {"model_name"}, {"ground_truth"}, {"transcription"}, {"similarity_percent"}, {"latency_ms"}, {"status"}, {"timestamp"}}},
-        {"iap_quality_tests", {{"id"}, {"file_name"}, {"latency_ms"}, {"snr_db"}, {"rms_error_pct"}, {"max_latency_ms"}, {"status"}, {"timestamp"}}},
-        {"models", {{"id"}, {"service"}, {"name"}, {"path"}, {"backend"}, {"size_mb"}, {"config_json"}, {"added_timestamp"}}},
-        {"model_benchmark_runs", {{"id"}, {"model_id"}, {"model_name"}, {"model_type"}, {"backend"}, {"test_files"}, {"iterations"}, {"files_tested"}, {"avg_accuracy"}, {"avg_latency_ms"}, {"p50_latency_ms"}, {"p95_latency_ms"}, {"p99_latency_ms"}, {"memory_mb"}, {"pass_count"}, {"fail_count"}, {"avg_tokens"}, {"interrupt_latency_ms"}, {"german_pct"}, {"timestamp"}}},
-        {"tts_validation_tests", {{"id"}, {"line1_call_id"}, {"line2_call_id"}, {"original_text"}, {"tts_transcription"}, {"similarity_percent"}, {"phoneme_errors"}, {"timestamp"}}},
-        {"sip_lines", {{"line_id"}, {"username"}, {"password"}, {"server"}, {"port"}, {"status"}, {"last_registered"}}},
-        {"service_test_runs", {{"id"}, {"service"}, {"test_type"}, {"status"}, {"metrics_json"}, {"timestamp"}}},
-        {"test_results", {{"id"}, {"test_name"}, {"service"}, {"status"}, {"details"}, {"timestamp"}}},
+        {"logs", {"id", "timestamp", "service", "call_id", "level", "message"}},
+        {"test_runs", {"id", "test_name", "start_time", "end_time", "exit_code", "arguments", "log_file"}},
+        {"service_status", {"service", "status", "last_seen", "call_count", "ports"}},
+        {"service_config", {"service", "binary_path", "default_args", "description", "auto_start"}},
+        {"settings", {"key", "value"}},
+        {"testfiles", {"name", "size_bytes", "duration_sec", "sample_rate", "channels", "ground_truth", "last_modified"}},
+        {"whisper_accuracy_tests", {"id", "test_run_id", "file_name", "model_name", "ground_truth", "transcription", "similarity_percent", "latency_ms", "status", "timestamp"}},
+        {"iap_quality_tests", {"id", "file_name", "latency_ms", "snr_db", "rms_error_pct", "max_latency_ms", "status", "timestamp"}},
+        {"models", {"id", "service", "name", "path", "backend", "size_mb", "config_json", "added_timestamp"}},
+        {"model_benchmark_runs", {"id", "model_id", "model_name", "model_type", "backend", "test_files", "iterations", "files_tested", "avg_accuracy", "avg_latency_ms", "p50_latency_ms", "p95_latency_ms", "p99_latency_ms", "memory_mb", "pass_count", "fail_count", "avg_tokens", "interrupt_latency_ms", "german_pct", "timestamp"}},
+        {"tts_validation_tests", {"id", "line1_call_id", "line2_call_id", "original_text", "tts_transcription", "similarity_percent", "phoneme_errors", "timestamp"}},
+        {"sip_lines", {"line_id", "username", "password", "server", "port", "status", "last_registered"}},
+        {"service_test_runs", {"id", "service", "test_type", "status", "metrics_json", "timestamp"}},
+        {"test_results", {"id", "test_name", "service", "status", "details", "timestamp"}},
+    };
+
+    auto get_columns = [this](const char* table_name) -> std::vector<std::string> {
+        std::vector<std::string> cols;
+        std::string pragma = "PRAGMA table_info(" + std::string(table_name) + ")";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, pragma.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return cols;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* col_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (col_name) cols.emplace_back(col_name);
+        }
+        sqlite3_finalize(stmt);
+        return cols;
+    };
+
+    auto table_exists = [this](const char* table_name) -> bool {
+        std::string sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, table_name, -1, SQLITE_STATIC);
+        bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
+        sqlite3_finalize(stmt);
+        return exists;
     };
 
     bool had_issues = false;
+    bool has_errors = false;
 
     for (const auto& table : canonical) {
-        std::string pragma = "PRAGMA table_info(" + std::string(table.name) + ")";
-        sqlite3_stmt* stmt = nullptr;
-        int rc = sqlite3_prepare_v2(db_, pragma.c_str(), -1, &stmt, nullptr);
-        if (rc != SQLITE_OK) {
-            std::cerr << "Error: could not query table info for " << table.name << "\n";
-            had_issues = true;
-            continue;
-        }
+        auto existing = get_columns(table.name);
 
-        std::vector<std::string> existing_columns;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char* col_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (col_name) existing_columns.emplace_back(col_name);
-        }
-        sqlite3_finalize(stmt);
-
-        if (existing_columns.empty()) {
-            std::cout << "  Missing table: " << table.name << " — created\n";
+        if (existing.empty()) {
+            if (table_exists(table.name)) {
+                std::cout << "  Warning: table " << table.name << " exists but has no columns\n";
+            } else {
+                std::cout << "  Missing table: " << table.name << " — created by init\n";
+            }
             had_issues = true;
             continue;
         }
 
         for (const auto& col : table.columns) {
             bool found = false;
-            for (const auto& ec : existing_columns) {
-                if (ec == col.name) { found = true; break; }
+            for (const auto& ec : existing) {
+                if (ec == col) { found = true; break; }
             }
             if (!found) {
-                std::cout << "  Missing column: " << table.name << "." << col.name << " — added\n";
+                std::cout << "  Missing column: " << table.name << "." << col << " — expected to be added by init\n";
                 had_issues = true;
             }
         }
     }
 
     if (had_issues) {
-        bool critical_missing = false;
+        bool still_broken = false;
         for (const auto& table : canonical) {
-            std::string check = "SELECT name FROM sqlite_master WHERE type='table' AND name='" + std::string(table.name) + "'";
-            sqlite3_stmt* stmt = nullptr;
-            sqlite3_prepare_v2(db_, check.c_str(), -1, &stmt, nullptr);
-            bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
-            sqlite3_finalize(stmt);
-            if (!exists) {
-                std::cerr << "Error: critical table still missing after init: " << table.name << "\n";
-                critical_missing = true;
+            if (!table_exists(table.name)) {
+                std::cerr << "Error: table still missing after init: " << table.name << "\n";
+                still_broken = true;
+                continue;
+            }
+            auto post_cols = get_columns(table.name);
+            for (const auto& col : table.columns) {
+                bool found = false;
+                for (const auto& ec : post_cols) {
+                    if (ec == col) { found = true; break; }
+                }
+                if (!found) {
+                    std::cerr << "Error: column still missing after init: " << table.name << "." << col << "\n";
+                    still_broken = true;
+                }
             }
         }
-        if (critical_missing) return false;
-        std::cout << "Database schema updated successfully.\n";
+        if (still_broken) {
+            has_errors = true;
+            std::cerr << "Database schema has unresolved issues.\n";
+        } else {
+            std::cout << "Database schema updated successfully.\n";
+        }
     } else {
         std::cout << "Database schema is up to date.\n";
     }
 
-    return true;
+    return !has_errors;
 }
 
 inline bool FrontendServer::init_database() {

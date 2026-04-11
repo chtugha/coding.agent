@@ -6854,15 +6854,16 @@ int main(int argc, char* argv[]) {
     std::cout << "=======================\n\n";
 
     FrontendServer server(port, project_root);
-    if (!server.start()) {
-        return 1;
-    }
 
     if (db_mode == "reuse") {
         if (!server.validate_schema()) {
             std::cerr << "Error: database schema validation failed. Aborting.\n";
             return 1;
         }
+    }
+
+    if (!server.start()) {
+        return 1;
     }
 
     return 0;
