@@ -293,12 +293,10 @@ std::atomic<bool> g_crawl_requested{false};
 constexpr int MG_POLL_TIMEOUT_MS = 100;
 
 // ============================================================
-// Ollama embedding stub (completed in Step 6)
+// Ollama embedding (forward declaration — implemented after HTTP helpers)
 // ============================================================
 
-static std::vector<float> embed_text(const std::string& /*text*/, const TomedoConfig& /*cfg*/) {
-    return {};
-}
+static std::vector<float> embed_text(const std::string& text, const TomedoConfig& cfg);
 
 // ============================================================
 // VectorStore — hnswlib (ANN) + SQLite (persistence + text)
@@ -1219,6 +1217,213 @@ static HttpResponse https_post(const std::string& host, int port,
 }
 
 // ============================================================
+// Plain HTTP client (for Ollama — no TLS)
+// ============================================================
+
+static std::string http_read_all_plain(int fd, int timeout_ms) {
+    std::string result;
+    char buf[8192];
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (true) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) break;
+        struct pollfd pfd{fd, POLLIN, 0};
+        int pr = poll(&pfd, 1, static_cast<int>(std::min(remaining, (long long)1000)));
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) break;
+        ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n <= 0) break;
+        result.append(buf, static_cast<size_t>(n));
+    }
+    return result;
+}
+
+static HttpResponse http_post_plain(const std::string& url, const std::string& body,
+                                    int timeout_ms = 30000) {
+    std::string host = "127.0.0.1";
+    int port = 11434;
+    std::string path = "/";
+
+    size_t scheme_end = url.find("://");
+    size_t host_start = (scheme_end == std::string::npos) ? 0 : scheme_end + 3;
+    size_t path_start = url.find('/', host_start);
+    std::string hostport;
+    if (path_start == std::string::npos) {
+        hostport = url.substr(host_start);
+    } else {
+        hostport = url.substr(host_start, path_start - host_start);
+        path = url.substr(path_start);
+    }
+    auto colon = hostport.find(':');
+    if (colon != std::string::npos) {
+        host = hostport.substr(0, colon);
+        port = std::atoi(hostport.c_str() + colon + 1);
+    } else {
+        host = hostport;
+    }
+
+    HttpResponse fail;
+    int fd = tcp_connect(host, port, timeout_ms);
+    if (fd < 0) return fail;
+
+    std::ostringstream req;
+    req << "POST " << path << " HTTP/1.1\r\n"
+        << "Host: " << host << ":" << port << "\r\n"
+        << "Content-Type: application/json\r\n"
+        << "Content-Length: " << body.size() << "\r\n"
+        << "Connection: close\r\n\r\n"
+        << body;
+
+    std::string raw_req = req.str();
+    ssize_t written = ::write(fd, raw_req.c_str(), raw_req.size());
+    if (written <= 0) { close(fd); return fail; }
+
+    std::string raw_resp = http_read_all_plain(fd, timeout_ms);
+    close(fd);
+    return parse_http_response(raw_resp);
+}
+
+// ============================================================
+// Ollama embedding client (real implementation)
+// ============================================================
+
+static std::vector<float> embed_text(const std::string& text, const TomedoConfig& cfg) {
+    if (text.empty()) return {};
+
+    std::string url = cfg.ollama_url + "/api/embeddings";
+    std::ostringstream body;
+    body << "{\"model\":\"" << json_escape(cfg.ollama_model)
+         << "\",\"prompt\":\"" << json_escape(text) << "\"}";
+
+    auto resp = http_post_plain(url, body.str(), 30000);
+    if (resp.status != 200 || resp.body.empty()) {
+        LOG_WARN("embed_text: Ollama status %d (url=%s)", resp.status, url.c_str());
+        return {};
+    }
+
+    auto pos = resp.body.find("\"embedding\"");
+    if (pos == std::string::npos) {
+        LOG_WARN("embed_text: no 'embedding' key in response");
+        return {};
+    }
+    pos += 11;
+    while (pos < resp.body.size() && resp.body[pos] != '[') ++pos;
+    if (pos >= resp.body.size()) return {};
+    ++pos;
+
+    std::vector<float> result;
+    result.reserve(768);
+    while (pos < resp.body.size()) {
+        while (pos < resp.body.size() &&
+               (resp.body[pos] == ' ' || resp.body[pos] == '\t' ||
+                resp.body[pos] == '\n' || resp.body[pos] == '\r' ||
+                resp.body[pos] == ',')) ++pos;
+        if (pos >= resp.body.size() || resp.body[pos] == ']') break;
+        char* end = nullptr;
+        float val = std::strtof(resp.body.c_str() + pos, &end);
+        if (end == resp.body.c_str() + pos) break;
+        result.push_back(val);
+        pos = static_cast<size_t>(end - resp.body.c_str());
+    }
+    return result;
+}
+
+// ============================================================
+// Text chunker (UTF-8 aware)
+// ============================================================
+
+static size_t utf8_codepoint_count(const char* s, size_t len) {
+    size_t count = 0;
+    for (size_t i = 0; i < len; ) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if      (c < 0x80)             i += 1;
+        else if ((c & 0xE0) == 0xC0)  i += 2;
+        else if ((c & 0xF0) == 0xE0)  i += 3;
+        else if ((c & 0xF8) == 0xF0)  i += 4;
+        else                           i += 1;
+        ++count;
+    }
+    return count;
+}
+
+static std::vector<std::string> chunk_text(const std::string& text,
+                                            int chunk_tokens = 512,
+                                            int overlap_tokens = 64) {
+    if (text.empty()) return {};
+
+    std::vector<std::string> sentences;
+    std::string cur;
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        cur += c;
+        if (c == '.' || c == '!' || c == '?' || c == '\n') {
+            std::string trimmed = cur;
+            while (!trimmed.empty() &&
+                   (trimmed.front() == ' ' || trimmed.front() == '\t' ||
+                    trimmed.front() == '\r' || trimmed.front() == '\n'))
+                trimmed.erase(trimmed.begin());
+            while (!trimmed.empty() &&
+                   (trimmed.back() == ' ' || trimmed.back() == '\t' ||
+                    trimmed.back() == '\r' || trimmed.back() == '\n'))
+                trimmed.pop_back();
+            if (!trimmed.empty())
+                sentences.push_back(trimmed);
+            cur.clear();
+        }
+    }
+    if (!cur.empty()) {
+        std::string trimmed = cur;
+        while (!trimmed.empty() &&
+               (trimmed.front() == ' ' || trimmed.front() == '\t' ||
+                trimmed.front() == '\r' || trimmed.front() == '\n'))
+            trimmed.erase(trimmed.begin());
+        while (!trimmed.empty() &&
+               (trimmed.back() == ' ' || trimmed.back() == '\t' ||
+                trimmed.back() == '\r' || trimmed.back() == '\n'))
+            trimmed.pop_back();
+        if (!trimmed.empty())
+            sentences.push_back(trimmed);
+    }
+
+    if (sentences.empty()) return {};
+
+    std::vector<std::string> chunks;
+    size_t start = 0;
+    while (start < sentences.size()) {
+        std::string chunk;
+        size_t tokens = 0;
+        size_t end = start;
+        while (end < sentences.size()) {
+            size_t sent_tokens = utf8_codepoint_count(
+                sentences[end].c_str(), sentences[end].size()) / 4 + 1;
+            if (!chunk.empty() && tokens + sent_tokens > static_cast<size_t>(chunk_tokens))
+                break;
+            if (!chunk.empty()) chunk += ' ';
+            chunk += sentences[end];
+            tokens += sent_tokens;
+            ++end;
+        }
+        if (!chunk.empty()) chunks.push_back(std::move(chunk));
+
+        if (end == start) { ++start; continue; }
+
+        size_t overlap_toks = 0;
+        size_t new_start = end;
+        for (size_t j = end; j > start && overlap_toks < static_cast<size_t>(overlap_tokens); --j) {
+            overlap_toks += utf8_codepoint_count(
+                sentences[j - 1].c_str(), sentences[j - 1].size()) / 4 + 1;
+            new_start = j - 1;
+        }
+        start = (new_start < end) ? new_start : end;
+    }
+    return chunks;
+}
+
+// ============================================================
 // Phone index (local SQLite table for phone -> patient mapping)
 // ============================================================
 
@@ -1617,6 +1822,52 @@ static int run_phone_crawl(const TomedoConfig& cfg, sqlite3* db) {
 }
 
 // ============================================================
+// Full RAG crawl (enumerate patients -> embed chunks -> upsert)
+// ============================================================
+
+static int run_full_crawl(const TomedoConfig& cfg, VectorStore& store) {
+    LOG_INFO("Full RAG crawl starting...");
+    auto patients = enumerate_patients(cfg);
+    if (patients.empty()) {
+        LOG_WARN("Full RAG crawl: no patients returned");
+        return 0;
+    }
+    LOG_INFO("Full RAG crawl: %d patients to process", (int)patients.size());
+
+    int total_chunks = 0;
+    for (size_t i = 0; i < patients.size(); ++i) {
+        if (s_quit.load()) break;
+
+        int pid = patients[i].ident;
+        std::string doc = fetch_patient_context(pid, cfg);
+        if (doc.empty()) continue;
+
+        auto chunks = chunk_text(doc);
+        std::string source = "patient/" + std::to_string(pid);
+        for (size_t ci = 0; ci < chunks.size(); ++ci) {
+            if (s_quit.load()) break;
+            auto emb = embed_text(chunks[ci], cfg);
+            if (emb.empty()) {
+                LOG_DEBUG("Full RAG crawl: embed_text empty for patient=%d chunk=%d", pid, (int)ci);
+                continue;
+            }
+            std::string chunk_source = source + "/chunk" + std::to_string(ci);
+            store.upsert(chunk_source, pid, chunks[ci], emb);
+            ++total_chunks;
+        }
+
+        if ((i + 1) % 50 == 0 || i + 1 == patients.size()) {
+            LOG_INFO("Full RAG crawl: %d/%d patients, %d chunks so far",
+                     (int)(i + 1), (int)patients.size(), total_chunks);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    LOG_INFO("Full RAG crawl complete: %d chunks from %d patients",
+             total_chunks, (int)patients.size());
+    return total_chunks;
+}
+
+// ============================================================
 // Caller resolution (uses local phone_index)
 // ============================================================
 
@@ -1720,13 +1971,29 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
 
     } else if (mg_strcmp(hm->uri, mg_str("/query")) == 0 &&
-               mg_strcmp(hm->method, mg_str("POST")) == 0) {
-        std::string body(hm->body.buf, hm->body.len);
-        std::string query_text = json_get_string(body, "text");
-        int top_k = json_get_int(body, "top_k", 3);
+               (mg_strcmp(hm->method, mg_str("GET")) == 0 ||
+                mg_strcmp(hm->method, mg_str("POST")) == 0)) {
+        std::string query_text;
+        int top_k = 3;
+        int patient_id_filter = -1;
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            char text_buf[4096] = {};
+            char topk_buf[32]   = {};
+            char pid_buf[32]    = {};
+            mg_http_get_var(&hm->query, "text",       text_buf, sizeof(text_buf));
+            mg_http_get_var(&hm->query, "top_k",      topk_buf, sizeof(topk_buf));
+            mg_http_get_var(&hm->query, "patient_id", pid_buf,  sizeof(pid_buf));
+            query_text = text_buf;
+            if (topk_buf[0]) top_k = std::atoi(topk_buf);
+            if (pid_buf[0])  patient_id_filter = std::atoi(pid_buf);
+        } else {
+            std::string body(hm->body.buf, hm->body.len);
+            query_text        = json_get_string(body, "text");
+            top_k             = json_get_int(body, "top_k", 3);
+            patient_id_filter = json_get_int(body, "patient_id", -1);
+        }
         if (top_k <= 0) top_k = 3;
         if (top_k > 20) top_k = 20;
-        int patient_id_filter = json_get_int(body, "patient_id", -1);
 
         if (query_text.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n",
@@ -1906,6 +2173,7 @@ int main(int argc, char** argv) {
 
     std::thread crawl_thread([&cfg, phone_db]() {
         run_phone_crawl(cfg, phone_db);
+        run_full_crawl(cfg, g_vector_store);
         g_last_crawl_time.store(static_cast<long>(
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count()));
@@ -1917,6 +2185,7 @@ int main(int argc, char** argv) {
             if (s_quit.load()) break;
             g_crawl_requested.store(false);
             run_phone_crawl(cfg, phone_db);
+            run_full_crawl(cfg, g_vector_store);
             g_last_crawl_time.store(static_cast<long>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
