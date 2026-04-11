@@ -227,7 +227,10 @@ static TomedoConfig parse_config(const std::string& path) {
         else if (key == "ollama_model")       cfg.ollama_model = val;
         else if (key == "api_host")           cfg.api_host = val;
         else if (key == "api_port")           cfg.api_port = parse_int(val, cfg.api_port);
-        else if (key == "log_port")           cfg.log_port = parse_int(val, cfg.log_port);
+        else if (key == "log_port") {
+            int v = parse_int(val, cfg.log_port);
+            cfg.log_port = (v > 0 && v <= 65535) ? v : cfg.log_port;
+        }
         else if (key == "db_path")            cfg.db_path = val;
     }
     return cfg;
@@ -302,6 +305,10 @@ struct HttpServer {
         return true;
     }
 
+    ~HttpServer() {
+        if (thread.joinable()) thread.join();
+    }
+
     void join() {
         if (thread.joinable()) thread.join();
     }
@@ -318,18 +325,13 @@ int main(int argc, char** argv) {
 
     TomedoConfig cfg = parse_config(config_path);
 
-    uint16_t log_port = (cfg.log_port > 0 && cfg.log_port <= 65535)
-                        ? static_cast<uint16_t>(cfg.log_port) : 22022;
-    g_log.init(log_port, whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE);
+    g_log.init(static_cast<uint16_t>(cfg.log_port), whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE);
 
     LOG_INFO("tomedo-crawl starting (api=%s:%d, db=%s)",
              cfg.api_host.c_str(), cfg.api_port, cfg.db_path.c_str());
 
     HttpServer srv;
-    if (!srv.start(cfg)) {
-        LOG_ERROR("HTTP server failed to start, exiting");
-        return 1;
-    }
+    if (!srv.start(cfg)) return 1;
 
     LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
 
