@@ -70,11 +70,11 @@ Modify `main()` in `frontend.cpp`:
 In `frontend.cpp`, add `bool validate_schema();` declaration to the `FrontendServer` class body (near `init_database()` at line 540).
 
 In `database.h`, add the implementation (follows the same pattern as `init_database()` — declared in class, inline-defined in `database.h`):
-- Define a static canonical schema structure: an array of `{table_name, {col1, col2, ...}}` structs/pairs that mirrors the 13 `CREATE TABLE` statements in `init_database()`. Exclude `sqlite_sequence` and `sqlite_master`.
+- Define a static canonical schema structure: an array of `{table_name, {col1, col2, ...}}` structs/pairs that mirrors the 13 `CREATE TABLE` statements in `init_database()`. Exclude `sqlite_sequence` and `sqlite_master`. Note: this array must be updated whenever the schema in `init_database()` changes.
 - `inline bool FrontendServer::validate_schema()` — uses `db_` member directly:
   - For each canonical table: run `PRAGMA table_info(<table>)` and collect existing column names
   - Compare against expected columns
-  - Print diagnostic lines for missing tables ("Missing table: X — will be created") and missing columns ("Missing column: X.Y — will be added")
+  - Print diagnostic lines for missing tables ("Missing table: X — created") and missing columns ("Missing column: X.Y — added")
   - If nothing is missing, print "Database schema is up to date."
   - If things were missing, print "Database schema updated successfully." (since `init_database()` already ran and fixed them)
   - Return false only if a critical table is still absent after init (query `sqlite_master` to confirm)
