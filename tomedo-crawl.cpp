@@ -199,6 +199,11 @@ static int parse_int(const std::string& val, int fallback) {
     catch (...) { return fallback; }
 }
 
+static int parse_port(const std::string& val, int fallback) {
+    int v = parse_int(val, fallback);
+    return (v > 0 && v <= 65535) ? v : fallback;
+}
+
 static TomedoConfig parse_config(const std::string& path) {
     TomedoConfig cfg;
     std::ifstream f(path);
@@ -217,7 +222,7 @@ static TomedoConfig parse_config(const std::string& path) {
         while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
         while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) val.pop_back();
         if (key == "tomedo_host")             cfg.tomedo_host = val;
-        else if (key == "tomedo_port")        cfg.tomedo_port = parse_int(val, cfg.tomedo_port);
+        else if (key == "tomedo_port")        cfg.tomedo_port = parse_port(val, cfg.tomedo_port);
         else if (key == "tomedo_db")          cfg.tomedo_db = val;
         else if (key == "tomedo_user")        cfg.tomedo_user = val;
         else if (key == "tomedo_pass")        cfg.tomedo_pass = val;
@@ -226,11 +231,8 @@ static TomedoConfig parse_config(const std::string& path) {
         else if (key == "ollama_url")         cfg.ollama_url = val;
         else if (key == "ollama_model")       cfg.ollama_model = val;
         else if (key == "api_host")           cfg.api_host = val;
-        else if (key == "api_port")           cfg.api_port = parse_int(val, cfg.api_port);
-        else if (key == "log_port") {
-            int v = parse_int(val, cfg.log_port);
-            cfg.log_port = (v > 0 && v <= 65535) ? v : cfg.log_port;
-        }
+        else if (key == "api_port")           cfg.api_port = parse_port(val, cfg.api_port);
+        else if (key == "log_port")           cfg.log_port = parse_port(val, cfg.log_port);
         else if (key == "db_path")            cfg.db_path = val;
     }
     return cfg;
