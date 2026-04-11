@@ -982,8 +982,14 @@ static int tcp_connect(const std::string& host, int port, int timeout_ms) {
     if (rc < 0 && errno != EINPROGRESS) { close(fd); return -1; }
     if (rc < 0) {
         struct pollfd pfd{fd, POLLOUT, 0};
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         int pr;
-        do { pr = poll(&pfd, 1, timeout_ms); } while (pr < 0 && errno == EINTR);
+        do {
+            int rem = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count());
+            if (rem <= 0) { pr = 0; break; }
+            pr = poll(&pfd, 1, rem);
+        } while (pr < 0 && errno == EINTR);
         if (pr <= 0) { close(fd); return -1; }
         int err = 0; socklen_t len = sizeof(err);
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
