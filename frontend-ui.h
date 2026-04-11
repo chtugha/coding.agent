@@ -34,6 +34,10 @@ inline std::string FrontendServer::build_ui_pages() {
 <div class="wt-pipeline-connector"></div>
 <div class="wt-pipeline-node" id="pipeline-node-OUTBOUND_AUDIO_PROCESSOR"><span class="node-label">OAP</span><span class="node-status offline" id="pipeline-status-OUTBOUND_AUDIO_PROCESSOR"></span></div>
 </div>
+<div style="display:flex;align-items:center;gap:8px;margin-top:8px;justify-content:center">
+<div class="wt-pipeline-node" id="pipeline-node-TOMEDO_CRAWL_SERVICE" style="border-color:rgba(176,38,255,0.5)"><span class="node-label">RAG</span><span class="node-status offline" id="pipeline-status-TOMEDO_CRAWL_SERVICE"></span></div>
+<span style="font-size:10px;color:rgba(255,255,255,0.3);letter-spacing:0.05em" id="ragDashInfo"></span>
+</div>
 </div>
 </div>
 
@@ -162,6 +166,43 @@ Save incoming audio as WAV</label>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
 <input class="wt-input" id="sipProviderWavDir" placeholder="/tmp/wav_recordings" style="font-size:12px" onchange="saveSipProviderWavConfig()"></div>
 </div>
+<div id="tomedoCrawlConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">Tomedo RAG Configuration</div>
+<div id="ragHealthStatus" style="margin-bottom:8px;padding:6px 10px;border-radius:4px;font-size:11px;background:rgba(0,0,0,0.2)">
+<span id="ragStatusDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--wt-text-secondary);margin-right:6px"></span>
+<span id="ragStatusText">Checking...</span>
+<span id="ragDocCount" style="margin-left:12px;color:var(--wt-text-secondary)"></span>
+<span id="ragLastCrawl" style="margin-left:12px;color:var(--wt-text-secondary)"></span>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Tomedo Server</div>
+<div style="display:grid;grid-template-columns:1fr 100px;gap:6px;margin-bottom:8px">
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">IP / Hostname</label>
+<input class="wt-input" id="ragTomeдоHost" placeholder="192.168.10.9" style="font-size:12px"></div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Port</label>
+<input class="wt-input" id="ragTomeдоPort" placeholder="8443" style="font-size:12px"></div>
+</div>
+<div class="wt-field" style="margin-bottom:8px"><label style="font-size:12px">Client Certificate (PEM)</label>
+<div style="display:flex;gap:6px;align-items:center">
+<input type="file" id="ragCertFile" accept=".pem,.crt,.cert,.key" style="font-size:11px;flex:1">
+<button class="wt-btn wt-btn-secondary" style="font-size:11px" onclick="uploadRagCert()">Upload</button>
+<span id="ragCertStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Ollama Embedding Backend</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Ollama URL</label>
+<input class="wt-input" id="ragOllamaUrl" placeholder="http://127.0.0.1:11434" style="font-size:12px"></div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Embedding Model</label>
+<input class="wt-input" id="ragOllamaModel" placeholder="nomic-embed-text" style="font-size:12px"></div>
+</div>
+<div class="wt-field" style="margin-bottom:8px"><label style="font-size:12px">Crawl Interval (seconds)</label>
+<input class="wt-input" id="ragCrawlInterval" placeholder="3600" style="font-size:12px;width:120px"></div>
+<div style="display:flex;gap:6px;align-items:center">
+<button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="saveRagConfig()">Save Config</button>
+<button class="wt-btn wt-btn-secondary" style="font-size:11px" onclick="triggerRagCrawl()">Trigger Crawl</button>
+<span id="ragConfigStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+</div>
 <div id="oapConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">Outbound Audio Processor Configuration</div>
 <div class="wt-field" style="margin-top:8px;margin-bottom:6px;display:flex;align-items:center;gap:8px">
@@ -207,6 +248,7 @@ Save outgoing audio as WAV</label>
 <option value="KOKORO_SERVICE">Kokoro TTS</option>
 <option value="NEUTTS_SERVICE">NeuTTS</option>
 <option value="OUTBOUND_AUDIO_PROCESSOR">Outbound Audio</option>
+<option value="TOMEDO_CRAWL">Tomedo RAG</option>
 <option value="FRONTEND">Frontend</option>
 </select>
 <select class="wt-select" id="logLevelFilter" onchange="applyLogLevelFilter()">

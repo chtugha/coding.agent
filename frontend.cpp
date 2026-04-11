@@ -921,6 +921,7 @@ private:
         if (name == "KOKORO_SERVICE") return ServiceType::KOKORO_SERVICE;
         if (name == "NEUTTS_SERVICE") return ServiceType::NEUTTS_SERVICE;
         if (name == "OUTBOUND_AUDIO_PROCESSOR") return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
+        if (name == "TOMEDO_CRAWL_SERVICE" || name == "TOMEDO_CRAWL") return ServiceType::TOMEDO_CRAWL_SERVICE;
         if (name == "FRONTEND") return ServiceType::FRONTEND;
         return ServiceType::SIP_CLIENT;
     }
@@ -1070,6 +1071,14 @@ private:
                 handle_pipeline_stress_stop(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/async/status")) == 0) {
                 handle_async_status(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/rag/health")) == 0) {
+                handle_rag_health(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/rag/config")) == 0) {
+                handle_rag_config(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/rag/cert_upload")) == 0) {
+                handle_rag_cert_upload(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/rag/trigger_crawl")) == 0) {
+                handle_rag_trigger_crawl(c, hm);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
@@ -3685,8 +3694,9 @@ private:
             {"llama-service",             whispertalk::ServiceType::LLAMA_SERVICE},
             {"tts-service",               whispertalk::ServiceType::KOKORO_SERVICE},
             {"outbound-audio-processor",  whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
+            {"tomedo-crawl",              whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE},
         };
-        constexpr int N = 7;
+        constexpr int N = 8;
 
         struct Result { bool reachable; std::string details; };
         std::vector<Result> results(N);
@@ -5178,7 +5188,7 @@ private:
 
             const char* services[] = {
                 "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE", "WHISPER_SERVICE",
-                "LLAMA_SERVICE", "KOKORO_SERVICE", "NEUTTS_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", nullptr
+                "LLAMA_SERVICE", "KOKORO_SERVICE", "NEUTTS_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", "TOMEDO_CRAWL_SERVICE", nullptr
             };
 
             std::stringstream json;
@@ -5241,6 +5251,7 @@ private:
                     {"KOKORO_SERVICE",           whispertalk::ServiceType::KOKORO_SERVICE},
                     {"NEUTTS_SERVICE",           whispertalk::ServiceType::NEUTTS_SERVICE},
                     {"OUTBOUND_AUDIO_PROCESSOR", whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
+                    {"TOMEDO_CRAWL_SERVICE",     whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE},
                 };
                 for (const auto& m : svc_map) {
                     if (service == m.name) {
@@ -5630,6 +5641,157 @@ private:
                 }
             }
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
+        }
+    }
+
+    static std::string rag_http_request(const std::string& method, const std::string& path,
+                                       const std::string& body = "", int timeout_ms = 2000) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return "";
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(13181);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            ::close(sock);
+            return "";
+        }
+        std::string req = method + " " + path + " HTTP/1.0\r\nHost: 127.0.0.1\r\n";
+        if (!body.empty()) {
+            req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+        }
+        req += "Connection: close\r\n\r\n";
+        if (!body.empty()) req += body;
+        send(sock, req.c_str(), req.size(), 0);
+        std::string response;
+        char buf[4096];
+        ssize_t n;
+        while ((n = recv(sock, buf, sizeof(buf), 0)) > 0) {
+            response.append(buf, n);
+        }
+        ::close(sock);
+        auto hdr_end = response.find("\r\n\r\n");
+        if (hdr_end != std::string::npos) return response.substr(hdr_end + 4);
+        return response;
+    }
+
+    void handle_rag_health(struct mg_connection *c) {
+        std::string body = rag_http_request("GET", "/health");
+        if (body.empty()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"status\":\"offline\",\"indexed_docs\":0,\"last_crawl\":null}");
+        } else {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", body.c_str());
+        }
+    }
+
+    void handle_rag_config(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            std::string tomedo_host = get_setting("rag_tomedo_host", "192.168.10.9");
+            std::string tomedo_port = get_setting("rag_tomedo_port", "8443");
+            std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
+            std::string ollama_model = get_setting("rag_ollama_model", "nomic-embed-text");
+            std::string crawl_interval = get_setting("rag_crawl_interval_sec", "3600");
+            std::string cert_status = get_setting("rag_cert_uploaded", "");
+            std::stringstream json;
+            json << "{\"tomedo_host\":\"" << escape_json(tomedo_host)
+                 << "\",\"tomedo_port\":\"" << escape_json(tomedo_port)
+                 << "\",\"ollama_url\":\"" << escape_json(ollama_url)
+                 << "\",\"ollama_model\":\"" << escape_json(ollama_model)
+                 << "\",\"crawl_interval_sec\":\"" << escape_json(crawl_interval)
+                 << "\",\"cert_uploaded\":" << (cert_status.empty() ? "false" : "true")
+                 << "}";
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+        } else {
+            std::string body(hm->body.buf, hm->body.len);
+            auto save = [&](const std::string& json_key, const std::string& setting_key) {
+                std::string val = extract_json_string(body, json_key);
+                if (!val.empty() && db_) {
+                    sqlite3_stmt* stmt;
+                    const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
+                    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                        sqlite3_bind_text(stmt, 1, setting_key.c_str(), -1, SQLITE_TRANSIENT);
+                        sqlite3_bind_text(stmt, 2, val.c_str(), -1, SQLITE_TRANSIENT);
+                        sqlite3_step(stmt);
+                        sqlite3_finalize(stmt);
+                    }
+                }
+            };
+            save("tomedo_host", "rag_tomedo_host");
+            save("tomedo_port", "rag_tomedo_port");
+            save("ollama_url", "rag_ollama_url");
+            save("ollama_model", "rag_ollama_model");
+            save("crawl_interval_sec", "rag_crawl_interval_sec");
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
+        }
+    }
+
+    void handle_rag_cert_upload(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        struct mg_http_part part;
+        size_t pos = 0;
+        std::string pem_data;
+        while ((pos = mg_http_next_multipart(hm->body, pos, &part)) > 0) {
+            if (part.body.len > 0) {
+                pem_data.assign(part.body.buf, part.body.len);
+                break;
+            }
+        }
+        if (pem_data.empty()) {
+            std::string raw(hm->body.buf, hm->body.len);
+            if (!raw.empty() && raw.find("-----BEGIN") != std::string::npos) {
+                pem_data = raw;
+            }
+        }
+        if (pem_data.empty() || pem_data.size() > 65536) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"No PEM data or file too large (max 64KB)\"}");
+            return;
+        }
+        mkdir("certs", 0700);
+        std::string cert_path = "certs/tomedo-client.pem";
+        std::ofstream out(cert_path, std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                "{\"error\":\"Cannot write certificate file\"}");
+            return;
+        }
+        out.write(pem_data.data(), pem_data.size());
+        out.close();
+        chmod(cert_path.c_str(), 0600);
+        if (db_) {
+            sqlite3_stmt* stmt;
+            const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, "rag_cert_uploaded", -1, SQLITE_STATIC);
+                sqlite3_bind_text(stmt, 2, cert_path.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"status\":\"uploaded\",\"path\":\"%s\"}", escape_json(cert_path).c_str());
+    }
+
+    void handle_rag_trigger_crawl(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string body = rag_http_request("POST", "/crawl/trigger");
+        if (body.empty()) {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"RAG service not reachable\"}");
+        } else {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"triggered\"}");
         }
     }
 

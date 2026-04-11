@@ -209,8 +209,6 @@ struct TomedoConfig {
     std::string tomedo_host      = "192.168.10.9";
     int         tomedo_port      = 8443;
     std::string tomedo_db        = "tomedo_live";
-    std::string tomedo_user      = "";
-    std::string tomedo_pass      = "";
     std::string tomedo_cert_pem  = "/etc/tomedo-crawl/client.pem";
     int         crawl_interval_sec = 3600;
     std::string ollama_url       = "http://127.0.0.1:11434";
@@ -252,8 +250,6 @@ static TomedoConfig parse_config(const std::string& path) {
         if (key == "tomedo_host")             cfg.tomedo_host = val;
         else if (key == "tomedo_port")        cfg.tomedo_port = parse_port(val, cfg.tomedo_port);
         else if (key == "tomedo_db")          cfg.tomedo_db = val;
-        else if (key == "tomedo_user")        cfg.tomedo_user = val;
-        else if (key == "tomedo_pass")        cfg.tomedo_pass = val;
         else if (key == "tomedo_cert_pem")    cfg.tomedo_cert_pem = val;
         else if (key == "crawl_interval_sec") {
             int v = parse_int(val, cfg.crawl_interval_sec);
@@ -294,7 +290,19 @@ whispertalk::LogForwarder g_log;
 std::atomic<long> g_last_crawl_time{0};
 std::atomic<bool> g_crawl_requested{false};
 
-constexpr int MG_POLL_TIMEOUT_MS = 100;
+constexpr int MG_POLL_TIMEOUT_MS      = 100;
+constexpr int CHARS_PER_TOKEN_APPROX  = 4;
+constexpr int MIN_PHONE_DIGITS        = 4;
+constexpr int PHONE_SUFFIX_MATCH_LEN  = 6;
+constexpr int MAX_DIAGNOSEN           = 20;
+constexpr int MAX_MEDICATIONS         = 20;
+constexpr int CRAWL_PROGRESS_INTERVAL = 50;
+constexpr int CRAWL_BATCH_SLEEP_MS    = 10;
+constexpr int EXPIRY_CHECK_INTERVAL_S = 300;
+constexpr int QUERY_POOL_WORKERS      = 4;
+constexpr int EMBED_TIMEOUT_MS        = 30000;
+constexpr int TOMEDO_API_TIMEOUT_MS   = 15000;
+constexpr int TOMEDO_LIST_TIMEOUT_MS  = 60000;
 
 // ============================================================
 // Ollama embedding (forward declaration — implemented after HTTP helpers)
@@ -1274,7 +1282,7 @@ static std::vector<float> embed_text(const std::string& text, const TomedoConfig
     body << "{\"model\":\"" << json_escape(cfg.ollama_model)
          << "\",\"prompt\":\"" << json_escape(text) << "\"}";
 
-    auto resp = http_post_plain(url, body.str(), 30000);
+    auto resp = http_post_plain(url, body.str(), EMBED_TIMEOUT_MS);
     if (resp.status != 200 || resp.body.empty()) {
         LOG_WARN("embed_text: Ollama status %d (url=%s)", resp.status, url.c_str());
         return {};
@@ -1364,7 +1372,7 @@ static std::vector<std::string> chunk_text(const std::string& text,
         size_t end = start;
         while (end < sentences.size()) {
             size_t sent_tokens = utf8_codepoint_count(
-                sentences[end].c_str(), sentences[end].size()) / 4 + 1;
+                sentences[end].c_str(), sentences[end].size()) / CHARS_PER_TOKEN_APPROX + 1;
             if (!chunk.empty() && tokens + sent_tokens > static_cast<size_t>(chunk_tokens))
                 break;
             if (!chunk.empty()) chunk += ' ';
@@ -1380,7 +1388,7 @@ static std::vector<std::string> chunk_text(const std::string& text,
         size_t new_start = end;
         for (size_t j = end; j > start && overlap_toks < static_cast<size_t>(overlap_tokens); --j) {
             overlap_toks += utf8_codepoint_count(
-                sentences[j - 1].c_str(), sentences[j - 1].size()) / 4 + 1;
+                sentences[j - 1].c_str(), sentences[j - 1].size()) / CHARS_PER_TOKEN_APPROX + 1;
             new_start = j - 1;
         }
         start = (new_start < end) ? new_start : end;
@@ -1448,8 +1456,8 @@ struct PhoneLookupResult {
 static PhoneLookupResult phone_index_lookup(sqlite3* db, const std::string& phone) {
     PhoneLookupResult r;
     std::string digits = normalize_phone(phone);
-    if (digits.size() < 4) return r;
-    std::string pattern = "%" + digits.substr(digits.size() > 6 ? digits.size() - 6 : 0) + "%";
+    if (digits.size() < static_cast<size_t>(MIN_PHONE_DIGITS)) return r;
+    std::string pattern = "%" + digits.substr(digits.size() > static_cast<size_t>(PHONE_SUFFIX_MATCH_LEN) ? digits.size() - PHONE_SUFFIX_MATCH_LEN : 0) + "%";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db,
         "SELECT patient_id, name, vorname FROM phone_index WHERE phone LIKE ? LIMIT 1",
@@ -1516,7 +1524,7 @@ static std::vector<PatientRef> parse_patient_array(const std::string& json) {
 
 static std::vector<PatientRef> enumerate_patients(const TomedoConfig& cfg) {
     std::string path = "/" + cfg.tomedo_db + "/patient?flach=true";
-    auto resp = https_get(cfg.tomedo_host, cfg.tomedo_port, path, cfg.tomedo_cert_pem, 60000);
+    auto resp = https_get(cfg.tomedo_host, cfg.tomedo_port, path, cfg.tomedo_cert_pem, TOMEDO_LIST_TIMEOUT_MS);
     if (resp.status != 200) {
         LOG_ERROR("enumerate_patients: HTTP %d", resp.status);
         return {};
@@ -1570,7 +1578,7 @@ static std::string extract_diagnosen(const std::string& body) {
     if (pos >= body.size()) return result;
     ++pos;
     int count = 0;
-    while (pos < body.size() && count < 20) {
+    while (pos < body.size() && count < MAX_DIAGNOSEN) {
         auto obj_start = body.find('{', pos);
         if (obj_start == std::string::npos) break;
         auto arr_end = body.find(']', pos);
@@ -1607,7 +1615,7 @@ static std::string extract_medications(const std::string& body) {
     std::string result;
     size_t pos = 0;
     int count = 0;
-    while (pos < body.size() && count < 20) {
+    while (pos < body.size() && count < MAX_MEDICATIONS) {
         auto obj_start = body.find('{', pos);
         if (obj_start == std::string::npos) break;
         int depth = 1;
@@ -1698,7 +1706,7 @@ static PatientContext fetch_patient_context_full(int patient_id, const TomedoCon
     std::string pid = std::to_string(patient_id);
 
     auto detail_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
-        base + "/patient/" + pid, cfg.tomedo_cert_pem, 15000);
+        base + "/patient/" + pid, cfg.tomedo_cert_pem, TOMEDO_API_TIMEOUT_MS);
     if (detail_resp.status != 200) return ctx;
 
     ctx.nachname = json_get_string(detail_resp.body, "nachname");
@@ -1710,21 +1718,21 @@ static PatientContext fetch_patient_context_full(int patient_id, const TomedoCon
         base + "/patient/" + pid + "/patientenDetailsRelationen"
         "?limitScheine=true&limitKartei=50&limitMedikamentenPlan=50"
         "&limitVerordnungen=50&limitZeiterfassungen=true&limitBehandlungsfaelle=true",
-        cfg.tomedo_cert_pem, 15000);
+        cfg.tomedo_cert_pem, TOMEDO_API_TIMEOUT_MS);
     std::string diagnosen;
     if (rel_resp.status == 200)
         diagnosen = extract_diagnosen(rel_resp.body);
 
     auto med_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
         base + "/patient/" + pid + "/patientenDetailsRelationen/medikamentenPlan",
-        cfg.tomedo_cert_pem, 15000);
+        cfg.tomedo_cert_pem, TOMEDO_API_TIMEOUT_MS);
     std::string medikamente;
     if (med_resp.status == 200)
         medikamente = extract_medications(med_resp.body);
 
     auto termin_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
         base + "/patient/" + pid + "/termine?flach=true",
-        cfg.tomedo_cert_pem, 15000);
+        cfg.tomedo_cert_pem, TOMEDO_API_TIMEOUT_MS);
     std::string termin;
     if (termin_resp.status == 200)
         termin = extract_next_appointment(termin_resp.body);
@@ -1814,10 +1822,10 @@ static int run_full_crawl(const std::vector<PatientRef>& patients,
             ++total_chunks;
         }
 
-        if ((i + 1) % 50 == 0 || i + 1 == patients.size()) {
+        if ((i + 1) % CRAWL_PROGRESS_INTERVAL == 0 || i + 1 == patients.size()) {
             LOG_INFO("Crawl: %d/%d patients, %d chunks, %d phones so far",
                      (int)(i + 1), (int)patients.size(), total_chunks, phone_count);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(CRAWL_BATCH_SLEEP_MS));
         }
     }
     LOG_INFO("Crawl complete: %d chunks, %d phones from %d patients",
@@ -2278,12 +2286,12 @@ int main(int argc, char** argv) {
     g_phone_db = phone_db;
 
     g_resolve_queue.start();
-    g_query_pool.start(4);
+    g_query_pool.start(QUERY_POOL_WORKERS);
 
     std::thread expiry_thread([]() {
         while (!s_quit.load()) {
             g_caller_store.expire_old();
-            for (int i = 0; i < 300 && !s_quit.load(); ++i)
+            for (int i = 0; i < EXPIRY_CHECK_INTERVAL_S && !s_quit.load(); ++i)
                 std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     });
@@ -2330,8 +2338,8 @@ int main(int argc, char** argv) {
 
     LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
 
-    g_query_pool.shutdown();
     srv.join();
+    g_query_pool.shutdown();
     srv.free_mgr();
     g_resolve_queue.shutdown();
     crawl_thread.join();
