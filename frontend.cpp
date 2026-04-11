@@ -335,6 +335,8 @@ public:
         }
     }
 
+    bool validate_schema();
+
     bool start() {
         if (!db_ok_) {
             std::cerr << "ERROR: Database initialization failed. Cannot start frontend server.\n";
@@ -6854,6 +6856,13 @@ int main(int argc, char* argv[]) {
     FrontendServer server(port, project_root);
     if (!server.start()) {
         return 1;
+    }
+
+    if (db_mode == "reuse") {
+        if (!server.validate_schema()) {
+            std::cerr << "Error: database schema validation failed. Aborting.\n";
+            return 1;
+        }
     }
 
     return 0;

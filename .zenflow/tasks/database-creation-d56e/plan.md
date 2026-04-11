@@ -66,7 +66,8 @@ Modify `main()` in `frontend.cpp`:
 
 **Verification**: `cd build && ninja -j$(sysctl -n hw.ncpu)` — must compile clean
 
-### [ ] Step: Add schema validation and diagnostic reporting
+### [x] Step: Add schema validation and diagnostic reporting
+<!-- chat-id: f74aa95f-925b-4123-9cc5-3c0b0a94ad9b -->
 
 In `frontend.cpp`, add `bool validate_schema();` declaration to the `FrontendServer` class body (near `init_database()` at line 540).
 
