@@ -549,6 +549,8 @@ private:
                         state->compact();
                     } else {
                         memset(frame, ULAW_SILENCE, ULAW_FRAME_SIZE);
+                        if (avail == 0)
+                            state->first_chunk = true;
                     }
                 }
 

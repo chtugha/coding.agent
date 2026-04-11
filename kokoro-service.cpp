@@ -51,6 +51,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <map>
 #include <mutex>
 #include <queue>
@@ -346,6 +347,11 @@ public:
         return buckets_.empty() ? nullptr : &buckets_.back();
     }
 
+    int max_asr_frames() const {
+        if (buckets_.empty()) return 0;
+        return buckets_.back().asr_frames;
+    }
+
     std::vector<float> decode(const BucketInfo& bucket,
                                const KTensor& asr,
                                const KTensor& f0_pred,
@@ -543,6 +549,11 @@ struct AlignedIntermediates {
     KTensor n_pred;
     KTensor ref_s_dec;
     bool valid = false;
+    std::vector<int64_t> pred_dur;
+    int actual_len = 0;
+    int64_t total_frames = 0;
+    KTensor d_enc;
+    KTensor s_style;
 };
 
 class KokoroPipeline {
@@ -674,6 +685,109 @@ public:
     }
 
 #ifdef KOKORO_COREML
+    std::vector<float> decode_part(const AlignedIntermediates& inter,
+                                    int phon_start, int phon_end,
+                                    int64_t frame_start, int64_t num_frames) {
+        if (num_frames <= 0) return {};
+
+        auto asr_slice = KTensor::zeros({1, 512, num_frames});
+        int64_t src_time = inter.asr.size(2);
+        for (int ch = 0; ch < 512; ch++) {
+            std::memcpy(asr_slice.ptr() + (int64_t)ch * num_frames,
+                        inter.asr.ptr() + (int64_t)ch * src_time + frame_start,
+                        num_frames * sizeof(float));
+        }
+
+        KTensor f0_pred, n_pred;
+        bool f0n_ok = false;
+        if (coreml_f0n_ && coreml_f0n_->is_available() && inter.d_enc.defined() && inter.s_style.defined()) {
+            int d_dim = 640;
+            auto en = KTensor::zeros({1, (int64_t)d_dim, num_frames});
+            {
+                int64_t pos = 0;
+                for (int i = phon_start; i < phon_end; i++) {
+                    int64_t dur = inter.pred_dur[i];
+                    if (dur <= 0) continue;
+                    int64_t frames = std::min(dur, num_frames - pos);
+                    for (int ch = 0; ch < d_dim; ch++) {
+                        float val = inter.d_enc.at3(0, i, ch);
+                        std::fill_n(en.ptr() + (int64_t)ch * num_frames + pos, frames, val);
+                    }
+                    pos += dur;
+                }
+            }
+            auto* f0n_bucket = coreml_f0n_->select_bucket((int)num_frames);
+            if (f0n_bucket) {
+                f0n_ok = coreml_f0n_->predict(*f0n_bucket, en.ptr(), d_dim, (int)num_frames,
+                                               inter.s_style.ptr(), f0_pred, n_pred);
+                if (f0n_ok) {
+                    int64_t f0n_actual = num_frames * 2;
+                    if (f0n_actual < (int64_t)f0_pred.size(1))
+                        f0_pred.truncate_last_dim(f0n_actual);
+                    if (f0n_actual < (int64_t)n_pred.size(1))
+                        n_pred.truncate_last_dim(f0n_actual);
+                }
+            }
+        }
+        if (!f0n_ok) {
+            int64_t f0_len = num_frames * 2;
+            f0_pred = KTensor::zeros({1, f0_len});
+            n_pred = KTensor::zeros({1, f0_len});
+        }
+
+        int f0_len = static_cast<int>(f0_pred.size(1));
+        auto* sb = coreml_split_decoder_->select_bucket(f0_len);
+        if (!sb) return {};
+
+        int asr_frames = sb->asr_frames;
+        int f0_frames = sb->f0_frames;
+
+        auto f0_padded = KTensor::zeros({1, (int64_t)f0_frames});
+        auto n_padded = KTensor::zeros({1, (int64_t)f0_frames});
+        int f0_actual = std::min(f0_len, f0_frames);
+        std::memcpy(f0_padded.ptr(), f0_pred.ptr(), f0_actual * sizeof(float));
+        std::memcpy(n_padded.ptr(), n_pred.ptr(), f0_actual * sizeof(float));
+
+        float* f0_ptr = f0_padded.ptr();
+        int f0_frames_cap = f0_frames;
+        auto har_future = std::async(std::launch::async,
+            [this, f0_ptr, f0_frames_cap]() {
+                return coreml_split_decoder_->compute_har(f0_ptr, f0_frames_cap);
+            });
+
+        auto asr_padded = KTensor::zeros({1, 512, (int64_t)asr_frames});
+        int asr_actual = std::min((int)num_frames, asr_frames);
+        for (int ch = 0; ch < 512; ch++) {
+            std::memcpy(asr_padded.ptr() + (int64_t)ch * asr_frames,
+                        asr_slice.ptr() + (int64_t)ch * num_frames,
+                        asr_actual * sizeof(float));
+        }
+
+        auto har = har_future.get();
+        if (har.empty()) return {};
+
+        int har_time = sb->har_time;
+        int har_channels = sb->har_channels * 2;
+        int64_t har_expected = (int64_t)har_channels * har_time;
+        std::vector<float> har_padded(har_expected, 0.0f);
+        int har_actual_frames = std::min((int)(har.size() / har_channels), har_time);
+        for (int c = 0; c < har_channels; c++) {
+            std::memcpy(har_padded.data() + c * har_time,
+                       har.data() + c * har_actual_frames,
+                       har_actual_frames * sizeof(float));
+        }
+
+        auto audio = coreml_split_decoder_->decode(*sb, asr_padded, f0_padded, n_padded,
+                                                     inter.ref_s_dec, har_padded);
+        if (!audio.empty() && num_frames < asr_frames) {
+            int64_t samples_per_frame = (int64_t)audio.size() / asr_frames;
+            int64_t trim_to = num_frames * samples_per_frame;
+            if (trim_to > 0 && (int64_t)audio.size() > trim_to)
+                audio.resize(trim_to);
+        }
+        return audio;
+    }
+
     std::vector<float> synthesize_coreml(const std::vector<int64_t>& ids,
                                           const KTensor& ref_s,
                                           float speed) {
@@ -681,6 +795,40 @@ public:
 
         auto intermediates = run_duration_and_align(ids, ref_s, speed);
         if (!intermediates.valid) return {};
+
+        const int max_asr = coreml_split_decoder_->max_asr_frames();
+        if (intermediates.total_frames > max_asr && intermediates.actual_len > 2) {
+            struct ChunkRange { int phon_start; int phon_end; int64_t frame_start; int64_t num_frames; };
+            std::vector<ChunkRange> chunks;
+            int64_t cum = 0;
+            int chunk_start = 0;
+            int64_t chunk_frame_start = 0;
+            for (int i = 0; i < intermediates.actual_len; i++) {
+                int64_t next = cum + intermediates.pred_dur[i];
+                if (next > max_asr && i > chunk_start) {
+                    chunks.push_back({chunk_start, i, chunk_frame_start, cum});
+                    chunk_frame_start += cum;
+                    chunk_start = i;
+                    cum = intermediates.pred_dur[i];
+                } else {
+                    cum = next;
+                }
+            }
+            if (chunk_start < intermediates.actual_len) {
+                chunks.push_back({chunk_start, intermediates.actual_len, chunk_frame_start, cum});
+            }
+
+            std::fprintf(stderr, "Splitting long synthesis (total_frames=%lld > max_asr=%d) into %zu chunks\n",
+                        (long long)intermediates.total_frames, max_asr, chunks.size());
+
+            std::vector<float> result;
+            for (auto& c : chunks) {
+                auto part = decode_part(intermediates, c.phon_start, c.phon_end,
+                                         c.frame_start, c.num_frames);
+                result.insert(result.end(), part.begin(), part.end());
+            }
+            return result;
+        }
 
         int f0_len = static_cast<int>(intermediates.f0_pred.size(1));
         auto* sb = coreml_split_decoder_->select_bucket(f0_len);
@@ -698,18 +846,26 @@ public:
         std::memcpy(f0_padded.ptr(), intermediates.f0_pred.ptr(), f0_actual * sizeof(float));
         std::memcpy(n_padded.ptr(), intermediates.n_pred.ptr(), f0_actual * sizeof(float));
 
-        auto har = coreml_split_decoder_->compute_har(f0_padded.ptr(), f0_frames);
-        if (har.empty()) {
-            std::fprintf(stderr, "HAR computation failed for bucket %s\n", sb->name.c_str());
-            return {};
-        }
+        float* f0_ptr = f0_padded.ptr();
+        int f0_frames_cap = f0_frames;
+        auto har_future = std::async(std::launch::async,
+            [this, f0_ptr, f0_frames_cap]() {
+                return coreml_split_decoder_->compute_har(f0_ptr, f0_frames_cap);
+            });
 
         auto asr_padded = KTensor::zeros({1, 512, (int64_t)asr_frames});
         int asr_actual = std::min((int)intermediates.asr.size(2), asr_frames);
+        int64_t src_time = intermediates.asr.size(2);
         for (int ch = 0; ch < 512; ch++) {
-            for (int t = 0; t < asr_actual; t++) {
-                asr_padded.at3(0, ch, t) = intermediates.asr.at3(0, ch, t);
-            }
+            std::memcpy(asr_padded.ptr() + (int64_t)ch * asr_frames,
+                        intermediates.asr.ptr() + (int64_t)ch * src_time,
+                        asr_actual * sizeof(float));
+        }
+
+        auto har = har_future.get();
+        if (har.empty()) {
+            std::fprintf(stderr, "HAR computation failed for bucket %s\n", sb->name.c_str());
+            return {};
         }
 
         int har_time = sb->har_time;
@@ -757,19 +913,28 @@ public:
         }
         if (total_frames <= 0) return result;
 
+        result.pred_dur.resize(actual_len);
+        for (int i = 0; i < actual_len; i++) result.pred_dur[i] = dur_out.pred_dur[i];
+        result.actual_len = actual_len;
+        result.total_frames = total_frames;
+        result.d_enc = std::move(dur_out.d);
+        result.s_style = std::move(dur_out.s);
+
         int t_en_dim = 512;
         auto asr = KTensor::zeros({1, (int64_t)t_en_dim, total_frames});
 
-        int64_t pos = 0;
-        for (int i = 0; i < actual_len && i < 512; i++) {
-            int64_t dur = dur_out.pred_dur[i];
-            if (dur <= 0) continue;
-            for (int64_t j = 0; j < dur && (pos + j) < total_frames; j++) {
+        {
+            int64_t pos = 0;
+            for (int i = 0; i < actual_len && i < 512; i++) {
+                int64_t dur = dur_out.pred_dur[i];
+                if (dur <= 0) continue;
+                int64_t frames = std::min(dur, total_frames - pos);
                 for (int d = 0; d < t_en_dim; d++) {
-                    asr.at3(0, d, pos + j) = dur_out.t_en.at3(0, d, i);
+                    float val = dur_out.t_en.at3(0, d, i);
+                    std::fill_n(asr.ptr() + (int64_t)d * total_frames + pos, frames, val);
                 }
+                pos += dur;
             }
-            pos += dur;
         }
 
         int64_t f0_frames = total_frames * 2;
@@ -777,32 +942,34 @@ public:
 
         bool f0n_ok = false;
 #ifdef KOKORO_COREML
-        if (coreml_f0n_ && coreml_f0n_->is_available() && dur_out.d.defined() && dur_out.s.defined()) {
+        if (coreml_f0n_ && coreml_f0n_->is_available() && result.d_enc.defined() && result.s_style.defined()) {
             int d_dim = 640;
             auto en = KTensor::zeros({1, (int64_t)d_dim, total_frames});
-            pos = 0;
-            for (int i = 0; i < actual_len && i < 512; i++) {
-                int64_t dur = dur_out.pred_dur[i];
-                if (dur <= 0) continue;
-                for (int64_t j = 0; j < dur && (pos + j) < total_frames; j++) {
+            {
+                int64_t pos = 0;
+                for (int i = 0; i < actual_len && i < 512; i++) {
+                    int64_t dur = result.pred_dur[i];
+                    if (dur <= 0) continue;
+                    int64_t frames = std::min(dur, total_frames - pos);
                     for (int ch = 0; ch < d_dim; ch++) {
-                        en.at3(0, ch, pos + j) = dur_out.d.at3(0, i, ch);
+                        float val = result.d_enc.at3(0, i, ch);
+                        std::fill_n(en.ptr() + (int64_t)ch * total_frames + pos, frames, val);
                     }
+                    pos += dur;
                 }
-                pos += dur;
             }
 
             auto* f0n_bucket = coreml_f0n_->select_bucket((int)total_frames);
             if (f0n_bucket) {
                 f0n_ok = coreml_f0n_->predict(*f0n_bucket, en.ptr(), d_dim, (int)total_frames,
-                                               dur_out.s.ptr(), result.f0_pred, result.n_pred);
+                                               result.s_style.ptr(), result.f0_pred, result.n_pred);
                 if (f0n_ok) {
                     int64_t f0n_actual = total_frames * 2;
                     if (f0n_actual < (int64_t)result.f0_pred.size(1))
                         result.f0_pred.truncate_last_dim(f0n_actual);
                     if (f0n_actual < (int64_t)result.n_pred.size(1))
                         result.n_pred.truncate_last_dim(f0n_actual);
-                    std::printf("F0/N predicted via CoreML (bucket %s, frames=%lld)\n",
+                    std::fprintf(stderr, "F0/N predicted via CoreML (bucket %s, frames=%lld)\n",
                                f0n_bucket->name.c_str(), (long long)total_frames);
                 }
             }
