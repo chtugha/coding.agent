@@ -498,7 +498,16 @@ private:
     }
 
     bool is_rag_available() {
-        if (!rag_addr_resolved_) return false;
+        if (!rag_addr_resolved_) {
+            int64_t retry_after = rag_dns_retry_after_.load(std::memory_order_relaxed);
+            auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (now < retry_after) return false;
+            if (!resolve_rag_addr()) {
+                rag_dns_retry_after_.store(now + RAG_COOLDOWN_SEC, std::memory_order_relaxed);
+                return false;
+            }
+        }
         int64_t disabled = rag_disabled_until_.load(std::memory_order_relaxed);
         if (disabled == 0) return true;
         auto now = std::chrono::duration_cast<std::chrono::seconds>(
@@ -725,12 +734,13 @@ private:
         std::string greeting_hint;
         std::string rag_ctx;
         if (is_rag_available()) {
+            bool rag_ok = true;
             if (!call->greeted) {
                 std::string caller_json = rag_get_caller(cid);
                 if (caller_json.empty()) {
                     rag_record_failure(cid);
+                    rag_ok = false;
                 } else {
-                    rag_record_success();
                     std::string status = extract_json_string(caller_json, "status");
                     if (status == "found") {
                         std::string name = extract_json_string(caller_json, "name");
@@ -745,12 +755,12 @@ private:
                     call->greeted = true;
                 }
             }
-            if (is_rag_available()) {
+            if (rag_ok && is_rag_available()) {
                 std::string rag_body = rag_query(text, 3, call->patient_id);
                 if (rag_body.empty()) {
                     rag_record_failure(cid);
+                    rag_ok = false;
                 } else {
-                    rag_record_success();
                     rag_ctx = extract_rag_text(rag_body);
                     if (!rag_ctx.empty()) {
                         log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid,
@@ -760,6 +770,7 @@ private:
                     }
                 }
             }
+            if (rag_ok) rag_record_success();
         }
 
         {
@@ -1174,6 +1185,7 @@ private:
     static constexpr int RAG_FAIL_THRESHOLD = 3;
     static constexpr int RAG_COOLDOWN_SEC = 30;
     std::atomic<int64_t> rag_disabled_until_{0};
+    std::atomic<int64_t> rag_dns_retry_after_{0};
     struct llama_model* model_ = nullptr;
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;
