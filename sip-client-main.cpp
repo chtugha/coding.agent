@@ -128,6 +128,8 @@ static std::string extract_phone_from_sip_from(const std::string& from) {
     return from.substr(start, end - start);
 }
 
+static const uint16_t TOMEDO_CRAWL_PORT = whispertalk::service_base_port(whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE) + 1;
+
 static int tomedo_connect_nonblock() {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
@@ -136,7 +138,7 @@ static int tomedo_connect_nonblock() {
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(whispertalk::service_base_port(whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE) + 1);
+    addr.sin_port = htons(TOMEDO_CRAWL_PORT);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     connect(sock, (struct sockaddr*)&addr, sizeof(addr));
     struct pollfd pfd{sock, POLLOUT, 0};
@@ -171,7 +173,7 @@ static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {
     std::string b = body.str();
     std::ostringstream req;
     req << "POST /caller HTTP/1.1\r\n"
-        << "Host: 127.0.0.1:13181\r\n"
+        << "Host: 127.0.0.1:" << TOMEDO_CRAWL_PORT << "\r\n"
         << "Content-Type: application/json\r\n"
         << "Content-Length: " << b.size() << "\r\n"
         << "Connection: close\r\n\r\n"
@@ -192,7 +194,7 @@ static void delete_tomedo_caller(uint32_t call_id) {
     }
     std::ostringstream req;
     req << "DELETE /caller/" << call_id << " HTTP/1.1\r\n"
-        << "Host: 127.0.0.1:13181\r\n"
+        << "Host: 127.0.0.1:" << TOMEDO_CRAWL_PORT << "\r\n"
         << "Content-Length: 0\r\n"
         << "Connection: close\r\n\r\n";
     std::string r = req.str();
