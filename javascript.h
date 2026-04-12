@@ -60,7 +60,7 @@ e.classList.toggle('active',e.dataset.page===p);
   currentPage=p;
   if(p!=='dashboard')stopDashboardPoll();
   if(p!=='test-results')stopTestResultsPoll();
-  if(p==='dashboard'){fetchDashboard();startDashboardPoll();}
+  if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();}
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();updateBetaSummaryDots();}
@@ -82,7 +82,7 @@ document.getElementById('svcBadge').textContent=`${d.services_online}/${d.servic
 let dashPollTimer=null;
 function startDashboardPoll(){
   stopDashboardPoll();
-  dashPollTimer=setInterval(fetchDashboard,POLL_STATUS_MS);
+  dashPollTimer=setInterval(()=>{fetchDashboard();fetchRagHealthDash();},POLL_STATUS_MS);
 }
 function stopDashboardPoll(){
   if(dashPollTimer){clearInterval(dashPollTimer);dashPollTimer=null;}
@@ -314,7 +314,8 @@ c.innerHTML=d.services.map(s=>{
     :'<span class="wt-badge wt-badge-secondary"><span class="wt-status-dot offline"></span>Offline</span>';
   const desc={'SIP_CLIENT':'SIP/RTP Gateway','INBOUND_AUDIO_PROCESSOR':'G.711 Decode & Resample',
     'VAD_SERVICE':'Voice Activity Detection','WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM','KOKORO_SERVICE':'Kokoro TTS',
-    'NEUTTS_SERVICE':'NeuTTS Nano German','OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP'};
+    'NEUTTS_SERVICE':'NeuTTS Nano German','OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP',
+    'TOMEDO_CRAWL_SERVICE':'Tomedo RAG — Patient Context','TEST_SIP_PROVIDER':'SIP B2BUA Test Provider'};
   const eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
   const svcAttr=escapeHtml(s.name);
   let btns='<div style="margin-top:6px;display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">';
@@ -405,6 +406,14 @@ loadOapWavConfig();
   } else {
 oc.classList.add('hidden');
   }
+  const tc=document.getElementById('tomedoCrawlConfig');
+  if(s.name==='TOMEDO_CRAWL_SERVICE'){
+tc.classList.remove('hidden');
+loadRagConfig();
+fetchRagHealth();
+  } else {
+tc.classList.add('hidden');
+  }
 }
 function loadWhisperConfig(args){
   fetch('/api/whisper/models').then(r=>r.json()).then(d=>{
@@ -483,6 +492,101 @@ function saveOapWavConfig(){
   fetch('/api/oap/wav_recording',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({enabled:cb.checked?'true':'false',dir:dirEl.value})
   }).then(()=>loadOapWavConfig()).catch(()=>{statusEl.textContent='(error)';});
+}
+
+function loadRagConfig(){
+  fetch('/api/rag/config').then(r=>r.json()).then(d=>{
+const h=document.getElementById('ragTomeдоHost');
+const p=document.getElementById('ragTomeдоPort');
+const ou=document.getElementById('ragOllamaUrl');
+const om=document.getElementById('ragOllamaModel');
+const ci=document.getElementById('ragCrawlInterval');
+const cs=document.getElementById('ragCertStatus');
+if(h)h.value=d.tomedo_host||'';
+if(p)p.value=d.tomedo_port||'';
+if(ou)ou.value=d.ollama_url||'';
+if(om)om.value=d.ollama_model||'';
+if(ci)ci.value=d.crawl_interval_sec||'';
+if(cs)cs.textContent=d.cert_uploaded?'Certificate uploaded':'No certificate';
+  }).catch(()=>{});
+}
+function saveRagConfig(){
+  const st=document.getElementById('ragConfigStatus');
+  st.textContent='Saving...';st.style.color='var(--wt-text-secondary)';
+  fetch('/api/rag/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+tomedo_host:document.getElementById('ragTomeдоHost').value.trim(),
+tomedo_port:document.getElementById('ragTomeдоPort').value.trim(),
+ollama_url:document.getElementById('ragOllamaUrl').value.trim(),
+ollama_model:document.getElementById('ragOllamaModel').value.trim(),
+crawl_interval_sec:document.getElementById('ragCrawlInterval').value.trim()
+  })}).then(r=>r.json()).then(d=>{
+if(d.status==='saved'){st.style.color='var(--wt-success)';st.textContent='Saved';}
+else{st.style.color='var(--wt-danger)';st.textContent=d.error||'Error';}
+setTimeout(()=>{st.textContent='';},TOAST_DURATION_MS);
+  }).catch(()=>{st.style.color='var(--wt-danger)';st.textContent='Failed';});
+}
+function uploadRagCert(){
+  const fileInput=document.getElementById('ragCertFile');
+  const st=document.getElementById('ragCertStatus');
+  if(!fileInput.files||!fileInput.files[0]){st.textContent='No file selected';return;}
+  st.textContent='Uploading...';
+  const fd=new FormData();
+  fd.append('cert',fileInput.files[0]);
+  fetch('/api/rag/cert_upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+if(d.status==='uploaded'){st.style.color='var(--wt-success)';st.textContent='Uploaded: '+d.path;}
+else{st.style.color='var(--wt-danger)';st.textContent=d.error||'Error';}
+  }).catch(()=>{st.style.color='var(--wt-danger)';st.textContent='Upload failed';});
+}
+function triggerRagCrawl(){
+  const st=document.getElementById('ragConfigStatus');
+  st.textContent='Triggering...';st.style.color='var(--wt-text-secondary)';
+  fetch('/api/rag/trigger_crawl',{method:'POST'}).then(r=>r.json()).then(d=>{
+if(d.status==='triggered'){st.style.color='var(--wt-success)';st.textContent='Crawl triggered';}
+else{st.style.color='var(--wt-danger)';st.textContent=d.error||'Error';}
+setTimeout(()=>{st.textContent='';},TOAST_DURATION_MS);
+  }).catch(()=>{st.style.color='var(--wt-danger)';st.textContent='Not reachable';});
+}
+function fetchRagHealth(){
+  fetch('/api/rag/health').then(r=>r.json()).then(d=>{
+const dot=document.getElementById('ragStatusDot');
+const txt=document.getElementById('ragStatusText');
+const docs=document.getElementById('ragDocCount');
+const lc=document.getElementById('ragLastCrawl');
+if(d.status==='ok'){
+  dot.style.background='var(--wt-success)';txt.textContent='Online';
+} else {
+  dot.style.background='var(--wt-danger)';txt.textContent='Offline';
+}
+docs.textContent=d.indexed_docs!=null?d.indexed_docs+' docs indexed':'';
+if(d.last_crawl&&d.last_crawl!==null){
+  const dt=new Date(d.last_crawl*1000);
+  lc.textContent='Last crawl: '+dt.toLocaleString();
+} else {
+  lc.textContent='No crawl yet';
+}
+const di=document.getElementById('ragDashInfo');
+if(di){
+  if(d.status==='ok')di.textContent=d.indexed_docs+' docs';
+  else di.textContent='';
+}
+  }).catch(()=>{
+const dot=document.getElementById('ragStatusDot');
+const txt=document.getElementById('ragStatusText');
+if(dot)dot.style.background='var(--wt-text-secondary)';
+if(txt)txt.textContent='Unreachable';
+  });
+}
+
+function fetchRagHealthDash(){
+  fetch('/api/rag/health').then(r=>r.json()).then(d=>{
+const node=document.getElementById('pipeline-status-TOMEDO_CRAWL_SERVICE');
+const di=document.getElementById('ragDashInfo');
+if(node)node.className=`node-status ${d.status==='ok'?'online':'offline'}`;
+if(di)di.textContent=d.status==='ok'?d.indexed_docs+' docs':'';
+  }).catch(()=>{
+const node=document.getElementById('pipeline-status-TOMEDO_CRAWL_SERVICE');
+if(node)node.className='node-status offline';
+  });
 }
 
 function sipConnectPbx(){

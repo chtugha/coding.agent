@@ -750,6 +750,28 @@ private:
                 if (!ll.empty() && ll.find(' ') == std::string::npos) use_args += " --log-level " + ll;
             }
 
+            if (name == "TOMEDO_CRAWL_SERVICE" && args_override.empty()) {
+                std::string ini_path = "tomedo-crawl.ini";
+                std::ofstream ini(ini_path, std::ios::trunc);
+                if (ini.is_open()) {
+                    std::string th = get_setting("rag_tomedo_host", "192.168.10.9");
+                    std::string tp = get_setting("rag_tomedo_port", "8443");
+                    std::string ou = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
+                    std::string om = get_setting("rag_ollama_model", "nomic-embed-text");
+                    std::string ci = get_setting("rag_crawl_interval_sec", "3600");
+                    std::string cp = get_setting("rag_cert_uploaded", "");
+                    if (cp.empty()) cp = "/etc/tomedo-crawl/client.pem";
+                    ini << "tomedo_host = " << th << "\n"
+                        << "tomedo_port = " << tp << "\n"
+                        << "tomedo_cert_pem = " << cp << "\n"
+                        << "ollama_url = " << ou << "\n"
+                        << "ollama_model = " << om << "\n"
+                        << "crawl_interval_sec = " << ci << "\n";
+                    ini.close();
+                }
+                use_args = ini_path;
+            }
+
             auto argv_strings = split_args(use_args);
 
             mkdir("logs", 0755);
