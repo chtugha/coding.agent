@@ -144,6 +144,13 @@ if(d.services){
   });
 }
 
+const ollamaDot=document.getElementById('pipeline-status-OLLAMA');
+if(ollamaDot)ollamaDot.className=`node-status ${d.ollama_running?'online':'offline'}`;
+if(d.ollama_installed===false&&!sessionStorage.getItem('ollamaAlertDismissed')){
+  const ov=document.getElementById('ollamaAlertOverlay');
+  if(ov)ov.style.display='flex';
+}
+
 const feed=document.getElementById('dashActivityFeed');
 if(d.recent_logs&&d.recent_logs.length>0){
   let html='';
@@ -411,6 +418,7 @@ oc.classList.add('hidden');
 tc.classList.remove('hidden');
 loadRagConfig();
 fetchRagHealth();
+setTimeout(parseRagArgsToControls,100);
   } else {
 tc.classList.add('hidden');
   }
@@ -494,36 +502,308 @@ body:JSON.stringify({enabled:cb.checked?'true':'false',dir:dirEl.value})
   }).then(()=>loadOapWavConfig()).catch(()=>{statusEl.textContent='(error)';});
 }
 
+var _ragSavedModel=null;
 function loadRagConfig(){
   fetch('/api/rag/config').then(r=>r.json()).then(d=>{
 const h=document.getElementById('ragTomedoHost');
 const p=document.getElementById('ragTomedoPort');
 const ou=document.getElementById('ragOllamaUrl');
-const om=document.getElementById('ragOllamaModel');
-const ci=document.getElementById('ragCrawlInterval');
+const ct=document.getElementById('ragCrawlTime');
+const cr=document.getElementById('ragCrawlRepeatMin');
 const cs=document.getElementById('ragCertStatus');
 if(h)h.value=d.tomedo_host||'';
 if(p)p.value=d.tomedo_port||'';
 if(ou)ou.value=d.ollama_url||'';
-if(om)om.value=d.ollama_model||'';
-if(ci)ci.value=d.crawl_interval_sec||'';
+if(ct)ct.value=d.crawl_time||'02:00';
+const rMin=parseInt(d.crawl_repeat_minutes||'0',10);
+if(cr)cr.value=rMin>0?rMin:60;
+const modeRadio=document.querySelector('input[name="ragCrawlMode"][value="'+(rMin>0?'interval':'daily')+'"]');
+if(modeRadio){modeRadio.checked=true;toggleCrawlMode();}
 if(cs)cs.textContent=d.cert_uploaded?'Certificate uploaded':'No certificate';
+_ragSavedModel=d.ollama_model||'nomic-embed-text';
+loadOllamaModels(_ragSavedModel);
+checkOllamaStatus();
   }).catch(()=>{});
+}
+function loadOllamaModels(activeModel){
+  fetch('/api/ollama/models').then(r=>r.json()).then(d=>{
+const sel=document.getElementById('ragOllamaModel');
+if(!sel)return;
+sel.innerHTML='';
+if(d.models&&d.models.length>0){
+  d.models.forEach(m=>{
+    const opt=document.createElement('option');
+    opt.value=m.name;opt.textContent=m.name;
+    if(m.name===activeModel||m.active)opt.selected=true;
+    sel.appendChild(opt);
+  });
+  if(!Array.from(sel.options).some(o=>o.value===activeModel)){
+    const opt=document.createElement('option');
+    opt.value=activeModel;opt.textContent=activeModel+' (not installed)';
+    opt.selected=true;sel.appendChild(opt);
+  }
+} else {
+  const opt=document.createElement('option');
+  opt.value=activeModel;opt.textContent=activeModel;
+  opt.selected=true;sel.appendChild(opt);
+}
+  }).catch(()=>{
+const sel=document.getElementById('ragOllamaModel');
+if(sel){sel.innerHTML='<option value="'+activeModel+'">'+activeModel+'</option>';}
+  });
+}
+function checkOllamaStatus(){
+  fetch('/api/ollama/status').then(r=>r.json()).then(d=>{
+const dot=document.getElementById('ollamaStatusDot');
+const txt=document.getElementById('ollamaStatusText');
+const ps=document.getElementById('ollamaPullStatus');
+if(!d.installed){
+  if(dot)dot.style.background='var(--wt-warning)';
+  if(txt)txt.textContent='Not installed';
+} else if(d.running){
+  if(dot)dot.style.background='var(--wt-success)';
+  if(txt)txt.textContent=d.pulling?'Running (pulling...)':'Running';
+} else {
+  if(dot)dot.style.background='var(--wt-danger)';
+  if(txt)txt.textContent='Stopped';
+}
+if(d.pulling&&ps){ps.style.color='var(--wt-text-secondary)';ps.textContent='Pulling model...';}
+  }).catch(()=>{
+const dot=document.getElementById('ollamaStatusDot');
+const txt=document.getElementById('ollamaStatusText');
+if(dot)dot.style.background='var(--wt-text-secondary)';
+if(txt)txt.textContent='Unknown';
+  });
+}
+function dismissOllamaAlert(){
+  sessionStorage.setItem('ollamaAlertDismissed','1');
+  const ov=document.getElementById('ollamaAlertOverlay');
+  if(ov)ov.style.display='none';
+}
+function installOllama(){
+  const st=document.getElementById('ollamaInstallStatus');
+  const btn=document.getElementById('ollamaInstallBtn');
+  if(st)st.textContent='Installing ollama...';
+  if(btn)btn.disabled=true;
+  fetch('/api/ollama/install',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.status==='already_installed'){
+      if(st){st.style.color='var(--wt-success)';st.textContent='Already installed!';}
+      setTimeout(dismissOllamaAlert,1500);
+    } else if(d.status==='installing'){
+      if(st)st.textContent='Installation in progress...';
+      let polls=0;
+      const poll=setInterval(()=>{
+        if(++polls>60){clearInterval(poll);if(st){st.style.color='var(--wt-danger)';st.textContent='Install timed out';}if(btn)btn.disabled=false;return;}
+        fetch('/api/ollama/status').then(r2=>r2.json()).then(s=>{
+          if(s.installed){
+            clearInterval(poll);
+            if(st){st.style.color='var(--wt-success)';st.textContent='Installed successfully!';}
+            if(btn)btn.disabled=false;
+            setTimeout(()=>{dismissOllamaAlert();fetchDashboard();checkOllamaStatus();},1500);
+          }
+        }).catch(()=>{});
+      },5000);
+    } else {
+      if(st){st.style.color='var(--wt-danger)';st.textContent=d.error||'Install failed';}
+      if(btn)btn.disabled=false;
+    }
+  }).catch(()=>{
+    if(st){st.style.color='var(--wt-danger)';st.textContent='Install request failed';}
+    if(btn)btn.disabled=false;
+  });
+}
+function ollamaStart(){
+  const txt=document.getElementById('ollamaStatusText');
+  if(txt)txt.textContent='Starting...';
+  fetch('/api/ollama/start',{method:'POST'}).then(r=>r.json()).then(()=>{
+setTimeout(checkOllamaStatus,2000);
+setTimeout(()=>loadOllamaModels(document.getElementById('ragOllamaModel').value),3000);
+  }).catch(()=>{if(txt)txt.textContent='Start failed';});
+}
+function ollamaStop(){
+  const txt=document.getElementById('ollamaStatusText');
+  if(txt)txt.textContent='Stopping...';
+  fetch('/api/ollama/stop',{method:'POST'}).then(r=>r.json()).then(()=>{
+setTimeout(checkOllamaStatus,1000);
+  }).catch(()=>{if(txt)txt.textContent='Stop failed';});
+}
+function ollamaRestart(){
+  const txt=document.getElementById('ollamaStatusText');
+  if(txt)txt.textContent='Restarting...';
+  fetch('/api/ollama/restart',{method:'POST'}).then(r=>r.json()).then(()=>{
+setTimeout(checkOllamaStatus,3000);
+setTimeout(()=>loadOllamaModels(document.getElementById('ragOllamaModel').value),4000);
+  }).catch(()=>{if(txt)txt.textContent='Restart failed';});
+}
+function ollamaPullModel(){
+  const input=document.getElementById('ragOllamaPullModel');
+  const st=document.getElementById('ollamaPullStatus');
+  const model=input.value.trim();
+  if(!model){if(st)st.textContent='Enter model name';return;}
+  if(st){st.style.color='var(--wt-text-secondary)';st.textContent='Pulling '+model+'...';}
+  fetch('/api/ollama/pull',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model:model})}).then(r=>r.json()).then(d=>{
+if(d.status==='pulling'){
+  input.value='';
+  if(st){st.style.color='var(--wt-text-secondary)';st.textContent='Pulling '+model+'...';}
+  let pullPolls=0;
+  const pollPull=setInterval(()=>{
+    if(++pullPolls>200){clearInterval(pollPull);if(st){st.style.color='var(--wt-danger)';st.textContent='Pull timed out';}return;}
+    fetch('/api/ollama/status').then(r2=>r2.json()).then(s=>{
+      if(!s.pulling){
+        clearInterval(pollPull);
+        if(st){st.style.color='var(--wt-success)';st.textContent='Pulled '+model;}
+        loadOllamaModels(document.getElementById('ragOllamaModel').value);
+        checkOllamaStatus();
+        setTimeout(()=>{if(st)st.textContent='';},TOAST_DURATION_MS);
+      }
+    }).catch(()=>{clearInterval(pollPull);});
+  },3000);
+} else {
+  if(st){st.style.color='var(--wt-danger)';st.textContent=d.error||'Pull failed';}
+  setTimeout(()=>{if(st)st.textContent='';},TOAST_DURATION_MS);
+}
+  }).catch(()=>{if(st){st.style.color='var(--wt-danger)';st.textContent='Pull failed';}});
+}
+var RAG_FLAGS=['--verbose','--skip-initial-crawl','--phone-only','--no-embed'];
+function toggleRagArg(flag){
+  const args=document.getElementById('svcDetailArgs');
+  if(!args)return;
+  const cur=args.value;
+  if(cur.includes(flag)){
+    args.value=cur.replace(flag,'').replace(/\s+/g,' ').trim();
+  } else {
+    args.value=(cur+' '+flag).trim();
+  }
+  syncRagArgButtons();
+}
+function syncRagArgButtons(){
+  const args=document.getElementById('svcDetailArgs');
+  if(!args)return;
+  const val=args.value;
+  document.querySelectorAll('#tomedoCrawlConfig button[onclick^="toggleRagArg"]').forEach(btn=>{
+    const m=btn.getAttribute('onclick').match(/'([^']+)'/);
+    if(!m)return;
+    const flag=m[1];
+    if(val.includes(flag)){
+      btn.classList.remove('wt-btn-secondary');btn.classList.add('wt-btn-primary');
+    } else {
+      btn.classList.remove('wt-btn-primary');btn.classList.add('wt-btn-secondary');
+    }
+  });
+}
+function buildRagArgs(){
+  const args=document.getElementById('svcDetailArgs');
+  if(!args)return;
+  const flags=args.value.split(/\s+/).filter(p=>RAG_FLAGS.includes(p));
+  const topk=document.getElementById('ragArgTopK').value;
+  const chunk=document.getElementById('ragArgChunkSize').value;
+  const overlap=document.getElementById('ragArgOverlap').value;
+  const workers=document.getElementById('ragArgWorkers').value;
+  let result=flags.join(' ');
+  if(topk&&topk!=='3')result+=' --top-k '+topk;
+  if(chunk&&chunk!=='512')result+=' --chunk-size '+chunk;
+  if(overlap&&overlap!=='64')result+=' --overlap '+overlap;
+  if(workers&&workers!=='4')result+=' --workers '+workers;
+  args.value=result.trim();
+  syncRagArgButtons();
+}
+function parseRagArgsToControls(){
+  const args=document.getElementById('svcDetailArgs');
+  if(!args)return;
+  const val=args.value;
+  const m_topk=val.match(/--top-k\s+(\d+)/);
+  const m_chunk=val.match(/--chunk-size\s+(\d+)/);
+  const m_overlap=val.match(/--overlap\s+(\d+)/);
+  const m_workers=val.match(/--workers\s+(\d+)/);
+  if(m_topk)document.getElementById('ragArgTopK').value=m_topk[1];
+  if(m_chunk)document.getElementById('ragArgChunkSize').value=m_chunk[1];
+  if(m_overlap)document.getElementById('ragArgOverlap').value=m_overlap[1];
+  if(m_workers){
+    document.getElementById('ragArgWorkers').value=m_workers[1];
+    document.getElementById('ragArgWorkersVal').textContent=m_workers[1];
+  }
+  syncRagArgButtons();
+}
+function toggleCrawlMode(){
+  const mode=document.querySelector('input[name="ragCrawlMode"]:checked').value;
+  document.getElementById('ragCrawlDailyRow').style.display=mode==='daily'?'':'none';
+  document.getElementById('ragCrawlIntervalRow').style.display=mode==='interval'?'':'none';
 }
 function saveRagConfig(){
   const st=document.getElementById('ragConfigStatus');
   st.textContent='Saving...';st.style.color='var(--wt-text-secondary)';
-  fetch('/api/rag/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+  const mode=document.querySelector('input[name="ragCrawlMode"]:checked').value;
+  const crawlTime=document.getElementById('ragCrawlTime').value||'02:00';
+  const repeatMin=document.getElementById('ragCrawlRepeatMin').value||'60';
+  let intervalSec;
+  if(mode==='interval'){
+    intervalSec=parseInt(repeatMin,10)*60;
+    if(intervalSec<300)intervalSec=300;
+  } else {
+    const parts=crawlTime.split(':');
+    const h=parseInt(parts[0]||'2',10);
+    const m=parseInt(parts[1]||'0',10);
+    const now=new Date();
+    let target=new Date(now.getFullYear(),now.getMonth(),now.getDate(),h,m,0);
+    if(target<=now)target.setDate(target.getDate()+1);
+    intervalSec=Math.round((target-now)/1000);
+  }
+  const newModel=document.getElementById('ragOllamaModel').value.trim();
+  const modelChanged=_ragSavedModel!==null&&newModel&&newModel!==_ragSavedModel;
+  const payload={
 tomedo_host:document.getElementById('ragTomedoHost').value.trim(),
 tomedo_port:document.getElementById('ragTomedoPort').value.trim(),
 ollama_url:document.getElementById('ragOllamaUrl').value.trim(),
-ollama_model:document.getElementById('ragOllamaModel').value.trim(),
-crawl_interval_sec:document.getElementById('ragCrawlInterval').value.trim()
-  })}).then(r=>r.json()).then(d=>{
-if(d.status==='saved'){st.style.color='var(--wt-success)';st.textContent='Saved';}
+ollama_model:newModel,
+crawl_interval_sec:String(intervalSec),
+crawl_time:crawlTime,
+crawl_repeat_minutes:mode==='interval'?repeatMin:'0'
+  };
+  const doSave=()=>{
+    fetch('/api/rag/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(r=>r.json()).then(d=>{
+if(d.status==='saved'){
+  _ragSavedModel=newModel;
+  st.style.color='var(--wt-success)';st.textContent='Saved';
+  promptRagRestart();
+}
 else{st.style.color='var(--wt-danger)';st.textContent=d.error||'Error';}
 setTimeout(()=>{st.textContent='';},TOAST_DURATION_MS);
-  }).catch(()=>{st.style.color='var(--wt-danger)';st.textContent='Failed';});
+    }).catch(()=>{st.style.color='var(--wt-danger)';st.textContent='Failed';});
+  };
+  if(modelChanged){
+    if(!confirm('Embedding model changed from "'+_ragSavedModel+'" to "'+newModel+'".\nAll existing vectors will be wiped and a re-crawl is needed.\n\nContinue?'))return;
+    st.textContent='Wiping vectors...';
+    fetch('/api/rag/wipe_vectors',{method:'POST'}).then(r=>r.json()).then(()=>{doSave();}).catch(()=>{doSave();});
+  } else {
+    doSave();
+  }
+}
+function promptRagRestart(){
+  const existing=document.getElementById('ragRestartBanner');
+  if(existing)existing.remove();
+  const banner=document.createElement('div');
+  banner.id='ragRestartBanner';
+  banner.style.cssText='margin:8px 0;padding:8px 12px;background:var(--wt-warning-bg,#2a2000);border:1px solid var(--wt-warning,#f0ad4e);border-radius:6px;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--wt-warning,#f0ad4e)';
+  banner.innerHTML='<span>\u26A0 Config saved \u2014 restart Tomedo Crawl service to apply changes.</span>'
+    +'<button onclick="restartRagService()" style="margin-left:auto;padding:4px 12px;border:1px solid var(--wt-warning,#f0ad4e);background:transparent;color:var(--wt-warning,#f0ad4e);border-radius:4px;cursor:pointer;font-size:12px">Restart Now</button>'
+    +'<button onclick="this.parentElement.remove()" style="padding:4px 8px;border:none;background:transparent;color:var(--wt-text-secondary);cursor:pointer;font-size:14px">\u2715</button>';
+  const cfg=document.getElementById('tomedoCrawlConfig');
+  if(cfg)cfg.insertBefore(banner,cfg.firstChild);
+}
+function restartRagService(){
+  const banner=document.getElementById('ragRestartBanner');
+  if(banner)banner.remove();
+  fetch('/api/services/restart',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:'TOMEDO_CRAWL_SERVICE'})}).then(r=>{
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const st=document.getElementById('ragConfigStatus');
+    if(st){st.style.color='var(--wt-success)';st.textContent='Restarting...';setTimeout(()=>{st.textContent='';},TOAST_DURATION_MS);}
+    setTimeout(fetchServices,DELAY_RESTART_MS);
+  }).catch(()=>{
+    const st=document.getElementById('ragConfigStatus');
+    if(st){st.style.color='var(--wt-danger)';st.textContent='Restart failed';setTimeout(()=>{st.textContent='';},TOAST_DURATION_MS);}
+  });
 }
 function uploadRagCert(){
   const fileInput=document.getElementById('ragCertFile');

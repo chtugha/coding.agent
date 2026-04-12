@@ -36,6 +36,8 @@ inline std::string FrontendServer::build_ui_pages() {
 </div>
 <div style="display:flex;align-items:center;gap:8px;margin-top:8px;justify-content:center">
 <div class="wt-pipeline-node" id="pipeline-node-TOMEDO_CRAWL_SERVICE" style="border-color:rgba(176,38,255,0.5)"><span class="node-label">RAG</span><span class="node-status offline" id="pipeline-status-TOMEDO_CRAWL_SERVICE"></span></div>
+<div class="wt-pipeline-connector" style="width:12px"></div>
+<div class="wt-pipeline-node" id="pipeline-node-OLLAMA" style="border-color:rgba(255,159,10,0.5)"><span class="node-label">Ollama</span><span class="node-status offline" id="pipeline-status-OLLAMA"></span></div>
 <span style="font-size:10px;color:rgba(255,255,255,0.3);letter-spacing:0.05em" id="ragDashInfo"></span>
 </div>
 </div>
@@ -76,6 +78,18 @@ inline std::string FrontendServer::build_ui_pages() {
 <button class="wt-btn wt-btn-danger" style="width:100%;justify-content:center" onclick="dashStopAll()">&#x25A0; Stop All Services</button>
 <button class="wt-btn wt-btn-secondary" style="width:100%;justify-content:center" onclick="dashRestartFailed()">&#x21BB; Restart Failed</button>
 </div>
+</div>
+</div>
+</div>
+
+<div id="ollamaAlertOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:9999;align-items:center;justify-content:center">
+<div style="background:var(--wt-card-bg);border:1px solid rgba(255,159,10,0.5);border-radius:var(--wt-radius-lg);padding:24px;max-width:420px;width:90%">
+<div style="font-size:16px;font-weight:700;margin-bottom:12px;color:var(--wt-warning)">&#x26A0; Ollama Not Installed</div>
+<div style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:16px;line-height:1.6">Ollama is required for RAG embeddings. Without it, the tomedo-crawl service cannot generate vector embeddings for patient data retrieval.</div>
+<div id="ollamaInstallStatus" style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:12px;min-height:16px"></div>
+<div style="display:flex;gap:8px;justify-content:flex-end">
+<button class="wt-btn wt-btn-secondary" onclick="dismissOllamaAlert()">OK</button>
+<button class="wt-btn wt-btn-primary" id="ollamaInstallBtn" onclick="installOllama()">Install</button>
 </div>
 </div>
 </div>
@@ -188,15 +202,63 @@ Save incoming audio as WAV</label>
 <span id="ragCertStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 </div>
-<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Ollama Embedding Backend</div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Ollama Subservice</div>
+<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+<span id="ollamaStatusDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--wt-text-secondary)"></span>
+<span id="ollamaStatusText" style="font-size:11px">Checking...</span>
+<div style="margin-left:auto;display:flex;gap:4px">
+<button class="wt-btn wt-btn-primary" style="font-size:10px;padding:3px 8px" onclick="ollamaStart()">&#x25B6; Start</button>
+<button class="wt-btn wt-btn-danger" style="font-size:10px;padding:3px 8px" onclick="ollamaStop()">&#x25A0; Stop</button>
+<button class="wt-btn wt-btn-secondary" style="font-size:10px;padding:3px 8px" onclick="ollamaRestart()">&#x21BB; Restart</button>
+</div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Ollama URL</label>
 <input class="wt-input" id="ragOllamaUrl" placeholder="http://127.0.0.1:11434" style="font-size:12px"></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Embedding Model</label>
-<input class="wt-input" id="ragOllamaModel" placeholder="nomic-embed-text" style="font-size:12px"></div>
+<select class="wt-select" id="ragOllamaModel" style="font-size:12px">
+<option value="">Loading...</option>
+</select>
 </div>
-<div class="wt-field" style="margin-bottom:8px"><label style="font-size:12px">Crawl Interval (seconds)</label>
-<input class="wt-input" id="ragCrawlInterval" placeholder="3600" style="font-size:12px;width:120px"></div>
+</div>
+<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+<input class="wt-input" id="ragOllamaPullModel" placeholder="Model name to pull..." style="font-size:11px;flex:1">
+<button class="wt-btn wt-btn-secondary" style="font-size:10px;padding:3px 8px" onclick="ollamaPullModel()">Pull</button>
+<span id="ollamaPullStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Crawl Schedule</div>
+<div style="display:flex;gap:12px;margin-bottom:6px;font-size:12px">
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+<input type="radio" name="ragCrawlMode" value="daily" checked onchange="toggleCrawlMode()"> Daily at fixed time</label>
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+<input type="radio" name="ragCrawlMode" value="interval" onchange="toggleCrawlMode()"> Repeat interval</label>
+</div>
+<div id="ragCrawlDailyRow" style="margin-bottom:6px">
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Daily crawl time</label>
+<input type="time" class="wt-input" id="ragCrawlTime" value="02:00" style="font-size:12px;width:120px"></div>
+</div>
+<div id="ragCrawlIntervalRow" style="margin-bottom:6px;display:none">
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Repeat every (minutes)</label>
+<input type="number" class="wt-input" id="ragCrawlRepeatMin" placeholder="60" min="5" max="1440" step="5" value="60" style="font-size:12px;width:120px"></div>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;margin-top:8px;color:var(--wt-text-secondary)">Service Arguments</div>
+<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">
+<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" onclick="toggleRagArg('--verbose')">Verbose</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" onclick="toggleRagArg('--skip-initial-crawl')">Skip Initial Crawl</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" onclick="toggleRagArg('--phone-only')">Phone Index Only</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" onclick="toggleRagArg('--no-embed')">No Embedding</button>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;align-items:center">
+<label style="font-size:11px;display:flex;align-items:center;gap:4px">Top-K:
+<input type="number" class="wt-input" id="ragArgTopK" min="1" max="20" value="3" style="font-size:11px;width:50px" onchange="buildRagArgs()"></label>
+<label style="font-size:11px;display:flex;align-items:center;gap:4px">Chunk size:
+<input type="number" class="wt-input" id="ragArgChunkSize" min="64" max="2048" value="512" step="64" style="font-size:11px;width:60px" onchange="buildRagArgs()"></label>
+<label style="font-size:11px;display:flex;align-items:center;gap:4px">Overlap:
+<input type="number" class="wt-input" id="ragArgOverlap" min="0" max="256" value="64" step="16" style="font-size:11px;width:55px" onchange="buildRagArgs()"></label>
+<label style="font-size:11px;display:flex;align-items:center;gap:4px">Workers:
+<input type="range" id="ragArgWorkers" min="1" max="8" value="4" style="width:60px" oninput="document.getElementById('ragArgWorkersVal').textContent=this.value;buildRagArgs()">
+<span id="ragArgWorkersVal" style="font-size:11px">4</span></label>
+</div>
 <div style="display:flex;gap:6px;align-items:center">
 <button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="saveRagConfig()">Save Config</button>
 <button class="wt-btn wt-btn-secondary" style="font-size:11px" onclick="triggerRagCrawl()">Trigger Crawl</button>

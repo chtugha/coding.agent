@@ -161,7 +161,6 @@
 #include <cstring>
 #include <cmath>
 #include <sstream>
-#include <fstream>
 #include <string>
 #include <thread>
 #include <atomic>
@@ -176,6 +175,7 @@
 #include <algorithm>
 #include <ctime>
 #include <signal.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -202,7 +202,7 @@ std::atomic<bool> s_quit{false};
 void sig_handler(int) { s_quit.store(true); }
 
 // ============================================================
-// Config
+// Config — stored in SQLite config table (no INI files)
 // ============================================================
 
 struct TomedoConfig {
@@ -230,44 +230,104 @@ static int parse_port(const std::string& val, int fallback) {
     return (v > 0 && v <= 65535) ? v : fallback;
 }
 
-static TomedoConfig parse_config(const std::string& path) {
+static bool config_db_ensure(const std::string& db_path) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
+        std::fprintf(stderr, "tomedo-crawl: cannot open config db '%s': %s\n",
+                     db_path.c_str(), db ? sqlite3_errmsg(db) : "unknown");
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
+    const char* sql =
+        "CREATE TABLE IF NOT EXISTS config ("
+        "  key   TEXT PRIMARY KEY NOT NULL,"
+        "  value TEXT NOT NULL"
+        ");";
+    char* errmsg = nullptr;
+    int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errmsg);
+    if (rc != SQLITE_OK) {
+        std::fprintf(stderr, "tomedo-crawl: config table creation failed: %s\n",
+                     errmsg ? errmsg : "unknown");
+        sqlite3_free(errmsg);
+        sqlite3_close(db);
+        return false;
+    }
+    sqlite3_close(db);
+    return true;
+}
+
+static std::string config_db_get(sqlite3* db, const std::string& key,
+                                 const std::string& fallback) {
+    if (!db) return fallback;
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT value FROM config WHERE key=?", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return fallback;
+    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    std::string result = fallback;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* v = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (v && v[0] != '\0') result = v;
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+static bool config_db_set(sqlite3* db, const std::string& key, const std::string& value) {
+    if (!db) return false;
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db,
+        "INSERT OR REPLACE INTO config(key,value) VALUES(?,?)", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+static TomedoConfig load_config_from_db(const std::string& db_path) {
     TomedoConfig cfg;
-    std::ifstream f(path);
-    if (!f.is_open()) {
-        std::fprintf(stderr, "tomedo-crawl: config file '%s' not found, using defaults\n", path.c_str());
+    cfg.db_path = db_path;
+
+    if (!config_db_ensure(db_path)) {
+        std::fprintf(stderr, "tomedo-crawl: config db init failed, using defaults\n");
         return cfg;
     }
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        std::string key = line.substr(0, eq);
-        std::string val = line.substr(eq + 1);
-        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
-        while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
-        while (!val.empty() && (val.back() == '\r' || val.back() == '\n')) val.pop_back();
-        if (key == "tomedo_host")             cfg.tomedo_host = val;
-        else if (key == "tomedo_port")        cfg.tomedo_port = parse_port(val, cfg.tomedo_port);
-        else if (key == "tomedo_db")          cfg.tomedo_db = val;
-        else if (key == "tomedo_cert_pem")    cfg.tomedo_cert_pem = val;
-        else if (key == "crawl_interval_sec") {
-            int v = parse_int(val, cfg.crawl_interval_sec);
-            cfg.crawl_interval_sec = (v > 0) ? v : cfg.crawl_interval_sec;
-        }
-        else if (key == "ollama_url")         cfg.ollama_url = val;
-        else if (key == "ollama_model")       cfg.ollama_model = val;
-        else if (key == "api_host")           cfg.api_host = val;
-        else if (key == "api_port")           cfg.api_port = parse_port(val, cfg.api_port);
-        else if (key == "log_port")           cfg.log_port = parse_port(val, cfg.log_port);
-        else if (key == "db_path")            cfg.db_path = val;
-        else if (key == "hnsw_max_elements") {
-            try {
-                size_t v = std::stoul(val);
-                if (v > 0) cfg.hnsw_max_elements = v;
-            } catch (...) {}
-        }
+
+    sqlite3* db = nullptr;
+    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
+        std::fprintf(stderr, "tomedo-crawl: cannot open config db for reading, using defaults\n");
+        if (db) sqlite3_close(db);
+        return cfg;
     }
+    sqlite3_exec(db, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
+
+    cfg.tomedo_host       = config_db_get(db, "tomedo_host",       cfg.tomedo_host);
+    cfg.tomedo_port       = parse_port(config_db_get(db, "tomedo_port",
+                                std::to_string(cfg.tomedo_port)), cfg.tomedo_port);
+    cfg.tomedo_db         = config_db_get(db, "tomedo_db",         cfg.tomedo_db);
+    cfg.tomedo_cert_pem   = config_db_get(db, "tomedo_cert_pem",   cfg.tomedo_cert_pem);
+    cfg.crawl_interval_sec = parse_int(config_db_get(db, "crawl_interval_sec",
+                                std::to_string(cfg.crawl_interval_sec)), cfg.crawl_interval_sec);
+    if (cfg.crawl_interval_sec <= 0) cfg.crawl_interval_sec = 3600;
+    cfg.ollama_url        = config_db_get(db, "ollama_url",        cfg.ollama_url);
+    cfg.ollama_model      = config_db_get(db, "ollama_model",      cfg.ollama_model);
+    cfg.api_host          = config_db_get(db, "api_host",          cfg.api_host);
+    cfg.api_port          = parse_port(config_db_get(db, "api_port",
+                                std::to_string(cfg.api_port)), cfg.api_port);
+    cfg.log_port          = parse_port(config_db_get(db, "log_port",
+                                std::to_string(cfg.log_port)), cfg.log_port);
+    std::string hnsw_str = config_db_get(db, "hnsw_max_elements",
+                                std::to_string(cfg.hnsw_max_elements));
+    try {
+        size_t v = std::stoul(hnsw_str);
+        if (v > 0) cfg.hnsw_max_elements = v;
+    } catch (...) {}
+
+    sqlite3_close(db);
     return cfg;
 }
 
@@ -289,6 +349,180 @@ whispertalk::LogForwarder g_log;
 
 std::atomic<long> g_last_crawl_time{0};
 std::atomic<bool> g_crawl_requested{false};
+std::atomic<bool> g_ollama_installed{false};
+std::atomic<bool> g_ollama_running{false};
+std::atomic<pid_t> g_ollama_pid{0};
+
+static int tcp_connect(const std::string& host, int port, int timeout_ms);
+
+static bool check_ollama_installed() {
+    FILE* fp = popen("which ollama 2>/dev/null", "r");
+    if (!fp) return false;
+    char buf[256];
+    bool found = false;
+    if (fgets(buf, sizeof(buf), fp) && buf[0] == '/') found = true;
+    pclose(fp);
+    return found;
+}
+
+static bool check_ollama_running(const std::string& ollama_url) {
+    std::string host = "127.0.0.1";
+    int port = 11434;
+    size_t scheme_end = ollama_url.find("://");
+    size_t host_start = (scheme_end == std::string::npos) ? 0 : scheme_end + 3;
+    size_t path_start = ollama_url.find('/', host_start);
+    std::string hostport = (path_start == std::string::npos) ?
+        ollama_url.substr(host_start) : ollama_url.substr(host_start, path_start - host_start);
+    auto colon = hostport.find(':');
+    if (colon != std::string::npos) {
+        host = hostport.substr(0, colon);
+        port = std::atoi(hostport.c_str() + colon + 1);
+    } else if (!hostport.empty()) {
+        host = hostport;
+    }
+    int fd = tcp_connect(host, port, 2000);
+    if (fd < 0) return false;
+    std::string req = "GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n";
+    ssize_t w = ::write(fd, req.c_str(), req.size());
+    if (w <= 0) { close(fd); return false; }
+    char buf[256];
+    struct pollfd pfd{fd, POLLIN, 0};
+    int pr = poll(&pfd, 1, 2000);
+    bool ok = false;
+    if (pr > 0) {
+        ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+        if (n > 0) { buf[n] = 0; ok = (strstr(buf, "200") != nullptr || strstr(buf, "Ollama") != nullptr); }
+    }
+    close(fd);
+    return ok;
+}
+
+static pid_t spawn_ollama_serve_detached() {
+    int pidpipe[2];
+    if (pipe(pidpipe) < 0) return -1;
+    int execpipe[2];
+    if (pipe(execpipe) < 0) { close(pidpipe[0]); close(pidpipe[1]); return -1; }
+    fcntl(execpipe[1], F_SETFD, FD_CLOEXEC);
+    pid_t mid = fork();
+    if (mid < 0) { close(pidpipe[0]); close(pidpipe[1]); close(execpipe[0]); close(execpipe[1]); return -1; }
+    if (mid == 0) {
+        close(pidpipe[0]);
+        close(execpipe[0]);
+        pid_t child = fork();
+        if (child < 0) { pid_t z = 0; (void)write(pidpipe[1], &z, sizeof(z)); close(pidpipe[1]); close(execpipe[1]); _exit(127); }
+        if (child > 0) { (void)write(pidpipe[1], &child, sizeof(child)); close(pidpipe[1]); close(execpipe[1]); _exit(0); }
+        close(pidpipe[1]);
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
+        execlp("ollama", "ollama", "serve", nullptr);
+        char err = 1;
+        (void)write(execpipe[1], &err, 1);
+        close(execpipe[1]);
+        _exit(127);
+    }
+    close(pidpipe[1]);
+    close(execpipe[1]);
+    pid_t grandchild = 0;
+    (void)read(pidpipe[0], &grandchild, sizeof(grandchild));
+    close(pidpipe[0]);
+    int status;
+    waitpid(mid, &status, 0);
+    if (grandchild < 1) { close(execpipe[0]); return -1; }
+    char err = 0;
+    struct pollfd pfd = {execpipe[0], POLLIN, 0};
+    if (poll(&pfd, 1, 200) > 0 && read(execpipe[0], &err, 1) == 1) {
+        close(execpipe[0]);
+        return -1;
+    }
+    close(execpipe[0]);
+    g_ollama_pid.store(grandchild);
+    return grandchild;
+}
+
+static int run_install_script() {
+    int pipefd[2];
+    if (pipe(pipefd) < 0) return -1;
+    pid_t curl_pid = fork();
+    if (curl_pid < 0) { close(pipefd[0]); close(pipefd[1]); return -1; }
+    if (curl_pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        execlp("curl", "curl", "-fsSL", "https://ollama.com/install.sh", nullptr);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    pid_t sh_pid = fork();
+    if (sh_pid < 0) { close(pipefd[0]); kill(curl_pid, SIGTERM); waitpid(curl_pid, nullptr, 0); return -1; }
+    if (sh_pid == 0) {
+        dup2(pipefd[0], STDIN_FILENO);
+        close(pipefd[0]);
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
+        execlp("sh", "sh", nullptr);
+        _exit(127);
+    }
+    close(pipefd[0]);
+    int curl_status = 0, sh_status = 0;
+    waitpid(curl_pid, &curl_status, 0);
+    waitpid(sh_pid, &sh_status, 0);
+    if (WIFEXITED(curl_status) && WEXITSTATUS(curl_status) == 0 &&
+        WIFEXITED(sh_status) && WEXITSTATUS(sh_status) == 0)
+        return 0;
+    return -1;
+}
+
+static void kill_ollama_tracked() {
+    pid_t p = g_ollama_pid.exchange(0);
+    if (p > 1) {
+        kill(p, SIGTERM);
+        return;
+    }
+    FILE* fp = popen("pgrep -f 'ollama serve'", "r");
+    if (fp) {
+        char buf[64];
+        while (fgets(buf, sizeof(buf), fp)) {
+            pid_t kp = static_cast<pid_t>(atoi(buf));
+            if (kp > 1) kill(kp, SIGTERM);
+        }
+        pclose(fp);
+    }
+}
+
+static void ollama_startup_check(const TomedoConfig& cfg) {
+    bool installed = check_ollama_installed();
+    g_ollama_installed.store(installed);
+    if (!installed) {
+        LOG_WARN("ollama is not installed — RAG embedding will be unavailable");
+        return;
+    }
+    LOG_INFO("ollama found in PATH");
+    bool running = check_ollama_running(cfg.ollama_url);
+    g_ollama_running.store(running);
+    if (running) {
+        LOG_INFO("ollama is already running at %s", cfg.ollama_url.c_str());
+        return;
+    }
+    LOG_INFO("ollama not running — attempting auto-start");
+    pid_t pid = spawn_ollama_serve_detached();
+    if (pid > 0) {
+        LOG_INFO("ollama serve started (pid=%d)", (int)pid);
+        for (int i = 0; i < 10 && !s_quit.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (check_ollama_running(cfg.ollama_url)) {
+                g_ollama_running.store(true);
+                LOG_INFO("ollama is now reachable at %s", cfg.ollama_url.c_str());
+                return;
+            }
+        }
+        LOG_WARN("ollama started but not yet reachable after 5s");
+    } else {
+        LOG_ERROR("failed to auto-start ollama serve");
+    }
+}
 
 constexpr int MG_POLL_TIMEOUT_MS      = 100;
 constexpr int CHARS_PER_TOKEN_APPROX  = 4;
@@ -572,6 +806,18 @@ public:
             count = sqlite3_column_int(stmt, 0);
         sqlite3_finalize(stmt);
         return count;
+    }
+
+    void wipe() {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (db_) {
+            sqlite3_exec(db_, "DELETE FROM chunks;", nullptr, nullptr, nullptr);
+            LOG_INFO("VectorStore: wiped all chunks from SQLite");
+        }
+        hnsw_.reset();
+        space_.reset();
+        dim_ = 0;
+        LOG_INFO("VectorStore: HNSW index cleared");
     }
 
     int index_usage_pct() {
@@ -2086,10 +2332,14 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         long lc = g_last_crawl_time.load();
         int docs = g_vector_store.doc_count();
         int idx_pct = g_vector_store.index_usage_pct();
+        bool oi = g_ollama_installed.load();
+        bool or_ = g_ollama_running.load();
         std::ostringstream j;
         j << "{\"status\":\"ok\","
           << "\"indexed_docs\":" << docs << ","
           << "\"index_usage_pct\":" << idx_pct << ","
+          << "\"ollama_installed\":" << (oi ? "true" : "false") << ","
+          << "\"ollama_running\":" << (or_ ? "true" : "false") << ","
           << "\"last_crawl\":";
         if (lc == 0) j << "null";
         else         j << lc;
@@ -2161,6 +2411,81 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         g_crawl_requested.store(true);
         mg_http_reply(c, 202, "Content-Type: application/json\r\n",
                       "{\"status\":\"crawl_triggered\"}");
+
+    } else if (mg_strcmp(hm->uri, mg_str("/vectors/wipe")) == 0 &&
+               mg_strcmp(hm->method, mg_str("POST")) == 0) {
+        int before = g_vector_store.doc_count();
+        g_vector_store.wipe();
+        LOG_INFO("Vector store wiped via API (%d docs removed)", before);
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                      "{\"status\":\"wiped\",\"docs_removed\":%d}", before);
+
+    } else if (mg_strcmp(hm->uri, mg_str("/ollama/status")) == 0 &&
+               mg_strcmp(hm->method, mg_str("GET")) == 0) {
+        bool installed = g_ollama_installed.load();
+        bool running = installed ? check_ollama_running(cfg.ollama_url) : false;
+        g_ollama_running.store(running);
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"installed\":%s,\"running\":%s}",
+            installed ? "true" : "false", running ? "true" : "false");
+
+    } else if (mg_strcmp(hm->uri, mg_str("/ollama/install")) == 0 &&
+               mg_strcmp(hm->method, mg_str("POST")) == 0) {
+        if (g_ollama_installed.load()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"status\":\"already_installed\"}");
+        } else {
+            std::thread([](){
+                LOG_INFO("Installing ollama via curl | sh (fork/exec)...");
+                int rc = run_install_script();
+                bool ok = (rc == 0 && check_ollama_installed());
+                g_ollama_installed.store(ok);
+                if (ok) LOG_INFO("ollama installed successfully");
+                else    LOG_ERROR("ollama installation failed (rc=%d)", rc);
+            }).detach();
+            mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+                "{\"status\":\"installing\"}");
+        }
+
+    } else if (mg_strcmp(hm->uri, mg_str("/ollama/start")) == 0 &&
+               mg_strcmp(hm->method, mg_str("POST")) == 0) {
+        if (!g_ollama_installed.load()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"ollama not installed\"}");
+        } else {
+            pid_t pid = spawn_ollama_serve_detached();
+            if (pid > 0) {
+                LOG_INFO("ollama serve started via API (pid=%d)", (int)pid);
+                mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                    "{\"status\":\"started\"}");
+            } else {
+                mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                    "{\"error\":\"failed to start ollama\"}");
+            }
+        }
+
+    } else if (mg_strcmp(hm->uri, mg_str("/ollama/stop")) == 0 &&
+               mg_strcmp(hm->method, mg_str("POST")) == 0) {
+        std::thread([](){
+            kill_ollama_tracked();
+            g_ollama_running.store(false);
+        }).detach();
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+            "{\"status\":\"stopping\"}");
+
+    } else if (mg_strcmp(hm->uri, mg_str("/config")) == 0 &&
+               mg_strcmp(hm->method, mg_str("GET")) == 0) {
+        std::ostringstream j;
+        j << "{\"tomedo_host\":\"" << json_escape(cfg.tomedo_host) << "\""
+          << ",\"tomedo_port\":" << cfg.tomedo_port
+          << ",\"tomedo_db\":\"" << json_escape(cfg.tomedo_db) << "\""
+          << ",\"tomedo_cert_pem\":\"" << json_escape(cfg.tomedo_cert_pem) << "\""
+          << ",\"crawl_interval_sec\":" << cfg.crawl_interval_sec
+          << ",\"ollama_url\":\"" << json_escape(cfg.ollama_url) << "\""
+          << ",\"ollama_model\":\"" << json_escape(cfg.ollama_model) << "\""
+          << ",\"hnsw_max_elements\":" << cfg.hnsw_max_elements
+          << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
 
     } else {
         struct mg_str caps[1] = {};
@@ -2249,10 +2574,10 @@ int main(int argc, char** argv) {
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
 
-    std::string config_path = "tomedo-crawl.ini";
-    if (argc >= 2) config_path = argv[1];
+    std::string db_path = "tomedo-crawl.db";
+    if (argc >= 2) db_path = argv[1];
 
-    TomedoConfig cfg = parse_config(config_path);
+    TomedoConfig cfg = load_config_from_db(db_path);
 
     g_log.init(static_cast<uint16_t>(cfg.log_port), whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE);
 
@@ -2264,16 +2589,39 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::thread ollama_init_thread([&cfg](){
+        ollama_startup_check(cfg);
+    });
+
     g_vector_store.set_max_elements(cfg.hnsw_max_elements);
     if (!g_vector_store.open(cfg.db_path)) {
         LOG_ERROR("Failed to open vector store at '%s'", cfg.db_path.c_str());
+        s_quit.store(true);
+        if (ollama_init_thread.joinable()) ollama_init_thread.join();
         return 1;
     }
     g_vector_store.rebuild_index();
 
+    {
+        sqlite3* cdb = nullptr;
+        if (sqlite3_open(cfg.db_path.c_str(), &cdb) == SQLITE_OK) {
+            sqlite3_exec(cdb, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
+            std::string prev_model = config_db_get(cdb, "active_embedding_model", "");
+            if (!prev_model.empty() && prev_model != cfg.ollama_model) {
+                LOG_WARN("Embedding model changed from '%s' to '%s' — wiping vector store",
+                         prev_model.c_str(), cfg.ollama_model.c_str());
+                g_vector_store.wipe();
+            }
+            config_db_set(cdb, "active_embedding_model", cfg.ollama_model);
+            sqlite3_close(cdb);
+        }
+    }
+
     sqlite3* phone_db = nullptr;
     if (sqlite3_open(cfg.db_path.c_str(), &phone_db) != SQLITE_OK) {
         LOG_ERROR("Failed to open phone_index DB");
+        s_quit.store(true);
+        if (ollama_init_thread.joinable()) ollama_init_thread.join();
         return 1;
     }
     sqlite3_exec(phone_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
@@ -2281,6 +2629,8 @@ int main(int argc, char** argv) {
     if (!phone_index_init(phone_db)) {
         LOG_ERROR("Failed to init phone_index table");
         sqlite3_close(phone_db);
+        s_quit.store(true);
+        if (ollama_init_thread.joinable()) ollama_init_thread.join();
         return 1;
     }
     g_phone_db = phone_db;
@@ -2328,6 +2678,7 @@ int main(int argc, char** argv) {
     HttpServer srv;
     if (!srv.start(cfg)) {
         s_quit.store(true);
+        if (ollama_init_thread.joinable()) ollama_init_thread.join();
         g_query_pool.shutdown();
         g_resolve_queue.shutdown();
         crawl_thread.join();
@@ -2337,6 +2688,8 @@ int main(int argc, char** argv) {
     }
 
     LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
+
+    if (ollama_init_thread.joinable()) ollama_init_thread.join();
 
     srv.join();
     g_query_pool.shutdown();

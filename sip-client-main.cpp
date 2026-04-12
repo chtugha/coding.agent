@@ -159,10 +159,7 @@ static int tomedo_connect_nonblock() {
 
 static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {
     int sock = tomedo_connect_nonblock();
-    if (sock < 0) {
-        fprintf(stderr, "SIP_CLIENT DEBUG call=%u: tomedo-crawl not reachable, caller lookup skipped\n", call_id);
-        return;
-    }
+    if (sock < 0) return;
     std::string escaped;
     for (char c : phone) {
         if (c == '"' || c == '\\') escaped += '\\';
@@ -179,29 +176,20 @@ static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {
         << "Connection: close\r\n\r\n"
         << b;
     std::string r = req.str();
-    ssize_t sent = send(sock, r.c_str(), r.size(), 0);
-    if (sent < 0 || static_cast<size_t>(sent) < r.size()) {
-        fprintf(stderr, "SIP_CLIENT DEBUG call=%u: tomedo-crawl send failed (sent=%zd/%zu)\n", call_id, sent, r.size());
-    }
+    send(sock, r.c_str(), r.size(), 0);
     close(sock);
 }
 
 static void delete_tomedo_caller(uint32_t call_id) {
     int sock = tomedo_connect_nonblock();
-    if (sock < 0) {
-        fprintf(stderr, "SIP_CLIENT DEBUG call=%u: tomedo-crawl not reachable, caller lookup skipped\n", call_id);
-        return;
-    }
+    if (sock < 0) return;
     std::ostringstream req;
     req << "DELETE /caller/" << call_id << " HTTP/1.1\r\n"
         << "Host: 127.0.0.1:" << TOMEDO_CRAWL_PORT << "\r\n"
         << "Content-Length: 0\r\n"
         << "Connection: close\r\n\r\n";
     std::string r = req.str();
-    ssize_t sent = send(sock, r.c_str(), r.size(), 0);
-    if (sent < 0 || static_cast<size_t>(sent) < r.size()) {
-        fprintf(stderr, "SIP_CLIENT DEBUG call=%u: tomedo-crawl delete send failed (sent=%zd/%zu)\n", call_id, sent, r.size());
-    }
+    send(sock, r.c_str(), r.size(), 0);
     close(sock);
 }
 

@@ -108,6 +108,7 @@
 #include <dirent.h>
 #include <algorithm>
 #include <fcntl.h>
+#include <poll.h>
 #include <cerrno>
 #include <climits>
 #include <regex>
@@ -319,7 +320,8 @@ public:
           db_(nullptr),
           db_ok_(false),
           project_root_(project_root),
-          db_path_(project_root + "/frontend.db") {
+          db_path_(project_root + "/frontend.db"),
+          rag_db_path_(project_root + "/tomedo-crawl.db") {
         
         db_ok_ = init_database();
         if (db_ok_) {
@@ -431,6 +433,9 @@ private:
     bool db_write_mode_ = false;
     std::string project_root_;
     std::string db_path_;
+    std::string rag_db_path_;
+    std::atomic<pid_t> ollama_pid_{0};
+    std::atomic<bool> ollama_pulling_{false};
     struct mg_mgr mgr_;
     std::thread log_thread_;
     
@@ -751,27 +756,10 @@ private:
             }
 
             if (name == "TOMEDO_CRAWL_SERVICE" && args_override.empty()) {
-                std::string ini_path = "tomedo-crawl.ini";
-                std::ofstream ini(ini_path, std::ios::trunc);
-                if (ini.is_open()) {
-                    std::string th = get_setting("rag_tomedo_host", "192.168.10.9");
-                    std::string tp = get_setting("rag_tomedo_port", "8443");
-                    std::string ou = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
-                    std::string om = get_setting("rag_ollama_model", "nomic-embed-text");
-                    std::string ci = get_setting("rag_crawl_interval_sec", "3600");
-                    std::string cp = get_setting("rag_cert_uploaded", "");
-                    if (cp.empty()) cp = "/etc/tomedo-crawl/client.pem";
-                    ini << "tomedo_host = " << th << "\n"
-                        << "tomedo_port = " << tp << "\n"
-                        << "tomedo_cert_pem = " << cp << "\n"
-                        << "ollama_url = " << ou << "\n"
-                        << "ollama_model = " << om << "\n"
-                        << "crawl_interval_sec = " << ci << "\n";
-                    ini.close();
-                }
-                std::string ini_args = ini_path;
-                if (!use_args.empty()) ini_args += " " + use_args;
-                use_args = ini_args;
+                rag_db_sync_all_config();
+                std::string db_args = rag_db_path_;
+                if (!use_args.empty()) db_args += " " + use_args;
+                use_args = db_args;
             }
 
             auto argv_strings = split_args(use_args);
@@ -1103,6 +1091,22 @@ private:
                 handle_rag_cert_upload(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/rag/trigger_crawl")) == 0) {
                 handle_rag_trigger_crawl(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/ollama/status")) == 0) {
+                handle_ollama_status(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/ollama/start")) == 0) {
+                handle_ollama_start(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/ollama/stop")) == 0) {
+                handle_ollama_stop(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/ollama/restart")) == 0) {
+                handle_ollama_restart(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/ollama/models")) == 0) {
+                handle_ollama_models(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/ollama/pull")) == 0) {
+                handle_ollama_pull(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/ollama/install")) == 0) {
+                handle_ollama_install(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/rag/wipe_vectors")) == 0) {
+                handle_rag_wipe_vectors(c, hm);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
@@ -5668,6 +5672,77 @@ private:
         }
     }
 
+    bool rag_db_set_config(const std::string& key, const std::string& value) {
+        sqlite3* rag_db = nullptr;
+        if (sqlite3_open(rag_db_path_.c_str(), &rag_db) != SQLITE_OK) {
+            std::cerr << "WARNING: cannot open RAG config DB " << rag_db_path_ << "\n";
+            if (rag_db) sqlite3_close(rag_db);
+            return false;
+        }
+        sqlite3_exec(rag_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+        sqlite3_exec(rag_db, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
+        sqlite3_exec(rag_db,
+            "CREATE TABLE IF NOT EXISTS config ("
+            "  key   TEXT PRIMARY KEY NOT NULL,"
+            "  value TEXT NOT NULL);",
+            nullptr, nullptr, nullptr);
+        sqlite3_stmt* st = nullptr;
+        bool ok = false;
+        if (sqlite3_prepare_v2(rag_db,
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                -1, &st, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(st, 2, value.c_str(), -1, SQLITE_TRANSIENT);
+            ok = (sqlite3_step(st) == SQLITE_DONE);
+            sqlite3_finalize(st);
+        }
+        sqlite3_close(rag_db);
+        if (!ok)
+            std::cerr << "WARNING: failed to write RAG config key '" << key << "'\n";
+        return ok;
+    }
+
+    void rag_db_sync_all_config() {
+        sqlite3* rag_db = nullptr;
+        if (sqlite3_open(rag_db_path_.c_str(), &rag_db) != SQLITE_OK) {
+            std::cerr << "WARNING: cannot open RAG config DB " << rag_db_path_ << "\n";
+            if (rag_db) sqlite3_close(rag_db);
+            return;
+        }
+        sqlite3_exec(rag_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+        sqlite3_exec(rag_db, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
+        sqlite3_exec(rag_db,
+            "CREATE TABLE IF NOT EXISTS config ("
+            "  key   TEXT PRIMARY KEY NOT NULL,"
+            "  value TEXT NOT NULL);",
+            nullptr, nullptr, nullptr);
+
+        std::string cp = get_setting("rag_cert_uploaded", "");
+        if (cp.empty()) cp = "/etc/tomedo-crawl/client.pem";
+        const std::pair<const char*, std::string> entries[] = {
+            {"tomedo_host",       get_setting("rag_tomedo_host", "192.168.10.9")},
+            {"tomedo_port",       get_setting("rag_tomedo_port", "8443")},
+            {"tomedo_cert_pem",   cp},
+            {"ollama_url",        get_setting("rag_ollama_url", "http://127.0.0.1:11434")},
+            {"ollama_model",      get_setting("rag_ollama_model", "nomic-embed-text")},
+            {"crawl_interval_sec",get_setting("rag_crawl_interval_sec", "3600")},
+        };
+        sqlite3_exec(rag_db, "BEGIN", nullptr, nullptr, nullptr);
+        for (auto& [key, val] : entries) {
+            sqlite3_stmt* st = nullptr;
+            if (sqlite3_prepare_v2(rag_db,
+                    "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                    -1, &st, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, key, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(st, 2, val.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(st);
+                sqlite3_finalize(st);
+            }
+        }
+        sqlite3_exec(rag_db, "COMMIT", nullptr, nullptr, nullptr);
+        sqlite3_close(rag_db);
+    }
+
     static std::string rag_http_request(const std::string& method, const std::string& path,
                                        const std::string& body = "", int timeout_ms = 2000) {
         int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -5721,6 +5796,8 @@ private:
             std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
             std::string ollama_model = get_setting("rag_ollama_model", "nomic-embed-text");
             std::string crawl_interval = get_setting("rag_crawl_interval_sec", "3600");
+            std::string crawl_time = get_setting("rag_crawl_time", "02:00");
+            std::string crawl_repeat_min = get_setting("rag_crawl_repeat_minutes", "0");
             std::string cert_status = get_setting("rag_cert_uploaded", "");
             std::stringstream json;
             json << "{\"tomedo_host\":\"" << escape_json(tomedo_host)
@@ -5728,6 +5805,8 @@ private:
                  << "\",\"ollama_url\":\"" << escape_json(ollama_url)
                  << "\",\"ollama_model\":\"" << escape_json(ollama_model)
                  << "\",\"crawl_interval_sec\":\"" << escape_json(crawl_interval)
+                 << "\",\"crawl_time\":\"" << escape_json(crawl_time)
+                 << "\",\"crawl_repeat_minutes\":\"" << escape_json(crawl_repeat_min)
                  << "\",\"cert_uploaded\":" << (cert_status.empty() ? "false" : "true")
                  << "}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
@@ -5751,6 +5830,21 @@ private:
             save("ollama_url", "rag_ollama_url");
             save("ollama_model", "rag_ollama_model");
             save("crawl_interval_sec", "rag_crawl_interval_sec");
+            save("crawl_time", "rag_crawl_time");
+            save("crawl_repeat_minutes", "rag_crawl_repeat_minutes");
+
+            auto sync = [&](const std::string& json_key, const char* cfg_key) {
+                std::string val = extract_json_string(body, json_key);
+                rag_db_set_config(cfg_key, val);
+            };
+            sync("tomedo_host", "tomedo_host");
+            sync("tomedo_port", "tomedo_port");
+            sync("ollama_url", "ollama_url");
+            sync("ollama_model", "ollama_model");
+            sync("crawl_interval_sec", "crawl_interval_sec");
+            sync("crawl_time", "crawl_time");
+            sync("crawl_repeat_minutes", "crawl_repeat_minutes");
+
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
         }
     }
@@ -5801,6 +5895,7 @@ private:
                 sqlite3_finalize(stmt);
             }
         }
+        rag_db_set_config("tomedo_cert_pem", cert_path);
         mg_http_reply(c, 200, "Content-Type: application/json\r\n",
             "{\"status\":\"uploaded\",\"path\":\"%s\"}", escape_json(cert_path).c_str());
     }
@@ -5816,6 +5911,290 @@ private:
                 "{\"error\":\"RAG service not reachable\"}");
         } else {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", body.c_str());
+        }
+    }
+
+    void handle_rag_wipe_vectors(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string resp = rag_http_request("POST", "/vectors/wipe");
+        if (resp.empty()) {
+            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
+                "{\"error\":\"RAG service not reachable\"}");
+        } else {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
+        }
+    }
+
+    static std::string ollama_http_request(const std::string& method, const std::string& url_base,
+                                           const std::string& path, const std::string& body = "",
+                                           int timeout_ms = 10000) {
+        std::string host = "127.0.0.1";
+        std::string port_str = "11434";
+        std::string trimmed = url_base;
+        auto proto = trimmed.find("://");
+        if (proto != std::string::npos) trimmed = trimmed.substr(proto + 3);
+        while (!trimmed.empty() && trimmed.back() == '/') trimmed.pop_back();
+        auto colon = trimmed.find(':');
+        if (colon != std::string::npos) {
+            host = trimmed.substr(0, colon);
+            port_str = trimmed.substr(colon + 1);
+        } else if (!trimmed.empty()) {
+            host = trimmed;
+        }
+        struct addrinfo hints{}, *res = nullptr;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) return "";
+        int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (sock < 0) { freeaddrinfo(res); return ""; }
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
+            ::close(sock);
+            freeaddrinfo(res);
+            return "";
+        }
+        freeaddrinfo(res);
+        std::string req = method + " " + path + " HTTP/1.0\r\nHost: " + host + "\r\n";
+        if (!body.empty()) {
+            req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+        }
+        req += "Connection: close\r\n\r\n";
+        if (!body.empty()) req += body;
+        send(sock, req.c_str(), req.size(), 0);
+        std::string response;
+        char buf[4096];
+        ssize_t n;
+        while ((n = recv(sock, buf, sizeof(buf), 0)) > 0) {
+            response.append(buf, n);
+        }
+        ::close(sock);
+        auto hdr_end = response.find("\r\n\r\n");
+        if (hdr_end != std::string::npos) return response.substr(hdr_end + 4);
+        return response;
+    }
+
+    void handle_ollama_status(struct mg_connection *c) {
+        std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
+        std::string resp = ollama_http_request("GET", ollama_url, "/api/tags");
+        bool running = !resp.empty();
+        bool pulling = ollama_pulling_.load();
+        bool installed = true;
+        std::string rag_health = rag_http_request("GET", "/ollama/status");
+        if (!rag_health.empty()) {
+            installed = rag_health.find("\"installed\":true") != std::string::npos;
+            if (!running) running = rag_health.find("\"running\":true") != std::string::npos;
+        }
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"running\":%s,\"pulling\":%s,\"installed\":%s}",
+            running ? "true" : "false", pulling ? "true" : "false",
+            installed ? "true" : "false");
+    }
+
+    pid_t spawn_ollama_serve() {
+        int pidpipe[2];
+        if (pipe(pidpipe) < 0) return -1;
+        int execpipe[2];
+        if (pipe(execpipe) < 0) { ::close(pidpipe[0]); ::close(pidpipe[1]); return -1; }
+        fcntl(execpipe[1], F_SETFD, FD_CLOEXEC);
+        pid_t mid = fork();
+        if (mid < 0) { ::close(pidpipe[0]); ::close(pidpipe[1]); ::close(execpipe[0]); ::close(execpipe[1]); return -1; }
+        if (mid == 0) {
+            ::close(pidpipe[0]);
+            ::close(execpipe[0]);
+            pid_t child = fork();
+            if (child < 0) { pid_t z = 0; (void)write(pidpipe[1], &z, sizeof(z)); ::close(pidpipe[1]); ::close(execpipe[1]); _exit(127); }
+            if (child > 0) { (void)write(pidpipe[1], &child, sizeof(child)); ::close(pidpipe[1]); ::close(execpipe[1]); _exit(0); }
+            ::close(pidpipe[1]);
+            setsid();
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) { dup2(devnull, STDIN_FILENO); dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); ::close(devnull); }
+            execlp("ollama", "ollama", "serve", nullptr);
+            char err = 1;
+            (void)write(execpipe[1], &err, 1);
+            ::close(execpipe[1]);
+            _exit(127);
+        }
+        ::close(pidpipe[1]);
+        ::close(execpipe[1]);
+        pid_t grandchild = 0;
+        (void)read(pidpipe[0], &grandchild, sizeof(grandchild));
+        ::close(pidpipe[0]);
+        int status;
+        waitpid(mid, &status, 0);
+        if (grandchild < 1) { ::close(execpipe[0]); return -1; }
+        char err = 0;
+        struct pollfd pfd = {execpipe[0], POLLIN, 0};
+        if (poll(&pfd, 1, 200) > 0 && read(execpipe[0], &err, 1) == 1) {
+            ::close(execpipe[0]);
+            return -1;
+        }
+        ::close(execpipe[0]);
+        ollama_pid_.store(grandchild);
+        return 0;
+    }
+
+    void kill_ollama_serve() {
+        pid_t p = ollama_pid_.exchange(0);
+        if (p > 1) {
+            kill(p, SIGTERM);
+            return;
+        }
+        std::thread([](){
+            FILE* fp = popen("pgrep -f 'ollama serve'", "r");
+            if (fp) {
+                char buf[64];
+                while (fgets(buf, sizeof(buf), fp)) {
+                    pid_t kp = static_cast<pid_t>(atoi(buf));
+                    if (kp > 1) kill(kp, SIGTERM);
+                }
+                pclose(fp);
+            }
+        }).detach();
+    }
+
+    void handle_ollama_start(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string resp = rag_http_request("POST", "/ollama/start");
+        if (resp.empty()) {
+            if (spawn_ollama_serve() >= 0) {
+                mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                    "{\"status\":\"started\"}");
+            } else {
+                mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                    "{\"error\":\"failed to start ollama (not installed or not in PATH?)\"}");
+            }
+        } else {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
+        }
+    }
+
+    void handle_ollama_stop(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string resp = rag_http_request("POST", "/ollama/stop");
+        if (resp.empty()) {
+            kill_ollama_serve();
+            mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+                "{\"status\":\"stopping\"}");
+        } else {
+            mg_http_reply(c, 202, "Content-Type: application/json\r\n", "%s", resp.c_str());
+        }
+    }
+
+    void handle_ollama_restart(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string stop_resp = rag_http_request("POST", "/ollama/stop");
+        if (!stop_resp.empty()) {
+            std::thread([](){
+                usleep(500000);
+                rag_http_request("POST", "/ollama/start");
+            }).detach();
+        } else {
+            std::thread([this](){
+                kill_ollama_serve();
+                usleep(500000);
+                spawn_ollama_serve();
+            }).detach();
+        }
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+            "{\"status\":\"restarting\"}");
+    }
+
+    void handle_ollama_models(struct mg_connection *c) {
+        std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
+        std::string resp = ollama_http_request("GET", ollama_url, "/api/tags");
+        if (resp.empty()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"models\":[],\"error\":\"ollama not reachable\"}");
+        } else {
+            std::vector<std::string> models;
+            size_t pos = 0;
+            while (true) {
+                auto name_key = resp.find("\"name\"", pos);
+                if (name_key == std::string::npos) break;
+                auto colon = resp.find(':', name_key);
+                if (colon == std::string::npos) break;
+                auto q1 = resp.find('"', colon + 1);
+                if (q1 == std::string::npos) break;
+                auto q2 = resp.find('"', q1 + 1);
+                if (q2 == std::string::npos) break;
+                models.push_back(resp.substr(q1 + 1, q2 - q1 - 1));
+                pos = q2 + 1;
+            }
+            std::string active_model = get_setting("rag_ollama_model", "nomic-embed-text");
+            std::stringstream json;
+            json << "{\"models\":[";
+            for (size_t i = 0; i < models.size(); i++) {
+                if (i > 0) json << ",";
+                json << "{\"name\":\"" << escape_json(models[i])
+                     << "\",\"active\":" << (models[i] == active_model ? "true" : "false") << "}";
+            }
+            json << "],\"active_model\":\"" << escape_json(active_model) << "\"}";
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+        }
+    }
+
+    void handle_ollama_pull(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        if (ollama_pulling_.load()) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
+                "{\"error\":\"a pull is already in progress\"}");
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string model = extract_json_string(body, "model");
+        if (model.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"model field required\"}");
+            return;
+        }
+        for (char ch : model) {
+            if (!std::isalnum(ch) && ch != '-' && ch != '_' && ch != '.' && ch != ':' && ch != '/') {
+                mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                    "{\"error\":\"invalid model name\"}");
+                return;
+            }
+        }
+        std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
+        ollama_pulling_.store(true);
+        std::thread([this, model, ollama_url]() {
+            std::string pull_body = "{\"name\":\"" + model + "\",\"stream\":false}";
+            ollama_http_request("POST", ollama_url, "/api/pull", pull_body, 600000);
+            ollama_pulling_.store(false);
+        }).detach();
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+            "{\"status\":\"pulling\",\"model\":\"%s\"}", escape_json(model).c_str());
+    }
+
+    void handle_ollama_install(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string resp = rag_http_request("POST", "/ollama/install");
+        if (resp.empty()) {
+            mg_http_reply(c, 502, "Content-Type: application/json\r\n",
+                "{\"error\":\"tomedo-crawl not reachable\"}");
+        } else {
+            mg_http_reply(c, 202, "Content-Type: application/json\r\n", "%s", resp.c_str());
         }
     }
 
@@ -5900,6 +6279,19 @@ private:
         auto now = std::chrono::steady_clock::now();
         auto uptime_s = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_).count();
 
+        bool ollama_installed = true, ollama_running = false;
+        {
+            std::string rag_ollama = rag_http_request("GET", "/ollama/status", "", 200);
+            if (!rag_ollama.empty()) {
+                ollama_installed = rag_ollama.find("\"installed\":true") != std::string::npos;
+                ollama_running = rag_ollama.find("\"running\":true") != std::string::npos;
+            } else {
+                std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
+                std::string resp = ollama_http_request("GET", ollama_url, "/api/tags");
+                ollama_running = !resp.empty();
+            }
+        }
+
         std::stringstream json;
         json << "{\"services_online\":" << svc_online
              << ",\"services_total\":" << svc_total
@@ -5907,6 +6299,8 @@ private:
              << ",\"test_pass\":" << test_pass
              << ",\"test_fail\":" << test_fail
              << ",\"uptime_seconds\":" << uptime_s
+             << ",\"ollama_installed\":" << (ollama_installed ? "true" : "false")
+             << ",\"ollama_running\":" << (ollama_running ? "true" : "false")
              << ",\"services\":" << svc_json.str()
              << ",\"recent_logs\":" << logs_json.str()
              << ",\"pipeline\":[\"SIP_CLIENT\",\"INBOUND_AUDIO_PROCESSOR\",\"VAD_SERVICE\",\"WHISPER_SERVICE\",\"LLAMA_SERVICE\",\"KOKORO_SERVICE\",\"OUTBOUND_AUDIO_PROCESSOR\"]"
