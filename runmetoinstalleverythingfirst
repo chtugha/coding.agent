@@ -118,7 +118,16 @@ check_and_install_homebrew() {
 
 install_system_deps() {
     step "Installing system dependencies"
-    DEPS=("cmake" "wget" "git" "espeak-ng" "ccache")
+    # openssl@3  — required to build the SQLCipher amalgamation
+    #   (./configure --with-crypto-lib=openssl) and statically linked into
+    #   `frontend` and `tomedo-crawl`.  CMakeLists.txt forces .a linkage so
+    #   both binaries have zero Homebrew runtime dependencies.
+    # tclsh     — required by SQLCipher's amalgamation generator (mksqlite3c.tcl)
+    #   which concatenates ~100 source files into a single sqlite3.c.
+    #   tclsh ships with macOS Xcode Command Line Tools (/usr/bin/tclsh).
+    #   If /usr/bin/tclsh is missing, tcl-tk is installed via Homebrew as
+    #   a fallback.
+    DEPS=("cmake" "wget" "git" "espeak-ng" "ccache" "openssl@3")
     for dep in "${DEPS[@]}"; do
         if ! brew list "$dep" &> /dev/null; then
             info "Installing $dep..."
@@ -127,6 +136,14 @@ install_system_deps() {
             info "$dep already installed"
         fi
     done
+
+    # tclsh — check system first (ships with Xcode CLT), install tcl-tk if missing
+    if command -v tclsh &> /dev/null; then
+        info "tclsh already available: $(command -v tclsh)"
+    else
+        warn "tclsh not found in PATH — installing tcl-tk via Homebrew (needed for SQLCipher amalgamation build)"
+        brew install tcl-tk
+    fi
 }
 
 check_and_install_python() {

@@ -189,6 +189,7 @@
 
 #include "mongoose.h"
 #include "sqlite3.h"
+#include "db_key.h"
 #include "interconnect.h"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -212,7 +213,7 @@ struct TomedoConfig {
     std::string tomedo_cert_pem  = "/etc/tomedo-crawl/client.pem";
     int         crawl_interval_sec = 3600;
     std::string ollama_url       = "http://127.0.0.1:11434";
-    std::string ollama_model     = "nomic-embed-text";
+    std::string ollama_model     = "embeddinggemma:300m";
     std::string api_host         = "127.0.0.1";
     int         api_port         = 13181;
     int         log_port         = 22022;
@@ -232,7 +233,7 @@ static int parse_port(const std::string& val, int fallback) {
 
 static bool config_db_ensure(const std::string& db_path) {
     sqlite3* db = nullptr;
-    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
+    if (prodigy_db::db_open_encrypted(db_path.c_str(), &db) != SQLITE_OK) {
         std::fprintf(stderr, "tomedo-crawl: cannot open config db '%s': %s\n",
                      db_path.c_str(), db ? sqlite3_errmsg(db) : "unknown");
         if (db) sqlite3_close(db);
@@ -298,7 +299,7 @@ static TomedoConfig load_config_from_db(const std::string& db_path) {
     }
 
     sqlite3* db = nullptr;
-    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
+    if (prodigy_db::db_open_encrypted(db_path.c_str(), &db) != SQLITE_OK) {
         std::fprintf(stderr, "tomedo-crawl: cannot open config db for reading, using defaults\n");
         if (db) sqlite3_close(db);
         return cfg;
@@ -391,7 +392,13 @@ static bool check_ollama_running(const std::string& ollama_url) {
     bool ok = false;
     if (pr > 0) {
         ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
-        if (n > 0) { buf[n] = 0; ok = (strstr(buf, "200") != nullptr || strstr(buf, "Ollama") != nullptr); }
+        if (n > 0) {
+            buf[n] = 0;
+            // Match only the HTTP status line to avoid false positives from
+            // JSON body content (e.g. {"code": 200} would fool a bare "200" search).
+            const char* status_line = strstr(buf, "HTTP/1.");
+            ok = (status_line && strstr(status_line, " 200 ") != nullptr);
+        }
     }
     close(fd);
     return ok;
@@ -440,17 +447,11 @@ static pid_t spawn_ollama_serve_detached() {
     return grandchild;
 }
 
-static int run_install_script() {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        execlp("sh", "sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh", nullptr);
-        _exit(127);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
-}
+// Ollama must be installed by the operator before starting this service.
+// Automatic installation via curl | sh is intentionally NOT supported:
+// this application processes HIPAA/GDPR-regulated patient data and cannot
+// download and execute arbitrary scripts from the internet at runtime.
+// Direct the operator to https://ollama.com to install manually.
 
 static void kill_ollama_tracked() {
     pid_t p = g_ollama_pid.exchange(0);
@@ -469,6 +470,111 @@ static void kill_ollama_tracked() {
     }
 }
 
+static bool ollama_model_available(const std::string& ollama_url, const std::string& model) {
+    std::string host = "127.0.0.1";
+    int port = 11434;
+    size_t scheme_end = ollama_url.find("://");
+    size_t host_start = (scheme_end == std::string::npos) ? 0 : scheme_end + 3;
+    size_t path_start = ollama_url.find('/', host_start);
+    std::string hostport = (path_start == std::string::npos) ?
+        ollama_url.substr(host_start) : ollama_url.substr(host_start, path_start - host_start);
+    auto colon = hostport.find(':');
+    if (colon != std::string::npos) {
+        host = hostport.substr(0, colon);
+        port = std::atoi(hostport.c_str() + colon + 1);
+    } else if (!hostport.empty()) {
+        host = hostport;
+    }
+    int fd = tcp_connect(host, port, 5000);
+    if (fd < 0) return false;
+    std::string req = "GET /api/tags HTTP/1.1\r\nHost: " + host + ":" + std::to_string(port) +
+                      "\r\nConnection: close\r\n\r\n";
+    ssize_t w = ::write(fd, req.c_str(), req.size());
+    if (w <= 0) { close(fd); return false; }
+    std::string resp;
+    char buf[4096];
+    struct pollfd pfd{fd, POLLIN, 0};
+    while (poll(&pfd, 1, 5000) > 0) {
+        ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+        if (n <= 0) break;
+        buf[n] = 0;
+        resp.append(buf, static_cast<size_t>(n));
+    }
+    close(fd);
+    std::string needle = "\"" + model + "\"";
+    if (resp.find(needle) != std::string::npos) return true;
+    size_t col = model.find(':');
+    if (col != std::string::npos) {
+        std::string base = model.substr(0, col);
+        if (resp.find("\"" + base + "\"") != std::string::npos) return true;
+        if (resp.find("\"" + base + ":") != std::string::npos &&
+            resp.find(model) != std::string::npos) return true;
+    }
+    return resp.find("\"name\":\"" + model + "\"") != std::string::npos;
+}
+
+static void ollama_pull_model(const std::string& ollama_url, const std::string& model) {
+    std::string host = "127.0.0.1";
+    int port = 11434;
+    size_t scheme_end = ollama_url.find("://");
+    size_t host_start = (scheme_end == std::string::npos) ? 0 : scheme_end + 3;
+    size_t path_start = ollama_url.find('/', host_start);
+    std::string hostport = (path_start == std::string::npos) ?
+        ollama_url.substr(host_start) : ollama_url.substr(host_start, path_start - host_start);
+    auto colon = hostport.find(':');
+    if (colon != std::string::npos) {
+        host = hostport.substr(0, colon);
+        port = std::atoi(hostport.c_str() + colon + 1);
+    } else if (!hostport.empty()) {
+        host = hostport;
+    }
+    std::string escaped_model;
+    for (char ch : model) {
+        if (ch == '"' || ch == '\\') escaped_model += '\\';
+        escaped_model += ch;
+    }
+    std::string body = "{\"name\":\"" + escaped_model + "\"}";
+    int fd = tcp_connect(host, port, 5000);
+    if (fd < 0) { LOG_ERROR("ollama pull: cannot connect"); return; }
+    std::ostringstream req;
+    req << "POST /api/pull HTTP/1.1\r\n"
+        << "Host: " << host << ":" << port << "\r\n"
+        << "Content-Type: application/json\r\n"
+        << "Content-Length: " << body.size() << "\r\n"
+        << "Connection: close\r\n\r\n"
+        << body;
+    std::string r = req.str();
+    ssize_t w = ::write(fd, r.c_str(), r.size());
+    if (w <= 0) { close(fd); LOG_ERROR("ollama pull: write failed"); return; }
+    std::string resp;
+    char buf[4096];
+    struct pollfd pfd{fd, POLLIN, 0};
+    while (poll(&pfd, 1, 300000) > 0) {
+        ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+        if (n <= 0) break;
+        buf[n] = 0;
+        resp.append(buf, static_cast<size_t>(n));
+    }
+    close(fd);
+    if (resp.find("\"error\"") != std::string::npos)
+        LOG_WARN("ollama pull response contains error: %.200s", resp.c_str());
+}
+
+static void ensure_model_available(const TomedoConfig& cfg) {
+    if (s_quit.load()) return;
+    if (ollama_model_available(cfg.ollama_url, cfg.ollama_model)) {
+        LOG_INFO("embedding model '%s' is available", cfg.ollama_model.c_str());
+        return;
+    }
+    LOG_INFO("embedding model '%s' not found — pulling...", cfg.ollama_model.c_str());
+    ollama_pull_model(cfg.ollama_url, cfg.ollama_model);
+    if (ollama_model_available(cfg.ollama_url, cfg.ollama_model)) {
+        LOG_INFO("embedding model '%s' pulled successfully", cfg.ollama_model.c_str());
+    } else {
+        LOG_ERROR("failed to pull embedding model '%s'", cfg.ollama_model.c_str());
+    }
+}
+
 static void ollama_startup_check(const TomedoConfig& cfg) {
     bool installed = check_ollama_installed();
     g_ollama_installed.store(installed);
@@ -481,6 +587,7 @@ static void ollama_startup_check(const TomedoConfig& cfg) {
     g_ollama_running.store(running);
     if (running) {
         LOG_INFO("ollama is already running at %s", cfg.ollama_url.c_str());
+        ensure_model_available(cfg);
         return;
     }
     LOG_INFO("ollama not running — attempting auto-start");
@@ -492,6 +599,7 @@ static void ollama_startup_check(const TomedoConfig& cfg) {
             if (check_ollama_running(cfg.ollama_url)) {
                 g_ollama_running.store(true);
                 LOG_INFO("ollama is now reachable at %s", cfg.ollama_url.c_str());
+                ensure_model_available(cfg);
                 return;
             }
         }
@@ -564,9 +672,9 @@ public:
     void set_max_elements(size_t n) { max_elements_ = n; }
 
     bool open(const std::string& db_path) {
-        int rc = sqlite3_open(db_path.c_str(), &db_);
+        int rc = prodigy_db::db_open_encrypted(db_path.c_str(), &db_);
         if (rc != SQLITE_OK) {
-            LOG_ERROR("VectorStore: sqlite3_open(%s): %s", db_path.c_str(), sqlite3_errmsg(db_));
+            LOG_ERROR("VectorStore: db_open_encrypted(%s): %s", db_path.c_str(), sqlite3_errmsg(db_));
             return false;
         }
         sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
@@ -2408,21 +2516,10 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
 
     } else if (mg_strcmp(hm->uri, mg_str("/ollama/install")) == 0 &&
                mg_strcmp(hm->method, mg_str("POST")) == 0) {
-        if (g_ollama_installed.load()) {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                "{\"status\":\"already_installed\"}");
-        } else {
-            std::thread([](){
-                LOG_INFO("Installing ollama via curl | sh (fork/exec)...");
-                int rc = run_install_script();
-                bool ok = (rc == 0 && check_ollama_installed());
-                g_ollama_installed.store(ok);
-                if (ok) LOG_INFO("ollama installed successfully");
-                else    LOG_ERROR("ollama installation failed (rc=%d)", rc);
-            }).detach();
-            mg_http_reply(c, 202, "Content-Type: application/json\r\n",
-                "{\"status\":\"installing\"}");
-        }
+        mg_http_reply(c, 501, "Content-Type: application/json\r\n",
+            "{\"error\":\"Automatic Ollama installation is not supported. "
+            "Install Ollama manually from https://ollama.com before starting this service.\"}");
+        LOG_WARN("POST /ollama/install called — automatic install is disabled for security reasons");
 
     } else if (mg_strcmp(hm->uri, mg_str("/ollama/start")) == 0 &&
                mg_strcmp(hm->method, mg_str("POST")) == 0) {
@@ -2581,7 +2678,7 @@ int main(int argc, char** argv) {
 
     {
         sqlite3* cdb = nullptr;
-        if (sqlite3_open(cfg.db_path.c_str(), &cdb) == SQLITE_OK) {
+        if (prodigy_db::db_open_encrypted(cfg.db_path.c_str(), &cdb) == SQLITE_OK) {
             sqlite3_exec(cdb, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
             std::string prev_model = config_db_get(cdb, "active_embedding_model", "");
             if (!prev_model.empty() && prev_model != cfg.ollama_model) {
@@ -2595,7 +2692,7 @@ int main(int argc, char** argv) {
     }
 
     sqlite3* phone_db = nullptr;
-    if (sqlite3_open(cfg.db_path.c_str(), &phone_db) != SQLITE_OK) {
+    if (prodigy_db::db_open_encrypted(cfg.db_path.c_str(), &phone_db) != SQLITE_OK) {
         LOG_ERROR("Failed to open phone_index DB");
         s_quit.store(true);
         if (ollama_init_thread.joinable()) ollama_init_thread.join();

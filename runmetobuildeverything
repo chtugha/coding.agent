@@ -41,7 +41,18 @@ while [[ $# -gt 0 ]]; do
             echo "Build order:"
             echo "  1. whisper.cpp (CoreML + Metal, static libs)"
             echo "  2. llama.cpp (Metal, static libs)"
-            echo "  3. Prodigy main project (all services)"
+            echo "  3. SQLCipher (auto-updated from GitHub master)"
+            echo "  4. Prodigy main project (all services)"
+            echo ""
+            echo "SQLCipher (database encryption):"
+            echo "  Source is fetched from https://github.com/sqlcipher/sqlcipher"
+            echo "  branch: master — updated on every build run."
+            echo "  Compiled with SQLITE_HAS_CODEC + SQLCIPHER_CRYPTO_OPENSSL."
+            echo "  Statically linked into 'frontend' and 'tomedo-crawl' binaries."
+            echo "  Encryption key: auto-generated 256-bit AES, stored in macOS"
+            echo "  Keychain (Secure Enclave-backed on Apple Silicon)."
+            echo "  To pin SQLCipher to a specific commit, pass to cmake:"
+            echo "    -DFETCHCONTENT_UPDATES_DISCONNECTED=ON"
             echo ""
             echo "Prerequisites: run ./runmetoinstalleverythingfirst"
             exit 0
@@ -163,8 +174,125 @@ build_llama_cpp() {
     fi
 }
 
+build_sqlcipher_amalgamation() {
+    # ──────────────────────────────────────────────────────────────────────────
+    # SQLCipher amalgamation build
+    #
+    # WHY THIS IS DONE HERE (not inside CMake)
+    #   SQLCipher's GitHub repo contains raw C source files, not the final
+    #   sqlite3.c amalgamation.  Building the amalgamation requires the SQLCipher
+    #   autoconf toolchain:
+    #     ./configure --with-crypto-lib=openssl  (needs tclsh + OpenSSL headers)
+    #     make sqlite3.c                         (concatenates ~100 source files)
+    #   CMake cannot run arbitrary shell pipelines during configure without
+    #   ExternalProject_Add, which makes the generated file unavailable until
+    #   the build phase — too late to list it as a source file.  Running this
+    #   step in the shell script before cmake is invoked keeps things simple
+    #   and reliable.
+    #
+    # CACHING STRATEGY
+    #   The git SHA of the cloned master commit is recorded in
+    #   third_party/sqlcipher/.sqlcipher_sha.  If the SHA hasn't changed since
+    #   the last build AND --force was not passed, the (expensive) autoconf +
+    #   make step is skipped.  Passing --force deletes the SHA file and forces
+    #   a full rebuild.
+    #
+    # OUTPUT
+    #   third_party/sqlcipher/sqlite3.c  — amalgamation (compiled by frontend +
+    #                                       tomedo-crawl with SQLITE_HAS_CODEC)
+    #   third_party/sqlcipher/sqlite3.h  — header with sqlite3_key() declarations
+    #
+    # DEPENDENCIES
+    #   git, tclsh (ships with macOS Xcode CLT), openssl@3 (brew)
+    # ──────────────────────────────────────────────────────────────────────────
+    step "Building SQLCipher amalgamation (latest master)"
+
+    local src_dir="${SCRIPT_DIR}/third_party/sqlcipher/sqlcipher-src"
+    local out_dir="${SCRIPT_DIR}/third_party/sqlcipher"
+    local sha_file="${out_dir}/.sqlcipher_sha"
+
+    # Locate OpenSSL (Homebrew arm64 path)
+    local openssl_prefix
+    openssl_prefix=$(brew --prefix openssl@3 2>/dev/null) || true
+    if [ -z "$openssl_prefix" ] || [ ! -d "$openssl_prefix/include" ]; then
+        error "openssl@3 not found. Run ./runmetoinstalleverythingfirst first."
+    fi
+
+    # Verify tclsh is available (required by SQLCipher's amalgamation generator)
+    if ! command -v tclsh &> /dev/null; then
+        error "tclsh not found. Install Xcode Command Line Tools: xcode-select --install"
+    fi
+
+    # Clone or update SQLCipher from GitHub master
+    mkdir -p "$(dirname "$src_dir")"
+    if [ -d "$src_dir/.git" ]; then
+        info "Pulling latest SQLCipher from GitHub master..."
+        git -C "$src_dir" fetch --depth=1 origin master 2>/dev/null \
+            && git -C "$src_dir" reset --hard origin/master 2>/dev/null \
+            || warn "SQLCipher git pull failed — using cached source"
+    else
+        info "Cloning SQLCipher from GitHub..."
+        git clone --depth=1 https://github.com/sqlcipher/sqlcipher.git "$src_dir"
+    fi
+
+    local current_sha
+    current_sha=$(git -C "$src_dir" rev-parse HEAD 2>/dev/null || echo "unknown")
+    local cached_sha=""
+    [ -f "$sha_file" ] && cached_sha=$(cat "$sha_file")
+
+    if [ "$current_sha" = "$cached_sha" ] \
+       && [ -f "${out_dir}/sqlite3.c" ] \
+       && [ "$FORCE_REBUILD" != "1" ]; then
+        info "SQLCipher amalgamation is up to date (commit ${current_sha:0:8})"
+        return
+    fi
+
+    info "Generating SQLCipher amalgamation (commit ${current_sha:0:8})..."
+    info "  configure --with-crypto-lib=openssl  CPPFLAGS=-I${openssl_prefix}/include"
+
+    local orig_dir="$PWD"
+    cd "$src_dir"
+
+    # Run SQLCipher's autosetup-based configure to generate the Makefile.
+    # Note: --with-crypto-lib is NOT a valid option in the SQLCipher master
+    # branch (it was removed when the build system switched from autoconf to
+    # autosetup).  The crypto backend (OpenSSL vs CommonCrypto) is selected
+    # at compile time via -DSQLCIPHER_CRYPTO_OPENSSL in CMakeLists.txt, not
+    # at configure time.  All backend source files are included in the
+    # amalgamation unconditionally; the preprocessor picks one at build time.
+    ./configure \
+        --with-tempstore=yes \
+        CPPFLAGS="-DSQLITE_HAS_CODEC -I${openssl_prefix}/include" \
+        LDFLAGS="-L${openssl_prefix}/lib" \
+        > /tmp/sqlcipher-configure.log 2>&1 \
+        || { cat /tmp/sqlcipher-configure.log; error "SQLCipher ./configure failed"; }
+
+    info "  make sqlite3.c  (amalgamation generator)"
+    make sqlite3.c -j"${NCPU}" > /dev/null 2>&1 \
+        || error "SQLCipher make sqlite3.c failed"
+
+    cd "$orig_dir"
+
+    # Copy outputs to third_party/sqlcipher/
+    mkdir -p "$out_dir"
+    cp "${src_dir}/sqlite3.c" "${out_dir}/sqlite3.c"
+    cp "${src_dir}/sqlite3.h" "${out_dir}/sqlite3.h"
+    # sqlcipher.h is included by sqlite3.c at compile time via SQLITE_HAS_CODEC
+    [ -f "${src_dir}/sqlcipher.h" ] && cp "${src_dir}/sqlcipher.h" "${out_dir}/sqlcipher.h" || true
+
+    echo "$current_sha" > "$sha_file"
+    info "SQLCipher amalgamation built successfully ($(wc -l < "${out_dir}/sqlite3.c") lines)"
+    info "Output: ${out_dir}/sqlite3.c + sqlite3.h"
+}
+
 build_main_project() {
     step "Building Prodigy"
+
+    # Build (or update) the SQLCipher amalgamation before cmake configure.
+    # This ensures every build picks up the latest SQLCipher security patches.
+    # cmake references third_party/sqlcipher/sqlite3.c directly — no network
+    # access is needed at cmake time.
+    build_sqlcipher_amalgamation
 
     clear_stale_cache build
     info "Configuring Prodigy (CoreML, Release, tests=${BUILD_TESTS})..."
@@ -193,6 +321,7 @@ verify_binaries() {
         "bin/kokoro-service"
         "bin/neutts-service"
         "bin/frontend"
+        "bin/tomedo-crawl"
     )
 
     ALL_OK=true

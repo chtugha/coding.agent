@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cctype>
 #include <iostream>
+#include "db_key.h"
 
 inline bool database_exists(const std::string& db_path) {
     struct stat st;
@@ -140,7 +141,7 @@ inline bool FrontendServer::validate_schema() {
 }
 
 inline bool FrontendServer::init_database() {
-    int rc = sqlite3_open(db_path_.c_str(), &db_);
+    int rc = prodigy_db::db_open_encrypted(db_path_.c_str(), &db_);
     if (rc != SQLITE_OK) {
         std::cerr << "Cannot open database: " << sqlite3_errmsg(db_) << "\n";
         db_ = nullptr;

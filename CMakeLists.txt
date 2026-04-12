@@ -10,11 +10,76 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries by default")
 
+# ──────────────────────────────────────────────────────────────────────────────
+# SQLCipher — transparent AES-256 encryption for all SQLite databases
+#
+# Source: https://github.com/sqlcipher/sqlcipher  (BSD licence, SQLite public domain)
+#
+# HOW THE AMALGAMATION IS PRODUCED
+#   SQLCipher's GitHub repository contains raw C source files, not the final
+#   sqlite3.c amalgamation.  The amalgamation is built by the SQLCipher autoconf
+#   toolchain (./configure && make sqlite3.c) which requires tclsh and the
+#   OpenSSL headers.  This two-step process cannot run inside CMake itself, so
+#   it is handled by runmetobuildeverything before cmake is invoked:
+#
+#     runmetobuildeverything  →  build_sqlcipher_amalgamation()
+#       1. git clone / pull  https://github.com/sqlcipher/sqlcipher  (master)
+#       2. ./configure --with-crypto-lib=openssl  CPPFLAGS=-I<openssl>/include
+#       3. make sqlite3.c          (generates the single-file amalgamation)
+#       4. copy sqlite3.c + sqlite3.h → third_party/sqlcipher/
+#       5. record git SHA in third_party/sqlcipher/.sqlcipher_sha (skip rebuild
+#          if SHA unchanged and --force not passed)
+#
+#   CMakeLists.txt then references third_party/sqlcipher/sqlite3.c directly —
+#   no network access at cmake time.
+#
+# WHY NOT brew install sqlcipher?
+#   We require a STATICALLY linked, self-contained binary with zero Homebrew
+#   runtime dependencies.  Linking against Homebrew's .dylib would break that.
+#   Building from source gives full control over compile flags.
+#
+# HOW THE HEADER CONFLICT IS RESOLVED
+#   SQLCipher's sqlite3.h is API-compatible with standard sqlite3.h but adds
+#   sqlite3_key() / sqlite3_rekey() declarations required by db_key.h.
+#   Both `frontend` and `tomedo-crawl` list ${SQLCIPHER_DIR} as their FIRST
+#   target_include_directories entry, so the compiler finds SQLCipher's
+#   sqlite3.h before the project-root copy.  The bundled sqlite3.c / sqlite3.h
+#   in the project root are intentionally kept (editors/tools depend on them)
+#   but are silently shadowed for these two targets.
+#
+# COMPILE DEFINITIONS (applied to both targets)
+#   SQLITE_HAS_CODEC           — activates SQLCipher codec hooks in sqlite3.c
+#   SQLCIPHER_CRYPTO_OPENSSL   — use OpenSSL EVP for AES-256-CBC
+#   SQLITE_TEMP_STORE=2        — temp tables in RAM (never plaintext on disk)
+#   SQLITE_ENABLE_COLUMN_METADATA — required by SQLCipher internals
+#
+# APPLE SILICON PERFORMANCE
+#   OpenSSL 3.x auto-detects ARMv8.2 AES instructions (AESE/AESMC) on M chips
+#   and uses hardware acceleration.  Overhead vs. plain SQLite: < 3%.
+#
+# KEY MANAGEMENT  (see db_key.h)
+#   get_db_key() retrieves (or generates) a 256-bit key stored in the macOS
+#   Keychain under kSecAttrAccessibleWhenUnlockedThisDeviceOnly.  On Apple
+#   Silicon this item is hardware-rooted in the Secure Enclave — the raw key
+#   material cannot be extracted by any other process or via backup.
+# ──────────────────────────────────────────────────────────────────────────────
+set(SQLCIPHER_DIR ${CMAKE_SOURCE_DIR}/third_party/sqlcipher)
+
+if(NOT EXISTS "${SQLCIPHER_DIR}/sqlite3.c")
+    message(FATAL_ERROR
+        "SQLCipher amalgamation not found at ${SQLCIPHER_DIR}/sqlite3.c\n"
+        "Run  ./runmetobuildeverything  (or  ./runmetobuildeverything --force)\n"
+        "to build the SQLCipher amalgamation from source before invoking cmake.")
+endif()
+message(STATUS "SQLCipher amalgamation: ${SQLCIPHER_DIR}/sqlite3.c")
+
+# FetchContent is used for optional googletest
+include(FetchContent)
+
 # Testing support
 option(BUILD_TESTS "Build unit tests" OFF)
 if(BUILD_TESTS)
     enable_testing()
-    include(FetchContent)
     FetchContent_Declare(
         googletest
         URL https://github.com/google/googletest/archive/refs/tags/v1.17.0.zip
@@ -326,21 +391,15 @@ else()
     message(WARNING "NeuTTS Service: DISABLED (espeak-ng not found)")
 endif()
 
-# 8. Frontend (mongoose + SQLite)
-add_executable(frontend frontend.cpp mongoose.c sqlite3.c)
-target_link_libraries(frontend PRIVATE Threads::Threads)
-target_compile_definitions(frontend PRIVATE MG_ENABLE_PACKED_FS=0)
-if(APPLE)
-    target_link_libraries(frontend PRIVATE "-framework CoreFoundation")
-endif()
-
-# 9. Tomedo Crawl (RAG sidecar)
-# OpenSSL is STATICALLY linked (.a) so the binary has zero runtime dependencies
-# beyond system libraries. Build-time only: requires openssl headers + .a files
-# (e.g. `brew install openssl@3` on macOS).
+# OpenSSL — statically linked for both frontend and tomedo-crawl.
+# Must be found BEFORE defining either target so ${OPENSSL_STATIC_*} vars are
+# populated when target_link_libraries() is called.
+# OpenSSL is STATICALLY linked (.a) so both binaries have zero runtime
+# dependencies beyond system libraries.
+# Build-time only: requires openssl@3 headers + .a files (brew install openssl@3).
 find_package(OpenSSL REQUIRED)
 # Force static archives — find_package prefers .dylib on macOS, but we need .a
-# to produce a standalone binary with no Homebrew runtime dependency.
+# to produce standalone binaries with no Homebrew runtime dependency.
 get_filename_component(_OPENSSL_LIB_DIR "${OPENSSL_SSL_LIBRARY}" DIRECTORY)
 if(EXISTS "${_OPENSSL_LIB_DIR}/libssl.a" AND EXISTS "${_OPENSSL_LIB_DIR}/libcrypto.a")
     set(OPENSSL_STATIC_SSL    "${_OPENSSL_LIB_DIR}/libssl.a")
@@ -348,17 +407,57 @@ if(EXISTS "${_OPENSSL_LIB_DIR}/libssl.a" AND EXISTS "${_OPENSSL_LIB_DIR}/libcryp
 else()
     message(FATAL_ERROR "Static OpenSSL libraries not found in ${_OPENSSL_LIB_DIR}")
 endif()
-add_executable(tomedo-crawl tomedo-crawl.cpp mongoose.c sqlite3.c)
+
+# 8. Frontend (mongoose + SQLCipher)
+# Uses SQLCipher (${SQLCIPHER_DIR}/sqlite3.c) instead of the bundled sqlite3.c
+# so that frontend.db and the shared tomedo-crawl.db are both opened with
+# AES-256 encryption via db_key.h / prodigy_db::db_open_encrypted.
+# ${SQLCIPHER_DIR} is prepended so the compiler finds SQLCipher's sqlite3.h
+# (which declares sqlite3_key/sqlite3_rekey) before the project-root copy.
+add_executable(frontend frontend.cpp mongoose.c ${SQLCIPHER_DIR}/sqlite3.c)
+target_include_directories(frontend PRIVATE
+    ${SQLCIPHER_DIR}                # SQLCipher sqlite3.h (must come first)
+    ${OPENSSL_INCLUDE_DIR})
+target_compile_definitions(frontend PRIVATE
+    MG_ENABLE_PACKED_FS=0
+    SQLITE_HAS_CODEC                                       # Enable SQLCipher codec hooks
+    SQLCIPHER_CRYPTO_OPENSSL                               # Use OpenSSL EVP backend (AES-256-CBC)
+    SQLITE_TEMP_STORE=2                                    # Temp tables in RAM, never on disk
+    SQLITE_ENABLE_COLUMN_METADATA                          # Required by SQLCipher internals
+    SQLITE_EXTRA_INIT=sqlcipher_extra_init                 # Required by SQLCipher master
+    SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown)        # Required by SQLCipher master
+target_link_libraries(frontend PRIVATE
+    Threads::Threads
+    ${OPENSSL_STATIC_SSL}
+    ${OPENSSL_STATIC_CRYPTO})
+if(APPLE)
+    target_link_libraries(frontend PRIVATE
+        "-framework CoreFoundation"
+        "-framework Security")      # macOS Keychain API (db_key.h)
+endif()
+
+# 9. Tomedo Crawl (RAG sidecar)
+add_executable(tomedo-crawl tomedo-crawl.cpp mongoose.c ${SQLCIPHER_DIR}/sqlite3.c)
 target_include_directories(tomedo-crawl PRIVATE
+    ${SQLCIPHER_DIR}                # SQLCipher sqlite3.h (must come first)
     ${CMAKE_SOURCE_DIR}/third_party/hnswlib
     ${OPENSSL_INCLUDE_DIR})
+target_compile_definitions(tomedo-crawl PRIVATE
+    MG_ENABLE_PACKED_FS=0
+    SQLITE_HAS_CODEC                                       # Enable SQLCipher codec hooks
+    SQLCIPHER_CRYPTO_OPENSSL                               # Use OpenSSL EVP backend (AES-256-CBC)
+    SQLITE_TEMP_STORE=2                                    # Temp tables in RAM, never on disk
+    SQLITE_ENABLE_COLUMN_METADATA                          # Required by SQLCipher internals
+    SQLITE_EXTRA_INIT=sqlcipher_extra_init                 # Required by SQLCipher master
+    SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown)        # Required by SQLCipher master
 target_link_libraries(tomedo-crawl PRIVATE
     Threads::Threads
     ${OPENSSL_STATIC_SSL}
     ${OPENSSL_STATIC_CRYPTO})
-target_compile_definitions(tomedo-crawl PRIVATE MG_ENABLE_PACKED_FS=0)
 if(APPLE)
-    target_link_libraries(tomedo-crawl PRIVATE "-framework CoreFoundation")
+    target_link_libraries(tomedo-crawl PRIVATE
+        "-framework CoreFoundation"
+        "-framework Security")      # macOS Keychain API (db_key.h)
 endif()
 
 # Install

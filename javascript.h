@@ -520,7 +520,7 @@ if(cr)cr.value=rMin>0?rMin:60;
 const modeRadio=document.querySelector('input[name="ragCrawlMode"][value="'+(rMin>0?'interval':'daily')+'"]');
 if(modeRadio){modeRadio.checked=true;toggleCrawlMode();}
 if(cs)cs.textContent=d.cert_uploaded?'Certificate uploaded':'No certificate';
-_ragSavedModel=d.ollama_model||'nomic-embed-text';
+_ragSavedModel=d.ollama_model||'embeddinggemma:300m';
 loadOllamaModels(_ragSavedModel);
 checkOllamaStatus();
   }).catch(()=>{});

@@ -85,6 +85,7 @@
 #include "interconnect.h"
 #include "mongoose.h"
 #include "sqlite3.h"
+#include "db_key.h"
 #include "css.h"
 #include "fonts.h"
 #include "vendors.h"
@@ -5674,7 +5675,7 @@ private:
 
     bool rag_db_set_config(const std::string& key, const std::string& value) {
         sqlite3* rag_db = nullptr;
-        if (sqlite3_open(rag_db_path_.c_str(), &rag_db) != SQLITE_OK) {
+        if (prodigy_db::db_open_encrypted(rag_db_path_.c_str(), &rag_db) != SQLITE_OK) {
             std::cerr << "WARNING: cannot open RAG config DB " << rag_db_path_ << "\n";
             if (rag_db) sqlite3_close(rag_db);
             return false;
@@ -5704,7 +5705,7 @@ private:
 
     void rag_db_sync_all_config() {
         sqlite3* rag_db = nullptr;
-        if (sqlite3_open(rag_db_path_.c_str(), &rag_db) != SQLITE_OK) {
+        if (prodigy_db::db_open_encrypted(rag_db_path_.c_str(), &rag_db) != SQLITE_OK) {
             std::cerr << "WARNING: cannot open RAG config DB " << rag_db_path_ << "\n";
             if (rag_db) sqlite3_close(rag_db);
             return;
@@ -5724,7 +5725,7 @@ private:
             {"tomedo_port",       get_setting("rag_tomedo_port", "8443")},
             {"tomedo_cert_pem",   cp},
             {"ollama_url",        get_setting("rag_ollama_url", "http://127.0.0.1:11434")},
-            {"ollama_model",      get_setting("rag_ollama_model", "nomic-embed-text")},
+            {"ollama_model",      get_setting("rag_ollama_model", "embeddinggemma:300m")},
             {"crawl_interval_sec",get_setting("rag_crawl_interval_sec", "3600")},
         };
         sqlite3_exec(rag_db, "BEGIN", nullptr, nullptr, nullptr);
@@ -5794,7 +5795,7 @@ private:
             std::string tomedo_host = get_setting("rag_tomedo_host", "192.168.10.9");
             std::string tomedo_port = get_setting("rag_tomedo_port", "8443");
             std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
-            std::string ollama_model = get_setting("rag_ollama_model", "nomic-embed-text");
+            std::string ollama_model = get_setting("rag_ollama_model", "embeddinggemma:300m");
             std::string crawl_interval = get_setting("rag_crawl_interval_sec", "3600");
             std::string crawl_time = get_setting("rag_crawl_time", "02:00");
             std::string crawl_repeat_min = get_setting("rag_crawl_repeat_minutes", "0");
@@ -6136,7 +6137,7 @@ private:
                 models.push_back(resp.substr(q1 + 1, q2 - q1 - 1));
                 pos = q2 + 1;
             }
-            std::string active_model = get_setting("rag_ollama_model", "nomic-embed-text");
+            std::string active_model = get_setting("rag_ollama_model", "embeddinggemma:300m");
             std::stringstream json;
             json << "{\"models\":[";
             for (size_t i = 0; i < models.size(); i++) {
