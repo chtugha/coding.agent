@@ -441,38 +441,15 @@ static pid_t spawn_ollama_serve_detached() {
 }
 
 static int run_install_script() {
-    int pipefd[2];
-    if (pipe(pipefd) < 0) return -1;
-    pid_t curl_pid = fork();
-    if (curl_pid < 0) { close(pipefd[0]); close(pipefd[1]); return -1; }
-    if (curl_pid == 0) {
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[1]);
-        int devnull = open("/dev/null", O_RDWR);
-        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
-        execlp("curl", "curl", "-fsSL", "https://ollama.com/install.sh", nullptr);
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execlp("sh", "sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh", nullptr);
         _exit(127);
     }
-    close(pipefd[1]);
-    pid_t sh_pid = fork();
-    if (sh_pid < 0) { close(pipefd[0]); kill(curl_pid, SIGTERM); waitpid(curl_pid, nullptr, 0); return -1; }
-    if (sh_pid == 0) {
-        dup2(pipefd[0], STDIN_FILENO);
-        close(pipefd[0]);
-        int devnull = open("/dev/null", O_RDWR);
-        if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
-        execlp("sh", "sh", nullptr);
-        _exit(127);
-    }
-    close(pipefd[0]);
-    int curl_status = 0, sh_status = 0;
-    waitpid(curl_pid, &curl_status, 0);
-    waitpid(sh_pid, &sh_status, 0);
-    if (WIFEXITED(curl_status) && WEXITSTATUS(curl_status) == 0 &&
-        WIFEXITED(sh_status) && WEXITSTATUS(sh_status) == 0)
-        return 0;
-    return -1;
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
 
 static void kill_ollama_tracked() {
