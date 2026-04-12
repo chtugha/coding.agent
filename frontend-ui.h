@@ -177,9 +177,9 @@ Save incoming audio as WAV</label>
 <div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Tomedo Server</div>
 <div style="display:grid;grid-template-columns:1fr 100px;gap:6px;margin-bottom:8px">
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">IP / Hostname</label>
-<input class="wt-input" id="ragTomeдоHost" placeholder="192.168.10.9" style="font-size:12px"></div>
+<input class="wt-input" id="ragTomedoHost" placeholder="192.168.10.9" style="font-size:12px"></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Port</label>
-<input class="wt-input" id="ragTomeдоPort" placeholder="8443" style="font-size:12px"></div>
+<input class="wt-input" id="ragTomedoPort" placeholder="8443" style="font-size:12px"></div>
 </div>
 <div class="wt-field" style="margin-bottom:8px"><label style="font-size:12px">Client Certificate (PEM)</label>
 <div style="display:flex;gap:6px;align-items:center">

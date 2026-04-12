@@ -769,7 +769,9 @@ private:
                         << "crawl_interval_sec = " << ci << "\n";
                     ini.close();
                 }
-                use_args = ini_path;
+                std::string ini_args = ini_path;
+                if (!use_args.empty()) ini_args += " " + use_args;
+                use_args = ini_args;
             }
 
             auto argv_strings = split_args(use_args);
@@ -5677,7 +5679,7 @@ private:
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(13181);
+        addr.sin_port = htons(whispertalk::service_data_port(whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE));
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
             ::close(sock);
@@ -5813,7 +5815,7 @@ private:
             mg_http_reply(c, 503, "Content-Type: application/json\r\n",
                 "{\"error\":\"RAG service not reachable\"}");
         } else {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"triggered\"}");
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", body.c_str());
         }
     }
 

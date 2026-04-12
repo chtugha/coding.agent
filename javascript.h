@@ -496,8 +496,8 @@ body:JSON.stringify({enabled:cb.checked?'true':'false',dir:dirEl.value})
 
 function loadRagConfig(){
   fetch('/api/rag/config').then(r=>r.json()).then(d=>{
-const h=document.getElementById('ragTomeдоHost');
-const p=document.getElementById('ragTomeдоPort');
+const h=document.getElementById('ragTomedoHost');
+const p=document.getElementById('ragTomedoPort');
 const ou=document.getElementById('ragOllamaUrl');
 const om=document.getElementById('ragOllamaModel');
 const ci=document.getElementById('ragCrawlInterval');
@@ -514,8 +514,8 @@ function saveRagConfig(){
   const st=document.getElementById('ragConfigStatus');
   st.textContent='Saving...';st.style.color='var(--wt-text-secondary)';
   fetch('/api/rag/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-tomedo_host:document.getElementById('ragTomeдоHost').value.trim(),
-tomedo_port:document.getElementById('ragTomeдоPort').value.trim(),
+tomedo_host:document.getElementById('ragTomedoHost').value.trim(),
+tomedo_port:document.getElementById('ragTomedoPort').value.trim(),
 ollama_url:document.getElementById('ragOllamaUrl').value.trim(),
 ollama_model:document.getElementById('ragOllamaModel').value.trim(),
 crawl_interval_sec:document.getElementById('ragCrawlInterval').value.trim()
@@ -579,14 +579,9 @@ if(txt)txt.textContent='Unreachable';
 
 function fetchRagHealthDash(){
   fetch('/api/rag/health').then(r=>r.json()).then(d=>{
-const node=document.getElementById('pipeline-status-TOMEDO_CRAWL_SERVICE');
 const di=document.getElementById('ragDashInfo');
-if(node)node.className=`node-status ${d.status==='ok'?'online':'offline'}`;
 if(di)di.textContent=d.status==='ok'?d.indexed_docs+' docs':'';
-  }).catch(()=>{
-const node=document.getElementById('pipeline-status-TOMEDO_CRAWL_SERVICE');
-if(node)node.className='node-status offline';
-  });
+  }).catch(()=>{});
 }
 
 function sipConnectPbx(){
