@@ -2065,6 +2065,7 @@ struct PatientContext {
     std::string nachname;
     std::string vorname;
     PatientPhones phones;
+    bool http_error = false;
 };
 
 static PatientContext fetch_patient_context_full(int patient_id, const TomedoConfig& cfg) {
@@ -2075,7 +2076,7 @@ static PatientContext fetch_patient_context_full(int patient_id, const TomedoCon
 
     auto detail_resp = https_get(cfg.tomedo_host, cfg.tomedo_port,
         base + "/patient/" + pid, cfg.tomedo_cert_pem, TOMEDO_API_TIMEOUT_MS);
-    if (detail_resp.status != 200) return ctx;
+    if (detail_resp.status != 200) { ctx.http_error = true; return ctx; }
 
     ctx.nachname = json_get_string(detail_resp.body, "nachname");
     ctx.vorname = json_get_string(detail_resp.body, "vorname");
@@ -2145,7 +2146,7 @@ static void index_patient_phones(sqlite3* db, int patient_id,
 
 struct CrawlStats {
     int  chunks      = 0;
-    int  skipped     = 0;  // patients skipped due to HTTP errors (not since_ts filtering)
+    int  skipped     = 0;  // patients skipped due to HTTP errors (detail GET non-200)
     bool interrupted = false;
 };
 
@@ -2173,7 +2174,7 @@ static CrawlStats run_full_crawl(const std::vector<PatientRef>& patients,
         int pid = patients[i].ident;
         auto pctx = fetch_patient_context_full(pid, cfg);
 
-        if (pctx.text.empty()) {
+        if (pctx.http_error) {
             ++stats.skipped;
         }
 

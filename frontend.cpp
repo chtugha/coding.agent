@@ -149,6 +149,10 @@ static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;    // poll interval for do
 using namespace whispertalk;
 
 static std::atomic<bool> s_sigint_received(false);
+static SSL_CTX* s_rag_ssl_ctx = nullptr;
+static void cleanup_rag_ssl_ctx() {
+    if (s_rag_ssl_ctx) { SSL_CTX_free(s_rag_ssl_ctx); s_rag_ssl_ctx = nullptr; }
+}
 static void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
         s_sigint_received = true;
@@ -336,6 +340,7 @@ public:
     }
 
     ~FrontendServer() {
+        cleanup_rag_ssl_ctx();
         if (db_) {
             sqlite3_close(db_);
         }
@@ -5776,23 +5781,22 @@ private:
 
         // Wrap in TLS — tomedo-crawl serves HTTPS with the shared prodigy self-signed cert.
         // Use SSL_VERIFY_PEER with the prodigy CA so we authenticate the loopback service.
-        static SSL_CTX* s_rag_ctx = nullptr;
         static std::once_flag s_rag_ctx_once;
         std::call_once(s_rag_ctx_once, []() {
             prodigy_tls::ensure_certs();
-            s_rag_ctx = SSL_CTX_new(TLS_client_method());
-            if (s_rag_ctx) {
+            s_rag_ssl_ctx = SSL_CTX_new(TLS_client_method());
+            if (s_rag_ssl_ctx) {
                 std::string ca = prodigy_tls::cert_file_path();
-                if (SSL_CTX_load_verify_locations(s_rag_ctx, ca.c_str(), nullptr) == 1) {
-                    SSL_CTX_set_verify(s_rag_ctx, SSL_VERIFY_PEER, nullptr);
+                if (SSL_CTX_load_verify_locations(s_rag_ssl_ctx, ca.c_str(), nullptr) == 1) {
+                    SSL_CTX_set_verify(s_rag_ssl_ctx, SSL_VERIFY_PEER, nullptr);
                 } else {
-                    SSL_CTX_set_verify(s_rag_ctx, SSL_VERIFY_NONE, nullptr);
+                    SSL_CTX_set_verify(s_rag_ssl_ctx, SSL_VERIFY_NONE, nullptr);
                 }
             }
         });
-        if (!s_rag_ctx) { ::close(sock); return ""; }
+        if (!s_rag_ssl_ctx) { ::close(sock); return ""; }
 
-        SSL* ssl = SSL_new(s_rag_ctx);
+        SSL* ssl = SSL_new(s_rag_ssl_ctx);
         if (!ssl) { ::close(sock); return ""; }
         SSL_set_fd(ssl, sock);
         SSL_set_tlsext_host_name(ssl, "127.0.0.1");
@@ -5813,7 +5817,10 @@ private:
         req += "Connection: close\r\n\r\n";
         if (!body.empty()) req += body;
 
-        SSL_write(ssl, req.c_str(), static_cast<int>(req.size()));
+        if (SSL_write(ssl, req.c_str(), static_cast<int>(req.size())) <= 0) {
+            SSL_shutdown(ssl); SSL_free(ssl); ::close(sock);
+            return "";
+        }
 
         std::string response;
         char buf[4096];
