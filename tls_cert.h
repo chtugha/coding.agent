@@ -39,6 +39,10 @@ static inline std::string tls_dir() {
     return get_exe_dir() + "/tls";
 }
 
+static inline std::string cert_file_path() {
+    return tls_dir() + "/server.crt";
+}
+
 static inline bool file_exists(const std::string& path) {
     struct stat st;
     return stat(path.c_str(), &st) == 0;
@@ -207,28 +211,7 @@ static inline bool ic_keychain_store(const std::string& key) {
     CFRelease(addQ); CFRelease(cfSvc); CFRelease(cfAcc); CFRelease(cfData);
 
     if (st == errSecSuccess) return true;
-    if (st == errSecDuplicateItem) {
-        CFStringRef cfSvc2  = CFStringCreateWithCString(nullptr, IC_KEYCHAIN_SERVICE, kCFStringEncodingUTF8);
-        CFStringRef cfAcc2  = CFStringCreateWithCString(nullptr, IC_KEYCHAIN_ACCOUNT, kCFStringEncodingUTF8);
-        CFDataRef   cfData2 = CFDataCreate(nullptr,
-                                 reinterpret_cast<const UInt8*>(key.data()),
-                                 static_cast<CFIndex>(key.size()));
-
-        CFMutableDictionaryRef findQ = CFDictionaryCreateMutable(
-            nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(findQ, kSecClass,       kSecClassGenericPassword);
-        CFDictionarySetValue(findQ, kSecAttrService, cfSvc2);
-        CFDictionarySetValue(findQ, kSecAttrAccount, cfAcc2);
-
-        CFMutableDictionaryRef updQ = CFDictionaryCreateMutable(
-            nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(updQ, kSecValueData, cfData2);
-
-        st = SecItemUpdate(findQ, updQ);
-        CFRelease(findQ); CFRelease(updQ);
-        CFRelease(cfSvc2); CFRelease(cfAcc2); CFRelease(cfData2);
-        return st == errSecSuccess;
-    }
+    if (st == errSecDuplicateItem) return false;
     return false;
 }
 #endif
@@ -249,7 +232,13 @@ static inline const std::string& get_interconnect_key() {
             std::fprintf(stderr, "[ic_key] Generated new interconnect AES-256 key "
                          "and stored in macOS Keychain\n");
         } else {
-            std::fprintf(stderr, "[ic_key] Warning: interconnect key Keychain storage failed\n");
+            std::string winner = ic_keychain_load();
+            if (!winner.empty() && winner.size() == 32) {
+                g_ic_key = winner;
+                std::fprintf(stderr, "[ic_key] Race detected — loaded winner's key from Keychain\n");
+            } else {
+                std::fprintf(stderr, "[ic_key] Warning: interconnect key Keychain storage failed\n");
+            }
         }
 #else
         g_ic_key.resize(32, '\0');

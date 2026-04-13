@@ -913,6 +913,7 @@ public:
     }
 
     ~VectorStore() {
+        std::lock_guard<std::mutex> lk(mutex_);
         hnsw_.reset();
         space_.reset();
         if (db_) sqlite3_close(db_);

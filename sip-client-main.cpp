@@ -159,21 +159,41 @@ static int tomedo_connect_nonblock() {
     return sock;
 }
 
+static SSL_CTX* g_tomedo_ssl_ctx = nullptr;
+static std::once_flag g_tomedo_ssl_once;
+
+static SSL_CTX* get_tomedo_ssl_ctx() {
+    std::call_once(g_tomedo_ssl_once, []() {
+        prodigy_tls::ensure_certs();
+        g_tomedo_ssl_ctx = SSL_CTX_new(TLS_client_method());
+        if (g_tomedo_ssl_ctx) {
+            SSL_CTX_set_verify(g_tomedo_ssl_ctx, SSL_VERIFY_PEER, nullptr);
+            std::string ca = prodigy_tls::cert_file_path();
+            if (SSL_CTX_load_verify_locations(g_tomedo_ssl_ctx, ca.c_str(), nullptr) != 1) {
+                SSL_CTX_set_verify(g_tomedo_ssl_ctx, SSL_VERIFY_NONE, nullptr);
+            }
+        }
+    });
+    return g_tomedo_ssl_ctx;
+}
+
 static void tomedo_tls_send(const std::string& request) {
     int sock = tomedo_connect_nonblock();
     if (sock < 0) return;
-    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    SSL_CTX* ctx = get_tomedo_ssl_ctx();
     if (!ctx) { close(sock); return; }
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
     SSL* ssl = SSL_new(ctx);
-    if (!ssl) { SSL_CTX_free(ctx); close(sock); return; }
+    if (!ssl) { close(sock); return; }
     SSL_set_fd(ssl, sock);
     if (SSL_connect(ssl) != 1) {
-        SSL_free(ssl); SSL_CTX_free(ctx); close(sock);
+        SSL_free(ssl); close(sock);
         return;
     }
-    SSL_write(ssl, request.c_str(), static_cast<int>(request.size()));
-    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); close(sock);
+    int written = SSL_write(ssl, request.c_str(), static_cast<int>(request.size()));
+    if (written <= 0) {
+        std::fprintf(stderr, "[sip-client] TLS write to tomedo-crawl failed\n");
+    }
+    SSL_shutdown(ssl); SSL_free(ssl); close(sock);
 }
 
 static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {

@@ -133,6 +133,15 @@ public:
           rag_host_(rag_host),
           rag_port_(rag_port),
           interconnect_(whispertalk::ServiceType::LLAMA_SERVICE) {
+        prodigy_tls::ensure_certs();
+        rag_ssl_ctx_ = SSL_CTX_new(TLS_client_method());
+        if (rag_ssl_ctx_) {
+            SSL_CTX_set_verify(rag_ssl_ctx_, SSL_VERIFY_PEER, nullptr);
+            std::string ca = prodigy_tls::cert_file_path();
+            if (SSL_CTX_load_verify_locations(rag_ssl_ctx_, ca.c_str(), nullptr) != 1) {
+                SSL_CTX_set_verify(rag_ssl_ctx_, SSL_VERIFY_NONE, nullptr);
+            }
+        }
         llama_backend_init();
         llama_model_params mparams = llama_model_default_params();
         mparams.n_gpu_layers = -1;
@@ -162,6 +171,7 @@ public:
     }
 
     ~LlamaService() {
+        if (rag_ssl_ctx_) SSL_CTX_free(rag_ssl_ctx_);
         if (sampler_) llama_sampler_free(sampler_);
         if (ctx_) llama_free(ctx_);
         if (model_) llama_model_free(model_);
@@ -557,22 +567,20 @@ private:
         }
         fcntl(sock, F_SETFL, flags);
 
-        SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
-        if (!ssl_ctx) { close(sock); return ""; }
-        SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, nullptr);
-        SSL* ssl = SSL_new(ssl_ctx);
-        if (!ssl) { SSL_CTX_free(ssl_ctx); close(sock); return ""; }
+        if (!rag_ssl_ctx_) { close(sock); return ""; }
+        SSL* ssl = SSL_new(rag_ssl_ctx_);
+        if (!ssl) { close(sock); return ""; }
         SSL_set_fd(ssl, sock);
         SSL_set_tlsext_host_name(ssl, rag_host_.c_str());
         if (SSL_connect(ssl) != 1) {
-            SSL_free(ssl); SSL_CTX_free(ssl_ctx); close(sock);
+            SSL_free(ssl); close(sock);
             return "";
         }
 
         std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + rag_host_ + ":" +
                           std::to_string(rag_port_) + "\r\nConnection: close\r\n\r\n";
         if (SSL_write(ssl, req.c_str(), static_cast<int>(req.size())) <= 0) {
-            SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ssl_ctx); close(sock);
+            SSL_shutdown(ssl); SSL_free(ssl); close(sock);
             return "";
         }
         std::string response;
@@ -588,7 +596,7 @@ private:
             if (n <= 0) break;
             response.append(buf, n);
         }
-        SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ssl_ctx); close(sock);
+        SSL_shutdown(ssl); SSL_free(ssl); close(sock);
 
         size_t status_end = response.find("\r\n");
         if (status_end == std::string::npos) return "";
@@ -1193,6 +1201,7 @@ private:
     struct sockaddr_storage rag_addr_{};
     socklen_t rag_addrlen_{0};
     bool rag_addr_resolved_{false};
+    SSL_CTX* rag_ssl_ctx_{nullptr};
     std::atomic<int> rag_fail_count_{0};
     static constexpr int RAG_FAIL_THRESHOLD = 3;
     static constexpr int RAG_COOLDOWN_SEC = 30;
