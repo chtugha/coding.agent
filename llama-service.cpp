@@ -139,6 +139,8 @@ public:
             SSL_CTX_set_verify(rag_ssl_ctx_, SSL_VERIFY_PEER, nullptr);
             std::string ca = prodigy_tls::cert_file_path();
             if (SSL_CTX_load_verify_locations(rag_ssl_ctx_, ca.c_str(), nullptr) != 1) {
+                std::fprintf(stderr, "[llama-service] WARNING: cannot load tomedo-crawl CA cert '%s'"
+                    " — TLS verification disabled\n", ca.c_str());
                 SSL_CTX_set_verify(rag_ssl_ctx_, SSL_VERIFY_NONE, nullptr);
             }
         }

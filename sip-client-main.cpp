@@ -170,6 +170,8 @@ static SSL_CTX* get_tomedo_ssl_ctx() {
             SSL_CTX_set_verify(g_tomedo_ssl_ctx, SSL_VERIFY_PEER, nullptr);
             std::string ca = prodigy_tls::cert_file_path();
             if (SSL_CTX_load_verify_locations(g_tomedo_ssl_ctx, ca.c_str(), nullptr) != 1) {
+                std::fprintf(stderr, "[sip-client] WARNING: cannot load tomedo-crawl CA cert '%s'"
+                    " — TLS verification disabled\n", ca.c_str());
                 SSL_CTX_set_verify(g_tomedo_ssl_ctx, SSL_VERIFY_NONE, nullptr);
             }
         }
