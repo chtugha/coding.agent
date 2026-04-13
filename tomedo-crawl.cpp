@@ -190,6 +190,7 @@
 #include "mongoose.h"
 #include "sqlite3.h"
 #include "db_key.h"
+#include "tls_cert.h"
 #include "interconnect.h"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -2381,6 +2382,16 @@ QueryWorkerPool g_query_pool;
 // ============================================================
 
 void http_handler(struct mg_connection *c, int ev, void *ev_data) {
+    if (ev == MG_EV_ACCEPT) {
+        const auto& certs = prodigy_tls::ensure_certs();
+        if (!certs.cert_pem.empty() && !certs.key_pem.empty()) {
+            struct mg_tls_opts opts{};
+            opts.cert = mg_str(certs.cert_pem.c_str());
+            opts.key  = mg_str(certs.key_pem.c_str());
+            mg_tls_init(c, &opts);
+        }
+        return;
+    }
     if (ev == MG_EV_WAKEUP) {
         PendingResponse pr;
         bool found = false;
@@ -2608,7 +2619,7 @@ struct HttpServer {
     HttpContext   ctx;
 
     bool start(const TomedoConfig& cfg) {
-        listen_addr = "http://" + cfg.api_host + ":" + std::to_string(cfg.api_port);
+        listen_addr = "https://" + cfg.api_host + ":" + std::to_string(cfg.api_port);
         mg_mgr_init(&mgr);
         if (!mg_wakeup_init(&mgr)) {
             LOG_ERROR("mg_wakeup_init failed — cannot serve /query asynchronously");

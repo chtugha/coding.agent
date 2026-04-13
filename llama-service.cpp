@@ -62,6 +62,8 @@
 #include <climits>
 #include "interconnect.h"
 #include "llama.h"
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 static constexpr int MAX_RESPONSE_TOKENS = 96;
 static constexpr int RAG_TIMEOUT_MS = 150;
@@ -554,14 +556,23 @@ private:
             return "";
         }
         fcntl(sock, F_SETFL, flags);
-        struct timeval stv{};
-        stv.tv_usec = RAG_TIMEOUT_MS * 1000;
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
+
+        SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
+        if (!ssl_ctx) { close(sock); return ""; }
+        SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, nullptr);
+        SSL* ssl = SSL_new(ssl_ctx);
+        if (!ssl) { SSL_CTX_free(ssl_ctx); close(sock); return ""; }
+        SSL_set_fd(ssl, sock);
+        SSL_set_tlsext_host_name(ssl, rag_host_.c_str());
+        if (SSL_connect(ssl) != 1) {
+            SSL_free(ssl); SSL_CTX_free(ssl_ctx); close(sock);
+            return "";
+        }
+
         std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + rag_host_ + ":" +
                           std::to_string(rag_port_) + "\r\nConnection: close\r\n\r\n";
-        ssize_t sent = send(sock, req.c_str(), req.size(), 0);
-        if (sent <= 0) {
-            close(sock);
+        if (SSL_write(ssl, req.c_str(), static_cast<int>(req.size())) <= 0) {
+            SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ssl_ctx); close(sock);
             return "";
         }
         std::string response;
@@ -573,11 +584,12 @@ private:
             if (remaining <= 0) break;
             struct pollfd rpfd{sock, POLLIN, 0};
             if (poll(&rpfd, 1, (int)remaining) <= 0 || !(rpfd.revents & POLLIN)) break;
-            ssize_t n = recv(sock, buf, sizeof(buf), 0);
+            int n = SSL_read(ssl, buf, sizeof(buf));
             if (n <= 0) break;
             response.append(buf, n);
         }
-        close(sock);
+        SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ssl_ctx); close(sock);
+
         size_t status_end = response.find("\r\n");
         if (status_end == std::string::npos) return "";
         std::string status_line = response.substr(0, status_end);

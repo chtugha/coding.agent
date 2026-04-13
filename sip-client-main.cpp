@@ -58,6 +58,8 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include "interconnect.h"
 
 static std::string detect_local_ip(const std::string& target_ip) {
@@ -157,9 +159,24 @@ static int tomedo_connect_nonblock() {
     return sock;
 }
 
-static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {
+static void tomedo_tls_send(const std::string& request) {
     int sock = tomedo_connect_nonblock();
     if (sock < 0) return;
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) { close(sock); return; }
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+    SSL* ssl = SSL_new(ctx);
+    if (!ssl) { SSL_CTX_free(ctx); close(sock); return; }
+    SSL_set_fd(ssl, sock);
+    if (SSL_connect(ssl) != 1) {
+        SSL_free(ssl); SSL_CTX_free(ctx); close(sock);
+        return;
+    }
+    SSL_write(ssl, request.c_str(), static_cast<int>(request.size()));
+    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); close(sock);
+}
+
+static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {
     std::string escaped;
     for (char c : phone) {
         if (c == '"' || c == '\\') escaped += '\\';
@@ -175,22 +192,16 @@ static void notify_tomedo_crawl(uint32_t call_id, const std::string& phone) {
         << "Content-Length: " << b.size() << "\r\n"
         << "Connection: close\r\n\r\n"
         << b;
-    std::string r = req.str();
-    send(sock, r.c_str(), r.size(), 0);
-    close(sock);
+    tomedo_tls_send(req.str());
 }
 
 static void delete_tomedo_caller(uint32_t call_id) {
-    int sock = tomedo_connect_nonblock();
-    if (sock < 0) return;
     std::ostringstream req;
     req << "DELETE /caller/" << call_id << " HTTP/1.1\r\n"
         << "Host: 127.0.0.1:" << TOMEDO_CRAWL_PORT << "\r\n"
         << "Content-Length: 0\r\n"
         << "Connection: close\r\n\r\n";
-    std::string r = req.str();
-    send(sock, r.c_str(), r.size(), 0);
-    close(sock);
+    tomedo_tls_send(req.str());
 }
 
 struct CallSession {

@@ -86,6 +86,7 @@
 #include "mongoose.h"
 #include "sqlite3.h"
 #include "db_key.h"
+#include "tls_cert.h"
 #include "css.h"
 #include "fonts.h"
 #include "vendors.h"
@@ -376,14 +377,13 @@ public:
 
         mg_mgr_init(&mgr_);
         
-        // Security: binds to loopback only — intentionally not exposed to the network.
-        // All security assumptions (no auth, no TLS) rely on local-only access.
-        std::string listen_addr = "http://127.0.0.1:" + std::to_string(http_port_);
+        // Security: binds to loopback only. TLS enabled via self-signed cert (tls_cert.h).
+        std::string listen_addr = "https://127.0.0.1:" + std::to_string(http_port_);
         struct mg_connection *c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
         if (c) c->fn_data = this;
         
         std::cout << "Frontend web server started on " << listen_addr << "\n";
-        std::cout << "Open http://localhost:" << http_port_ << " in your browser\n";
+        std::cout << "Open https://localhost:" << http_port_ << " in your browser\n";
 
         auto last_flush = std::chrono::steady_clock::now();
         auto last_rotation = last_flush;
@@ -957,6 +957,16 @@ private:
     }
 
     void http_handler(struct mg_connection *c, int ev, void *ev_data) {
+        if (ev == MG_EV_ACCEPT) {
+            const auto& certs = prodigy_tls::ensure_certs();
+            if (!certs.cert_pem.empty() && !certs.key_pem.empty()) {
+                struct mg_tls_opts opts{};
+                opts.cert = mg_str(certs.cert_pem.c_str());
+                opts.key  = mg_str(certs.key_pem.c_str());
+                mg_tls_init(c, &opts);
+            }
+            return;
+        }
         if (ev == MG_EV_CLOSE) {
             if (c->data[0] == 'S') {
                 remove_sse_connection(c);

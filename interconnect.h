@@ -69,6 +69,8 @@
 #include <cstdio>
 #include <cstdarg>
 
+#include "tls_cert.h"
+
 namespace whispertalk {
 
 static constexpr uint16_t FRONTEND_LOG_PORT = 22022;
@@ -599,20 +601,10 @@ public:
         }
         if (sock < 0) return false;
 
-        size_t total = pkt.serialized_size();
-        if (total <= SEND_BUF_SIZE) {
-            thread_local uint8_t buf[SEND_BUF_SIZE];
-            pkt.serialize_into(buf);
-            if (!send_all_with_timeout(sock, buf, total, DATA_SEND_TIMEOUT_MS)) {
-                mark_downstream_failed();
-                return false;
-            }
-        } else {
-            auto data = pkt.serialize();
-            if (!send_all_with_timeout(sock, data.data(), data.size(), DATA_SEND_TIMEOUT_MS)) {
-                mark_downstream_failed();
-                return false;
-            }
+        auto data = pkt.serialize();
+        if (!send_encrypted(sock, data.data(), data.size(), DATA_SEND_TIMEOUT_MS)) {
+            mark_downstream_failed();
+            return false;
         }
         return true;
     }
@@ -627,20 +619,10 @@ public:
         }
         if (sock < 0) return false;
 
-        size_t total = pkt.serialized_size();
-        if (total <= SEND_BUF_SIZE) {
-            thread_local uint8_t buf[SEND_BUF_SIZE];
-            pkt.serialize_into(buf);
-            if (!send_all_with_timeout(sock, buf, total, DATA_SEND_TIMEOUT_MS)) {
-                mark_upstream_failed();
-                return false;
-            }
-        } else {
-            auto data = pkt.serialize();
-            if (!send_all_with_timeout(sock, data.data(), data.size(), DATA_SEND_TIMEOUT_MS)) {
-                mark_upstream_failed();
-                return false;
-            }
+        auto data = pkt.serialize();
+        if (!send_encrypted(sock, data.data(), data.size(), DATA_SEND_TIMEOUT_MS)) {
+            mark_upstream_failed();
+            return false;
         }
         return true;
     }
@@ -787,19 +769,18 @@ public:
         memcpy(buf.data() + 3, msg.data(), len);
 
         std::lock_guard<std::mutex> lock(send_downstream_mgmt_mutex_);
-        if (!send_all_with_timeout(sock, buf.data(), buf.size(), timeout_ms)) return "";
+        if (!send_encrypted(sock, buf.data(), buf.size(), timeout_ms)) return "";
 
-        uint8_t resp_hdr[3];
-        if (!recv_exact(sock, resp_hdr, 3, timeout_ms)) return "";
-        if (resp_hdr[0] != static_cast<uint8_t>(MgmtMsgType::CUSTOM)) return "";
+        std::vector<uint8_t> resp_plain;
+        if (!recv_encrypted(sock, resp_plain, timeout_ms)) return "";
+        if (resp_plain.size() < 3) return "";
+        if (resp_plain[0] != static_cast<uint8_t>(MgmtMsgType::CUSTOM)) return "";
         uint16_t resp_len;
-        memcpy(&resp_len, resp_hdr + 1, 2);
+        memcpy(&resp_len, resp_plain.data() + 1, 2);
         resp_len = ntohs(resp_len);
-        if (resp_len == 0) return "";
+        if (resp_len == 0 || resp_plain.size() < (size_t)(3 + resp_len)) return "";
 
-        std::string resp(resp_len, '\0');
-        if (!recv_exact(sock, resp.data(), resp_len, timeout_ms)) return "";
-        return resp;
+        return std::string(reinterpret_cast<char*>(resp_plain.data() + 3), resp_len);
     }
 
 private:
@@ -1006,29 +987,31 @@ private:
                 continue;
             }
 
-            uint8_t type_byte;
-            if (!recv_exact(sock, &type_byte, 1, MGMT_RECV_TIMEOUT_MS)) {
-                // Connection closed or errored — recv_exact returns false on EOF (n==0)
-                // and on read errors. Mark upstream failed so reconnect logic kicks in.
+            std::vector<uint8_t> mgmt_plain;
+            if (!recv_encrypted(sock, mgmt_plain, MGMT_RECV_TIMEOUT_MS)) {
                 mark_upstream_failed();
                 continue;
             }
+            if (mgmt_plain.empty()) { mark_upstream_failed(); continue; }
 
+            uint8_t type_byte = mgmt_plain[0];
             MgmtMsgType msg_type = static_cast<MgmtMsgType>(type_byte);
 
             bool mark_failed = false;
             switch (msg_type) {
                 case MgmtMsgType::CALL_END: {
+                    if (mgmt_plain.size() < 5) { mark_failed = true; break; }
                     uint32_t net_cid;
-                    if (!recv_exact(sock, &net_cid, 4, MGMT_RECV_TIMEOUT_MS)) { mark_failed = true; break; }
+                    memcpy(&net_cid, mgmt_plain.data() + 1, 4);
                     uint32_t cid = ntohl(net_cid);
                     handle_remote_call_end(cid);
                     break;
                 }
                 case MgmtMsgType::SPEECH_ACTIVE:
                 case MgmtMsgType::SPEECH_IDLE: {
+                    if (mgmt_plain.size() < 5) { mark_failed = true; break; }
                     uint32_t net_cid;
-                    if (!recv_exact(sock, &net_cid, 4, MGMT_RECV_TIMEOUT_MS)) { mark_failed = true; break; }
+                    memcpy(&net_cid, mgmt_plain.data() + 1, 4);
                     uint32_t cid = ntohl(net_cid);
                     bool active = (msg_type == MgmtMsgType::SPEECH_ACTIVE);
                     bool changed = false;
@@ -1041,10 +1024,6 @@ private:
                         if (speech_signal_handler_) {
                             speech_signal_handler_(cid, active);
                         }
-                        // Speech signals originate at VAD and flow downstream only.
-                        // OAP and SIP_CLIENT are the terminal consumers — forwarding
-                        // beyond OAP would loop signals back through SIP→IAP→VAD→Whisper,
-                        // creating an infinite oscillation at ~40k cycles/second.
                         if (type_ != ServiceType::OUTBOUND_AUDIO_PROCESSOR &&
                             type_ != ServiceType::SIP_CLIENT) {
                             send_mgmt_to_downstream(msg_type, cid);
@@ -1055,20 +1034,20 @@ private:
                 case MgmtMsgType::PING: {
                     uint8_t pong = static_cast<uint8_t>(MgmtMsgType::PONG);
                     std::lock_guard<std::mutex> lock(send_upstream_mgmt_mutex_);
-                    send_all_with_timeout(sock, &pong, 1, MGMT_SEND_TIMEOUT_MS);
+                    send_encrypted(sock, &pong, 1, MGMT_SEND_TIMEOUT_MS);
                     break;
                 }
                 case MgmtMsgType::PONG:
                     break;
                 case MgmtMsgType::CUSTOM: {
+                    if (mgmt_plain.size() < 3) { mark_failed = true; break; }
                     uint16_t net_len;
-                    if (!recv_exact(sock, &net_len, 2, MGMT_RECV_TIMEOUT_MS)) { mark_failed = true; break; }
+                    memcpy(&net_len, mgmt_plain.data() + 1, 2);
                     uint16_t len = ntohs(net_len);
 
                     std::string response;
-                    if (len > 0) {
-                        std::string msg(len, '\0');
-                        if (!recv_exact(sock, msg.data(), len, CUSTOM_MSG_TIMEOUT_MS)) { mark_failed = true; break; }
+                    if (len > 0 && mgmt_plain.size() >= (size_t)(3 + len)) {
+                        std::string msg(reinterpret_cast<char*>(mgmt_plain.data() + 3), len);
                         if (custom_handler_) {
                             response = custom_handler_(msg);
                         }
@@ -1082,7 +1061,7 @@ private:
                     if (resp_len > 0) memcpy(resp_buf.data() + 3, response.data(), resp_len);
                     {
                         std::lock_guard<std::mutex> lock(send_upstream_mgmt_mutex_);
-                        send_all_with_timeout(sock, resp_buf.data(), 3 + resp_len, CUSTOM_MSG_TIMEOUT_MS);
+                        send_encrypted(sock, resp_buf.data(), 3 + resp_len, CUSTOM_MSG_TIMEOUT_MS);
                     }
                     break;
                 }
@@ -1144,9 +1123,7 @@ private:
         memcpy(buf + 1, &net_cid, 4);
 
         std::lock_guard<std::mutex> lock(send_downstream_mgmt_mutex_);
-        if (!send_all_with_timeout(sock, buf, 5, MGMT_SEND_TIMEOUT_MS)) {
-            // Don't mark failed for mgmt send failure — data channel matters more
-        }
+        send_encrypted(sock, buf, 5, MGMT_SEND_TIMEOUT_MS);
     }
 
     // Lock order: {upstream,downstream}_mutex_ → state_mutex_ (never reversed).
@@ -1332,31 +1309,41 @@ private:
         return true;
     }
 
-    bool recv_packet(int sock, Packet& pkt, int timeout_ms) {
-        uint8_t header[8];
-        if (!recv_exact(sock, header, 8, timeout_ms)) {
+    bool send_encrypted(int sock, const void* data, size_t len, int timeout_ms) {
+        size_t enc_size = prodigy_tls::ic_encrypted_size(len);
+        std::vector<uint8_t> enc_buf(4 + enc_size);
+        size_t actual_enc_len = 0;
+        if (!prodigy_tls::ic_encrypt(static_cast<const uint8_t*>(data), len,
+                                      enc_buf.data() + 4, actual_enc_len)) {
             return false;
         }
+        uint32_t net_len = htonl(static_cast<uint32_t>(actual_enc_len));
+        memcpy(enc_buf.data(), &net_len, 4);
+        return send_all_with_timeout(sock, enc_buf.data(), 4 + actual_enc_len, timeout_ms);
+    }
 
-        uint32_t net_call_id, net_size;
-        memcpy(&net_call_id, header, 4);
-        memcpy(&net_size, header + 4, 4);
-
-        pkt.call_id = ntohl(net_call_id);
-        pkt.payload_size = ntohl(net_size);
-
-        if (pkt.call_id == 0 || pkt.payload_size > Packet::MAX_PAYLOAD_SIZE) {
+    bool recv_encrypted(int sock, std::vector<uint8_t>& plaintext, int timeout_ms) {
+        uint32_t net_len;
+        if (!recv_exact(sock, &net_len, 4, timeout_ms)) return false;
+        uint32_t enc_len = ntohl(net_len);
+        if (enc_len > Packet::MAX_PAYLOAD_SIZE + 256) return false;
+        std::vector<uint8_t> enc_buf(enc_len);
+        if (!recv_exact(sock, enc_buf.data(), enc_len, timeout_ms)) return false;
+        plaintext.resize(enc_len);
+        size_t plain_len = 0;
+        if (!prodigy_tls::ic_decrypt(enc_buf.data(), enc_len,
+                                      plaintext.data(), plain_len)) {
             return false;
         }
-
-        pkt.payload.resize(pkt.payload_size);
-        if (pkt.payload_size > 0) {
-            if (!recv_exact(sock, pkt.payload.data(), pkt.payload_size, PAYLOAD_RECV_TIMEOUT_MS)) {
-                return false;
-            }
-        }
-
+        plaintext.resize(plain_len);
         return true;
+    }
+
+    bool recv_packet(int sock, Packet& pkt, int timeout_ms) {
+        std::vector<uint8_t> plaintext;
+        if (!recv_encrypted(sock, plaintext, timeout_ms)) return false;
+        if (plaintext.size() < 8) return false;
+        return Packet::deserialize(plaintext.data(), plaintext.size(), pkt);
     }
 
     void close_socket(int& sock) {

@@ -92,6 +92,18 @@ endif()
 # Dependencies
 find_package(Threads REQUIRED)
 
+# OpenSSL — statically linked for all services.
+# Required for: mongoose TLS (frontend/tomedo-crawl), interconnect AES-256-GCM
+# encryption, Tomedo mTLS client, and TLS HTTP clients.
+# Build-time only: requires openssl@3 headers + .a files (brew install openssl@3).
+find_package(OpenSSL REQUIRED)
+get_filename_component(_OPENSSL_LIB_DIR "${OPENSSL_SSL_LIBRARY}" DIRECTORY)
+if(EXISTS "${_OPENSSL_LIB_DIR}/libssl.a" AND EXISTS "${_OPENSSL_LIB_DIR}/libcrypto.a")
+    set(OPENSSL_STATIC_SSL    "${_OPENSSL_LIB_DIR}/libssl.a")
+    set(OPENSSL_STATIC_CRYPTO "${_OPENSSL_LIB_DIR}/libcrypto.a")
+else()
+    message(FATAL_ERROR "Static OpenSSL libraries not found in ${_OPENSSL_LIB_DIR}")
+endif()
 
 # Headers
 include_directories(
@@ -223,23 +235,49 @@ endif()
 
 # 1. SIP Client
 add_executable(sip-client sip-client-main.cpp)
-target_link_libraries(sip-client PRIVATE Threads::Threads)
+target_include_directories(sip-client PRIVATE ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(sip-client PRIVATE Threads::Threads
+    ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
+if(APPLE)
+    target_link_libraries(sip-client PRIVATE
+        "-framework CoreFoundation" "-framework Security")
+endif()
 
 # 2. Inbound Audio Processor
 add_executable(inbound-audio-processor inbound-audio-processor.cpp)
-target_link_libraries(inbound-audio-processor PRIVATE Threads::Threads)
+target_include_directories(inbound-audio-processor PRIVATE ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(inbound-audio-processor PRIVATE Threads::Threads
+    ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
+if(APPLE)
+    target_link_libraries(inbound-audio-processor PRIVATE
+        "-framework CoreFoundation" "-framework Security")
+endif()
 
 # 2b. VAD Service
 add_executable(vad-service vad-service.cpp)
-target_link_libraries(vad-service PRIVATE Threads::Threads)
+target_include_directories(vad-service PRIVATE ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(vad-service PRIVATE Threads::Threads
+    ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
+if(APPLE)
+    target_link_libraries(vad-service PRIVATE
+        "-framework CoreFoundation" "-framework Security")
+endif()
 
 # 3. Outbound Audio Processor
 add_executable(outbound-audio-processor outbound-audio-processor.cpp)
-target_link_libraries(outbound-audio-processor PRIVATE Threads::Threads)
+target_include_directories(outbound-audio-processor PRIVATE ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(outbound-audio-processor PRIVATE Threads::Threads
+    ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
+if(APPLE)
+    target_link_libraries(outbound-audio-processor PRIVATE
+        "-framework CoreFoundation" "-framework Security")
+endif()
 
 # 4. Whisper Service
 add_executable(whisper-service whisper-service.cpp)
-target_link_libraries(whisper-service PRIVATE Threads::Threads)
+target_include_directories(whisper-service PRIVATE ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(whisper-service PRIVATE Threads::Threads
+    ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
 if(TARGET thirdparty_whisper)
     target_link_libraries(whisper-service PRIVATE thirdparty_whisper)
 endif()
@@ -263,14 +301,18 @@ if(TARGET thirdparty_whisper_coreml)
 endif()
 if(APPLE)
     find_library(COREML_FRAMEWORK CoreML)
-    target_link_libraries(whisper-service PRIVATE ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK} ${COREML_FRAMEWORK})
+    target_link_libraries(whisper-service PRIVATE ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK} ${COREML_FRAMEWORK}
+        "-framework Security")
 endif()
 
 # 5. LLaMA Service
 add_executable(llama-service llama-service.cpp)
-target_link_libraries(llama-service PRIVATE Threads::Threads)
+target_include_directories(llama-service PRIVATE ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(llama-service PRIVATE Threads::Threads
+    ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
 if(APPLE)
-    target_link_libraries(llama-service PRIVATE ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK})
+    target_link_libraries(llama-service PRIVATE ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK}
+        "-framework Security")
 endif()
 if(TARGET thirdparty_llama)
     target_link_libraries(llama-service PRIVATE thirdparty_llama)
@@ -331,7 +373,11 @@ if(ESPEAK_NG_LIB AND ESPEAK_NG_INCLUDE)
         target_link_libraries(kokoro-service PRIVATE Threads::Threads ${ESPEAK_NG_LIB} ${ESPEAK_NG_DEPS})
         message(STATUS "  CoreML acceleration: DISABLED (non-Apple platform)")
     endif()
-    target_include_directories(kokoro-service PRIVATE ${ESPEAK_NG_INCLUDE})
+    target_include_directories(kokoro-service PRIVATE ${ESPEAK_NG_INCLUDE} ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(kokoro-service PRIVATE ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
+    if(APPLE)
+        target_link_libraries(kokoro-service PRIVATE "-framework Security")
+    endif()
     set_property(TARGET kokoro-service PROPERTY CXX_STANDARD 17)
     if(ESPEAK_NG_DATA_DIR)
         target_compile_definitions(kokoro-service PRIVATE ESPEAK_NG_DATA_DIR="${ESPEAK_NG_DATA_DIR}")
@@ -356,11 +402,13 @@ if(ESPEAK_NG_LIB AND ESPEAK_NG_INCLUDE)
         target_include_directories(neutts-service PRIVATE
             ${CMAKE_SOURCE_DIR}/llama-cpp/include
             ${CMAKE_SOURCE_DIR}/llama-cpp/ggml/include
-            ${ESPEAK_NG_INCLUDE})
+            ${ESPEAK_NG_INCLUDE}
+            ${OPENSSL_INCLUDE_DIR})
         target_link_libraries(neutts-service PRIVATE
             Threads::Threads ${ESPEAK_NG_LIB} ${ESPEAK_NG_DEPS}
             ${COREML_FRAMEWORK_NEUTTS} ${ACCELERATE_FRAMEWORK} ${METAL_FRAMEWORK}
-            ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK} "-lobjc")
+            ${FOUNDATION_FRAMEWORK} ${METALKIT_FRAMEWORK} "-lobjc"
+            ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO} "-framework Security")
         set_property(TARGET neutts-service PROPERTY CXX_STANDARD 17)
         if(ESPEAK_NG_DATA_DIR)
             target_compile_definitions(neutts-service PRIVATE ESPEAK_NG_DATA_DIR="${ESPEAK_NG_DATA_DIR}")
@@ -391,23 +439,6 @@ else()
     message(WARNING "NeuTTS Service: DISABLED (espeak-ng not found)")
 endif()
 
-# OpenSSL — statically linked for both frontend and tomedo-crawl.
-# Must be found BEFORE defining either target so ${OPENSSL_STATIC_*} vars are
-# populated when target_link_libraries() is called.
-# OpenSSL is STATICALLY linked (.a) so both binaries have zero runtime
-# dependencies beyond system libraries.
-# Build-time only: requires openssl@3 headers + .a files (brew install openssl@3).
-find_package(OpenSSL REQUIRED)
-# Force static archives — find_package prefers .dylib on macOS, but we need .a
-# to produce standalone binaries with no Homebrew runtime dependency.
-get_filename_component(_OPENSSL_LIB_DIR "${OPENSSL_SSL_LIBRARY}" DIRECTORY)
-if(EXISTS "${_OPENSSL_LIB_DIR}/libssl.a" AND EXISTS "${_OPENSSL_LIB_DIR}/libcrypto.a")
-    set(OPENSSL_STATIC_SSL    "${_OPENSSL_LIB_DIR}/libssl.a")
-    set(OPENSSL_STATIC_CRYPTO "${_OPENSSL_LIB_DIR}/libcrypto.a")
-else()
-    message(FATAL_ERROR "Static OpenSSL libraries not found in ${_OPENSSL_LIB_DIR}")
-endif()
-
 # 8. Frontend (mongoose + SQLCipher)
 # Uses SQLCipher (${SQLCIPHER_DIR}/sqlite3.c) instead of the bundled sqlite3.c
 # so that frontend.db and the shared tomedo-crawl.db are both opened with
@@ -420,6 +451,7 @@ target_include_directories(frontend PRIVATE
     ${OPENSSL_INCLUDE_DIR})
 target_compile_definitions(frontend PRIVATE
     MG_ENABLE_PACKED_FS=0
+    MG_TLS=MG_TLS_OPENSSL                                 # Enable mongoose TLS via OpenSSL
     SQLITE_HAS_CODEC                                       # Enable SQLCipher codec hooks
     SQLCIPHER_CRYPTO_OPENSSL                               # Use OpenSSL EVP backend (AES-256-CBC)
     SQLITE_TEMP_STORE=2                                    # Temp tables in RAM, never on disk
@@ -444,6 +476,7 @@ target_include_directories(tomedo-crawl PRIVATE
     ${OPENSSL_INCLUDE_DIR})
 target_compile_definitions(tomedo-crawl PRIVATE
     MG_ENABLE_PACKED_FS=0
+    MG_TLS=MG_TLS_OPENSSL                                 # Enable mongoose TLS via OpenSSL
     SQLITE_HAS_CODEC                                       # Enable SQLCipher codec hooks
     SQLCIPHER_CRYPTO_OPENSSL                               # Use OpenSSL EVP backend (AES-256-CBC)
     SQLITE_TEMP_STORE=2                                    # Temp tables in RAM, never on disk
@@ -482,7 +515,12 @@ if(BUILD_TESTS)
     target_link_libraries(test_sanity PRIVATE GTest::gtest_main Threads::Threads)
     
     add_executable(test_interconnect tests/test_interconnect.cpp)
-    target_link_libraries(test_interconnect PRIVATE GTest::gtest_main Threads::Threads)
+    target_include_directories(test_interconnect PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(test_interconnect PRIVATE GTest::gtest_main Threads::Threads
+        ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
+    if(APPLE)
+        target_link_libraries(test_interconnect PRIVATE "-framework Security" "-framework CoreFoundation")
+    endif()
     
     if(TARGET kokoro-service)
         if(APPLE AND KOKORO_COREML)
