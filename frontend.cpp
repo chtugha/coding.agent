@@ -116,6 +116,8 @@
 #include <regex>
 #include <iomanip>
 #include <unordered_set>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 // Named constants — all timing, buffer, and limit values formerly scattered as
 // magic numbers throughout the event loop, log infrastructure, and test runners.
@@ -5771,19 +5773,56 @@ private:
             ::close(sock);
             return "";
         }
+
+        // Wrap in TLS — tomedo-crawl serves HTTPS with the shared prodigy self-signed cert.
+        // Use SSL_VERIFY_PEER with the prodigy CA so we authenticate the loopback service.
+        static SSL_CTX* s_rag_ctx = nullptr;
+        static std::once_flag s_rag_ctx_once;
+        std::call_once(s_rag_ctx_once, []() {
+            prodigy_tls::ensure_certs();
+            s_rag_ctx = SSL_CTX_new(TLS_client_method());
+            if (s_rag_ctx) {
+                std::string ca = prodigy_tls::cert_file_path();
+                if (SSL_CTX_load_verify_locations(s_rag_ctx, ca.c_str(), nullptr) == 1) {
+                    SSL_CTX_set_verify(s_rag_ctx, SSL_VERIFY_PEER, nullptr);
+                } else {
+                    SSL_CTX_set_verify(s_rag_ctx, SSL_VERIFY_NONE, nullptr);
+                }
+            }
+        });
+        if (!s_rag_ctx) { ::close(sock); return ""; }
+
+        SSL* ssl = SSL_new(s_rag_ctx);
+        if (!ssl) { ::close(sock); return ""; }
+        SSL_set_fd(ssl, sock);
+        SSL_set_tlsext_host_name(ssl, "127.0.0.1");
+        if (SSL_connect(ssl) != 1) {
+            SSL_free(ssl); ::close(sock);
+            return "";
+        }
+
+        // POST requests always need Content-Length (even for empty body) so
+        // mongoose doesn't reject with 411.
+        bool is_post = (method == "POST" || method == "PUT" || method == "PATCH");
         std::string req = method + " " + path + " HTTP/1.0\r\nHost: 127.0.0.1\r\n";
         if (!body.empty()) {
             req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+        } else if (is_post) {
+            req += "Content-Length: 0\r\n";
         }
         req += "Connection: close\r\n\r\n";
         if (!body.empty()) req += body;
-        send(sock, req.c_str(), req.size(), 0);
+
+        SSL_write(ssl, req.c_str(), static_cast<int>(req.size()));
+
         std::string response;
         char buf[4096];
-        ssize_t n;
-        while ((n = recv(sock, buf, sizeof(buf), 0)) > 0) {
-            response.append(buf, n);
+        int n;
+        while ((n = SSL_read(ssl, buf, sizeof(buf))) > 0) {
+            response.append(buf, static_cast<size_t>(n));
         }
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
         ::close(sock);
         auto hdr_end = response.find("\r\n\r\n");
         if (hdr_end != std::string::npos) return response.substr(hdr_end + 4);

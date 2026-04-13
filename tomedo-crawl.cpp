@@ -618,8 +618,9 @@ constexpr int MAX_DIAGNOSEN           = 20;
 constexpr int MAX_MEDICATIONS         = 20;
 constexpr int CRAWL_PROGRESS_INTERVAL = 50;
 constexpr int CRAWL_BATCH_SLEEP_MS    = 10;
-constexpr int EXPIRY_CHECK_INTERVAL_S = 300;
-constexpr int QUERY_POOL_WORKERS      = 4;
+constexpr int EXPIRY_CHECK_INTERVAL_S  = 300;
+constexpr int QUERY_POOL_WORKERS       = 4;
+constexpr int RESOLVE_QUEUE_MAX_DEPTH  = 200;
 constexpr int EMBED_TIMEOUT_MS        = 30000;
 constexpr int TOMEDO_API_TIMEOUT_MS   = 15000;
 constexpr int TOMEDO_LIST_TIMEOUT_MS  = 60000;
@@ -912,11 +913,18 @@ public:
         return static_cast<int>(hnsw_->getCurrentElementCount() * 100 / max_elements_);
     }
 
-    ~VectorStore() {
+    void close() {
         std::lock_guard<std::mutex> lk(mutex_);
         hnsw_.reset();
         space_.reset();
-        if (db_) sqlite3_close(db_);
+        if (db_) {
+            sqlite3_close(db_);
+            db_ = nullptr;
+        }
+    }
+
+    ~VectorStore() {
+        close();
     }
 };
 
@@ -1325,7 +1333,7 @@ static std::string ssl_read_all(SSL* ssl, int timeout_ms) {
             if (errno == EINTR) continue;
             break;
         }
-        if (pr == 0) break;
+        if (pr == 0) continue;  // sub-poll timeout, check deadline and retry
         int n = SSL_read(ssl, buf, sizeof(buf));
         if (n <= 0) {
             int err = SSL_get_error(ssl, n);
@@ -1432,13 +1440,16 @@ static std::string g_ssl_ctx_pem;
 static SSL_CTX* get_shared_ssl_ctx(const std::string& pem_path) {
     std::lock_guard<std::mutex> lk(g_ssl_ctx_mutex);
     if (g_ssl_ctx && g_ssl_ctx_pem == pem_path) {
+        // g_ssl_ctx refcount reflects one "stored" ref + one "in-use" ref.
+        // Caller calls SSL_CTX_free() when done, leaving the stored ref intact.
+        // cleanup_shared_ssl_ctx() drops the stored ref on shutdown.
         SSL_CTX_up_ref(g_ssl_ctx);
         return g_ssl_ctx;
     }
     if (g_ssl_ctx) { SSL_CTX_free(g_ssl_ctx); g_ssl_ctx = nullptr; }
     SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) return nullptr;
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+
     if (!pem_path.empty()) {
         if (SSL_CTX_use_certificate_file(ctx, pem_path.c_str(), SSL_FILETYPE_PEM) != 1 ||
             SSL_CTX_use_PrivateKey_file(ctx, pem_path.c_str(), SSL_FILETYPE_PEM) != 1) {
@@ -1449,7 +1460,31 @@ static SSL_CTX* get_shared_ssl_ctx(const std::string& pem_path) {
             SSL_CTX_free(ctx);
             return nullptr;
         }
+        // Try to load server CA from the same PEM (Tomedo client certs are
+        // typically signed by the same CA as the server cert).
+        // SSL_CTX_load_verify_locations silently ignores non-CA entries.
+        if (SSL_CTX_load_verify_locations(ctx, pem_path.c_str(), nullptr) == 1) {
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+            LOG_INFO("HTTPS: server cert verification enabled (CA from %s)", pem_path.c_str());
+        } else {
+            // CA not in PEM — disable peer verification but warn prominently.
+            // Patient data is still encrypted in transit; only MITM on the
+            // local network segment could intercept. Pin the server cert by
+            // exporting the Tomedo server CA and setting tomedo_ca_pem in the
+            // config database to enable full verification.
+            ERR_clear_error();
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+            LOG_WARN("HTTPS: server cert verification DISABLED — "
+                     "Tomedo CA not found in %s. "
+                     "Set tomedo_ca_pem in config DB to enable VERIFY_PEER.",
+                     pem_path.c_str());
+        }
+    } else {
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+        LOG_WARN("HTTPS: no client cert configured — Tomedo mTLS disabled, "
+                 "server cert not verified");
     }
+
     g_ssl_ctx = ctx;
     g_ssl_ctx_pem = pem_path;
     SSL_CTX_up_ref(g_ssl_ctx);
@@ -1724,7 +1759,7 @@ static std::vector<std::string> chunk_text(const std::string& text,
                 sentences[j - 1].c_str(), sentences[j - 1].size()) / CHARS_PER_TOKEN_APPROX + 1;
             new_start = j - 1;
         }
-        start = (new_start < end) ? new_start : end;
+        start = (new_start > start && new_start < end) ? new_start : end;
     }
     return chunks;
 }
@@ -2108,29 +2143,39 @@ static void index_patient_phones(sqlite3* db, int patient_id,
     store_phone(ph.telefon3);
 }
 
-static int run_full_crawl(const std::vector<PatientRef>& patients,
-                          const TomedoConfig& cfg, VectorStore& store,
-                          sqlite3* phone_db, long long since_ts = 0) {
+struct CrawlStats {
+    int  chunks      = 0;
+    int  skipped     = 0;  // patients skipped due to HTTP errors (not since_ts filtering)
+    bool interrupted = false;
+};
+
+static CrawlStats run_full_crawl(const std::vector<PatientRef>& patients,
+                                  const TomedoConfig& cfg, VectorStore& store,
+                                  sqlite3* phone_db, long long since_ts = 0) {
+    CrawlStats stats;
     int processed = 0;
     for (const auto& p : patients) {
         if (since_ts > 0 && p.zuletzt_aufgerufen > 0 &&
-            p.zuletzt_aufgerufen <= since_ts)
+            p.zuletzt_aufgerufen <= since_ts)  // both in epoch-ms (Tomedo API confirmed)
             continue;
         ++processed;
     }
     LOG_INFO("Crawl starting (%d patients total, %d to process, since_ts=%lld)",
              (int)patients.size(), processed, since_ts);
 
-    int total_chunks = 0;
     int phone_count = 0;
     for (size_t i = 0; i < patients.size(); ++i) {
-        if (s_quit.load()) break;
+        if (s_quit.load()) { stats.interrupted = true; break; }
         if (since_ts > 0 && patients[i].zuletzt_aufgerufen > 0 &&
-            patients[i].zuletzt_aufgerufen <= since_ts)
+            patients[i].zuletzt_aufgerufen <= since_ts)  // both in epoch-ms
             continue;
 
         int pid = patients[i].ident;
         auto pctx = fetch_patient_context_full(pid, cfg);
+
+        if (pctx.text.empty()) {
+            ++stats.skipped;
+        }
 
         if (phone_db) {
             index_patient_phones(phone_db, pid, pctx.nachname, pctx.vorname, pctx.phones);
@@ -2144,7 +2189,7 @@ static int run_full_crawl(const std::vector<PatientRef>& patients,
         auto chunks = chunk_text(pctx.text);
         std::string source = "patient/" + std::to_string(pid);
         for (size_t ci = 0; ci < chunks.size(); ++ci) {
-            if (s_quit.load()) break;
+            if (s_quit.load()) { stats.interrupted = true; break; }
             auto emb = embed_text(chunks[ci], cfg);
             if (emb.empty()) {
                 LOG_DEBUG("Crawl: embed_text empty for patient=%d chunk=%d", pid, (int)ci);
@@ -2152,18 +2197,19 @@ static int run_full_crawl(const std::vector<PatientRef>& patients,
             }
             std::string chunk_source = source + "/chunk" + std::to_string(ci);
             store.upsert(chunk_source, pid, chunks[ci], emb);
-            ++total_chunks;
+            ++stats.chunks;
         }
 
         if ((i + 1) % CRAWL_PROGRESS_INTERVAL == 0 || i + 1 == patients.size()) {
             LOG_INFO("Crawl: %d/%d patients, %d chunks, %d phones so far",
-                     (int)(i + 1), (int)patients.size(), total_chunks, phone_count);
+                     (int)(i + 1), (int)patients.size(), stats.chunks, phone_count);
             std::this_thread::sleep_for(std::chrono::milliseconds(CRAWL_BATCH_SLEEP_MS));
         }
     }
-    LOG_INFO("Crawl complete: %d chunks, %d phones from %d patients",
-             total_chunks, phone_count, (int)patients.size());
-    return total_chunks;
+    LOG_INFO("Crawl complete: %d chunks, %d phones, %d skipped, interrupted=%s",
+             stats.chunks, phone_count, stats.skipped,
+             stats.interrupted ? "yes" : "no");
+    return stats;
 }
 
 // ============================================================
@@ -2228,6 +2274,15 @@ public:
     void enqueue(int call_id, const std::string& phone) {
         {
             std::lock_guard<std::mutex> lk(mutex_);
+            if (static_cast<int>(queue_.size()) >= RESOLVE_QUEUE_MAX_DEPTH) {
+                // Queue full — resolve immediately as NOT_FOUND rather than
+                // blocking indefinitely. Under normal load (≤200 concurrent
+                // unresolved callers) this should never trigger.
+                LOG_WARN("ResolveQueue full (depth=%d) — call_id=%d set to NOT_FOUND",
+                         RESOLVE_QUEUE_MAX_DEPTH, call_id);
+                g_caller_store.update(call_id, LookupStatus::NOT_FOUND, -1, "", "");
+                return;
+            }
             queue_.push({call_id, phone});
         }
         cv_.notify_one();
@@ -2732,21 +2787,48 @@ int main(int argc, char** argv) {
         }
     });
 
-    std::thread crawl_thread([&cfg, phone_db]() {
+    // Start HTTP server before crawl thread so /health is available from the
+    // very first request, even while the initial crawl is in progress.
+    HttpServer srv;
+    if (!srv.start(cfg)) {
+        s_quit.store(true);
+        if (ollama_init_thread.joinable()) ollama_init_thread.join();
+        g_query_pool.shutdown();
+        g_resolve_queue.shutdown();
+        expiry_thread.join();
+        sqlite3_close(phone_db);
+        return 1;
+    }
+
+    LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
+
+    auto crawl_fn = [&cfg, phone_db]() {
         long long since_ts = 0;
-        auto do_crawl = [&](long long ts) {
+        // Returns the wall-clock epoch-ms at which the crawl STARTED (for use
+        // as the next since_ts), or 0 if the crawl was incomplete/interrupted.
+        // since_ts is only advanced when every patient was fetched without HTTP
+        // errors AND the crawl was not interrupted by SIGTERM — preventing
+        // partially-crawled patients from being silently skipped on the next run.
+        auto do_crawl = [&](long long ts) -> long long {
+            long long started_at = static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
             auto patients = enumerate_patients(cfg);
-            if (!patients.empty()) {
-                run_full_crawl(patients, cfg, g_vector_store, phone_db, ts);
-            }
+            if (patients.empty()) return 0;  // fetch failed — don't advance ts
+            auto stats = run_full_crawl(patients, cfg, g_vector_store, phone_db, ts);
             g_last_crawl_time.store(static_cast<long>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
+            if (stats.interrupted || stats.skipped > 0) {
+                LOG_WARN("Crawl incomplete (interrupted=%s, skipped=%d) — "
+                         "since_ts not advanced; all patients will be re-checked next run",
+                         stats.interrupted ? "yes" : "no", stats.skipped);
+                return 0;  // don't advance ts
+            }
+            return started_at;
         };
-        do_crawl(since_ts);
-        since_ts = static_cast<long long>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
+        long long new_ts = do_crawl(since_ts);
+        if (new_ts > 0) since_ts = new_ts;
         while (!s_quit.load()) {
             for (int i = 0; i < cfg.crawl_interval_sec && !s_quit.load(); ++i) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -2754,26 +2836,11 @@ int main(int argc, char** argv) {
             }
             if (s_quit.load()) break;
             g_crawl_requested.store(false);
-            do_crawl(since_ts);
-            since_ts = static_cast<long long>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
+            new_ts = do_crawl(since_ts);
+            if (new_ts > 0) since_ts = new_ts;
         }
-    });
-
-    HttpServer srv;
-    if (!srv.start(cfg)) {
-        s_quit.store(true);
-        if (ollama_init_thread.joinable()) ollama_init_thread.join();
-        g_query_pool.shutdown();
-        g_resolve_queue.shutdown();
-        crawl_thread.join();
-        expiry_thread.join();
-        sqlite3_close(phone_db);
-        return 1;
-    }
-
-    LOG_INFO("HTTP server listening on %s", srv.listen_addr.c_str());
+    };
+    std::thread crawl_thread(crawl_fn);
 
     if (ollama_init_thread.joinable()) ollama_init_thread.join();
 
@@ -2785,6 +2852,7 @@ int main(int argc, char** argv) {
     expiry_thread.join();
     sqlite3_close(phone_db);
     g_phone_db = nullptr;
+    g_vector_store.close();
     cleanup_shared_ssl_ctx();
 
     LOG_INFO("tomedo-crawl stopped");

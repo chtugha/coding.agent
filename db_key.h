@@ -191,6 +191,11 @@ static bool keychain_store(const std::string& key)
         CFMutableDictionaryRef updQ = CFDictionaryCreateMutable(
             nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         CFDictionarySetValue(updQ, kSecValueData, cfData2);
+        // Also update accessibility so a pre-existing WhenUnlocked entry is
+        // migrated to AfterFirstUnlock, which is required for daemon access
+        // after reboot while the screen is still locked.
+        CFDictionarySetValue(updQ, kSecAttrAccessible,
+                             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
 
         st = SecItemUpdate(findQ, updQ);
         CFRelease(findQ);
