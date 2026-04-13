@@ -142,11 +142,11 @@ inline std::string FrontendServer::build_ui_pages() {
 <div id="whisperConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">Whisper Configuration</div>
 <div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">Language</label>
-<select class="wt-select" id="whisperLang" onchange="updateWhisperArgs()" style="font-size:12px"></select></div>
+<select class="wt-select" id="whisperLang" onchange="updateWhisperArgs()" title="BCP-47 language code passed to Whisper. Use 'de' for German, 'en' for English. Setting the correct language improves accuracy and avoids auto-detection overhead." style="font-size:12px"></select></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Model</label>
-<select class="wt-select" id="whisperModel" onchange="updateWhisperArgs()" style="font-size:12px"></select></div>
+<select class="wt-select" id="whisperModel" onchange="updateWhisperArgs()" title="GGML model file from bin/models/. Larger models are more accurate but slower. Recommended: ggml-large-v3-turbo-q5_0.bin (547 MB, best speed/accuracy). Model files must be placed in bin/models/ and converted to CoreML for ANE acceleration." style="font-size:12px"></select></div>
 <div class="wt-field" style="margin-top:8px;margin-bottom:0;display:flex;align-items:center;gap:8px">
-<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
+<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px" title="When enabled, Whisper output is checked against a list of known hallucination strings (e.g. 'Untertitel', 'Copyright') and repetition patterns. Matching transcriptions are suppressed before reaching LLaMA. Disable if legitimate speech is being incorrectly filtered.">
 <input type="checkbox" id="whisperHallucinationFilter" onchange="toggleHallucinationFilter(this.checked)" style="width:16px;height:16px;cursor:pointer">
 Hallucination Filter</label>
 <span id="whisperHalluFilterStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
@@ -156,33 +156,33 @@ Hallucination Filter</label>
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">PBX Connection</div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Server IP</label>
-<input class="wt-input" id="sipPbxServer" placeholder="192.168.1.100" style="font-size:12px"></div>
+<input class="wt-input" id="sipPbxServer" placeholder="192.168.1.100" title="IP address or hostname of the SIP PBX (e.g. FreePBX, Asterisk, 3CX). The SIP client registers a line on this server and receives inbound calls." style="font-size:12px"></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Port</label>
-<input class="wt-input" id="sipPbxPort" placeholder="5060" value="5060" style="font-size:12px"></div>
+<input class="wt-input" id="sipPbxPort" placeholder="5060" value="5060" title="SIP signalling port on the PBX. Standard SIP uses UDP 5060. Use 5061 for TLS-encrypted SIP (SIPS)." style="font-size:12px"></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Username</label>
-<input class="wt-input" id="sipPbxUser" placeholder="extension100" style="font-size:12px"></div>
+<input class="wt-input" id="sipPbxUser" placeholder="extension100" title="SIP extension number or username to register with the PBX. Must match the account configured on the PBX." style="font-size:12px"></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Password</label>
-<input class="wt-input" id="sipPbxPassword" type="password" placeholder="password" style="font-size:12px"></div>
+<input class="wt-input" id="sipPbxPassword" type="password" placeholder="password" title="SIP account password for digest authentication with the PBX." style="font-size:12px"></div>
 </div>
 <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
-<button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="sipConnectPbx()">Connect New Line</button>
+<button class="wt-btn wt-btn-primary" style="font-size:11px" title="Register the entered SIP credentials with the PBX and add a new active line. Each call session uses its own independent line. The line remains registered until the service is stopped." onclick="sipConnectPbx()">Connect New Line</button>
 <span id="sipPbxStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 </div>
 <div id="sipProviderConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">SIP Provider Configuration</div>
 <div class="wt-field" style="margin-top:8px;margin-bottom:6px;display:flex;align-items:center;gap:8px">
-<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
+<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px" title="When enabled, raw inbound RTP audio is written to 16-bit PCM WAV files (one file per call) in the configured directory. Useful for debugging ASR issues or recording call data.">
 <input type="checkbox" id="sipProviderSaveWav" onchange="saveSipProviderWavConfig()" style="width:16px;height:16px;cursor:pointer">
 Save incoming audio as WAV</label>
 <span id="sipProviderWavStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
-<input class="wt-input" id="sipProviderWavDir" placeholder="/tmp/wav_recordings" style="font-size:12px" onchange="saveSipProviderWavConfig()"></div>
+<input class="wt-input" id="sipProviderWavDir" placeholder="/tmp/wav_recordings" title="Directory where inbound WAV recordings are written. The directory must exist and be writable. Files are named by call_id and timestamp." style="font-size:12px" onchange="saveSipProviderWavConfig()"></div>
 </div>
 <div id="tomedoCrawlConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">Tomedo RAG Configuration</div>
-<div id="ragHealthStatus" style="margin-bottom:8px;padding:6px 10px;border-radius:4px;font-size:11px;background:rgba(0,0,0,0.2)">
+<div id="ragHealthStatus" title="Live status from tomedo-crawl /health endpoint. Green = service running and Ollama available. Shows indexed document count and timestamp of last completed crawl." style="margin-bottom:8px;padding:6px 10px;border-radius:4px;font-size:11px;background:rgba(0,0,0,0.2)">
 <span id="ragStatusDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--wt-text-secondary);margin-right:6px"></span>
 <span id="ragStatusText">Checking...</span>
 <span id="ragDocCount" style="margin-left:12px;color:var(--wt-text-secondary)"></span>
@@ -191,98 +191,98 @@ Save incoming audio as WAV</label>
 <div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Tomedo Server</div>
 <div style="display:grid;grid-template-columns:1fr 100px;gap:6px;margin-bottom:8px">
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">IP / Hostname</label>
-<input class="wt-input" id="ragTomedoHost" placeholder="192.168.10.9" style="font-size:12px"></div>
+<input class="wt-input" id="ragTomedoHost" placeholder="192.168.10.9" title="IP address or hostname of the Tomedo EMR server. Default port is 8443 (HTTPS with mutual TLS)." style="font-size:12px"></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Port</label>
-<input class="wt-input" id="ragTomedoPort" placeholder="8443" style="font-size:12px"></div>
+<input class="wt-input" id="ragTomedoPort" placeholder="8443" title="HTTPS port of the Tomedo REST API. Default is 8443. The connection uses mutual TLS client certificate authentication." style="font-size:12px"></div>
 </div>
 <div class="wt-field" style="margin-bottom:8px"><label style="font-size:12px">Client Certificate (PEM)</label>
 <div style="display:flex;gap:6px;align-items:center">
-<input type="file" id="ragCertFile" accept=".pem,.crt,.cert,.key" style="font-size:11px;flex:1">
-<button class="wt-btn wt-btn-secondary" style="font-size:11px" onclick="uploadRagCert()">Upload</button>
+<input type="file" id="ragCertFile" accept=".pem,.crt,.cert,.key" title="Select the PEM file containing both the client certificate and private key for Tomedo mutual TLS authentication. Export from macOS Keychain: security export -t identities -f pkcs12 | openssl pkcs12 -nodes -out client.pem" style="font-size:11px;flex:1">
+<button class="wt-btn wt-btn-secondary" style="font-size:11px" title="Upload the selected PEM file. The certificate is stored securely on disk and the path is saved to the tomedo-crawl config database." onclick="uploadRagCert()">Upload</button>
 <span id="ragCertStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 </div>
 <div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Ollama Subservice</div>
 <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-<span id="ollamaStatusDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--wt-text-secondary)"></span>
+<span id="ollamaStatusDot" title="Current Ollama process status as reported by tomedo-crawl /health. Green = running and serving embeddings." style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--wt-text-secondary)"></span>
 <span id="ollamaStatusText" style="font-size:11px">Checking...</span>
 <div style="margin-left:auto;display:flex;gap:4px">
-<button class="wt-btn wt-btn-primary" style="font-size:10px;padding:3px 8px" onclick="ollamaStart()">&#x25B6; Start</button>
-<button class="wt-btn wt-btn-danger" style="font-size:10px;padding:3px 8px" onclick="ollamaStop()">&#x25A0; Stop</button>
-<button class="wt-btn wt-btn-secondary" style="font-size:10px;padding:3px 8px" onclick="ollamaRestart()">&#x21BB; Restart</button>
+<button class="wt-btn wt-btn-primary" style="font-size:10px;padding:3px 8px" title="Start the Ollama embedding server (ollama serve). tomedo-crawl will manage the process lifecycle." onclick="ollamaStart()">&#x25B6; Start</button>
+<button class="wt-btn wt-btn-danger" style="font-size:10px;padding:3px 8px" title="Stop the Ollama server. In-progress embedding requests will be aborted. The RAG /query endpoint will return 503 until Ollama is restarted." onclick="ollamaStop()">&#x25A0; Stop</button>
+<button class="wt-btn wt-btn-secondary" style="font-size:10px;padding:3px 8px" title="Stop and immediately restart the Ollama server. Use this to apply a new embedding model or recover from a crash." onclick="ollamaRestart()">&#x21BB; Restart</button>
 </div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Ollama URL</label>
-<input class="wt-input" id="ragOllamaUrl" placeholder="http://127.0.0.1:11434" style="font-size:12px"></div>
+<input class="wt-input" id="ragOllamaUrl" placeholder="http://127.0.0.1:11434" title="Base URL of the Ollama HTTP API. Default is http://127.0.0.1:11434. Change only if Ollama runs on a different host or port." style="font-size:12px"></div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Embedding Model</label>
-<select class="wt-select" id="ragOllamaModel" style="font-size:12px">
+<select class="wt-select" id="ragOllamaModel" title="Select the embedding model to use for generating vector representations of patient text chunks. The currently active model (used for existing vectors) is highlighted. Changing the model requires wiping the vector store and re-crawling." style="font-size:12px">
 <option value="">Loading...</option>
 </select>
 </div>
 </div>
 <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
-<input class="wt-input" id="ragOllamaPullModel" placeholder="Model name to pull..." style="font-size:11px;flex:1">
-<button class="wt-btn wt-btn-secondary" style="font-size:10px;padding:3px 8px" onclick="ollamaPullModel()">Pull</button>
+<input class="wt-input" id="ragOllamaPullModel" placeholder="Model name to pull..." title="Enter an Ollama model name (e.g. nomic-embed-text, embeddinggemma:300m) and click Pull to download it. Progress is shown in the live logs." style="font-size:11px;flex:1">
+<button class="wt-btn wt-btn-secondary" style="font-size:10px;padding:3px 8px" title="Download the embedding model specified in the field to the left. Runs ollama pull in the background. Check live logs for download progress." onclick="ollamaPullModel()">Pull</button>
 <span id="ollamaPullStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 <div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Crawl Schedule</div>
 <div style="display:flex;gap:12px;margin-bottom:6px;font-size:12px">
-<label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Trigger one crawl per day at the specified local time. Recommended for production use — minimises load on the Tomedo server.">
 <input type="radio" name="ragCrawlMode" value="daily" checked onchange="toggleCrawlMode()"> Daily at fixed time</label>
-<label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Repeat crawl every N minutes. Useful during initial setup or when patient data changes frequently. Minimum interval: 5 minutes.">
 <input type="radio" name="ragCrawlMode" value="interval" onchange="toggleCrawlMode()"> Repeat interval</label>
 </div>
 <div id="ragCrawlDailyRow" style="margin-bottom:6px">
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Daily crawl time</label>
-<input type="time" class="wt-input" id="ragCrawlTime" value="02:00" style="font-size:12px;width:120px"></div>
+<input type="time" class="wt-input" id="ragCrawlTime" value="02:00" title="Local time at which the daily crawl runs automatically. Default is 02:00 (2 AM) to avoid peak hours on the Tomedo server." style="font-size:12px;width:120px"></div>
 </div>
 <div id="ragCrawlIntervalRow" style="margin-bottom:6px;display:none">
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Repeat every (minutes)</label>
-<input type="number" class="wt-input" id="ragCrawlRepeatMin" placeholder="60" min="5" max="1440" step="5" value="60" style="font-size:12px;width:120px"></div>
+<input type="number" class="wt-input" id="ragCrawlRepeatMin" placeholder="60" min="5" max="1440" step="5" value="60" title="Interval between automatic crawls in minutes. Range: 5–1440 (1 day). The crawl fetches updated patient data from Tomedo and refreshes the vector store." style="font-size:12px;width:120px"></div>
 </div>
 <div style="font-size:11px;font-weight:600;margin-bottom:4px;margin-top:8px;color:var(--wt-text-secondary)">Service Arguments</div>
 <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">
-<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" onclick="toggleRagArg('--verbose')">Verbose</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" onclick="toggleRagArg('--skip-initial-crawl')">Skip Initial Crawl</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" onclick="toggleRagArg('--phone-only')">Phone Index Only</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" onclick="toggleRagArg('--no-embed')">No Embedding</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" title="Enable DEBUG log level. Logs every patient fetch, embedding call, and vector upsert. Useful for diagnosing crawl failures. Adds --verbose to service arguments." onclick="toggleRagArg('--verbose')">Verbose</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" title="Do not run a crawl immediately when the service starts. The vector store is loaded from disk but no new data is fetched until the next scheduled crawl or a manual Trigger Crawl. Adds --skip-initial-crawl." onclick="toggleRagArg('--skip-initial-crawl')">Skip Initial Crawl</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" title="Only update the phone-number index (phone → patient_id mapping). No text chunks are embedded or stored in the vector store. Faster than a full crawl. Useful when only caller identification is needed. Adds --phone-only." onclick="toggleRagArg('--phone-only')">Phone Index Only</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" style="font-size:10px" title="Fetch patient data and update the phone index, but skip the Ollama embedding step. No new vectors are written to the store. Useful when Ollama is unavailable but phone lookup is still needed. Adds --no-embed." onclick="toggleRagArg('--no-embed')">No Embedding</button>
 </div>
 <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;align-items:center">
-<label style="font-size:11px;display:flex;align-items:center;gap:4px">Top-K:
+<label style="font-size:11px;display:flex;align-items:center;gap:4px" title="Number of vector search results returned per /query request. Higher values give more context to LLaMA but increase prompt length. Range: 1–20.">Top-K:
 <input type="number" class="wt-input" id="ragArgTopK" min="1" max="20" value="3" style="font-size:11px;width:50px" onchange="buildRagArgs()"></label>
-<label style="font-size:11px;display:flex;align-items:center;gap:4px">Chunk size:
+<label style="font-size:11px;display:flex;align-items:center;gap:4px" title="Maximum size of each text chunk in estimated tokens (Unicode codepoints ÷ 4). Larger chunks provide more context per vector but require a model with a larger context window. Range: 64–2048, step 64.">Chunk size:
 <input type="number" class="wt-input" id="ragArgChunkSize" min="64" max="2048" value="512" step="64" style="font-size:11px;width:60px" onchange="buildRagArgs()"></label>
-<label style="font-size:11px;display:flex;align-items:center;gap:4px">Overlap:
+<label style="font-size:11px;display:flex;align-items:center;gap:4px" title="Token overlap between consecutive text chunks. Overlap ensures that information near chunk boundaries is not lost. Recommended: 10–15% of chunk size. Range: 0–256, step 16.">Overlap:
 <input type="number" class="wt-input" id="ragArgOverlap" min="0" max="256" value="64" step="16" style="font-size:11px;width:55px" onchange="buildRagArgs()"></label>
-<label style="font-size:11px;display:flex;align-items:center;gap:4px">Workers:
+<label style="font-size:11px;display:flex;align-items:center;gap:4px" title="Number of parallel embedding worker threads. Each worker makes one HTTP request to Ollama at a time. Increasing workers speeds up the crawl but increases load on Ollama. Match to Ollama's concurrency limit. Range: 1–8.">Workers:
 <input type="range" id="ragArgWorkers" min="1" max="8" value="4" style="width:60px" oninput="document.getElementById('ragArgWorkersVal').textContent=this.value;buildRagArgs()">
 <span id="ragArgWorkersVal" style="font-size:11px">4</span></label>
 </div>
 <div style="display:flex;gap:6px;align-items:center">
-<button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="saveRagConfig()">Save Config</button>
-<button class="wt-btn wt-btn-secondary" style="font-size:11px" onclick="triggerRagCrawl()">Trigger Crawl</button>
+<button class="wt-btn wt-btn-primary" style="font-size:11px" title="Save all Tomedo RAG configuration (server address, certificate path, Ollama settings, crawl schedule) to the tomedo-crawl encrypted SQLite database. Changes take effect on the next service start." onclick="saveRagConfig()">Save Config</button>
+<button class="wt-btn wt-btn-secondary" style="font-size:11px" title="Request an immediate crawl of the Tomedo patient database. The crawl runs in the background without restarting the service. Monitor progress in Live Logs." onclick="triggerRagCrawl()">Trigger Crawl</button>
 <span id="ragConfigStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 </div>
 <div id="oapConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">Outbound Audio Processor Configuration</div>
 <div class="wt-field" style="margin-top:8px;margin-bottom:6px;display:flex;align-items:center;gap:8px">
-<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
+<label style="font-size:12px;margin:0;cursor:pointer;display:flex;align-items:center;gap:6px" title="When enabled, the synthesised TTS audio sent to the caller is written to 16-bit PCM WAV files (one per call). Useful for verifying TTS quality and debugging audio routing.">
 <input type="checkbox" id="oapSaveWav" onchange="saveOapWavConfig()" style="width:16px;height:16px;cursor:pointer">
 Save outgoing audio as WAV</label>
 <span id="oapWavStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
-<input class="wt-input" id="oapWavDir" placeholder="/tmp/wav_recordings" style="font-size:12px" onchange="saveOapWavConfig()"></div>
+<input class="wt-input" id="oapWavDir" placeholder="/tmp/wav_recordings" title="Directory where outbound TTS WAV recordings are written. The directory must exist and be writable. Files are named by call_id and timestamp." style="font-size:12px" onchange="saveOapWavConfig()"></div>
 </div>
 <div class="wt-field"><label>Arguments</label>
-<input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..."></div>
+<input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..." title="Command-line arguments passed to the service binary on start. For Tomedo RAG the arguments are built automatically by the buttons above. For other services refer to the service documentation."></div>
 <div style="display:flex;gap:8px">
-<button class="wt-btn wt-btn-primary" id="svcStartBtn" onclick="startSvcDetail()">&#x25B6; Start</button>
-<button class="wt-btn wt-btn-danger" id="svcStopBtn" onclick="stopSvcDetail()">&#x25A0; Stop</button>
-<button class="wt-btn wt-btn-secondary" id="svcRestartBtn" onclick="restartSvcDetail()">&#x21BB; Restart</button>
-<button class="wt-btn wt-btn-secondary" id="svcSaveBtn" onclick="saveSvcConfig()">&#x1F4BE; Save Config</button>
+<button class="wt-btn wt-btn-primary" id="svcStartBtn" title="Start the selected service. If the service is already running it will not be started again." onclick="startSvcDetail()">&#x25B6; Start</button>
+<button class="wt-btn wt-btn-danger" id="svcStopBtn" title="Send SIGTERM to the service process and wait for it to exit cleanly. Active calls on this service will be terminated." onclick="stopSvcDetail()">&#x25A0; Stop</button>
+<button class="wt-btn wt-btn-secondary" id="svcRestartBtn" title="Stop the service (SIGTERM) and immediately start it again with the current saved arguments. Use after changing configuration." onclick="restartSvcDetail()">&#x21BB; Restart</button>
+<button class="wt-btn wt-btn-secondary" id="svcSaveBtn" title="Persist the current service path and arguments to the frontend settings database. These values are restored automatically the next time the frontend starts." onclick="saveSvcConfig()">&#x1F4BE; Save Config</button>
 </div></div>
 <div id="sipActiveLinesCard" class="wt-card hidden">
 <div class="wt-card-header"><span class="wt-card-title">Active Lines</span>

@@ -206,6 +206,14 @@ void sig_handler(int) { s_quit.store(true); }
 // ============================================================
 // Config — stored in SQLite config table (no INI files)
 // ============================================================
+//
+// All configuration is persisted in the encrypted SQLite database (same file
+// as the vector store) in a "config" table (key TEXT PRIMARY KEY, value TEXT).
+// The frontend writes to this table via /api/rag/config; on every service
+// start the binary reads the table and materialises the struct below.
+//
+// Defaults are safe for a fresh install: the service starts and exposes /health
+// immediately, and the first crawl is deferred until Tomedo credentials are set.
 
 struct TomedoConfig {
     std::string tomedo_host      = "192.168.10.9";
@@ -345,9 +353,13 @@ whispertalk::LogForwarder g_log;
 #define LOG_DEBUG(fmt, ...) g_log.forward(whispertalk::LogLevel::DEBUG, 0, fmt, ##__VA_ARGS__)
 
 // ============================================================
-// State (stubs — filled in later steps)
+// Global service state
 // ============================================================
-
+//
+// All atomics are written by background threads and read by the Mongoose
+// event-loop thread (or vice-versa).  Plain relaxed loads are sufficient for
+// the status/health data; crawl_requested_ uses sequential consistency so the
+// crawl thread observes the write promptly.
 
 std::atomic<long> g_last_crawl_time{0};
 std::atomic<bool> g_crawl_requested{false};
@@ -634,6 +646,28 @@ static std::vector<float> embed_text(const std::string& text, const TomedoConfig
 // ============================================================
 // VectorStore — hnswlib (ANN) + SQLite (persistence + text)
 // ============================================================
+//
+// Two-layer storage:
+//   • SQLite table "chunks": persistent storage of (source, patient_id, text,
+//     embedding BLOB, updated_at).  This is the authoritative store — it
+//     survives restarts and is the source-of-truth for text retrieval.
+//   • hnswlib HierarchicalNSW: in-memory Approximate Nearest Neighbour (ANN)
+//     index built from the SQLite embeddings at startup.  Provides O(log N)
+//     query latency (<10 ms for 50 k vectors).  hnswlib labels == SQLite row IDs
+//     so text can be fetched directly after ANN search.
+//
+// Thread safety:
+//   All public methods are guarded by mutex_.  The rebuild_index() call in
+//   main() runs before any other threads start and therefore does NOT lock.
+//
+// HNSW tuning constants (file scope):
+//   HNSW_M        = 16   — number of bidirectional links per element
+//   HNSW_EF_BUILD = 200  — construction beam width (higher = better recall)
+//   HNSW_EF_QUERY = 50   — query beam width (higher = better recall, slower)
+//
+// Encoding: embeddings are stored as raw little-endian float32 arrays in BLOB
+// columns.  Dimension is inferred from the first blob encountered; a mismatch
+// (e.g. after model change) is logged and the offending row is skipped.
 
 struct QueryResult {
     std::string text;
@@ -933,6 +967,22 @@ VectorStore g_vector_store;
 // ============================================================
 // CallerStore — thread-safe in-memory caller identity tracking
 // ============================================================
+//
+// Lifecycle per call:
+//   1. sip-client-main detects an incoming call and POSTs /caller with the
+//      call_id and raw phone number string from the SIP From: header.
+//   2. CallerStore::register_caller() creates a PENDING entry.
+//   3. ResolveQueue dispatches a background lookup against the local
+//      phone_index SQLite table (populated by the crawl thread).
+//   4. CallerStore::update() sets status to FOUND/NOT_FOUND/ERROR and fills
+//      name/patient_id when a match is found.
+//   5. llama-service GETs /caller/{call_id} to retrieve the identity before
+//      building the dynamic system prompt.
+//   6. sip-client-main DELETEs /caller/{call_id} on call tear-down.
+//
+// TTL: entries expire after 1 hour (TTL_SECONDS) regardless of DELETE, as a
+// safety net for calls that did not send a DELETE (e.g. crash).  expire_old()
+// is called by the expiry_thread every EXPIRY_CHECK_INTERVAL_S seconds.
 
 enum class LookupStatus { PENDING, FOUND, NOT_FOUND, ERROR };
 
@@ -1685,6 +1735,20 @@ static std::vector<float> embed_text(const std::string& text, const TomedoConfig
 // ============================================================
 // Text chunker (UTF-8 aware)
 // ============================================================
+//
+// chunk_text() splits a patient context document into overlapping windows
+// suitable for embedding.  Splitting is done on sentence boundaries (., !, ?,
+// \n) to avoid cutting mid-sentence.
+//
+// Token estimation: utf8_codepoint_count(text) / 4 — counts Unicode codepoints
+// rather than bytes.  This is important for German text where ä/ö/ü/ß are
+// 2-byte UTF-8 sequences; using text.size()/4 would over-count and produce
+// chunks that are too small.
+//
+// Default parameters (configurable via --chunk-size and --overlap argv flags):
+//   chunk_tokens = 512   — target window size in estimated tokens
+//   overlap_tokens = 64  — how many tokens from the previous chunk are
+//                          prepended to the next chunk for context continuity
 
 static size_t utf8_codepoint_count(const char* s, size_t len) {
     size_t count = 0;
@@ -1767,6 +1831,21 @@ static std::vector<std::string> chunk_text(const std::string& text,
 // ============================================================
 // Phone index (local SQLite table for phone -> patient mapping)
 // ============================================================
+//
+// The Tomedo REST API has no server-side phone-number search endpoint
+// (confirmed: searchByAttributes?telefonNummern=true returns an empty dict).
+// Instead, during each crawl the phone numbers of every patient are stored in
+// the local "phone_index" SQLite table.  Caller lookup at call time is then a
+// fast local LIKE query.
+//
+// Normalisation: all phone numbers are stored as digit-only strings (non-digit
+// characters stripped).  Lookups use a suffix LIKE match ('%' || digits || '%')
+// to handle varying area-code formats (e.g. "07383-942735" stored as "07383942735"
+// matches a query for "942735").
+//
+// Schema:
+//   phone_index(id PK, phone TEXT, patient_id INTEGER, name TEXT, vorname TEXT)
+//   Unique on (phone, patient_id) — upsert replaces on conflict.
 
 static bool phone_index_init(sqlite3* db) {
     const char* sql =
@@ -1847,6 +1926,35 @@ static PhoneLookupResult phone_index_lookup(sqlite3* db, const std::string& phon
 // ============================================================
 // Tomedo patient enumeration + context fetch
 // ============================================================
+//
+// All Tomedo API calls use mutual TLS (client certificate) over HTTPS port 8443.
+// The certificate is a self-signed RSA-4096 identity that the Tomedo macOS client
+// installs automatically in the user's Keychain on first server connection.
+// Export procedure (one-time):
+//   security export -k ~/Library/Keychains/login.keychain-db \
+//     -t identities -f pkcs12 -P "" -o /tmp/tomedo_client.p12
+//   openssl pkcs12 -legacy -in /tmp/tomedo_client.p12 -nodes \
+//     -passin pass:"" -out /etc/tomedo-crawl/client.pem
+//
+// enumerate_patients():
+//   GET /tomedo_live/patient?flach=true — returns all ~15 k patients in one
+//   response (no server-side pagination).  Phone numbers are NOT in the flat
+//   list; they are fetched per-patient in a separate call.
+//
+// fetch_patient_context_full():
+//   Composes a natural-language document from three Tomedo endpoints:
+//     GET /patient/{id}                            — contact data + phones
+//     GET /patient/{id}/patientenDetailsRelationen — diagnoses (up to 20)
+//     GET /patient/{id}/patientenDetailsRelationen/medikamentenPlan — medications
+//     GET /patient/{id}/termine?flach=true         — appointments
+//   Phone numbers are also written into the phone_index table for lookup.
+//
+// Context document format (per patient):
+//   Patient: {vorname} {nachname} (ID {ident}), geb. {geburtsDatum}
+//   Diagnosen: {diagnosen[].freitext} [max 20]
+//   Medikamente: {nameBeiVerordnung} {dosierungFrueh}-{mittag}-{abend}
+//   Nächster Termin: {beginn_formatted} ({info})
+//   Telefon: {telefon}
 
 struct PatientRef {
     int ident = 0;
@@ -2127,6 +2235,30 @@ static PatientContext fetch_patient_context_full(int patient_id, const TomedoCon
 // ============================================================
 // Unified crawl: RAG chunks + phone index in a single pass
 // ============================================================
+//
+// run_full_crawl() is the main ingestion pipeline.  It is called:
+//   • Once immediately at startup (before the HTTP server enters its poll loop).
+//   • Periodically by the crawl_thread at crawl_interval_sec (default: daily at
+//     02:00 as computed by main()).
+//   • On demand when POST /crawl/trigger is received.
+//
+// For each patient in the flat list:
+//   1. fetch_patient_context_full() — makes up to 4 HTTPS calls to Tomedo.
+//   2. index_patient_phones() — writes phone digits to the phone_index table.
+//   3. chunk_text() — splits the context document into overlapping windows.
+//   4. embed_text() — calls Ollama /api/embeddings for each chunk.
+//   5. VectorStore::upsert() — writes the embedding to SQLite + hnswlib.
+//
+// Batching: patients are processed in groups of 100 with a 10 ms sleep between
+// batches to avoid overwhelming the Tomedo server.
+//
+// since_ts (epoch ms): when non-zero, only patients with zuletztAufgerufen
+// > since_ts are re-fetched.  Patients not re-fetched retain their existing
+// vectors from the previous crawl.  since_ts is only advanced after a clean
+// (non-interrupted, zero-skipped) crawl to ensure no patient is silently missed.
+//
+// Returns CrawlStats.interrupted = true when s_quit is set mid-crawl.
+// In that case the caller should NOT advance since_ts.
 
 static void index_patient_phones(sqlite3* db, int patient_id,
                                   const std::string& nachname,
@@ -2239,6 +2371,18 @@ static void resolve_caller(int call_id, const std::string& phone) {
 // ============================================================
 // ResolveQueue — bounded single-background-thread worker queue
 // ============================================================
+//
+// Serialises all phone-lookup work on a single worker thread so that the
+// Mongoose event loop is never blocked by SQLite queries.
+//
+// The queue is bounded (RESOLVE_QUEUE_MAX_PENDING = 64) to shed load when
+// many simultaneous calls arrive faster than lookups can complete.  Excess
+// enqueue() calls immediately return false, and the caller is registered with
+// status ERROR so llama-service proceeds without RAG enrichment rather than
+// stalling.
+//
+// Shutdown is graceful: all pending jobs are drained before the thread exits,
+// so no registered caller is left in PENDING state at teardown.
 
 class ResolveQueue {
     struct Job { int call_id; std::string phone; };
@@ -2346,6 +2490,23 @@ static std::string build_query_json(const std::vector<QueryResult>& results) {
 // ============================================================
 // QueryWorkerPool — embeds text off the Mongoose event-loop thread
 // ============================================================
+//
+// /query requests require an Ollama embedding call (~50-200 ms) which must not
+// block the single-threaded Mongoose event loop.  Instead:
+//   1. http_handler() enqueues the job and returns immediately (connection stays
+//      open — Mongoose will buffer the response).
+//   2. A worker thread calls embed_text() + VectorStore::query().
+//   3. The result is stored in g_pending_responses (keyed by mg_connection::id).
+//   4. mg_wakeup() signals the Mongoose event loop, which picks up the result
+//      in the MG_EV_WAKEUP branch and sends the HTTP response.
+//
+// If the client disconnects before the worker finishes, the connection id is
+// moved from g_inflight_query_ids to g_cancelled_queries so the worker silently
+// discards its result instead of writing to a dead connection.
+//
+// The pool is bounded at QUERY_POOL_MAX_QUEUE = 32 concurrent jobs; overflow
+// returns HTTP 429.  QUERY_POOL_WORKERS threads are started in main() using
+// the value from argv or defaulting to 4.
 
 static constexpr size_t QUERY_POOL_MAX_QUEUE = 32;
 
@@ -2437,6 +2598,29 @@ QueryWorkerPool g_query_pool;
 // ============================================================
 // Mongoose HTTP server
 // ============================================================
+//
+// tomedo-crawl exposes a plain HTTP REST API on api_host:api_port (default
+// 127.0.0.1:13181).  All endpoints return application/json.  TLS is enabled
+// when prodigy_tls::ensure_certs() returns valid cert/key PEM strings (managed
+// by tls_cert.h, shared with the other Prodigy services).
+//
+// Endpoint summary:
+//   GET  /health            — service status, doc count, Ollama state
+//   GET/POST /query         — RAG semantic search (async via QueryWorkerPool)
+//   POST /caller            — register incoming call + phone number
+//   GET  /caller/{id}       — poll lookup status for a call
+//   DELETE /caller/{id}     — deregister call on hangup
+//   POST /crawl/trigger     — request an immediate crawl (sets atomic flag)
+//   POST /wipe              — delete all vectors and rebuild empty index
+//   GET  /ollama/models     — list models from Ollama /api/tags
+//   POST /ollama/start      — start ollama serve (if not already running)
+//   POST /ollama/stop       — kill the tracked ollama process
+//   POST /ollama/pull       — background ollama pull {model}
+//   GET  /config            — read all config keys from SQLite
+//   POST /config            — write one or more config keys to SQLite
+//
+// Security: the listener binds to api_host (127.0.0.1 by default).  No
+// authentication is required — the loopback-only binding is the security model.
 
 void http_handler(struct mg_connection *c, int ev, void *ev_data) {
     if (ev == MG_EV_ACCEPT) {
@@ -2711,6 +2895,30 @@ struct HttpServer {
 };
 
 } // namespace
+
+// ============================================================
+// main() — startup sequence
+// ============================================================
+//
+// 1. Parse argv[1] as the database path (default: "tomedo-crawl.db").
+// 2. load_config_from_db() — reads config from the encrypted SQLite DB.
+// 3. LogForwarder initialisation — UDP datagrams to frontend log port 22022.
+// 4. Spawn ollama_init_thread — checks ollama installation/running state in
+//    parallel with the rest of startup to avoid a sequential delay.
+// 5. VectorStore::open() + rebuild_index() — open the encrypted DB and
+//    reconstruct the hnswlib ANN index from persisted embeddings.
+// 6. Active embedding model check — if the configured model changed since the
+//    last run, the vector store is wiped to prevent dimension mismatches.
+// 7. phone_index_init() — ensure the phone lookup table exists.
+// 8. ResolveQueue + QueryWorkerPool — start background worker threads.
+// 9. CallerStore expiry thread — calls expire_old() every 5 minutes.
+// 10. HttpServer::start() — bind the Mongoose listener before the crawl so
+//     /health is available immediately.
+// 11. Crawl thread — runs the first crawl immediately, then sleeps until the
+//     next scheduled time or a /crawl/trigger request arrives.
+// 12. Wait for s_quit (SIGINT/SIGTERM), then orderly shutdown:
+//     QueryWorkerPool → HttpServer → ResolveQueue → crawl thread → expiry
+//     thread → sqlite close → cleanup SSL.
 
 int main(int argc, char** argv) {
     signal(SIGINT,  sig_handler);

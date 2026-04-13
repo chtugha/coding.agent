@@ -228,7 +228,45 @@ Results are stored in multiple DB tables depending on test type:
 - `tts_validation_tests`: TTS round-trip validation
 - `test_runs`: Test binary execution history (exit code, log file)
 
-## 9. Security Model
+## 9. tomedo-crawl / RAG Integration
+
+### Frontend-Side Architecture
+
+The frontend communicates with tomedo-crawl (port 13181) via a set of `/api/rag/*` proxy endpoints.  It also maintains configuration in the tomedo-crawl encrypted SQLite database (`tomedo-crawl.db`) via `rag_db_set_config()` / `rag_db_sync_all_config()`.
+
+### New API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/rag/health` | Proxy GET 13181/health |
+| GET/POST | `/api/rag/config` | Read/write tomedo-crawl config in its SQLite DB |
+| POST | `/api/rag/cert_upload` | Receive PEM file upload, write to disk, update config |
+| POST | `/api/rag/trigger_crawl` | Proxy POST 13181/crawl/trigger |
+| GET | `/api/rag/ollama/models` | Proxy GET 13181/ollama/models |
+| POST | `/api/rag/ollama/start` | Proxy POST 13181/ollama/start |
+| POST | `/api/rag/ollama/stop` | Proxy POST 13181/ollama/stop |
+| POST | `/api/rag/ollama/pull` | Proxy POST 13181/ollama/pull |
+| POST | `/api/rag/wipe_vectors` | Proxy POST 13181/wipe |
+
+### `rag_db_sync_all_config()`
+
+Called by `handle_start_service()` before starting TOMEDO_CRAWL_SERVICE.  Reads all RAG-related settings from the frontend's `settings` SQLite table and writes them to the tomedo-crawl database's `config` table, ensuring the service always starts with the latest frontend configuration.
+
+### Dashboard Integration
+
+Two additional pipeline nodes are rendered for tomedo-crawl:
+- **RAG** node (`pipeline-node-TOMEDO_CRAWL_SERVICE`, purple border): reflects tomedo-crawl process status.
+- **Ollama** node (`pipeline-node-OLLAMA`, orange border): reflects `ollama_running` from the `/health` response.
+
+The `ragDashInfo` span shows real-time indexed document count and last crawl time.
+
+An overlay (`ollamaAlertOverlay`) appears when `/health` reports `ollama_installed: false`, giving the user **OK** (dismiss) and **Install** (trigger `ollama` download + install) options.
+
+### Service Arguments Builder
+
+The TOMEDO_CRAWL config panel generates the `service arguments` string from UI controls rather than free-text input.  `buildRagArgs()` is called by every control's `onchange` handler and writes to `svcDetailArgs`.
+
+## 10. Security Model
 
 ### Local-Only Access
 

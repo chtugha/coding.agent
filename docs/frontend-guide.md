@@ -48,17 +48,29 @@ The sidebar is organized into four sections:
 
 The default landing page. Shows:
 
-- **Pipeline Overview**: A horizontal node chain (SIP > IAP > VAD > ASR > LLM > TTS > OAP) with live status dots. Green = online, grey = offline, red = error.
+- **Pipeline Overview**: A horizontal node chain (SIP > IAP > VAD > ASR > LLM > TTS > OAP > **RAG** > **Ollama**) with live status dots. Green = online, grey = offline, red = error.
 - **Health Badge**: "Healthy" (all services up), "Degraded" (some down), or "Offline" (most/all down).
 - **Metric Cards**: Services Online, Running Tests, Tests Passed (with fail count), and Uptime.
 - **Activity Feed**: Last 10 log entries from all services.
 - **Quick Actions**: Start All Services, Stop All Services, Restart Failed.
+- **Ollama alert**: if Ollama is not installed, a modal overlay appears with **OK** (dismiss) and **Install** (download and install Ollama) buttons.
 
 Data refreshes every 3 seconds while the dashboard is visible.
 
 ### Pipeline Section
 
 **Services**: View and manage all pipeline services. Each service card shows status, PID, uptime. Actions: Start, Stop, Restart. Click a service for detailed config (arguments, log level).
+
+When the **TOMEDO_CRAWL** service card is selected, an expanded configuration panel appears:
+- **Tomedo Server**: IP/hostname and HTTPS port of the Tomedo EMR server.
+- **Client Certificate (PEM)**: upload the mTLS client certificate exported from macOS Keychain.
+- **Ollama Subservice**: status indicator, Start/Stop/Restart buttons for the local Ollama process.
+- **Ollama URL**: base URL for the Ollama API (default `http://127.0.0.1:11434`).
+- **Embedding Model**: dropdown populated from `ollama list`; pull new models from the text field + Pull button.
+- **Crawl Schedule**: choose between a daily fixed time (default 02:00) or a repeat interval (in minutes).
+- **Service Arguments**: clickable buttons for common flags (Verbose, Skip Initial Crawl, Phone Index Only, No Embedding) plus numeric controls for Top-K, Chunk size, Overlap, and Worker threads.
+- **Save Config**: persists all settings to the encrypted SQLite config database.
+- **Trigger Crawl**: immediately starts a background crawl.
 
 **Live Logs**: Real-time log stream via Server-Sent Events. Filter by service using the dropdown. Logs auto-scroll with the latest entries.
 

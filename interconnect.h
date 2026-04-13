@@ -137,6 +137,20 @@ inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
     return out_len;
 }
 
+// ServiceType — identifies each process in the Prodigy system.
+//
+// Pipeline services (is_pipeline_service() == true):
+//   SIP_CLIENT, INBOUND_AUDIO_PROCESSOR, VAD_SERVICE, WHISPER_SERVICE,
+//   LLAMA_SERVICE, KOKORO_SERVICE, NEUTTS_SERVICE, OUTBOUND_AUDIO_PROCESSOR
+//
+// Sidecar services (is_pipeline_service() == false):
+//   FRONTEND (13160) — web UI and log aggregator; not in the audio path.
+//   TOMEDO_CRAWL_SERVICE (13180) — RAG sidecar; connects to the Tomedo EMR
+//     server and populates a local vector store.  llama-service queries it
+//     via plain HTTP (GET /query, GET /caller/{id}) to retrieve patient context
+//     before inference.  It is NOT wired into the interconnect pipeline graph
+//     (no up/downstream_of() entry, no Packet frames) — all communication is
+//     via its own REST API at port 13181.
 enum class ServiceType : uint8_t {
     SIP_CLIENT = 1,
     INBOUND_AUDIO_PROCESSOR = 2,
@@ -147,7 +161,7 @@ enum class ServiceType : uint8_t {
     OUTBOUND_AUDIO_PROCESSOR = 6,
     FRONTEND = 7,
     NEUTTS_SERVICE = 9,
-    TOMEDO_CRAWL_SERVICE = 10
+    TOMEDO_CRAWL_SERVICE = 10   // RAG sidecar; REST API only, not in pipeline graph
 };
 
 inline bool is_pipeline_service(ServiceType type) {

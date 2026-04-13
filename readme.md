@@ -2,25 +2,30 @@
 
 A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. Prodigy integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** or **NeuTTS** (TTS) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal) with no PyTorch runtime dependency.
 
+An optional **RAG sidecar** (`tomedo-crawl`) connects to a [Tomedo](https://www.tomedo.de/) electronic medical records (EMR) server, crawls patient data, and feeds LLaMA with per-caller context so the AI can greet patients by name and give medically-informed responses.
+
 ## Architecture
 
 ```
                          Telephony Network
                               |
-                         [SIP Client]
-                          /        \
-                    RTP in          RTP out
-                        |              ^
-                       IAP            OAP
-                        |              ^
-                       VAD          Kokoro / NeuTTS
-                        |              ^
-                     Whisper -----> LLaMA
+                         [SIP Client] ──────────────────────────► tomedo-crawl
+                          /        \           POST /caller           (port 13181)
+                    RTP in          RTP out                              │
+                        |              ^                    GET /caller  │
+                       IAP            OAP              GET /query        │
+                        |              ^                                 ▼
+                       VAD          Kokoro / NeuTTS               [Ollama embed]
+                        |              ^                          [Vector store ]
+                     Whisper ────► LLaMA ◄──────────────────────────────┘
+                                                    RAG context injection
 
                      [Frontend] (web UI + log aggregation)
 ```
 
 The pipeline is a linear chain of C++ programs. Every adjacent pair communicates over two persistent TCP connections (management + data). The frontend manages all services and provides a web UI at `http://0.0.0.0:8080/`.
+
+`tomedo-crawl` is a **sidecar** — it is not in the audio data path. Communication with other pipeline services is via its own HTTP REST API (port 13181).
 
 ## Requirements
 
@@ -135,6 +140,7 @@ All services bind to `127.0.0.1`:
 | Kokoro / NeuTTS | 13140 | 13141 | 13142 | Mutually exclusive |
 | OAP | 13150 | 13151 | 13152 | |
 | Frontend | - | - | - | HTTP 8080, Log UDP 22022 |
+| tomedo-crawl | 13180 | **13181** | 13182 | REST API on 13181; 13180/13182 reserved |
 
 ---
 
@@ -471,6 +477,36 @@ Central control plane. Serves the web UI, manages service lifecycles, aggregates
 - SIP management: add/remove SIP lines, view RTP statistics
 - Beta testing page: audio injection into live calls via Test SIP Provider
 - Test infrastructure: ASR accuracy tests, pipeline WER tests, LLaMA quality tests, codec quality tests
+- **tomedo-crawl** configuration: Tomedo server IP/port, mTLS certificate upload, Ollama subservice management, crawl schedule, vector store status
+
+---
+
+### 10. tomedo-crawl (`bin/tomedo-crawl`)
+
+RAG sidecar that crawls a Tomedo EMR server and provides per-patient context to the LLaMA service.
+
+**Components:**
+- **Tomedo crawler**: fetches patient list, diagnoses, medications, appointments, and phone numbers via mutual TLS HTTPS.
+- **Vector store**: hnswlib HNSW in-memory ANN index + SQLite persistence (encrypted with SQLCipher).
+- **Phone index**: local SQLite table mapping digit-normalised phone numbers to patient IDs; enables sub-100 ms caller identification from a SIP phone number.
+- **Ollama client**: calls `POST /api/embeddings` to generate float32 embeddings for each text chunk.
+- **HTTP API** (port 13181): serves `/health`, `/query`, `/caller`, `/crawl/trigger`, `/ollama/*`, `/config`.
+
+**Command-Line Parameters:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `[db-path]` | `tomedo-crawl.db` | Path to the encrypted SQLite database |
+| `--verbose` | off | Enable DEBUG log level |
+| `--skip-initial-crawl` | off | Do not crawl at startup |
+| `--phone-only` | off | Update phone index only, skip embeddings |
+| `--no-embed` | off | Index phone numbers without generating embeddings |
+| `--top-k N` | `3` | Default result count for /query |
+| `--chunk-size N` | `512` | Text chunk size in estimated tokens |
+| `--overlap N` | `64` | Token overlap between consecutive chunks |
+| `--workers N` | `4` | Embedding worker thread count |
+
+See [`docs/tomedo-crawl.md`](docs/tomedo-crawl.md) for the full API reference, database schema, Tomedo API details, and security model.
 
 ---
 
