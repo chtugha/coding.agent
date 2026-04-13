@@ -38,20 +38,22 @@ setup_macos_env
 CMAKE_GEN=""
 if command -v ninja >/dev/null 2>&1; then CMAKE_GEN="-G Ninja"; fi
 
+NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
 # Build whisper-cpp
 log "Configuring whisper-cpp..."
 cmake $CMAKE_GEN -S "$ROOT_DIR/whisper-cpp" -B "$ROOT_DIR/whisper-cpp/build" -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF -DWHISPER_COREML=ON -DGGML_METAL=ON -DGGML_CCACHE=OFF -DGGML_OPENMP=OFF \
   -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF
-log "Building whisper-cpp..."
-cmake --build "$ROOT_DIR/whisper-cpp/build" --config Release -j 6
+log "Building whisper-cpp (-j${NCPU})..."
+cmake --build "$ROOT_DIR/whisper-cpp/build" --config Release -j "${NCPU}"
 
 # Build llama-cpp
 log "Configuring llama-cpp..."
 cmake $CMAKE_GEN -S "$ROOT_DIR/llama-cpp" -B "$ROOT_DIR/llama-cpp/build" -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_OPENMP=OFF
-log "Building llama-cpp (target: llama)..."
-cmake --build "$ROOT_DIR/llama-cpp/build" --config Release --target llama -j 6
+log "Building llama-cpp (target: llama, -j${NCPU})..."
+cmake --build "$ROOT_DIR/llama-cpp/build" --config Release --target llama -j "${NCPU}"
 
 log "Done. Expected artifacts:"
 log "  - $ROOT_DIR/whisper-cpp/build/src/libwhisper.a"

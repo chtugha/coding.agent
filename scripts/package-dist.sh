@@ -42,7 +42,7 @@ rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"/{bin,lib,models,espeak-ng-data}
 
 log "Copying binaries..."
-SERVICES=(sip-client inbound-audio-processor outbound-audio-processor whisper-service llama-service kokoro-service)
+SERVICES=(sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service kokoro-service neutts-service frontend tomedo-crawl)
 for svc in "${SERVICES[@]}"; do
     src="$ROOT_DIR/bin/$svc"
     if [[ ! -f "$src" ]]; then
@@ -169,6 +169,24 @@ if [[ -d "$KOKORO_SRC" ]]; then
     log "  Kokoro models ($(du -sh "$DIST_DIR/models/kokoro-german" | cut -f1))"
 fi
 
+NEUTTS_SRC="$MODELS_SRC/neutts-nano-german"
+if [[ -d "$NEUTTS_SRC" ]]; then
+    mkdir -p "$DIST_DIR/models/neutts-nano-german"
+    for f in "$NEUTTS_SRC"/neutts-nano-german-Q4_0.gguf "$NEUTTS_SRC"/ref_codes.bin "$NEUTTS_SRC"/ref_text.txt; do
+        [[ -f "$f" ]] && cp "$f" "$DIST_DIR/models/neutts-nano-german/"
+    done
+    if [[ -d "$NEUTTS_SRC/neucodec_decoder.mlmodelc" ]]; then
+        cp -R "$NEUTTS_SRC/neucodec_decoder.mlmodelc" "$DIST_DIR/models/neutts-nano-german/"
+    fi
+    log "  NeuTTS models ($(du -sh "$DIST_DIR/models/neutts-nano-german" | cut -f1))"
+fi
+
+if [[ -d "$ROOT_DIR/bin/tls" ]]; then
+    mkdir -p "$DIST_DIR/tls"
+    cp -R "$ROOT_DIR/bin/tls/"* "$DIST_DIR/tls/" 2>/dev/null || true
+    log "  TLS certificates copied"
+fi
+
 cat > "$DIST_DIR/run.sh" << 'RUNEOF'
 #!/usr/bin/env bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -179,7 +197,9 @@ export WHISPERTALK_MODELS_DIR="$DIR/models"
 if [[ $# -eq 0 ]]; then
     echo "Prodigy Distribution"
     echo "Usage: $0 <service> [args...]"
-    echo "Services: sip-client, inbound-audio-processor, whisper-service, llama-service, kokoro-service, outbound-audio-processor"
+    echo "Services: sip-client, inbound-audio-processor, vad-service, outbound-audio-processor,"
+    echo "          whisper-service, llama-service, kokoro-service, neutts-service,"
+    echo "          frontend, tomedo-crawl"
     exit 0
 fi
 

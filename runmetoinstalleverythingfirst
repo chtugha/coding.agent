@@ -13,7 +13,7 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "This script will:"
     echo "  1. Check macOS + Apple Silicon"
     echo "  2. Install Homebrew (if not present)"
-    echo "  3. Install system deps (cmake, wget, git, espeak-ng, ccache)"
+    echo "  3. Install system deps (cmake, wget, git, espeak-ng, ccache, openssl@3)"
     echo "  4. Install Miniconda (if not present)"
     echo "  5. Create Python environment with PyTorch, CoreML tools"
     echo "  6. Clone/update whisper.cpp from GitHub (latest)"
@@ -25,6 +25,7 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  12. Export Kokoro TTS models (CoreML duration + decoder)"
     echo "  13. Download NeuTTS Nano German model (GGUF + NeuCodec ONNX→CoreML)"
     echo "  14. Prepare NeuTTS reference voice (encode audio + phonemize text)"
+    echo "  15. Check Ollama installation (optional, for tomedo-crawl RAG embeddings)"
     echo ""
     echo "Requirements:"
     echo "  - macOS (Apple Silicon M1/M2/M3/M4)"
@@ -668,6 +669,32 @@ verify_installation() {
     fi
 }
 
+check_ollama() {
+    step "Checking Ollama (for tomedo-crawl RAG embeddings)"
+    if command -v ollama &> /dev/null; then
+        info "Ollama installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
+        local list_output
+        if list_output=$(ollama list 2>/dev/null); then
+            local has_embed
+            has_embed=$(echo "$list_output" | grep -i "embeddinggemma" || true)
+            if [ -n "$has_embed" ]; then
+                info "Embedding model 'embeddinggemma:300m' already available"
+            else
+                warn "Embedding model 'embeddinggemma:300m' not found."
+                warn "  tomedo-crawl needs it for RAG. Pull with: ollama pull embeddinggemma:300m"
+            fi
+        else
+            warn "Ollama is installed but not running. Start with: ollama serve"
+            warn "  Then pull the embedding model: ollama pull embeddinggemma:300m"
+        fi
+    else
+        warn "Ollama not installed. tomedo-crawl RAG service requires Ollama for embeddings."
+        warn "  Install from: https://ollama.com/download"
+        warn "  Then pull: ollama pull embeddinggemma:300m"
+        warn "  (This is optional — all other services work without Ollama)"
+    fi
+}
+
 install_git_hooks() {
     step "Installing git sync helpers"
 
@@ -733,6 +760,7 @@ main() {
     convert_neucodec_to_coreml
     prepare_neutts_reference
 
+    check_ollama
     install_git_hooks
     verify_installation
 }

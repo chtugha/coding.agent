@@ -79,6 +79,8 @@ setup_macos_env
 CMAKE_GEN=""
 if command -v ninja >/dev/null 2>&1; then CMAKE_GEN="-G Ninja"; fi
 
+NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
 WHISPER_LIB="$ROOT_DIR/whisper-cpp/build/src/libwhisper.a"
 LLAMA_LIB="$ROOT_DIR/llama-cpp/build/src/libllama.a"
 PIPER_LIB="$ROOT_DIR/libpiper/build/libpiper.dylib"
@@ -158,7 +160,7 @@ build_whisper(){
   # shellcheck disable=SC2086
   cmake $CMAKE_GEN "${cmake_opts[@]}"
   log "Building whisper-cpp..."
-  cmake --build "$ROOT_DIR/whisper-cpp/build" --config Release -j 6
+  cmake --build "$ROOT_DIR/whisper-cpp/build" --config Release -j "${NCPU}"
 }
 
 build_llama(){
@@ -177,7 +179,7 @@ build_llama(){
   # shellcheck disable=SC2086
   cmake $CMAKE_GEN "${cmake_opts[@]}"
   log "Building llama-cpp (target: llama)..."
-  cmake --build "$ROOT_DIR/llama-cpp/build" --config Release --target llama -j 6
+  cmake --build "$ROOT_DIR/llama-cpp/build" --config Release --target llama -j "${NCPU}"
 }
 
 build_piper(){
@@ -316,6 +318,40 @@ if [[ ! -f "$LLAMA_LIB" ]]; then
   log "ERROR: libllama not found at $LLAMA_LIB"; exit 1
 fi
 
+# Build SQLCipher amalgamation if not present
+SQLCIPHER_DIR="$ROOT_DIR/third_party/sqlcipher"
+if [[ ! -f "$SQLCIPHER_DIR/sqlite3.c" ]]; then
+    log "SQLCipher amalgamation not found — building from source..."
+    SQLCIPHER_SRC="$SQLCIPHER_DIR/sqlcipher-src"
+    if [[ ! -d "$SQLCIPHER_SRC/.git" ]]; then
+        mkdir -p "$(dirname "$SQLCIPHER_SRC")"
+        git clone --depth=1 https://github.com/sqlcipher/sqlcipher.git "$SQLCIPHER_SRC"
+    fi
+    openssl_prefix=$(brew --prefix openssl@3 2>/dev/null) || true
+    if [[ -z "$openssl_prefix" || ! -d "$openssl_prefix/include" ]]; then
+        log "ERROR: openssl@3 not found. Run: brew install openssl@3"; exit 1
+    fi
+    if ! command -v tclsh &>/dev/null; then
+        log "ERROR: tclsh not found. Install Xcode CLT: xcode-select --install"; exit 1
+    fi
+    (
+        cd "$SQLCIPHER_SRC"
+        ./configure --with-tempstore=yes \
+            CPPFLAGS="-DSQLITE_HAS_CODEC -I${openssl_prefix}/include" \
+            LDFLAGS="-L${openssl_prefix}/lib" > /tmp/sqlcipher-configure.log 2>&1 \
+            || { cat /tmp/sqlcipher-configure.log; log "ERROR: SQLCipher ./configure failed"; exit 1; }
+        make sqlite3.c -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" > /dev/null 2>&1 \
+            || { log "ERROR: SQLCipher make sqlite3.c failed"; exit 1; }
+    )
+    mkdir -p "$SQLCIPHER_DIR"
+    cp "$SQLCIPHER_SRC/sqlite3.c" "$SQLCIPHER_DIR/sqlite3.c"
+    cp "$SQLCIPHER_SRC/sqlite3.h" "$SQLCIPHER_DIR/sqlite3.h"
+    [ -f "$SQLCIPHER_SRC/sqlcipher.h" ] && cp "$SQLCIPHER_SRC/sqlcipher.h" "$SQLCIPHER_DIR/sqlcipher.h" || true
+    log "SQLCipher amalgamation built"
+else
+    log "SQLCipher amalgamation already present"
+fi
+
 # Top-level build
 log "Configuring top-level project..."
 piper_flag="OFF"
@@ -332,7 +368,7 @@ cmake $CMAKE_GEN -S "$ROOT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_PIPER_SERVICE="$piper_flag"
 
 log "Building targets..."
-cmake --build "$BUILD_DIR" --config Release -j 6
+cmake --build "$BUILD_DIR" --config Release -j "${NCPU}"
 
 log "Binaries in: $ROOT_DIR/bin"
 
