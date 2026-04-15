@@ -44,6 +44,7 @@ whisper-sip-client
 *.db
 *.db-shm
 *.db-wal
+*.db.bak*
 *.sqlite
 *.sqlite3
 

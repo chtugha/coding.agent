@@ -69,6 +69,8 @@ e.classList.toggle('active',e.dataset.page===p);
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
   if(p==='credentials'){loadCredentials();}
+  if(p==='certificates'){fetchCerts();}
+  if(p==='login'){fetchLoginConfig();}
 }
 
 function fetchStatus(){
@@ -3785,6 +3787,219 @@ window.accuracyChart=new Chart(ctx,{
   }
 });
   }).catch(e=>console.error('Failed to load accuracy trend:',e));
+}
+
+// ─── Certificates page ────────────────────────────────────────────────────
+function fetchCerts(){
+  fetch('/api/certs/list').then(r=>r.json()).then(d=>{
+    const sel=document.getElementById('certSelect');
+    sel.innerHTML='';
+    (d.certs||[]).forEach(cert=>{
+      const opt=document.createElement('option');
+      opt.value=cert.name;
+      opt.textContent=cert.name+(cert.active?' (active)':'');
+      if(cert.active)opt.selected=true;
+      sel.appendChild(opt);
+    });
+    const active=(d.certs||[]).find(c=>c.active);
+    const info=document.getElementById('certActiveInfo');
+    const warn=document.getElementById('certWarningBanner');
+    if(active){
+      const exp=active.expiry>0?new Date(active.expiry*1000).toLocaleDateString():'unknown';
+      const days=active.days_remaining;
+      info.textContent=`Type: ${active.type} · Expires: ${exp} (${days>=0?days+' days':'EXPIRED'})`;
+      if(days<0){
+        warn.style.display='block';
+        warn.textContent='WARNING: Active certificate has expired. Please generate or upload a new certificate.';
+      } else if(days<7){
+        warn.style.display='block';
+        warn.textContent=`WARNING: Active certificate expires in ${days} day(s). It will be auto-refreshed if self-refreshing is enabled.`;
+      } else {
+        warn.style.display='none';
+      }
+      const selfRefreshEl=document.getElementById('certSelfRefresh');
+      if(selfRefreshEl){
+        const isUploaded=(active.type==='uploaded'||active.type==='custom');
+        selfRefreshEl.disabled=isUploaded;
+        selfRefreshEl.parentElement.style.opacity=isUploaded?'0.4':'1';
+      }
+    }
+    const sr=document.getElementById('certSelfRefresh');
+    const hr=document.getElementById('certHttpRedirect');
+    if(sr)sr.checked=(d.self_refresh==='1');
+    if(hr)hr.checked=(d.http_redirect==='1');
+  }).catch(e=>console.error('fetchCerts:',e));
+}
+
+function selectActiveCert(){
+  const name=document.getElementById('certSelect').value;
+  fetch('/api/certs/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok)fetchCerts();
+      else showToast('Error: '+(d.error||'unknown'));
+    }).catch(e=>console.error('selectActiveCert:',e));
+}
+
+function generateSelfSignedCert(){
+  const btn=event.target;
+  btn.disabled=true;
+  const st=document.getElementById('certGenStatus');
+  st.textContent='Generating...';
+  fetch('/api/certs/generate',{method:'POST'}).then(r=>r.json()).then(d=>{
+    btn.disabled=false;
+    if(d.ok){
+      const exp=d.expiry>0?new Date(d.expiry*1000).toLocaleDateString():'unknown';
+      st.style.color='var(--wt-success)';
+      st.textContent='Generated: '+d.name+' (expires '+exp+')';
+      fetchCerts();
+    } else {
+      st.style.color='var(--wt-danger)';
+      st.textContent='Error: '+(d.error||'unknown');
+    }
+  }).catch(e=>{btn.disabled=false;st.style.color='var(--wt-danger)';st.textContent='Network error';});
+}
+
+function uploadCert(){
+  const certFile=document.getElementById('certFileInput').files[0];
+  const keyFile=document.getElementById('keyFileInput').files[0];
+  const st=document.getElementById('certUploadStatus');
+  if(!certFile||!keyFile){st.style.color='var(--wt-danger)';st.textContent='Select both certificate and key files';return;}
+  const fd=new FormData();
+  fd.append('cert',certFile);
+  fd.append('key',keyFile);
+  st.textContent='Uploading...';
+  fetch('/api/certs/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      st.style.color='var(--wt-success)';
+      st.textContent='Uploaded and activated: '+d.name;
+      fetchCerts();
+    } else {
+      st.style.color='var(--wt-danger)';
+      st.textContent='Error: '+(d.error||'unknown');
+    }
+  }).catch(()=>{st.style.color='var(--wt-danger)';st.textContent='Network error';});
+}
+
+function saveCertSettings(){
+  const sr=document.getElementById('certSelfRefresh');
+  const hr=document.getElementById('certHttpRedirect');
+  const body={self_refresh:sr&&sr.checked?'1':'0',http_redirect:hr&&hr.checked?'1':'0'};
+  fetch('/api/certs/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .catch(e=>console.error('saveCertSettings:',e));
+}
+
+// ─── Login page ───────────────────────────────────────────────────────────
+function fetchLoginConfig(){
+  Promise.all([
+    fetch('/api/auth/settings').then(r=>r.json()),
+    fetch('/api/auth/users').then(r=>r.json())
+  ]).then(([cfg,usr])=>{
+    const ae=document.getElementById('authEnabled');
+    if(ae)ae.checked=(cfg.auth_enabled==='1');
+    const tbody=document.getElementById('usersTableBody');
+    if(tbody){
+      tbody.innerHTML='';
+      (usr.users||[]).forEach(u=>{
+        const tr=document.createElement('tr');
+        const tdName=document.createElement('td');
+        tdName.style.cssText='padding:6px 8px;border-bottom:1px solid var(--wt-border)';
+        tdName.textContent=u.username;
+        const tdAct=document.createElement('td');
+        tdAct.style.cssText='padding:6px 8px;border-bottom:1px solid var(--wt-border);text-align:right;white-space:nowrap';
+        const btnChg=document.createElement('button');
+        btnChg.className='wt-btn wt-btn-sm wt-btn-secondary';
+        btnChg.textContent='Change Password';
+        btnChg.dataset.username=u.username;
+        btnChg.addEventListener('click',()=>showChangePwForm(u.username));
+        const btnDel=document.createElement('button');
+        btnDel.className='wt-btn wt-btn-sm wt-btn-danger';
+        btnDel.textContent='Delete';
+        btnDel.dataset.username=u.username;
+        btnDel.addEventListener('click',()=>deleteLoginUser(u.username));
+        tdAct.appendChild(btnChg);
+        tdAct.appendChild(document.createTextNode(' '));
+        tdAct.appendChild(btnDel);
+        tr.appendChild(tdName);
+        tr.appendChild(tdAct);
+        tbody.appendChild(tr);
+      });
+    }
+  }).catch(e=>console.error('fetchLoginConfig:',e));
+}
+
+function escHtml(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function toggleAuthEnabled(){
+  const ae=document.getElementById('authEnabled');
+  fetch('/api/auth/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({auth_enabled:ae.checked?'1':'0'})})
+    .then(r=>r.json()).then(d=>{if(!d.ok)showToast('Error saving auth setting');})
+    .catch(e=>console.error('toggleAuthEnabled:',e));
+}
+
+function addLoginUser(){
+  const u=document.getElementById('newUsername').value.trim();
+  const p=document.getElementById('newPassword').value;
+  const p2=document.getElementById('newPasswordConfirm').value;
+  const st=document.getElementById('addUserStatus');
+  st.textContent='';
+  if(!u){st.style.color='var(--wt-danger)';st.textContent='Username required';return;}
+  if(p.length<4){st.style.color='var(--wt-danger)';st.textContent='Password must be at least 4 characters';return;}
+  if(p!==p2){st.style.color='var(--wt-danger)';st.textContent='Passwords do not match';return;}
+  fetch('/api/auth/users/add',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:u,password:p})}).then(r=>r.json()).then(d=>{
+      if(d.ok){
+        st.style.color='var(--wt-success)';st.textContent='User added';
+        document.getElementById('newUsername').value='';
+        document.getElementById('newPassword').value='';
+        document.getElementById('newPasswordConfirm').value='';
+        fetchLoginConfig();
+      } else {
+        st.style.color='var(--wt-danger)';st.textContent='Error: '+(d.error||'unknown');
+      }
+  }).catch(()=>{st.style.color='var(--wt-danger)';st.textContent='Network error';});
+}
+
+function deleteLoginUser(username){
+  if(!confirm('Delete user "'+username+'"?'))return;
+  fetch('/api/auth/users/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username})}).then(r=>r.json()).then(d=>{
+      if(d.ok)fetchLoginConfig();
+      else showToast('Error: '+(d.error||'unknown'));
+  }).catch(e=>console.error('deleteLoginUser:',e));
+}
+
+function showChangePwForm(username){
+  document.getElementById('changePwUsername').value=username;
+  document.getElementById('changePwTitle').textContent='Change Password: '+username;
+  document.getElementById('changePwCurrent').value='';
+  document.getElementById('changePwNew').value='';
+  document.getElementById('changePwStatus').textContent='';
+  document.getElementById('changePasswordCard').style.display='block';
+  document.getElementById('changePasswordCard').scrollIntoView({behavior:'smooth'});
+}
+
+function submitChangePassword(){
+  const username=document.getElementById('changePwUsername').value;
+  const current_password=document.getElementById('changePwCurrent').value;
+  const new_password=document.getElementById('changePwNew').value;
+  const st=document.getElementById('changePwStatus');
+  if(new_password.length<4){st.style.color='var(--wt-danger)';st.textContent='New password must be at least 4 characters';return;}
+  fetch('/api/auth/users/change_password',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username,current_password,new_password})}).then(r=>r.json()).then(d=>{
+      if(d.ok){
+        st.style.color='var(--wt-success)';st.textContent='Password changed';
+        setTimeout(()=>{document.getElementById('changePasswordCard').style.display='none';},1500);
+      } else {
+        st.style.color='var(--wt-danger)';st.textContent='Error: '+(d.error||'unknown');
+      }
+  }).catch(()=>{st.style.color='var(--wt-danger)';st.textContent='Network error';});
+}
+
+function logoutCurrentSession(){
+  fetch('/api/auth/logout',{method:'POST'}).then(()=>{location.href='/login';}).catch(()=>{location.href='/login';});
 }
 
 )JS";

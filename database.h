@@ -71,6 +71,8 @@ inline bool FrontendServer::validate_schema() {
         {"sip_lines", {"line_id", "username", "password", "server", "port", "status", "last_registered"}},
         {"service_test_runs", {"id", "service", "test_type", "status", "metrics_json", "timestamp"}},
         {"test_results", {"id", "test_name", "service", "status", "details", "timestamp"}},
+        {"users", {"id", "username", "password_hash", "salt", "created_at"}},
+        {"sessions", {"token", "username", "created_at", "last_seen"}},
     };
 
     auto get_columns = [this](const char* table_name) -> std::vector<std::string> {
@@ -312,6 +314,21 @@ inline bool FrontendServer::init_database() {
             details TEXT,
             timestamp INTEGER
         );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL
+        );
     )";
 
     char* errmsg = nullptr;
@@ -360,6 +377,8 @@ inline bool FrontendServer::init_database() {
         UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args='--lines 1 alice 127.0.0.1 5060' OR default_args='--lines 2 alice 127.0.0.1 5060');
     )";
     sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
+
+    seed_default_admin_if_empty();
 
     rotate_logs();
     return true;

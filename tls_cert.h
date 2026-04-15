@@ -4,8 +4,10 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 #include <fstream>
 #include <sstream>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -14,6 +16,7 @@
 #  include <mach-o/dyld.h>
 #endif
 
+#include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -57,8 +60,9 @@ static inline bool read_file(const std::string& path, std::string& out) {
     return !out.empty();
 }
 
-static inline bool generate_self_signed_cert(const std::string& cert_path,
-                                             const std::string& key_path) {
+static inline bool generate_self_signed_cert_impl(const std::string& cert_path,
+                                                  const std::string& key_path,
+                                                  long validity_seconds) {
     EVP_PKEY* pkey = EVP_PKEY_new();
     if (!pkey) return false;
 
@@ -79,7 +83,7 @@ static inline bool generate_self_signed_cert(const std::string& cert_path,
 
     ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
     X509_gmtime_adj(X509_get_notBefore(x509), 0);
-    X509_gmtime_adj(X509_get_notAfter(x509), 365L * 24 * 60 * 60 * 10);
+    X509_gmtime_adj(X509_get_notAfter(x509), validity_seconds);
     X509_set_pubkey(x509, pkey);
 
     X509_NAME* name = X509_get_subject_name(x509);
@@ -120,37 +124,123 @@ static inline bool generate_self_signed_cert(const std::string& cert_path,
     return true;
 }
 
+static inline bool generate_self_signed_cert(const std::string& cert_path,
+                                             const std::string& key_path) {
+    return generate_self_signed_cert_impl(cert_path, key_path, 365L * 24 * 60 * 60 * 10);
+}
+
+static inline bool generate_self_signed_cert_90d(const std::string& cert_path,
+                                                  const std::string& key_path) {
+    return generate_self_signed_cert_impl(cert_path, key_path, 90L * 24 * 60 * 60);
+}
+
+static inline time_t get_cert_expiry(const std::string& cert_path) {
+    FILE* f = fopen(cert_path.c_str(), "r");
+    if (!f) return 0;
+    X509* x509 = PEM_read_X509(f, nullptr, nullptr, nullptr);
+    fclose(f);
+    if (!x509) return 0;
+
+    const ASN1_TIME* not_after = X509_get0_notAfter(x509);
+    struct tm tm_val{};
+    int ret = ASN1_TIME_to_tm(not_after, &tm_val);
+    X509_free(x509);
+    if (ret != 1) return 0;
+    return timegm(&tm_val);
+}
+
+static inline bool validate_pem_cert(const std::string& pem) {
+    BIO* bio = BIO_new_mem_buf(pem.data(), (int)pem.size());
+    if (!bio) return false;
+    X509* x = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    if (!x) return false;
+    X509_free(x);
+    return true;
+}
+
+static inline bool validate_pem_key(const std::string& pem) {
+    BIO* bio = BIO_new_mem_buf(pem.data(), (int)pem.size());
+    if (!bio) return false;
+    EVP_PKEY* k = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    if (!k) return false;
+    EVP_PKEY_free(k);
+    return true;
+}
+
+static inline std::vector<std::string> list_certs_in_dir(const std::string& dir) {
+    std::vector<std::string> result;
+    DIR* d = opendir(dir.c_str());
+    if (!d) return result;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name.size() > 4 && name.substr(name.size() - 4) == ".crt") {
+            result.push_back(name);
+        }
+    }
+    closedir(d);
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 struct CertData {
     std::string cert_pem;
     std::string key_pem;
 };
 
-static std::once_flag g_cert_once;
-static CertData       g_cert_data;
+static std::mutex  g_cert_mutex;
+static CertData    g_cert_data;
+static bool        g_cert_loaded = false;
+
+static inline bool reload_certs(const std::string& cert_path, const std::string& key_path) {
+    CertData tmp;
+    if (!read_file(cert_path, tmp.cert_pem) || !read_file(key_path, tmp.key_pem)) {
+        std::fprintf(stderr, "[tls_cert] Cannot read cert/key: %s / %s\n",
+                     cert_path.c_str(), key_path.c_str());
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(g_cert_mutex);
+    g_cert_data = std::move(tmp);
+    g_cert_loaded = true;
+    std::fprintf(stderr, "[tls_cert] Loaded TLS certificate from %s\n", cert_path.c_str());
+    return true;
+}
 
 static inline const CertData& ensure_certs() {
-    std::call_once(g_cert_once, []() {
-        std::string dir = tls_dir();
-        mkdir(dir.c_str(), 0700);
+    {
+        std::lock_guard<std::mutex> lk(g_cert_mutex);
+        if (g_cert_loaded) return g_cert_data;
+    }
 
-        std::string cert_path = dir + "/server.crt";
-        std::string key_path  = dir + "/server.key";
+    std::string dir = tls_dir();
+    mkdir(dir.c_str(), 0700);
 
-        if (!file_exists(cert_path) || !file_exists(key_path)) {
-            if (!generate_self_signed_cert(cert_path, key_path)) {
-                std::fprintf(stderr, "[tls_cert] FATAL: cannot generate TLS certificate\n");
-                return;
-            }
+    std::string cert_path = dir + "/server.crt";
+    std::string key_path  = dir + "/server.key";
+
+    if (!file_exists(cert_path) || !file_exists(key_path)) {
+        if (!generate_self_signed_cert_90d(cert_path, key_path)) {
+            std::fprintf(stderr, "[tls_cert] FATAL: cannot generate TLS certificate\n");
+            std::lock_guard<std::mutex> lk(g_cert_mutex);
+            return g_cert_data;
         }
+    }
 
-        if (!read_file(cert_path, g_cert_data.cert_pem) ||
-            !read_file(key_path, g_cert_data.key_pem)) {
-            std::fprintf(stderr, "[tls_cert] FATAL: cannot read TLS certificate files\n");
-        } else {
-            std::fprintf(stderr, "[tls_cert] Loaded TLS certificate from %s\n",
-                         cert_path.c_str());
-        }
-    });
+    reload_certs(cert_path, key_path);
+
+    std::lock_guard<std::mutex> lk(g_cert_mutex);
+    return g_cert_data;
+}
+
+static inline CertData get_certs() {
+    {
+        std::lock_guard<std::mutex> lk(g_cert_mutex);
+        if (g_cert_loaded) return g_cert_data;
+    }
+    ensure_certs();
+    std::lock_guard<std::mutex> lk(g_cert_mutex);
     return g_cert_data;
 }
 

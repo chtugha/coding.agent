@@ -118,6 +118,8 @@
 #include <unordered_set>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 
 // Named constants — all timing, buffer, and limit values formerly scattered as
 // magic numbers throughout the event loop, log infrastructure, and test runners.
@@ -336,6 +338,7 @@ public:
             discover_tests();
             load_services();
             scan_testfiles_directory();
+            check_and_refresh_cert();
         }
     }
 
@@ -399,10 +402,23 @@ public:
         std::cout << "Also listening on " << http_listen << " (plain HTTP, loopback only)\n";
         std::cout << "Open https://localhost:" << http_port_ << " in your browser\n";
 
+        {
+            std::string active_cert = get_setting("active_cert_name", "");
+            std::string active_key  = get_setting("active_key_name",  "");
+            std::string dir = prodigy_tls::tls_dir();
+            if (!active_cert.empty() && !active_key.empty()) {
+                prodigy_tls::reload_certs(dir + "/" + active_cert, dir + "/" + active_key);
+            } else {
+                prodigy_tls::ensure_certs();
+            }
+        }
+
         auto last_flush = std::chrono::steady_clock::now();
         auto last_rotation = last_flush;
         auto last_svc_check = std::chrono::steady_clock::now();
         auto last_async_cleanup = std::chrono::steady_clock::now();
+        auto last_cert_check = std::chrono::steady_clock::now();
+        auto last_session_cleanup = std::chrono::steady_clock::now();
         while (!s_sigint_received) {
             mg_mgr_poll(&mgr_, MG_POLL_TIMEOUT_MS);
             check_test_status();
@@ -424,6 +440,14 @@ public:
             if (now - last_rotation >= std::chrono::hours(1)) {
                 rotate_logs();
                 last_rotation = now;
+            }
+            if (now - last_cert_check >= std::chrono::hours(24)) {
+                check_and_refresh_cert();
+                last_cert_check = now;
+            }
+            if (now - last_session_cleanup >= std::chrono::hours(1)) {
+                cleanup_expired_sessions();
+                last_session_cleanup = now;
             }
         }
         flush_log_queue();
@@ -527,6 +551,12 @@ private:
     };
     std::shared_ptr<PipelineStressProgress> pipeline_stress_;
     std::mutex pipeline_stress_mutex_;
+
+    struct FailedAttempts {
+        int count = 0;
+        time_t window_start = 0;
+    };
+    std::map<std::string, FailedAttempts> login_failures_;
 
     int64_t create_async_task(const std::string& type) {
         int64_t id = ++async_id_counter_;
@@ -979,6 +1009,25 @@ private:
         }
         if (ev == MG_EV_HTTP_MSG) {
             struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+            if (get_setting("http_redirect_to_https", "0") == "1") {
+                char loc[1024];
+                if (hm->query.len > 0) {
+                    snprintf(loc, sizeof(loc), "https://127.0.0.1:%u%.*s?%.*s",
+                             (unsigned)http_port_,
+                             (int)hm->uri.len, hm->uri.buf,
+                             (int)hm->query.len, hm->query.buf);
+                } else {
+                    snprintf(loc, sizeof(loc), "https://127.0.0.1:%u%.*s",
+                             (unsigned)http_port_,
+                             (int)hm->uri.len, hm->uri.buf);
+                }
+                mg_printf(c,
+                    "HTTP/1.1 301 Moved Permanently\r\n"
+                    "Location: %s\r\n"
+                    "Content-Length: 0\r\n"
+                    "\r\n", loc);
+                return;
+            }
             handle_http_request(c, hm);
         }
     }
@@ -990,7 +1039,7 @@ private:
 
     void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         if (ev == MG_EV_ACCEPT) {
-            const auto& certs = prodigy_tls::ensure_certs();
+            const auto certs = prodigy_tls::get_certs();
             if (!certs.cert_pem.empty() && !certs.key_pem.empty()) {
                 struct mg_tls_opts opts{};
                 opts.cert = mg_str(certs.cert_pem.c_str());
@@ -1012,7 +1061,50 @@ private:
     }
 
     void handle_http_request(struct mg_connection *c, struct mg_http_message *hm) {
-            if (mg_strcmp(hm->uri, mg_str("/")) == 0) {
+            if (get_setting("auth_enabled", "0") == "1") {
+                bool is_public = (mg_strcmp(hm->uri, mg_str("/login")) == 0 ||
+                                  mg_strcmp(hm->uri, mg_str("/api/auth/login")) == 0);
+                if (!is_public) {
+                    std::string token = extract_session_cookie(hm);
+                    std::string username;
+                    if (token.empty() || !validate_session(token, username)) {
+                        if (mg_strcmp(hm->uri, mg_str("/")) == 0) {
+                            serve_login_page(c);
+                        } else {
+                            mg_http_reply(c, 401, "Content-Type: application/json\r\n",
+                                          "{\"error\":\"Unauthorized\"}");
+                        }
+                        return;
+                    }
+                }
+            }
+            if (mg_strcmp(hm->uri, mg_str("/login")) == 0) {
+                serve_login_page(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/auth/login")) == 0) {
+                handle_api_auth_login(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/auth/logout")) == 0) {
+                handle_api_auth_logout(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/auth/users")) == 0) {
+                handle_api_auth_users(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/auth/users/add")) == 0) {
+                handle_api_auth_users_add(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/auth/users/change_password")) == 0) {
+                handle_api_auth_users_change_password(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/auth/users/delete")) == 0) {
+                handle_api_auth_users_delete(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/auth/settings")) == 0) {
+                handle_api_auth_settings(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/certs/list")) == 0) {
+                handle_api_certs_list(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/certs/generate")) == 0) {
+                handle_api_certs_generate(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/certs/upload")) == 0) {
+                handle_api_certs_upload(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/certs/select")) == 0) {
+                handle_api_certs_select(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/certs/settings")) == 0) {
+                handle_api_certs_settings(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/")) == 0) {
                 serve_index(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/dashboard")) == 0) {
                 handle_dashboard(c);
@@ -1236,6 +1328,10 @@ private:
 <i class="nav-icon fas fa-database" aria-hidden="true"></i><span class="nav-text">Database</span></a>
 <a class="wt-nav-item" data-page="credentials" onclick="showPage('credentials')">
 <i class="nav-icon fas fa-key" aria-hidden="true"></i><span class="nav-text">Credentials</span></a>
+<a class="wt-nav-item" data-page="certificates" onclick="showPage('certificates')">
+<i class="nav-icon fas fa-certificate" aria-hidden="true"></i><span class="nav-text">Certificates</span></a>
+<a class="wt-nav-item" data-page="login" onclick="showPage('login')">
+<i class="nav-icon fas fa-sign-in-alt" aria-hidden="true"></i><span class="nav-text">Login</span></a>
 </div>
 <div class="wt-status-bar" id="statusBar">
 <span id="statusText">Connecting...</span>
@@ -7396,6 +7492,749 @@ private:
 
     void handle_db_write_mode(struct mg_connection *c, struct mg_http_message *hm);
     void handle_db_query(struct mg_connection *c, struct mg_http_message *hm);
+
+    // -------------------------------------------------------------------------
+    // Password hashing (PBKDF2-SHA256 via OpenSSL)
+    // -------------------------------------------------------------------------
+
+    static std::string bytes_to_hex(const unsigned char* data, size_t len) {
+        std::string out;
+        out.reserve(len * 2);
+        for (size_t i = 0; i < len; i++) {
+            char buf[3];
+            snprintf(buf, sizeof(buf), "%02x", data[i]);
+            out += buf;
+        }
+        return out;
+    }
+
+    static std::string generate_salt() {
+        unsigned char raw[16];
+        RAND_bytes(raw, sizeof(raw));
+        return bytes_to_hex(raw, sizeof(raw));
+    }
+
+    static std::string hash_password(const std::string& password, const std::string& salt) {
+        unsigned char out[32];
+        PKCS5_PBKDF2_HMAC(password.c_str(), (int)password.size(),
+                           (const unsigned char*)salt.c_str(), (int)salt.size(),
+                           100000, EVP_sha256(), 32, out);
+        return bytes_to_hex(out, 32);
+    }
+
+    static bool verify_password(const std::string& password,
+                                const std::string& salt,
+                                const std::string& stored_hash) {
+        return hash_password(password, salt) == stored_hash;
+    }
+
+    // -------------------------------------------------------------------------
+    // Session management
+    // -------------------------------------------------------------------------
+
+    std::string create_session(const std::string& username) {
+        unsigned char raw[32];
+        RAND_bytes(raw, sizeof(raw));
+        std::string token = bytes_to_hex(raw, 32);
+
+        if (!db_) return "";
+        sqlite3_stmt* stmt;
+        const char* sql = "INSERT INTO sessions (token, username, created_at, last_seen) VALUES (?, ?, ?, ?)";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            time_t now = time(nullptr);
+            sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(stmt, 3, (int64_t)now);
+            sqlite3_bind_int64(stmt, 4, (int64_t)now);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+        return token;
+    }
+
+    bool validate_session(const std::string& token, std::string& out_username) {
+        if (!db_ || token.empty() || token.size() != 64) return false;
+
+        sqlite3_stmt* stmt;
+        const char* sql = "SELECT username, last_seen FROM sessions WHERE token = ?";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+
+        bool valid = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* uname = (const char*)sqlite3_column_text(stmt, 0);
+            int64_t last_seen = sqlite3_column_int64(stmt, 1);
+            time_t now = time(nullptr);
+            if (uname && (now - last_seen) < 24 * 3600) {
+                out_username = uname;
+                valid = true;
+            }
+        }
+        sqlite3_finalize(stmt);
+
+        if (valid) {
+            sqlite3_stmt* upd;
+            const char* usql = "UPDATE sessions SET last_seen = ? WHERE token = ?";
+            if (sqlite3_prepare_v2(db_, usql, -1, &upd, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(upd, 1, (int64_t)time(nullptr));
+                sqlite3_bind_text(upd, 2, token.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(upd);
+                sqlite3_finalize(upd);
+            }
+        }
+        return valid;
+    }
+
+    void invalidate_session(const std::string& token) {
+        if (!db_ || token.empty()) return;
+        sqlite3_stmt* stmt;
+        const char* sql = "DELETE FROM sessions WHERE token = ?";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    void cleanup_expired_sessions() {
+        if (!db_) return;
+        sqlite3_stmt* stmt;
+        const char* sql = "DELETE FROM sessions WHERE last_seen < ?";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, (int64_t)(time(nullptr) - 24 * 3600));
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    static std::string extract_session_cookie(struct mg_http_message *hm) {
+        struct mg_str* cookie_ptr = mg_http_get_header(hm, "Cookie");
+        if (!cookie_ptr || !cookie_ptr->buf || cookie_ptr->len == 0) return "";
+        struct mg_str cookie_hdr = *cookie_ptr;
+
+        std::string cookies(cookie_hdr.buf, cookie_hdr.len);
+        const std::string key = "prodigy_session=";
+        size_t pos = cookies.find(key);
+        if (pos == std::string::npos) return "";
+        pos += key.size();
+        size_t end = cookies.find(';', pos);
+        if (end == std::string::npos) end = cookies.size();
+        std::string token = cookies.substr(pos, end - pos);
+        while (!token.empty() && token.front() == ' ') token.erase(token.begin());
+        while (!token.empty() && token.back() == ' ') token.pop_back();
+        return token;
+    }
+
+    // -------------------------------------------------------------------------
+    // Seed default admin user
+    // -------------------------------------------------------------------------
+
+    void seed_default_admin_if_empty() {
+        if (!db_) return;
+        sqlite3_stmt* stmt;
+        const char* check = "SELECT COUNT(*) FROM users";
+        if (sqlite3_prepare_v2(db_, check, -1, &stmt, nullptr) != SQLITE_OK) return;
+        int count = 0;
+        if (sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (count > 0) return;
+
+        std::string salt = generate_salt();
+        std::string phash = hash_password("admin", salt);
+        time_t now = time(nullptr);
+
+        sqlite3_stmt* ins;
+        const char* sql = "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)";
+        if (sqlite3_prepare_v2(db_, sql, -1, &ins, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(ins, 1, "admin", -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 2, phash.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(ins, 3, salt.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(ins, 4, (int64_t)now);
+            sqlite3_step(ins);
+            sqlite3_finalize(ins);
+        }
+        std::fprintf(stderr, "[auth] Seeded default admin user\n");
+    }
+
+    // -------------------------------------------------------------------------
+    // Login page
+    // -------------------------------------------------------------------------
+
+    void serve_login_page(struct mg_connection *c) {
+        const char* html = R"HTML(<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prodigy Login</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d0d14;color:#e0e0e0;font-family:system-ui,sans-serif;
+  display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-box{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:12px;
+  padding:2.5rem;width:100%;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+h1{font-size:1.5rem;text-align:center;margin-bottom:1.8rem;
+  background:linear-gradient(135deg,#ff2d95,#b026ff,#00fff5);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+label{display:block;font-size:.8rem;color:#aaa;margin-bottom:.35rem;margin-top:1rem}
+input{width:100%;padding:.65rem .9rem;background:#0d0d1a;border:1px solid #333;
+  border-radius:6px;color:#e0e0e0;font-size:.95rem;outline:none}
+input:focus{border-color:#b026ff}
+button{margin-top:1.5rem;width:100%;padding:.75rem;background:#b026ff;
+  color:#fff;border:none;border-radius:6px;font-size:1rem;cursor:pointer;
+  transition:background .2s}
+button:hover{background:#9000e0}
+#err{margin-top:1rem;color:#ff4d6d;font-size:.85rem;text-align:center;min-height:1.2rem}
+</style></head><body>
+<div class="login-box">
+<h1>PRODIGY</h1>
+<form id="f">
+<label>Username</label>
+<input type="text" id="u" autocomplete="username" required>
+<label>Password</label>
+<input type="password" id="p" autocomplete="current-password" required>
+<button type="submit">Login</button>
+</form>
+<div id="err"></div>
+</div>
+<script>
+document.getElementById('f').onsubmit=async function(e){
+  e.preventDefault();
+  document.getElementById('err').textContent='';
+  try{
+    const r=await fetch('/api/auth/login',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:document.getElementById('u').value,
+                           password:document.getElementById('p').value})});
+    if(r.ok){location.href='/';}
+    else{const d=await r.json();document.getElementById('err').textContent=d.error||'Login failed';}
+  }catch(ex){document.getElementById('err').textContent='Network error';}
+};
+</script>
+</body></html>)HTML";
+        mg_http_reply(c, 200, "Content-Type: text/html; charset=utf-8\r\n", "%s", html);
+    }
+
+    // -------------------------------------------------------------------------
+    // Auth API handlers
+    // -------------------------------------------------------------------------
+
+    void handle_api_auth_login(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string username = extract_json_string(body, "username");
+        std::string password = extract_json_string(body, "password");
+
+        if (username.empty() || password.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"username and password required\"}");
+            return;
+        }
+
+        char ip_buf[48] = {};
+        if (!c->rem.is_ip6) {
+            snprintf(ip_buf, sizeof(ip_buf), "%u.%u.%u.%u",
+                     c->rem.ip[0], c->rem.ip[1], c->rem.ip[2], c->rem.ip[3]);
+        } else {
+            snprintf(ip_buf, sizeof(ip_buf),
+                     "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+                     c->rem.ip[0],c->rem.ip[1],c->rem.ip[2],c->rem.ip[3],
+                     c->rem.ip[4],c->rem.ip[5],c->rem.ip[6],c->rem.ip[7],
+                     c->rem.ip[8],c->rem.ip[9],c->rem.ip[10],c->rem.ip[11],
+                     c->rem.ip[12],c->rem.ip[13],c->rem.ip[14],c->rem.ip[15]);
+        }
+        std::string ip(ip_buf);
+
+        time_t now = time(nullptr);
+        auto& fa = login_failures_[ip];
+        if (fa.count >= 5 && (now - fa.window_start) < 60) {
+            mg_http_reply(c, 429, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Too many failed attempts. Try again later.\"}");
+            return;
+        }
+        if ((now - fa.window_start) >= 60) {
+            fa.count = 0;
+            fa.window_start = now;
+        }
+
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB unavailable\"}");
+            return;
+        }
+
+        sqlite3_stmt* stmt;
+        const char* sql = "SELECT password_hash, salt FROM users WHERE username = ?";
+        bool auth_ok = false;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* phash = (const char*)sqlite3_column_text(stmt, 0);
+                const char* salt  = (const char*)sqlite3_column_text(stmt, 1);
+                if (phash && salt) {
+                    auth_ok = verify_password(password, std::string(salt), std::string(phash));
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        if (!auth_ok) {
+            fa.count++;
+            fa.window_start = now;
+            mg_http_reply(c, 401, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Invalid credentials\"}");
+            return;
+        }
+
+        fa.count = 0;
+        std::string token = create_session(username);
+        mg_printf(c,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Set-Cookie: prodigy_session=%s; HttpOnly; Secure; SameSite=Strict; Path=/\r\n"
+            "Content-Length: 12\r\n"
+            "\r\n"
+            "{\"ok\":true}", token.c_str());
+    }
+
+    void handle_api_auth_logout(struct mg_connection *c, struct mg_http_message *hm) {
+        std::string token = extract_session_cookie(hm);
+        if (!token.empty()) invalidate_session(token);
+        mg_printf(c,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Set-Cookie: prodigy_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0\r\n"
+            "Content-Length: 12\r\n"
+            "\r\n"
+            "{\"ok\":true}");
+    }
+
+    void handle_api_auth_users(struct mg_connection *c, struct mg_http_message *hm) {
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB unavailable\"}");
+            return;
+        }
+        sqlite3_stmt* stmt;
+        const char* sql = "SELECT id, username, created_at FROM users ORDER BY id";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB error\"}");
+            return;
+        }
+        std::stringstream json;
+        json << "{\"users\":[";
+        int i = 0;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (i++ > 0) json << ",";
+            int id = sqlite3_column_int(stmt, 0);
+            const char* uname = (const char*)sqlite3_column_text(stmt, 1);
+            int64_t ts = sqlite3_column_int64(stmt, 2);
+            json << "{\"id\":" << id
+                 << ",\"username\":\"" << escape_json(uname ? uname : "") << "\""
+                 << ",\"created_at\":" << ts << "}";
+        }
+        sqlite3_finalize(stmt);
+        json << "]}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    void handle_api_auth_users_add(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string username = extract_json_string(body, "username");
+        std::string password = extract_json_string(body, "password");
+
+        if (username.empty() || password.size() < 4) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"username required and password must be at least 4 characters\"}");
+            return;
+        }
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB unavailable\"}");
+            return;
+        }
+        std::string salt = generate_salt();
+        std::string phash = hash_password(password, salt);
+        sqlite3_stmt* stmt;
+        const char* sql = "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)";
+        int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB error\"}");
+            return;
+        }
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, phash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, salt.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 4, (int64_t)time(nullptr));
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        if (rc == SQLITE_CONSTRAINT) {
+            mg_http_reply(c, 409, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Username already exists\"}");
+        } else if (rc != SQLITE_DONE) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Insert failed\"}");
+        } else {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+        }
+    }
+
+    void handle_api_auth_users_change_password(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string username = extract_json_string(body, "username");
+        std::string current_pw = extract_json_string(body, "current_password");
+        std::string new_pw = extract_json_string(body, "new_password");
+
+        if (username.empty() || new_pw.size() < 4) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"username required and new password must be at least 4 characters\"}");
+            return;
+        }
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB unavailable\"}");
+            return;
+        }
+
+        sqlite3_stmt* stmt;
+        const char* sel = "SELECT password_hash, salt FROM users WHERE username = ?";
+        if (sqlite3_prepare_v2(db_, sel, -1, &stmt, nullptr) != SQLITE_OK) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB error\"}");
+            return;
+        }
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+        bool found = false;
+        std::string old_hash, old_salt;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* ph = (const char*)sqlite3_column_text(stmt, 0);
+            const char* s  = (const char*)sqlite3_column_text(stmt, 1);
+            if (ph && s) { old_hash = ph; old_salt = s; found = true; }
+        }
+        sqlite3_finalize(stmt);
+
+        if (!found) {
+            mg_http_reply(c, 404, "Content-Type: application/json\r\n", "{\"error\":\"User not found\"}");
+            return;
+        }
+        if (!verify_password(current_pw, old_salt, old_hash)) {
+            mg_http_reply(c, 401, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Current password is incorrect\"}");
+            return;
+        }
+
+        std::string new_salt = generate_salt();
+        std::string new_hash = hash_password(new_pw, new_salt);
+        sqlite3_stmt* upd;
+        const char* usql = "UPDATE users SET password_hash=?, salt=? WHERE username=?";
+        if (sqlite3_prepare_v2(db_, usql, -1, &upd, nullptr) != SQLITE_OK) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB error\"}");
+            return;
+        }
+        sqlite3_bind_text(upd, 1, new_hash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(upd, 2, new_salt.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(upd, 3, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(upd);
+        sqlite3_finalize(upd);
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+    }
+
+    void handle_api_auth_users_delete(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string username = extract_json_string(body, "username");
+        if (username.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"username required\"}");
+            return;
+        }
+        if (!db_) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB unavailable\"}");
+            return;
+        }
+        sqlite3_stmt* cnt;
+        const char* csql = "SELECT COUNT(*) FROM users";
+        int total = 0;
+        if (sqlite3_prepare_v2(db_, csql, -1, &cnt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(cnt) == SQLITE_ROW) total = sqlite3_column_int(cnt, 0);
+            sqlite3_finalize(cnt);
+        }
+        if (total <= 1) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Cannot delete the last user\"}");
+            return;
+        }
+        sqlite3_stmt* del;
+        const char* dsql = "DELETE FROM users WHERE username = ?";
+        if (sqlite3_prepare_v2(db_, dsql, -1, &del, nullptr) != SQLITE_OK) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB error\"}");
+            return;
+        }
+        sqlite3_bind_text(del, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(del);
+        sqlite3_finalize(del);
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+    }
+
+    void handle_api_auth_settings(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            std::string auth_enabled = get_setting("auth_enabled", "0");
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                          "{\"auth_enabled\":\"%s\"}", auth_enabled.c_str());
+        } else {
+            std::string body(hm->body.buf, hm->body.len);
+            std::string val = extract_json_string(body, "auth_enabled");
+            if (!val.empty()) set_setting("auth_enabled", val);
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Certificate management
+    // -------------------------------------------------------------------------
+
+    void check_and_refresh_cert() {
+        if (get_setting("cert_self_refresh", "1") != "1") return;
+
+        std::string active_cert = get_setting("active_cert_name", "server.crt");
+        bool is_selfsigned = (active_cert == "server.crt" ||
+                              active_cert.substr(0, 11) == "selfsigned_");
+        if (!is_selfsigned) return;
+
+        std::string dir = prodigy_tls::tls_dir();
+        std::string cert_path = dir + "/" + active_cert;
+
+        time_t expiry = prodigy_tls::get_cert_expiry(cert_path);
+        time_t now = time(nullptr);
+        bool needs_refresh = (expiry == 0 || expiry < now + 7 * 24 * 3600);
+        if (!needs_refresh) return;
+
+        char ts[16];
+        struct tm tm_buf;
+        localtime_r(&now, &tm_buf);
+        strftime(ts, sizeof(ts), "%Y%m%d", &tm_buf);
+
+        std::string new_name = std::string("selfsigned_") + ts + ".crt";
+        std::string new_key_name = std::string("selfsigned_") + ts + ".key";
+        std::string new_cert_path = dir + "/" + new_name;
+        std::string new_key_path  = dir + "/" + new_key_name;
+
+        if (prodigy_tls::generate_self_signed_cert_90d(new_cert_path, new_key_path)) {
+            set_setting("active_cert_name", new_name);
+            set_setting("active_key_name", new_key_name);
+            prodigy_tls::reload_certs(new_cert_path, new_key_path);
+            std::fprintf(stderr, "[cert] Auto-refreshed TLS certificate: %s\n", new_name.c_str());
+        }
+    }
+
+    void handle_api_certs_list(struct mg_connection *c) {
+        std::string dir = prodigy_tls::tls_dir();
+        auto certs = prodigy_tls::list_certs_in_dir(dir);
+        std::string active = get_setting("active_cert_name", "server.crt");
+        std::string self_refresh = get_setting("cert_self_refresh", "1");
+        std::string http_redirect = get_setting("http_redirect_to_https", "0");
+
+        time_t now = time(nullptr);
+        std::stringstream json;
+        json << "{\"certs\":[";
+        for (size_t i = 0; i < certs.size(); i++) {
+            if (i > 0) json << ",";
+            const std::string& name = certs[i];
+            std::string cert_path = dir + "/" + name;
+            time_t expiry = prodigy_tls::get_cert_expiry(cert_path);
+            long days = (expiry > now) ? (long)((expiry - now) / 86400) : -1;
+            bool is_active = (name == active);
+            std::string type = "custom";
+            if (name.substr(0, 11) == "selfsigned_" || name == "server.crt") type = "selfsigned";
+            else if (name.substr(0, 9) == "uploaded_") type = "uploaded";
+            json << "{\"name\":\"" << escape_json(name) << "\""
+                 << ",\"expiry\":" << (int64_t)expiry
+                 << ",\"days_remaining\":" << days
+                 << ",\"active\":" << (is_active ? "true" : "false")
+                 << ",\"type\":\"" << type << "\"}";
+        }
+        json << "]"
+             << ",\"active_cert\":\"" << escape_json(active) << "\""
+             << ",\"self_refresh\":\"" << self_refresh << "\""
+             << ",\"http_redirect\":\"" << http_redirect << "\"}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    void handle_api_certs_generate(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string dir = prodigy_tls::tls_dir();
+        mkdir(dir.c_str(), 0700);
+
+        time_t now = time(nullptr);
+        char ts[16];
+        struct tm tm_buf;
+        localtime_r(&now, &tm_buf);
+        strftime(ts, sizeof(ts), "%Y%m%d", &tm_buf);
+
+        std::string new_name = std::string("selfsigned_") + ts + ".crt";
+        std::string new_key_name = std::string("selfsigned_") + ts + ".key";
+        std::string cert_path = dir + "/" + new_name;
+        std::string key_path  = dir + "/" + new_key_name;
+
+        if (!prodigy_tls::generate_self_signed_cert_90d(cert_path, key_path)) {
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Certificate generation failed\"}");
+            return;
+        }
+        set_setting("active_cert_name", new_name);
+        set_setting("active_key_name", new_key_name);
+        prodigy_tls::reload_certs(cert_path, key_path);
+
+        time_t expiry = prodigy_tls::get_cert_expiry(cert_path);
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                      "{\"ok\":true,\"name\":\"%s\",\"expiry\":%lld}",
+                      escape_json(new_name).c_str(), (long long)expiry);
+    }
+
+    void handle_api_certs_upload(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+
+        std::string cert_data, key_data;
+        struct mg_http_part part;
+        size_t pos = 0;
+        while ((pos = mg_http_next_multipart(hm->body, pos, &part)) > 0) {
+            if (part.name.len > 0 && part.body.len > 0) {
+                std::string name(part.name.buf, part.name.len);
+                if (name == "cert") {
+                    cert_data.assign(part.body.buf, part.body.len);
+                } else if (name == "key") {
+                    key_data.assign(part.body.buf, part.body.len);
+                }
+            }
+        }
+
+        if (cert_data.empty() || key_data.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Both cert and key fields are required\"}");
+            return;
+        }
+        if (cert_data.size() > 65536 || key_data.size() > 65536) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"File too large (max 64KB)\"}");
+            return;
+        }
+        if (!prodigy_tls::validate_pem_cert(cert_data)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Invalid PEM certificate\"}");
+            return;
+        }
+        if (!prodigy_tls::validate_pem_key(key_data)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Invalid PEM private key\"}");
+            return;
+        }
+
+        std::string dir = prodigy_tls::tls_dir();
+        mkdir(dir.c_str(), 0700);
+
+        time_t now = time(nullptr);
+        char ts[16];
+        struct tm tm_buf;
+        localtime_r(&now, &tm_buf);
+        strftime(ts, sizeof(ts), "%Y%m%d", &tm_buf);
+
+        std::string new_name = std::string("uploaded_") + ts + ".crt";
+        std::string new_key_name = std::string("uploaded_") + ts + ".key";
+        std::string cert_path = dir + "/" + new_name;
+        std::string key_path  = dir + "/" + new_key_name;
+
+        {
+            std::ofstream f(cert_path, std::ios::binary | std::ios::trunc);
+            if (!f.is_open()) {
+                mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                              "{\"error\":\"Cannot write certificate\"}");
+                return;
+            }
+            f.write(cert_data.data(), cert_data.size());
+        }
+        chmod(cert_path.c_str(), 0600);
+
+        {
+            std::ofstream f(key_path, std::ios::binary | std::ios::trunc);
+            if (!f.is_open()) {
+                std::remove(cert_path.c_str());
+                mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                              "{\"error\":\"Cannot write key\"}");
+                return;
+            }
+            f.write(key_data.data(), key_data.size());
+        }
+        chmod(key_path.c_str(), 0600);
+
+        set_setting("active_cert_name", new_name);
+        set_setting("active_key_name", new_key_name);
+        prodigy_tls::reload_certs(cert_path, key_path);
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                      "{\"ok\":true,\"name\":\"%s\"}", escape_json(new_name).c_str());
+    }
+
+    void handle_api_certs_select(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string name = extract_json_string(body, "name");
+
+        if (name.empty() || name.find('/') != std::string::npos ||
+            name.find("..") != std::string::npos ||
+            name.size() < 5 || name.substr(name.size() - 4) != ".crt") {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Invalid certificate name\"}");
+            return;
+        }
+
+        std::string dir = prodigy_tls::tls_dir();
+        std::string cert_path = dir + "/" + name;
+        std::string key_name = name.substr(0, name.size() - 4) + ".key";
+        std::string key_path = dir + "/" + key_name;
+
+        if (!prodigy_tls::file_exists(cert_path) || !prodigy_tls::file_exists(key_path)) {
+            mg_http_reply(c, 404, "Content-Type: application/json\r\n",
+                          "{\"error\":\"Certificate or key file not found\"}");
+            return;
+        }
+
+        set_setting("active_cert_name", name);
+        set_setting("active_key_name", key_name);
+        prodigy_tls::reload_certs(cert_path, key_path);
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+    }
+
+    void handle_api_certs_settings(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            std::string self_refresh  = get_setting("cert_self_refresh", "1");
+            std::string http_redirect = get_setting("http_redirect_to_https", "0");
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                          "{\"self_refresh\":\"%s\",\"http_redirect\":\"%s\"}",
+                          self_refresh.c_str(), http_redirect.c_str());
+        } else {
+            std::string body(hm->body.buf, hm->body.len);
+            std::string sr = extract_json_string(body, "self_refresh");
+            std::string hr = extract_json_string(body, "http_redirect");
+            if (!sr.empty()) set_setting("cert_self_refresh", sr);
+            if (!hr.empty()) set_setting("http_redirect_to_https", hr);
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+        }
+    }
+
 };
 
 #include "log-server.h"

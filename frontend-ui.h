@@ -1220,5 +1220,148 @@ Save outgoing audio as WAV</label>
 
 </div></div><!-- end page-models -->
 
+<div class="wt-page" id="page-certificates">
+<div class="wt-content">
+<h2 class="wt-page-title">TLS Certificates</h2>
+
+<div id="certWarningBanner" style="display:none;padding:10px 16px;border-radius:8px;margin-bottom:16px;background:rgba(255,69,58,.15);border:1px solid rgba(255,69,58,.4);color:#ff6b6b;font-size:13px"></div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Active Certificate</span></div>
+<div style="padding:4px 0">
+<label style="display:block;font-size:12px;color:var(--wt-text-secondary);margin-bottom:6px">Select active certificate</label>
+<select class="wt-input" id="certSelect" onchange="selectActiveCert()" style="width:100%;margin-bottom:12px"></select>
+<div id="certActiveInfo" style="font-size:12px;color:var(--wt-text-secondary)"></div>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header" onclick="toggleCollapsible('certUploadBody')" style="cursor:pointer">
+<span class="wt-card-title">Upload Certificate</span>
+</div>
+<div class="wt-collapsible" id="certUploadBody">
+<div style="padding:4px 0">
+<div class="wt-field">
+<label>Certificate file (.pem / .crt)</label>
+<input type="file" class="wt-input" id="certFileInput" accept=".pem,.crt" style="padding:6px">
+</div>
+<div class="wt-field">
+<label>Private key file (.pem / .key)</label>
+<input type="file" class="wt-input" id="keyFileInput" accept=".pem,.key" style="padding:6px">
+</div>
+<button class="wt-btn wt-btn-primary" onclick="uploadCert()" style="margin-top:8px">Upload &amp; Activate</button>
+<div id="certUploadStatus" style="font-size:12px;margin-top:8px"></div>
+</div>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Generate Self-Signed Certificate</span></div>
+<div style="padding:4px 0">
+<p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Creates a new EC P-256 self-signed certificate valid for 90 days (CN=localhost, SAN=localhost/127.0.0.1).</p>
+<button class="wt-btn wt-btn-primary" onclick="generateSelfSignedCert()">Generate Self-Signed Certificate</button>
+<div id="certGenStatus" style="font-size:12px;margin-top:8px"></div>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Settings</span></div>
+<div style="padding:4px 0;display:flex;flex-direction:column;gap:14px">
+<label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+<input type="checkbox" id="certSelfRefresh" onchange="saveCertSettings()">
+<span>
+<strong>Self-refreshing</strong>
+<span style="display:block;font-size:12px;color:var(--wt-text-secondary)">Automatically renews self-signed certificate 7 days before expiry (checks every 24h and on startup). If the certificate has already expired, a new one is generated immediately.</span>
+<!-- Future: this checkbox could also control Let's Encrypt ACME auto-renewal when that integration is implemented -->
+</span>
+</label>
+<label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+<input type="checkbox" id="certHttpRedirect" onchange="saveCertSettings()">
+<span>
+<strong>Redirect HTTP to HTTPS</strong>
+<span style="display:block;font-size:12px;color:var(--wt-text-secondary)">Respond to plain-HTTP requests (port +1) with an HTTP 301 redirect to the HTTPS port.</span>
+</span>
+</label>
+</div>
+</div>
+
+</div></div><!-- end page-certificates -->
+
+<div class="wt-page" id="page-login">
+<div class="wt-content">
+<h2 class="wt-page-title">Login Configuration</h2>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Authentication</span></div>
+<div style="padding:4px 0">
+<label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+<input type="checkbox" id="authEnabled" onchange="toggleAuthEnabled()">
+<span>
+<strong>Enable Authentication</strong>
+<span style="display:block;font-size:12px;color:var(--wt-text-secondary)">When disabled, the UI is accessible without login (compatible with local loopback-only deployments). Default credentials: <strong>admin / admin</strong>.</span>
+</span>
+</label>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Users</span></div>
+<div style="padding:4px 0">
+<table style="width:100%;border-collapse:collapse;font-size:13px">
+<thead><tr>
+<th style="text-align:left;padding:6px 8px;color:var(--wt-text-secondary);font-weight:500;border-bottom:1px solid var(--wt-border)">Username</th>
+<th style="text-align:right;padding:6px 8px;color:var(--wt-text-secondary);font-weight:500;border-bottom:1px solid var(--wt-border)">Actions</th>
+</tr></thead>
+<tbody id="usersTableBody"></tbody>
+</table>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Add User</span></div>
+<div style="padding:4px 0">
+<div class="wt-field">
+<label>Username</label>
+<input type="text" class="wt-input" id="newUsername" placeholder="username" autocomplete="off">
+</div>
+<div class="wt-field">
+<label>Password <span style="color:var(--wt-text-secondary);font-size:11px">(min 4 characters)</span></label>
+<input type="password" class="wt-input" id="newPassword" autocomplete="new-password">
+</div>
+<div class="wt-field">
+<label>Confirm Password</label>
+<input type="password" class="wt-input" id="newPasswordConfirm" autocomplete="new-password">
+</div>
+<button class="wt-btn wt-btn-primary" onclick="addLoginUser()" style="margin-top:8px">Add User</button>
+<div id="addUserStatus" style="font-size:12px;margin-top:8px"></div>
+</div>
+</div>
+
+<div class="wt-card" id="changePasswordCard" style="display:none">
+<div class="wt-card-header"><span class="wt-card-title" id="changePwTitle">Change Password</span></div>
+<div style="padding:4px 0">
+<input type="hidden" id="changePwUsername">
+<div class="wt-field">
+<label>Current Password</label>
+<input type="password" class="wt-input" id="changePwCurrent" autocomplete="current-password">
+</div>
+<div class="wt-field">
+<label>New Password <span style="color:var(--wt-text-secondary);font-size:11px">(min 4 characters)</span></label>
+<input type="password" class="wt-input" id="changePwNew" autocomplete="new-password">
+</div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button class="wt-btn wt-btn-primary" onclick="submitChangePassword()">Change Password</button>
+<button class="wt-btn wt-btn-secondary" onclick="document.getElementById('changePasswordCard').style.display='none'">Cancel</button>
+</div>
+<div id="changePwStatus" style="font-size:12px;margin-top:8px"></div>
+</div>
+</div>
+
+<div style="margin-top:16px">
+<button class="wt-btn wt-btn-secondary" onclick="logoutCurrentSession()" style="font-size:12px">Logout current session</button>
+</div>
+
+</div></div><!-- end page-login -->
+
 )PG";
 }
