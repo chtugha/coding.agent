@@ -7605,6 +7605,11 @@ private:
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
+        time_t now = time(nullptr);
+        for (auto it = login_failures_.begin(); it != login_failures_.end(); ) {
+            if (now - it->second.window_start > 60) it = login_failures_.erase(it);
+            else ++it;
+        }
     }
 
     static std::string extract_session_cookie(struct mg_http_message *hm) {

@@ -192,7 +192,8 @@ struct CertData {
 
 static std::mutex  g_cert_mutex;
 static CertData    g_cert_data;
-static bool        g_cert_loaded = false;
+static bool        g_cert_loaded     = false;
+static bool        g_cert_generating = false;
 
 static inline bool reload_certs(const std::string& cert_path, const std::string& key_path) {
     CertData tmp;
@@ -212,6 +213,8 @@ static inline const CertData& ensure_certs() {
     {
         std::lock_guard<std::mutex> lk(g_cert_mutex);
         if (g_cert_loaded) return g_cert_data;
+        if (g_cert_generating) return g_cert_data;
+        g_cert_generating = true;
     }
 
     std::string dir = tls_dir();
@@ -224,6 +227,7 @@ static inline const CertData& ensure_certs() {
         if (!generate_self_signed_cert_90d(cert_path, key_path)) {
             std::fprintf(stderr, "[tls_cert] FATAL: cannot generate TLS certificate\n");
             std::lock_guard<std::mutex> lk(g_cert_mutex);
+            g_cert_generating = false;
             return g_cert_data;
         }
     }
@@ -231,6 +235,7 @@ static inline const CertData& ensure_certs() {
     reload_certs(cert_path, key_path);
 
     std::lock_guard<std::mutex> lk(g_cert_mutex);
+    g_cert_generating = false;
     return g_cert_data;
 }
 
