@@ -63,7 +63,7 @@ e.classList.toggle('active',e.dataset.page===p);
   if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();}
   if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
-  if(p==='beta-testing'){buildSipLinesGrid();refreshTestFiles();loadVadConfig();loadLlamaPrompts();refreshInjectLegs();updateBetaSummaryDots();}
+  if(p==='beta-testing'){try{buildSipLinesGrid();}catch(e){console.error('buildSipLinesGrid:',e);}try{refreshTestFiles();}catch(e){console.error('refreshTestFiles:',e);}try{loadVadConfig();}catch(e){}try{loadLlamaPrompts();}catch(e){}try{refreshInjectLegs();}catch(e){}try{updateBetaSummaryDots();}catch(e){}startPrereqPoll();}else{stopPrereqPoll();}
   if(p==='models'){loadModels();loadModelComparison();}
   if(p==='test-results'){fetchTestResultsPage();startTestResultsPoll();}
   if(p==='logs'){reconnectLogSSE();}
@@ -1278,14 +1278,15 @@ c.innerHTML='<table class="wt-table"><thead><tr><th>File</th><th>Duration</th><t
       `${escapeHtml(f.ground_truth||'--')}</td></tr>`;
   }).join('')+'</tbody></table>';
 
-const sel1=document.getElementById('injectFileSelect');
-const sel2=document.getElementById('accuracyTestFiles');
-const sel3=document.getElementById('iapTestFileSelect');
-const sel4=document.getElementById('fullLoopFiles');
-sel1.innerHTML='<option value="">-- Select a test file --</option>'+d.files.map(fileOpt).join('');
-sel2.innerHTML=d.files.map(fileOpt).join('');
-if(sel3)sel3.innerHTML='<option value="">-- Select a test file --</option>'+d.files.map(fileOpt).join('');
-if(sel4)sel4.innerHTML=d.files.map(fileOpt).join('');
+var sel1=document.getElementById('injectFileSelect');
+var sel2=document.getElementById('accuracyTestFiles');
+var sel3=document.getElementById('iapTestFileSelect');
+var sel4=document.getElementById('fullLoopFiles');
+var opts=d.files.map(fileOpt).join('');
+if(sel1)sel1.innerHTML='<option value="">-- Select a test file --</option>'+opts;
+if(sel2)sel2.innerHTML=opts;
+if(sel3)sel3.innerHTML='<option value="">-- Select a test file --</option>'+opts;
+if(sel4)sel4.innerHTML=opts;
   }).catch(e=>console.error('Failed to load test files:',e));
   loadLogLevels();
 }
@@ -1338,8 +1339,8 @@ sel.innerHTML='<option value="" disabled>-- No active testlines --</option>';
 function injectAudio(){
   const file=document.getElementById('injectFileSelect').value;
   const leg=document.getElementById('injectLeg').value;
-  if(!file){alert('Please select a test file');return;}
-  if(!leg){alert('No active testline selected');return;}
+  if(!file){showToast('Please select a test file','error');return;}
+  if(!leg){showToast('No active testline selected','warn');return;}
   const status=document.getElementById('injectionStatus');
   status.innerHTML='<span style="color:var(--wt-accent)">Injecting audio...</span>';
   fetch(`http://localhost:${TSP_PORT}/inject`,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1375,7 +1376,7 @@ llamaPrompts.forEach(p=>{
 let llamaQualityPoll=null;
 let llamaShutupPoll=null;
 
-function runLlamaQualityTest(){
+async function runLlamaQualityTest(){
   if(llamaQualityPoll){clearInterval(llamaQualityPoll);llamaQualityPoll=null;}
   const status=document.getElementById('llamaTestStatus');
   const results=document.getElementById('llamaTestResults');
@@ -1383,10 +1384,15 @@ function runLlamaQualityTest(){
   const custom=document.getElementById('llamaCustomPrompt').value.trim();
   const selectedIds=Array.from(sel.selectedOptions).map(o=>parseInt(o.value));
   const prompts=llamaPrompts.filter(p=>selectedIds.indexOf(p.id)>=0);
-  if(custom){prompts.push({id:0,prompt:custom,expected_keywords:[],category:'custom',max_words:30});}
+  const llamaMaxWords=parseInt(document.getElementById('llamaMaxWordsSlider')?.value)||30;
+  const llamaTemp=parseFloat(document.getElementById('llamaTempSlider')?.value)||0.3;
+  const llamaTopP=parseFloat(document.getElementById('llamaTopPSlider')?.value)||0.95;
+  if(custom){prompts.push({id:0,prompt:custom,expected_keywords:[],category:'custom',max_words:llamaMaxWords});}
   if(prompts.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one prompt or enter a custom prompt.</span>';return;}
-  status.innerHTML=`<span style="color:var(--wt-accent)">Running quality test (${prompts.length} prompts)...</span>`;
+  status.innerHTML=`<span style="color:var(--wt-accent)">Applying sampling params (temp=${llamaTemp}, top_p=${llamaTopP})...</span>`;
   results.innerHTML='';
+  try{await fetch('/api/llama/set_sampling',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({temperature:llamaTemp,top_p:llamaTopP})});}catch(e){}
+  status.innerHTML=`<span style="color:var(--wt-accent)">Running quality test (${prompts.length} prompts)...</span>`;
   fetch('/api/llama/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts})})
 .then(r=>{
   if(r.status===202) return r.json();
@@ -1529,7 +1535,8 @@ function runKokoroQualityTest(){
   const status=document.getElementById('kokoroTestStatus');
   const results=document.getElementById('kokoroTestResults');
   const custom=document.getElementById('kokoroCustomPhrase').value.trim();
-  const body=custom?{phrases:[custom]}:{};
+  const kokoroSpeed=parseFloat(document.getElementById('kokoroSpeedSlider')?.value)||1.0;
+  const body=custom?{phrases:[custom],speed:kokoroSpeed}:{speed:kokoroSpeed};
   status.innerHTML='<span style="color:var(--wt-accent)">Running Kokoro quality test...</span>';
   results.innerHTML='';
   fetch('/api/kokoro/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
@@ -2056,7 +2063,7 @@ options:{
 }
 
 function exportTestResults(){
-  if(testResultsCache.length===0){alert('No test results to export');return;}
+  if(testResultsCache.length===0){showToast('No test results to export','warn');return;}
   const json=JSON.stringify(testResultsCache,null,2);
   const blob=new Blob([json],{type:'application/json'});
   const url=URL.createObjectURL(blob);
@@ -2105,10 +2112,11 @@ function renderTrTable(results){
   const c=document.getElementById('trResultsTable');
   if(!results||results.length===0){
 c.innerHTML='<p style="color:var(--wt-text-secondary);font-size:13px">No test results match the filters</p>';
+document.getElementById('trCompareBtn').style.display='none';
 return;
   }
-  let html='<table class="wt-table"><thead><tr><th>Type</th><th>Service</th><th>Test</th><th>Status</th><th>Latency</th><th>Time</th></tr></thead><tbody>';
-  results.forEach(r=>{
+  let html='<table class="wt-table"><thead><tr><th style="width:30px"><input type="checkbox" id="trSelectAll" onchange="toggleAllTrCheckboxes(this.checked)"></th><th>Type</th><th>Service</th><th>Test</th><th>Status</th><th>Latency</th><th>Time</th></tr></thead><tbody>';
+  results.forEach((r,i)=>{
 const ts=new Date(r.timestamp*1000).toLocaleString();
 const st=r.status.toLowerCase();
 const badge=st==='pass'||st==='passed'||st==='success'?'<span class="wt-badge wt-badge-success">Pass</span>'
@@ -2117,10 +2125,67 @@ const badge=st==='pass'||st==='passed'||st==='success'?'<span class="wt-badge wt
   :`<span class="wt-badge wt-badge-secondary">${escapeHtml(r.status)}</span>`;
 const lat=r.metrics&&r.metrics.latency_ms?`${r.metrics.latency_ms.toFixed(1)} ms`:'—';
 const typeName=r.type.replace(/_/g,' ');
-html+=`<tr><td style="font-size:12px">${escapeHtml(typeName)}</td><td>${escapeHtml(r.service)}</td><td>${escapeHtml(r.test_type)}</td><td>${badge}</td><td style="font-family:var(--wt-mono);font-size:12px">${lat}</td><td style="font-size:12px">${ts}</td></tr>`;
+html+=`<tr><td><input type="checkbox" class="tr-compare-cb" data-idx="${i}" onchange="updateCompareBtn()"></td><td style="font-size:12px">${escapeHtml(typeName)}</td><td>${escapeHtml(r.service)}</td><td>${escapeHtml(r.test_type)}</td><td>${badge}</td><td style="font-family:var(--wt-mono);font-size:12px">${lat}</td><td style="font-size:12px">${ts}</td></tr>`;
   });
   html+='</tbody></table>';
   c.innerHTML=html;
+  document.getElementById('trCompareBtn').style.display='none';
+}
+function toggleAllTrCheckboxes(checked){
+  document.querySelectorAll('.tr-compare-cb').forEach(cb=>cb.checked=checked);
+  updateCompareBtn();
+}
+function updateCompareBtn(){
+  const checked=document.querySelectorAll('.tr-compare-cb:checked');
+  const btn=document.getElementById('trCompareBtn');
+  btn.style.display=checked.length>=2?'inline-block':'none';
+  btn.textContent=`Compare ${checked.length} Selected`;
+}
+function compareSelectedResults(){
+  const checked=Array.from(document.querySelectorAll('.tr-compare-cb:checked'));
+  if(checked.length<2){showToast('Select at least 2 results to compare','warn');return;}
+  const items=checked.map(cb=>trCache[parseInt(cb.dataset.idx)]);
+  const panel=document.getElementById('trComparePanel');
+  const content=document.getElementById('trCompareContent');
+  let html='<div style="overflow-x:auto"><table class="wt-table"><thead><tr><th>Field</th>';
+  items.forEach((r,i)=>{
+    html+=`<th style="min-width:150px">Run ${i+1}<br><span style="font-weight:normal;font-size:11px">${new Date(r.timestamp*1000).toLocaleString()}</span></th>`;
+  });
+  html+='</tr></thead><tbody>';
+  const fields=['type','service','test_type','status'];
+  fields.forEach(f=>{
+    html+=`<tr><td style="font-weight:600">${f}</td>`;
+    items.forEach(r=>html+=`<td>${escapeHtml(String(r[f]||'—'))}</td>`);
+    html+='</tr>';
+  });
+  html+='<tr><td style="font-weight:600">latency (ms)</td>';
+  const lats=items.map(r=>r.metrics&&r.metrics.latency_ms?r.metrics.latency_ms:null);
+  const minLat=Math.min(...lats.filter(l=>l!==null));
+  const maxLat=Math.max(...lats.filter(l=>l!==null));
+  lats.forEach(l=>{
+    if(l===null){html+='<td>—</td>';}
+    else{
+      const color=l===minLat?'var(--wt-success)':l===maxLat?'var(--wt-danger)':'inherit';
+      html+=`<td style="color:${color};font-weight:bold;font-family:var(--wt-mono)">${l.toFixed(1)}</td>`;
+    }
+  });
+  html+='</tr>';
+  if(items.some(r=>r.metrics)){
+    const metricKeys=new Set();
+    items.forEach(r=>{if(r.metrics)Object.keys(r.metrics).forEach(k=>{if(k!=='latency_ms')metricKeys.add(k);});});
+    metricKeys.forEach(k=>{
+      html+=`<tr><td style="font-weight:600">${k}</td>`;
+      items.forEach(r=>{
+        const v=r.metrics?r.metrics[k]:null;
+        html+=`<td style="font-family:var(--wt-mono)">${v!==null&&v!==undefined?String(v):'—'}</td>`;
+      });
+      html+='</tr>';
+    });
+  }
+  html+='</tbody></table></div>';
+  content.innerHTML=html;
+  panel.style.display='block';
+  panel.scrollIntoView({behavior:'smooth'});
 }
 
 function renderTrTrendChart(results){
@@ -2209,7 +2274,7 @@ options:{
 }
 
 function exportTestResultsPage(){
-  if(!trCache||trCache.length===0){alert('No test results to export');return;}
+  if(!trCache||trCache.length===0){showToast('No test results to export','warn');return;}
   const json=JSON.stringify(trCache,null,2);
   const blob=new Blob([json],{type:'application/json'});
   const url=URL.createObjectURL(blob);
@@ -2230,7 +2295,7 @@ document.getElementById('sqlQuery').addEventListener('keydown',e=>{
   if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();runQuery();}
 });
 
-const sipLineNames=['alice','bob','charlie','david','eve','frank','george','helen','ivan','julia',
+var sipLineNames=['alice','bob','charlie','david','eve','frank','george','helen','ivan','julia',
   'karl','laura','max','nina','oscar','petra','quinn','rosa','sam','tina'];
 
 function buildSipLinesGrid(){
@@ -2430,7 +2495,7 @@ document.getElementById('iapConnectionStatus').innerHTML='<span style="color:var
 
 function runIapQualityTest(){
   const file=document.getElementById('iapTestFileSelect').value;
-  if(!file){alert('Please select a test file');return;}
+  if(!file){showToast('Please select a test file','error');return;}
   
   const statusDiv=document.getElementById('iapTestStatus');
   statusDiv.innerHTML=`<span style="color:var(--wt-warning)">&#x23F3; Running IAP quality test on ${file}...</span>`;
@@ -2541,7 +2606,7 @@ options:{
 async function runAllIapQualityTests(){
   const sel=document.getElementById('iapTestFileSelect');
   const files=Array.from(sel.options).filter(o=>o.value).map(o=>o.value);
-  if(files.length===0){alert('No test files found');return;}
+  if(files.length===0){showToast('No test files found','error');return;}
   const statusDiv=document.getElementById('iapTestStatus');
   const tbody=document.getElementById('iapResultsBody');
   tbody.innerHTML='';
@@ -2582,17 +2647,114 @@ function updateVadThresholdDisplay(val){
 
 // ===== MODELS PAGE =====
 
-const toggleCollapsible=(header)=>{
-  const body=header.nextElementSibling;
+function toggleCollapsible(header){
+  var body=header.nextElementSibling;
   if(!body) return;
-  const isOpen=body.classList.toggle('open');
+  var isOpen=body.classList.toggle('open');
   header.setAttribute('aria-expanded',isOpen);
-  const arrow=header.querySelector('span:last-child');
+  var arrow=header.querySelector('span:last-child');
   if(arrow) arrow.innerHTML=isOpen?'&#x25BC;':'&#x25B6;';
-};
+}
 
-const updateBetaSummaryDots=()=>{
-  const getTabStatus=(paneId)=>{
+function toggleAllCollapsibles(expand){
+  var pane=document.querySelector('.wt-tab-pane.active');
+  if(!pane) return;
+  pane.querySelectorAll('.wt-collapsible').forEach(function(body){
+    var header=body.previousElementSibling;
+    if(!header) return;
+    if(expand && !body.classList.contains('open')){
+      body.classList.add('open');
+      header.setAttribute('aria-expanded','true');
+      var a=header.querySelector('span:last-child');
+      if(a) a.innerHTML='&#x25BC;';
+    } else if(!expand && body.classList.contains('open')){
+      body.classList.remove('open');
+      header.setAttribute('aria-expanded','false');
+      var a=header.querySelector('span:last-child');
+      if(a) a.innerHTML='&#x25B6;';
+    }
+  });
+}
+
+async function runAllBetaTests(){
+  const statusEl=document.getElementById('runAllTestsStatus');
+  const progEl=document.getElementById('runAllProgress');
+  const detailEl=document.getElementById('runAllDetails');
+  const btn=document.getElementById('runAllTestsBtn');
+  statusEl.style.display='block';
+  btn.disabled=true;
+  btn.textContent='Running...';
+  const svcData=await fetch('/api/services').then(r=>r.json()).catch(()=>({services:[]}));
+  const online=new Set(svcData.services.filter(s=>s.online).map(s=>s.name));
+  const tests=[
+    {name:'IAP Codec Quality',fn:()=>runAllIapQualityTests(),requires:[]},
+    {name:'Whisper Accuracy',fn:()=>new Promise((res,rej)=>{
+      const sel=document.getElementById('accuracyTestFiles');
+      if(!sel||sel.options.length===0){rej('No test files');return;}
+      sel.options[0].selected=true;
+      runWhisperAccuracyTest();
+      const iv=setInterval(()=>{
+        const s=document.getElementById('accuracySummary');
+        if(s&&s.style.display!=='none'){clearInterval(iv);res();}
+      },1000);
+      setTimeout(()=>{clearInterval(iv);res();},60000);
+    }),requires:['WHISPER_SERVICE','VAD_SERVICE']},
+    {name:'LLaMA Quality',fn:()=>new Promise((res,rej)=>{
+      const sel=document.getElementById('llamaTestPrompts');
+      if(sel&&sel.options.length>0)sel.options[0].selected=true;
+      fetch('/api/llama/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts:[{id:0,prompt:'Was ist die Hauptstadt von Deutschland?',expected_keywords:['Berlin'],category:'test',max_words:30}]})})
+      .then(r=>{if(r.status===202)return r.json();return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});})
+      .then(d=>{
+        const poll=setInterval(()=>{
+          fetch('/api/async/status?task_id='+d.task_id).then(r=>r.json()).then(s=>{
+            if(s.status==='running')return;
+            clearInterval(poll);
+            if(s.error)rej(s.error);else res();
+          }).catch(()=>{clearInterval(poll);rej('poll error');});
+        },1000);
+        setTimeout(()=>{clearInterval(poll);res();},30000);
+      }).catch(rej);
+    }),requires:['LLAMA_SERVICE']},
+    {name:'Kokoro TTS Quality',fn:()=>new Promise((res,rej)=>{
+      fetch('/api/kokoro/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})
+      .then(r=>{if(r.status===202)return r.json();return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});})
+      .then(d=>{
+        const poll=setInterval(()=>{
+          fetch('/api/async/status?task_id='+d.task_id).then(r=>r.json()).then(s=>{
+            if(s.status==='running')return;
+            clearInterval(poll);
+            if(s.error)rej(s.error);else res();
+          }).catch(()=>{clearInterval(poll);rej('poll error');});
+        },1000);
+        setTimeout(()=>{clearInterval(poll);res();},30000);
+      }).catch(rej);
+    }),requires:['KOKORO_SERVICE']},
+  ];
+  let done=0,pass=0,fail=0,skip=0;
+  const total=tests.length;
+  const lines=[];
+  for(const t of tests){
+    progEl.textContent=`${done}/${total}`;
+    const missing=t.requires.filter(s=>!online.has(s));
+    if(missing.length>0){skip++;done++;lines.push(`<span style="color:var(--wt-warning)">SKIP</span>: ${t.name} (need: ${missing.join(', ')})`);detailEl.innerHTML=lines.join('<br>');continue;}
+    try{
+      await t.fn();
+      pass++;lines.push(`<span style="color:var(--wt-success)">PASS</span>: ${t.name}`);
+    }catch(e){
+      fail++;lines.push(`<span style="color:var(--wt-danger)">FAIL</span>: ${t.name}: ${e}`);
+    }
+    done++;
+    progEl.textContent=`${done}/${total}`;
+    detailEl.innerHTML=lines.join('<br>');
+  }
+  progEl.textContent=`${done}/${total} \u2014 ${pass} passed, ${fail} failed, ${skip} skipped`;
+  btn.disabled=false;
+  btn.textContent='\u25B6 Run All Tests';
+  updateBetaSummaryDots();
+}
+
+function updateBetaSummaryDots(){
+  var getTabStatus=function(paneId){
 const pane=document.getElementById(paneId);
 if(!pane) return 'neutral';
 const els=pane.querySelectorAll('.badge,.wt-badge,[id$="Status"],[id$="Results"]');
@@ -2607,12 +2769,12 @@ if(hasFail) return 'danger';
 if(hasPass) return 'success';
 return 'neutral';
   };
-  const colorMap={success:'var(--wt-success,#34c759)',danger:'var(--wt-danger,#ff3b30)',neutral:'var(--wt-text-secondary)'};
-  ['Component','Pipeline','Tools'].forEach(name=>{
-const dot=document.getElementById('betaDot'+name);
+  var colorMap={success:'var(--wt-success,#34c759)',danger:'var(--wt-danger,#ff3b30)',neutral:'var(--wt-text-secondary)'};
+  ['Component','Pipeline','Tools'].forEach(function(name){
+var dot=document.getElementById('betaDot'+name);
 if(dot) dot.style.background=colorMap[getTabStatus('beta-'+name.toLowerCase())];
   });
-};
+}
 
 document.addEventListener('keydown',e=>{
   if((e.key==='Enter'||e.key===' ')&&e.target.getAttribute('role')==='button'){
@@ -2632,6 +2794,36 @@ pane.classList.toggle('active',pane.id===tabId);
   });
   updateBetaSummaryDots();
 }
+
+let _prereqInterval=null;
+function updatePrereqBadges(){
+  fetch('/api/services').then(r=>r.json()).then(d=>{
+    const online=new Set(d.services.filter(s=>s.online).map(s=>s.name));
+    const prereqs={
+      'prereq-sip-rtp':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR'],
+      'prereq-iap':[],
+      'prereq-whisper':['WHISPER_SERVICE','VAD_SERVICE'],
+      'prereq-llama':['LLAMA_SERVICE'],
+      'prereq-kokoro':['KOKORO_SERVICE'],
+      'prereq-shutup-pipeline':['LLAMA_SERVICE'],
+      'prereq-roundtrip':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-fullloop':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-health':[],
+      'prereq-multiline':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-stress':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'],
+    };
+    for(const[id,reqs] of Object.entries(prereqs)){
+      const el=document.getElementById(id);
+      if(!el)continue;
+      if(reqs.length===0){el.textContent='Ready';el.style.background='var(--wt-success)';el.style.color='#000';continue;}
+      const missing=reqs.filter(s=>!online.has(s));
+      if(missing.length===0){el.textContent='Ready';el.style.background='var(--wt-success)';el.style.color='#000';}
+      else{el.textContent=missing.length+' offline';el.style.background='var(--wt-danger)';el.style.color='#fff';el.title='Missing: '+missing.join(', ');}
+    }
+  }).catch(()=>{});
+}
+function startPrereqPoll(){if(!_prereqInterval){updatePrereqBadges();_prereqInterval=setInterval(updatePrereqBadges,5000);}}
+function stopPrereqPoll(){if(_prereqInterval){clearInterval(_prereqInterval);_prereqInterval=null;}}
 
 (()=>{
   let debounceTimer=null;
@@ -2760,7 +2952,7 @@ function runBenchmark(){
   if(benchmarkPollInterval){clearInterval(benchmarkPollInterval);benchmarkPollInterval=null;}
   const modelId=document.getElementById('benchmarkModelId').value;
   const iterations=parseInt(document.getElementById('benchmarkIterations').value)||1;
-  if(!modelId){alert('Please select a model first.');return;}
+  if(!modelId){showToast('Please select a model first','warn');return;}
 
   if(!window._testFiles){
 document.getElementById('benchmarkStatus').innerHTML='<span style="color:var(--wt-accent)">Loading test files...</span>';
@@ -3248,7 +3440,7 @@ function runLlamaBenchmark(){
   if(llamaBenchmarkPollInterval){clearInterval(llamaBenchmarkPollInterval);llamaBenchmarkPollInterval=null;}
   const modelId=document.getElementById('llamaBenchmarkModelId').value;
   const iterations=parseInt(document.getElementById('llamaBenchmarkIterations').value)||1;
-  if(!modelId){alert('Please select a LLaMA model first.');return;}
+  if(!modelId){showToast('Please select a LLaMA model first','warn');return;}
   const btn=document.getElementById('llamaBenchmarkRunBtn');
   btn.disabled=true;btn.textContent='Running...';
   document.getElementById('llamaBenchmarkStatus').innerHTML='<span style="color:var(--wt-accent)">Starting LLaMA benchmark...</span>';
@@ -3419,7 +3611,7 @@ function runWhisperAccuracyTest(){
   const selected=Array.from(select.selectedOptions).map(o=>o.value);
   
   if(selected.length===0){
-alert('Please select at least one test file');
+showToast('Please select at least one test file','warn');
 return;
   }
   

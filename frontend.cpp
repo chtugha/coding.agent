@@ -137,12 +137,12 @@ static constexpr useconds_t SERVICE_STARTUP_WAIT_US = 200000;  // 200ms delay af
 static constexpr useconds_t STOP_POLL_INTERVAL_US = 100000;    // 100ms between stop-poll iterations
 static constexpr useconds_t SHUTDOWN_GRACE_US = 2000000;       // 2s shutdown grace period
 static constexpr useconds_t RESTART_WAIT_US = 500000;          // 500ms wait between stop and start
-static constexpr int TRANSCRIPTION_SETTLE_MS = 5000;     // settle time before reading transcription
-static constexpr int TRANSCRIPTION_POLL_MS = 150;        // poll interval for transcription log check
-static constexpr int LLAMA_RESPONSE_POLL_MS = 200;       // poll interval for LLaMA response check
+static constexpr int TRANSCRIPTION_SETTLE_MS = 2000;     // settle time before reading transcription (reduced from 5s)
+static constexpr int TRANSCRIPTION_POLL_MS = 100;        // poll interval for transcription log check (reduced from 150ms)
+static constexpr int LLAMA_RESPONSE_POLL_MS = 100;       // poll interval for LLaMA response check (reduced from 200ms)
 static constexpr int SHUTUP_INTER_ROUND_MS = 100;        // pause between shut-up test rounds
 static constexpr int STRESS_POLL_MS = 100;               // poll interval in pipeline stress loop
-static constexpr int PIPELINE_ROUND_POLL_MS = 500;       // poll interval for pipeline round-trip test
+static constexpr int PIPELINE_ROUND_POLL_MS = 250;       // poll interval for pipeline round-trip test (reduced from 500ms)
 static constexpr int ACCURACY_INTER_FILE_MS = 2000;      // pause between accuracy test files
 static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;    // poll interval for download progress
 
@@ -389,7 +389,14 @@ public:
         struct mg_connection *c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
         if (c) c->fn_data = this;
         
+        // Also listen on plain HTTP (http_port + 1) for tools/browsers that reject self-signed certs.
+        uint16_t http_plain_port = http_port_ + 1;
+        std::string http_listen = "http://127.0.0.1:" + std::to_string(http_plain_port);
+        struct mg_connection *ch = mg_http_listen(&mgr_, http_listen.c_str(), http_handler_plain_static, this);
+        if (ch) ch->fn_data = this;
+
         std::cout << "Frontend web server started on " << listen_addr << "\n";
+        std::cout << "Also listening on " << http_listen << " (plain HTTP, loopback only)\n";
         std::cout << "Open https://localhost:" << http_port_ << " in your browser\n";
 
         auto last_flush = std::chrono::steady_clock::now();
@@ -958,6 +965,24 @@ private:
     void remove_sse_connection(struct mg_connection *c);
     void flush_sse_queue();
 
+    static void http_handler_plain_static(struct mg_connection *c, int ev, void *ev_data) {
+        FrontendServer* self = static_cast<FrontendServer*>(c->fn_data);
+        self->http_handler_plain(c, ev, ev_data);
+    }
+
+    void http_handler_plain(struct mg_connection *c, int ev, void *ev_data) {
+        if (ev == MG_EV_CLOSE) {
+            if (c->data[0] == 'S') {
+                remove_sse_connection(c);
+            }
+            return;
+        }
+        if (ev == MG_EV_HTTP_MSG) {
+            struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+            handle_http_request(c, hm);
+        }
+    }
+
     static void http_handler_static(struct mg_connection *c, int ev, void *ev_data) {
         FrontendServer* self = static_cast<FrontendServer*>(c->fn_data);
         self->http_handler(c, ev, ev_data);
@@ -982,7 +1007,11 @@ private:
         }
         if (ev == MG_EV_HTTP_MSG) {
             struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-            
+            handle_http_request(c, hm);
+        }
+    }
+
+    void handle_http_request(struct mg_connection *c, struct mg_http_message *hm) {
             if (mg_strcmp(hm->uri, mg_str("/")) == 0) {
                 serve_index(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/dashboard")) == 0) {
@@ -1073,6 +1102,8 @@ private:
                 handle_whisper_benchmark(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/llama/prompts")) == 0) {
                 handle_llama_prompts(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/llama/set_sampling")) == 0) {
+                handle_llama_set_sampling(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/llama/quality_test")) == 0) {
                 handle_llama_quality_test(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/llama/shutup_test")) == 0) {
@@ -1128,7 +1159,6 @@ private:
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
-        }
     }
 
     void serve_index(struct mg_connection *c) {
@@ -2919,6 +2949,23 @@ private:
             if (!pi.prompt.empty()) prompts.push_back(pi);
         }
         return prompts;
+    }
+
+    void handle_llama_set_sampling(struct mg_connection *c, struct mg_http_message *hm) {
+        double temp = 0.3, top_p = 0.95;
+        mg_json_get_num(hm->body, "$.temperature", &temp);
+        mg_json_get_num(hm->body, "$.top_p", &top_p);
+        uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
+        std::string err;
+        std::string cmd = "SET_SAMPLING:temp=" + std::to_string((float)temp) + ",top_p=" + std::to_string((float)top_p);
+        std::string resp = tcp_command(llama_cmd_port, cmd, err, 3);
+        if (resp.rfind("OK", 0) == 0) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"status\":\"ok\",\"temperature\":%.2f,\"top_p\":%.2f}", temp, top_p);
+        } else {
+            mg_http_reply(c, 502, "Content-Type: application/json\r\n",
+                "{\"error\":\"LLaMA service unreachable: %s\"}", escape_json(err.empty() ? resp : err).c_str());
+        }
     }
 
     // POST /api/llama/quality_test — Async LLaMA quality test. Sends each prompt to

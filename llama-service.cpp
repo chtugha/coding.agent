@@ -1112,6 +1112,40 @@ private:
             log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Downstream switched to NEUTTS_SERVICE");
             return "OK TTS=NEUTTS\n";
         }
+        if (cmd.rfind("SET_SAMPLING:", 0) == 0) {
+            std::string params = cmd.substr(13);
+            float new_temp = sampling_temp_;
+            float new_top_p = sampling_top_p_;
+            size_t pos = 0;
+            while (pos < params.size()) {
+                size_t eq = params.find('=', pos);
+                if (eq == std::string::npos) break;
+                size_t comma = params.find(',', eq);
+                if (comma == std::string::npos) comma = params.size();
+                std::string key = params.substr(pos, eq - pos);
+                std::string val = params.substr(eq + 1, comma - eq - 1);
+                if (key == "temp") new_temp = std::stof(val);
+                else if (key == "top_p") new_top_p = std::stof(val);
+                pos = (comma < params.size()) ? comma + 1 : params.size();
+            }
+            {
+                std::lock_guard<std::mutex> lock(llama_mutex_);
+                if (sampler_) llama_sampler_free(sampler_);
+                sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
+                llama_sampler_chain_add(sampler_, llama_sampler_init_penalties(64, 1.1f, 0.0f, 0.0f));
+                llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(new_top_p, 1));
+                llama_sampler_chain_add(sampler_, llama_sampler_init_temp(new_temp));
+                llama_sampler_chain_add(sampler_, llama_sampler_init_dist(42));
+                sampling_temp_ = new_temp;
+                sampling_top_p_ = new_top_p;
+            }
+            log_fwd_.forward(whispertalk::LogLevel::INFO, 0,
+                "Sampling params updated: temp=%.2f top_p=%.2f", new_temp, new_top_p);
+            return "OK temp=" + std::to_string(new_temp) + " top_p=" + std::to_string(new_top_p) + "\n";
+        }
+        if (cmd == "GET_SAMPLING") {
+            return "SAMPLING:temp=" + std::to_string(sampling_temp_) + ",top_p=" + std::to_string(sampling_top_p_) + "\n";
+        }
         if (cmd.rfind("TEST_PROMPT:", 0) == 0) {
             std::string prompt = cmd.substr(12);
             uint32_t test_cid = TEST_PROMPT_CID;
@@ -1213,6 +1247,8 @@ private:
     struct llama_context* ctx_ = nullptr;
     const struct llama_vocab* vocab_ = nullptr;
     struct llama_sampler* sampler_ = nullptr;
+    float sampling_temp_ = 0.3f;
+    float sampling_top_p_ = 0.95f;
     std::mutex llama_mutex_;
     std::mutex calls_mutex_;
     std::atomic<uint32_t> next_seq_id_{0};

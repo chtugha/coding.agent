@@ -353,6 +353,7 @@ Save outgoing audio as WAV</label>
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Results</span>
 <div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-sm wt-btn-primary" id="trCompareBtn" onclick="compareSelectedResults()" style="display:none">Compare Selected</button>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="fetchTestResultsPage()">&#x21BB; Refresh</button>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="exportTestResultsPage()">&#x1F4E5; Export</button>
 </div>
@@ -373,6 +374,10 @@ Save outgoing audio as WAV</label>
 </select>
 <input type="date" class="wt-input" id="trFilterDateFrom" onchange="fetchTestResultsPage()" style="width:auto;font-size:12px">
 <input type="date" class="wt-input" id="trFilterDateTo" onchange="fetchTestResultsPage()" style="width:auto;font-size:12px">
+</div>
+<div id="trComparePanel" style="display:none;margin-bottom:12px;padding:12px;background:var(--wt-card-bg);border:1px solid var(--wt-primary);border-radius:var(--wt-radius)">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong style="font-size:13px">Side-by-Side Comparison</strong><button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="document.getElementById('trComparePanel').style.display='none'">Close</button></div>
+<div id="trCompareContent" style="font-size:12px"></div>
 </div>
 <div id="trResultsTable">No test results yet.</div>
 </div>
@@ -445,13 +450,22 @@ Save outgoing audio as WAV</label>
 <button class="wt-tab-btn" role="tab" id="tab-beta-pipeline" aria-selected="false" aria-controls="beta-pipeline" onclick="switchBetaTab('beta-pipeline')">Pipeline Tests</button>
 <button class="wt-tab-btn" role="tab" id="tab-beta-tools" aria-selected="false" aria-controls="beta-tools" onclick="switchBetaTab('beta-tools')">Tools</button>
 </div>
+<div style="display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end">
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="toggleAllCollapsibles(true)">Expand All</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="toggleAllCollapsibles(false)">Collapse All</button>
+<button class="wt-btn wt-btn-sm wt-btn-primary" id="runAllTestsBtn" onclick="runAllBetaTests()">&#x25B6; Run All Tests</button>
+</div>
+<div id="runAllTestsStatus" style="display:none;margin-bottom:12px;padding:10px;background:var(--wt-card-bg);border:1px solid var(--wt-border);border-radius:var(--wt-radius);font-size:12px">
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><strong>Run All Progress:</strong> <span id="runAllProgress">0/0</span></div>
+<div id="runAllDetails" style="font-size:11px;color:var(--wt-text-secondary)"></div>
+</div>
 
 <div class="wt-tab-panes" id="betaTestPanes">
 <div class="wt-tab-pane active" id="beta-component" role="tabpanel" aria-labelledby="tab-beta-component">
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span><span id="prereq-sip-rtp" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Test SIP Client RTP packet routing and TCP connection handling with IAP service.</p>
 <div style="display:flex;gap:8px;margin-bottom:12px">
@@ -494,8 +508,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: IAP Codec Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: IAP Codec Quality</span><span id="prereq-iap" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-success);color:#000">Ready</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px"><strong>Codec algorithm test</strong> (does not require IAP service). Runs the exact G.711 mu-law encode/decode + 15-tap FIR half-band 8kHz&#x2192;16kHz upsample pipeline offline, measuring SNR and RMS Error per-packet. Service connectivity is tested in Test 1 above.</p>
 <div class="wt-field">
@@ -539,8 +553,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Whisper Accuracy Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Whisper Accuracy Test</span><span id="prereq-whisper" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <div class="wt-field">
 <label>Test Files (hold Ctrl/Cmd to select multiple)</label>
@@ -621,8 +635,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: LLaMA Response Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: LLaMA Response Quality</span><span id="prereq-llama" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Send test prompts directly to LLaMA service and evaluate response quality.
@@ -637,6 +651,14 @@ Save outgoing audio as WAV</label>
 <label>Custom Prompt (optional)</label>
 <input class="wt-input" id="llamaCustomPrompt" placeholder="Type a custom German prompt...">
 </div>
+<div style="padding:10px;background:var(--wt-card-hover);border-radius:6px;margin-top:8px;border-left:3px solid var(--wt-primary)">
+<div style="font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:6px">LLaMA Generation Settings</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:12px">
+<div class="wt-field"><label>Temperature: <span id="llamaTempValue">0.3</span></label><input type="range" id="llamaTempSlider" min="0.0" max="2.0" value="0.3" step="0.1" style="width:100%" oninput="document.getElementById('llamaTempValue').textContent=parseFloat(this.value).toFixed(1)"><div style="display:flex;justify-content:space-between;font-size:10px;color:var(--wt-text-muted)"><span>0.0</span><span>2.0</span></div></div>
+<div class="wt-field"><label>Top-P: <span id="llamaTopPValue">0.95</span></label><input type="range" id="llamaTopPSlider" min="0.1" max="1.0" value="0.95" step="0.05" style="width:100%" oninput="document.getElementById('llamaTopPValue').textContent=parseFloat(this.value).toFixed(2)"><div style="display:flex;justify-content:space-between;font-size:10px;color:var(--wt-text-muted)"><span>0.1</span><span>1.0</span></div></div>
+<div class="wt-field"><label>Max Words: <span id="llamaMaxWordsValue">30</span></label><input type="range" id="llamaMaxWordsSlider" min="5" max="200" value="30" step="5" style="width:100%" oninput="document.getElementById('llamaMaxWordsValue').textContent=this.value"><div style="display:flex;justify-content:space-between;font-size:10px;color:var(--wt-text-muted)"><span>5</span><span>200</span></div></div>
+</div>
+</div>
 <div style="display:flex;gap:8px;margin-top:8px">
 <button class="wt-btn wt-btn-primary" onclick="runLlamaQualityTest()">&#x25B6; Run Quality Test</button>
 <button class="wt-btn wt-btn-secondary" onclick="runLlamaShutupTest()">&#x1F910; Shut-up Test</button>
@@ -649,8 +671,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span><span id="prereq-kokoro" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Synthesize German phrases via Kokoro TTS and measure latency, RTF, audio quality.
@@ -659,6 +681,13 @@ Save outgoing audio as WAV</label>
 <div class="wt-field">
 <label>Custom Phrase (optional)</label>
 <input class="wt-input" id="kokoroCustomPhrase" placeholder="Type a German phrase to synthesize...">
+</div>
+<div style="padding:10px;background:var(--wt-card-hover);border-radius:6px;margin-top:8px;border-left:3px solid var(--wt-primary)">
+<div style="font-size:12px;font-weight:600;color:var(--wt-text-secondary);margin-bottom:6px">Kokoro TTS Settings</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+<div class="wt-field"><label>Speed: <span id="kokoroSpeedValue">1.0</span>x</label><input type="range" id="kokoroSpeedSlider" min="0.5" max="2.0" value="1.0" step="0.1" style="width:100%" oninput="document.getElementById('kokoroSpeedValue').textContent=parseFloat(this.value).toFixed(1)"><div style="display:flex;justify-content:space-between;font-size:10px;color:var(--wt-text-muted)"><span>0.5x</span><span>2.0x</span></div></div>
+<div class="wt-field"><label>Voice</label><select class="wt-select" id="kokoroVoiceSelect" style="width:100%;padding:6px"><option value="af_heart" selected>af_heart (default)</option><option value="af_sky">af_sky</option><option value="af_star">af_star</option></select></div>
+</div>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
 <button class="wt-btn wt-btn-primary" onclick="runKokoroQualityTest()">&#x25B6; Run Quality Test</button>
@@ -681,8 +710,8 @@ Save outgoing audio as WAV</label>
 <div class="wt-tab-pane" id="beta-pipeline" role="tabpanel" aria-labelledby="tab-beta-pipeline">
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: Shut-Up Mechanism (Pipeline)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: Shut-Up Mechanism (Pipeline)</span><span id="prereq-shutup-pipeline" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Tests the LLaMA shut-up (interrupt / barge-in) mechanism via command port with configurable delays.
@@ -709,8 +738,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: Full Pipeline Round-Trip</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: Full Pipeline Round-Trip</span><span id="prereq-roundtrip" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Full pipeline loop: Phrase &#x2192; Kokoro WAV &#x2192; inject &#x2192; SIP(L1) &#x2192; IAP &#x2192; VAD &#x2192; Whisper &#x2192; LLaMA &#x2192; Kokoro &#x2192; OAP &#x2192; SIP &#x2192; relay &#x2192; SIP(L2) &#x2192; IAP &#x2192; VAD &#x2192; Whisper.
@@ -731,8 +760,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 3: Full Loop File Test (WER)</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 3: Full Loop File Test (WER)</span><span id="prereq-fullloop" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Injects test audio files through full pipeline with 2 SIP lines. Measures Word Error Rate (WER)
@@ -755,8 +784,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: Pipeline Resilience Health Check</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: Pipeline Resilience Health Check</span><span id="prereq-health" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-success);color:#000">Ready</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Pings all 7 pipeline services via their command ports and reports interconnect status.
@@ -773,8 +802,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Multi-Line Command Stress Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Multi-Line Command Stress Test</span><span id="prereq-multiline" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Floods all 7 pipeline service command ports concurrently with PING requests from multiple simulated lines.
@@ -792,8 +821,8 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="true" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 6: Full Pipeline Stress Test</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25BC;</span></div>
-<div class="wt-collapsible open">
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 6: Full Pipeline Stress Test</span><span id="prereq-stress" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Continuously injects test audio through the full pipeline for a configurable duration.
