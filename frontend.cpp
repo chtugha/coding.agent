@@ -1270,7 +1270,7 @@ private:
 
     void serve_index(struct mg_connection *c) {
         std::string html = build_ui_html();
-        mg_http_reply(c, 200, "Content-Type: text/html; charset=utf-8\r\n", "%s", html.c_str());
+        mg_http_reply(c, 200, "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-cache, no-store, must-revalidate\r\nPragma: no-cache\r\n", "%s", html.c_str());
     }
 
     std::string build_ui_html() {

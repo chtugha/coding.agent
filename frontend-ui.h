@@ -1253,7 +1253,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" onclick="toggleCollapsible('certUploadBody')" style="cursor:pointer">
+<div class="wt-card-header" onclick="toggleCollapsible(this)" style="cursor:pointer">
 <span class="wt-card-title">Upload Certificate</span>
 </div>
 <div class="wt-collapsible" id="certUploadBody">
