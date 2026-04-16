@@ -2926,7 +2926,7 @@ pane.classList.toggle('active',pane.id===tabId);
   updateBetaSummaryDots();
 }
 
-let _prereqInterval=null;
+var _prereqInterval=null;
 function updatePrereqBadges(){
   fetch('/api/services').then(r=>r.json()).then(d=>{
     const online=new Set(d.services.filter(s=>s.online).map(s=>s.name));
