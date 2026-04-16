@@ -3904,6 +3904,7 @@ window.accuracyChart=new Chart(ctx,{
 
 // ─── Certificates page ────────────────────────────────────────────────────
 function fetchCerts(){
+  initCertDropZone();
   fetch('/api/certs/list').then(r=>r.json()).then(d=>{
     const sel=document.getElementById('certSelect');
     sel.innerHTML='';
@@ -3972,19 +3973,43 @@ function generateSelfSignedCert(){
   }).catch(e=>{btn.disabled=false;st.style.color='var(--wt-danger)';st.textContent='Network error';});
 }
 
+var _certDropFiles={cert:null,key:null};
+function initCertDropZone(){
+  const zone=document.getElementById('certDropZone');
+  if(!zone||zone._initDone)return;
+  zone._initDone=true;
+  zone.addEventListener('dragover',e=>{e.preventDefault();e.stopPropagation();zone.style.borderColor='var(--wt-accent)';zone.style.background='rgba(255,45,149,0.05)';});
+  zone.addEventListener('dragleave',e=>{e.preventDefault();e.stopPropagation();zone.style.borderColor='';zone.style.background='';});
+  zone.addEventListener('drop',e=>{e.preventDefault();e.stopPropagation();zone.style.borderColor='';zone.style.background='';handleCertFileSelect(e.dataTransfer.files);});
+}
+function handleCertFileSelect(files){
+  for(let i=0;i<files.length;i++){
+    const f=files[i];
+    const n=f.name.toLowerCase();
+    if(n.endsWith('.key')||n.includes('key')){_certDropFiles.key=f;}
+    else{_certDropFiles.cert=f;}
+  }
+  const list=document.getElementById('certFileList');
+  if(!list)return;
+  let html='';
+  if(_certDropFiles.cert)html+='<div style="color:var(--wt-success)">Certificate: '+_certDropFiles.cert.name+'</div>';
+  if(_certDropFiles.key)html+='<div style="color:var(--wt-success)">Key: '+_certDropFiles.key.name+'</div>';
+  if(!_certDropFiles.cert&&!_certDropFiles.key)html='<div style="color:var(--wt-text-secondary)">No files selected</div>';
+  list.innerHTML=html;
+}
 function uploadCert(){
-  const certFile=document.getElementById('certFileInput').files[0];
-  const keyFile=document.getElementById('keyFileInput').files[0];
   const st=document.getElementById('certUploadStatus');
-  if(!certFile||!keyFile){st.style.color='var(--wt-danger)';st.textContent='Select both certificate and key files';return;}
+  if(!_certDropFiles.cert||!_certDropFiles.key){st.style.color='var(--wt-danger)';st.textContent='Both a certificate and a key file are required';return;}
   const fd=new FormData();
-  fd.append('cert',certFile);
-  fd.append('key',keyFile);
+  fd.append('cert',_certDropFiles.cert);
+  fd.append('key',_certDropFiles.key);
   st.textContent='Uploading...';
   fetch('/api/certs/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
     if(d.ok){
       st.style.color='var(--wt-success)';
       st.textContent='Uploaded and activated: '+d.name;
+      _certDropFiles={cert:null,key:null};
+      document.getElementById('certFileList').innerHTML='';
       fetchCerts();
     } else {
       st.style.color='var(--wt-danger)';

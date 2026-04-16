@@ -1253,22 +1253,16 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" onclick="toggleCollapsible(this)" style="cursor:pointer">
-<span class="wt-card-title">Upload Certificate</span>
-</div>
-<div class="wt-collapsible" id="certUploadBody">
+<div class="wt-card-header"><span class="wt-card-title">Upload Certificate</span></div>
 <div style="padding:4px 0">
-<div class="wt-field">
-<label>Certificate file (.pem / .crt)</label>
-<input type="file" class="wt-input" id="certFileInput" accept=".pem,.crt" style="padding:6px">
+<div id="certDropZone" style="border:2px dashed var(--wt-border);border-radius:8px;padding:24px 16px;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s" onclick="document.getElementById('certFileInput').click()">
+<div style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:4px">Drop certificate (.pem/.crt) and key (.pem/.key) files here</div>
+<div style="font-size:11px;color:var(--wt-text-secondary);opacity:0.6">or click to browse</div>
+<input type="file" id="certFileInput" accept=".pem,.crt,.key" multiple style="display:none" onchange="handleCertFileSelect(this.files)">
 </div>
-<div class="wt-field">
-<label>Private key file (.pem / .key)</label>
-<input type="file" class="wt-input" id="keyFileInput" accept=".pem,.key" style="padding:6px">
-</div>
+<div id="certFileList" style="font-size:12px;margin-top:8px"></div>
 <button class="wt-btn wt-btn-primary" onclick="uploadCert()" style="margin-top:8px">Upload &amp; Activate</button>
 <div id="certUploadStatus" style="font-size:12px;margin-top:8px"></div>
-</div>
 </div>
 </div>
 
