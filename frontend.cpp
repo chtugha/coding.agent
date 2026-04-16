@@ -1963,7 +1963,29 @@ private:
             finish_async_task(task_id, "{\"error\":\"Failed to start TTS service: " + tts_to_start + "\"}");
             return;
         }
-        usleep(2000000); // 2s for TTS to initialise
+
+        {
+            whispertalk::ServiceType tts_svc_type = (tts_choice == "neutts")
+                ? whispertalk::ServiceType::NEUTTS_SERVICE
+                : whispertalk::ServiceType::KOKORO_SERVICE;
+            uint16_t tts_cmd_port = whispertalk::service_cmd_port(tts_svc_type);
+            bool tts_ready = false;
+            for (int i = 0; i < 120; i++) {
+                set_setup_progress(task_id, "C",
+                    "Waiting for " + tts_label + " TTS to initialise (" + std::to_string(i * 3) + "s)...");
+                std::string err;
+                std::string resp = tcp_command(tts_cmd_port, "PING", err, 3);
+                if (resp.find("PONG") != std::string::npos) {
+                    tts_ready = true;
+                    break;
+                }
+                usleep(3000000);
+            }
+            if (!tts_ready) {
+                finish_async_task(task_id, "{\"error\":\"" + tts_label + " TTS did not become reachable within 6 minutes\"}");
+                return;
+            }
+        }
 
         // Tell LLaMA which TTS to use
         if (tts_choice == "neutts") {
