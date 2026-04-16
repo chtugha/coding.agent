@@ -3102,10 +3102,13 @@ private:
                     if (tpos == std::string::npos) continue;
 
                     size_t ms_start = tpos + 15;
-                    size_t ms_end = msg.find("ms)", ms_start);
+                    size_t ms_end = msg.find("ms", ms_start);
                     if (ms_end == std::string::npos) continue;
 
-                    size_t text_start = ms_end + 5;
+                    size_t paren_close = msg.find("):", ms_end);
+                    if (paren_close == std::string::npos) continue;
+
+                    size_t text_start = paren_close + 2;
                     if (text_start >= msg.size()) continue;
 
                     double chunk_latency = std::stod(msg.substr(ms_start, ms_end - ms_start));
