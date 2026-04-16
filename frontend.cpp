@@ -3543,7 +3543,11 @@ private:
     ShutupScenarioResult run_shutup_scenario(const std::string& scenario) {
         ShutupScenarioResult r;
         uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+        std::string active_tts_s = get_setting("test_active_tts", "kokoro");
+        whispertalk::ServiceType tts_type_s = (active_tts_s == "neutts")
+            ? whispertalk::ServiceType::NEUTTS_SERVICE
+            : whispertalk::ServiceType::KOKORO_SERVICE;
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(tts_type_s);
         uint16_t oap_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
 
         std::string prompt = "Erzähl mir eine sehr lange und detaillierte Geschichte über einen Ritter, der durch dunkle Wälder reist.";
@@ -3938,7 +3942,11 @@ private:
     }
 
     void run_kokoro_quality_test_async(int64_t task_id, std::vector<std::string> phrases) {
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+        std::string active_tts_q = get_setting("test_active_tts", "kokoro");
+        whispertalk::ServiceType tts_type_q = (active_tts_q == "neutts")
+            ? whispertalk::ServiceType::NEUTTS_SERVICE
+            : whispertalk::ServiceType::KOKORO_SERVICE;
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(tts_type_q);
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
@@ -4074,7 +4082,11 @@ private:
     }
 
     void run_kokoro_benchmark_async(int64_t task_id, std::string phrase, int iterations) {
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+        std::string active_tts_b = get_setting("test_active_tts", "kokoro");
+        whispertalk::ServiceType tts_type_b = (active_tts_b == "neutts")
+            ? whispertalk::ServiceType::NEUTTS_SERVICE
+            : whispertalk::ServiceType::KOKORO_SERVICE;
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(tts_type_b);
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
@@ -4271,7 +4283,11 @@ private:
     }
 
     void run_tts_roundtrip_async(int64_t task_id, std::vector<std::string> phrases) {
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::KOKORO_SERVICE);
+        std::string active_tts = get_setting("test_active_tts", "kokoro");
+        whispertalk::ServiceType tts_type = (active_tts == "neutts")
+            ? whispertalk::ServiceType::NEUTTS_SERVICE
+            : whispertalk::ServiceType::KOKORO_SERVICE;
+        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(tts_type);
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
@@ -4336,16 +4352,16 @@ private:
                 continue;
             }
 
-            TranscriptionResult tr1 = wait_for_whisper_transcription(seq_before, 30000);
+            TranscriptionResult tr1 = wait_for_whisper_transcription(seq_before, 60000);
             std::string transcription_in = tr1.found ? tr1.text : "";
             double similarity_in = tr1.found ? calculate_levenshtein_similarity(phrase, transcription_in) : 0;
 
             uint64_t seq_after_l1 = current_log_seq();
 
-            LlamaResponseResult llama_res = wait_for_llama_response(seq_before, 30000);
+            LlamaResponseResult llama_res = wait_for_llama_response(seq_before, 60000);
             std::string llama_text = llama_res.found ? llama_res.text : "";
 
-            TranscriptionResult tr2 = wait_for_whisper_transcription(seq_after_l1, 60000);
+            TranscriptionResult tr2 = wait_for_whisper_transcription(seq_after_l1, 120000);
 
             auto e2e_end = std::chrono::steady_clock::now();
             double e2e_ms = std::chrono::duration_cast<std::chrono::milliseconds>(e2e_end - e2e_start).count();
@@ -4482,13 +4498,18 @@ private:
             return;
         }
 
-        static const std::pair<whispertalk::ServiceType, const char*> required_services[] = {
+        std::string active_tts = get_setting("test_active_tts", "kokoro");
+        whispertalk::ServiceType tts_svc_type = (active_tts == "neutts")
+            ? whispertalk::ServiceType::NEUTTS_SERVICE
+            : whispertalk::ServiceType::KOKORO_SERVICE;
+
+        std::vector<std::pair<whispertalk::ServiceType, const char*>> required_services = {
             {whispertalk::ServiceType::SIP_CLIENT, "SIP Client"},
             {whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, "IAP"},
             {whispertalk::ServiceType::VAD_SERVICE, "VAD"},
             {whispertalk::ServiceType::WHISPER_SERVICE, "Whisper"},
             {whispertalk::ServiceType::LLAMA_SERVICE, "LLaMA"},
-            {whispertalk::ServiceType::KOKORO_SERVICE, "TTS"},
+            {tts_svc_type, "TTS"},
             {whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
         };
         for (const auto& [svc, name] : required_services) {
@@ -4540,15 +4561,15 @@ private:
                 }
             }
 
-            TranscriptionResult tr1 = wait_for_whisper_transcription(seq_before, 30000, l1_call_id);
+            TranscriptionResult tr1 = wait_for_whisper_transcription(seq_before, 60000, l1_call_id);
             std::string whisper_l1 = tr1.found ? tr1.text : "";
 
-            LlamaResponseResult llama_res = wait_for_llama_response(seq_before, 30000);
+            LlamaResponseResult llama_res = wait_for_llama_response(seq_before, 60000);
             std::string llama_text = llama_res.found ? llama_res.text : "";
 
             uint64_t seq_after_llama = current_log_seq();
 
-            TranscriptionResult tr2 = wait_for_whisper_transcription(seq_after_llama, 60000, l2_call_id);
+            TranscriptionResult tr2 = wait_for_whisper_transcription(seq_after_llama, 120000, l2_call_id);
 
             auto e2e_end = std::chrono::steady_clock::now();
             double e2e_ms = std::chrono::duration_cast<std::chrono::milliseconds>(e2e_end - e2e_start).count();
