@@ -3054,6 +3054,7 @@ int main(int argc, char** argv) {
     if (ollama_init_thread.joinable()) ollama_init_thread.join();
 
     srv.join();
+    kill_ollama_tracked();
     g_query_pool.shutdown();
     srv.free_mgr();
     g_resolve_queue.shutdown();

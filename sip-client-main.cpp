@@ -991,6 +991,18 @@ private:
             }
             return "ERROR Line " + std::to_string(index) + " not found";
         }
+        else if (msg == "REMOVE_ALL_LINES") {
+            std::vector<int> indices;
+            {
+                std::lock_guard<std::mutex> lock(lines_mutex_);
+                for (const auto& line : lines_) indices.push_back(line->index);
+            }
+            int removed = 0;
+            for (int idx : indices) {
+                if (remove_line(idx)) removed++;
+            }
+            return "LINES_REMOVED " + std::to_string(removed);
+        }
         else if (msg == "LIST_LINES") {
             return list_lines();
         }

@@ -99,7 +99,16 @@ inline std::string FrontendServer::build_ui_pages() {
 <div class="wt-page" id="page-tests">
 <div class="wt-content">
 <div id="tests-overview">
-<h2 class="wt-page-title">Tests</h2>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px">
+<h2 class="wt-page-title" style="margin:0">Tests</h2>
+<label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-left:auto">TTS:
+<select class="wt-select tts-pref-select" onchange="setTtsPreference(this.value)" style="font-size:12px;padding:2px 6px">
+<option value="auto">Auto (Kokoro + NeuTTS)</option>
+<option value="kokoro">Kokoro only</option>
+<option value="neutts">NeuTTS only</option>
+</select>
+</label>
+</div>
 <div id="testsContainer"></div>
 </div>
 <div id="tests-detail" class="hidden">
@@ -110,9 +119,10 @@ inline std::string FrontendServer::build_ui_pages() {
 <span id="testDetailStatus"></span></div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="testDetailArgs" placeholder="e.g. --gtest_filter=*MyTest*"></div>
-<div style="display:flex;gap:8px">
-<button class="wt-btn wt-btn-primary" onclick="startTestDetail()">&#x25B6; Run</button>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+<button class="wt-btn wt-btn-primary" id="testDetailRunBtn" onclick="startTestDetail()">&#x25B6; Run</button>
 <button class="wt-btn wt-btn-danger" id="testStopBtn" onclick="stopTestDetail()" style="display:none">&#x25A0; Stop</button>
+<span id="testDetailSetupStatus" style="font-size:12px"></span>
 </div></div>
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Live Output</span>
@@ -450,7 +460,14 @@ Save outgoing audio as WAV</label>
 <button class="wt-tab-btn" role="tab" id="tab-beta-pipeline" aria-selected="false" aria-controls="beta-pipeline" onclick="switchBetaTab('beta-pipeline')">Pipeline Tests</button>
 <button class="wt-tab-btn" role="tab" id="tab-beta-tools" aria-selected="false" aria-controls="beta-tools" onclick="switchBetaTab('beta-tools')">Tools</button>
 </div>
-<div style="display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end">
+<div style="display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end;align-items:center;flex-wrap:wrap">
+<label style="font-size:12px;display:flex;align-items:center;gap:6px">TTS:
+<select class="wt-select tts-pref-select" onchange="setTtsPreference(this.value)" style="font-size:12px;padding:2px 6px">
+<option value="auto">Auto (Kokoro + NeuTTS)</option>
+<option value="kokoro">Kokoro only</option>
+<option value="neutts">NeuTTS only</option>
+</select>
+</label>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="toggleAllCollapsibles(true)">Expand All</button>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="toggleAllCollapsibles(false)">Collapse All</button>
 <button class="wt-btn wt-btn-sm wt-btn-primary" id="runAllTestsBtn" onclick="runAllBetaTests()">&#x25B6; Run All Tests</button>
@@ -469,7 +486,7 @@ Save outgoing audio as WAV</label>
 <div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Test SIP Client RTP packet routing and TCP connection handling with IAP service.</p>
 <div style="display:flex;gap:8px;margin-bottom:12px">
-<button class="wt-btn wt-btn-primary" onclick="startSipRtpTest()">&#x25B6; Start Test</button>
+<button class="wt-btn wt-btn-primary" id="sipRtpStartBtn" onclick="startSipRtpTest()">&#x25B6; Start Test</button>
 <button class="wt-btn wt-btn-danger" onclick="stopSipRtpTest()">&#x25A0; Stop Test</button>
 <button class="wt-btn wt-btn-secondary" onclick="refreshSipStats()">&#x21BB; Refresh Stats</button>
 </div>
@@ -519,8 +536,8 @@ Save outgoing audio as WAV</label>
 </select>
 </div>
 <div style="display:flex;gap:8px;margin-bottom:12px">
-<button class="wt-btn wt-btn-primary" onclick="runIapQualityTest()">&#x25B6; Run Quality Test</button>
-<button class="wt-btn wt-btn-success" onclick="runAllIapQualityTests()">&#x25B6; Run All Files</button>
+<button class="wt-btn wt-btn-primary" id="iapRunBtn" onclick="runIapQualityTest()">&#x25B6; Run Quality Test</button>
+<button class="wt-btn wt-btn-success" id="iapRunAllBtn" onclick="runAllIapQualityTests()">&#x25B6; Run All Files</button>
 </div>
 <div id="iapTestStatus" style="margin-bottom:12px;font-size:13px"></div>
 <div id="iapTestResults">
@@ -660,7 +677,7 @@ Save outgoing audio as WAV</label>
 </div>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
-<button class="wt-btn wt-btn-primary" onclick="runLlamaQualityTest()">&#x25B6; Run Quality Test</button>
+<button class="wt-btn wt-btn-primary" id="llamaQualityRunBtn" onclick="runLlamaQualityTest()">&#x25B6; Run Quality Test</button>
 <button class="wt-btn wt-btn-secondary" onclick="runLlamaShutupTest()">&#x1F910; Shut-up Test</button>
 </div>
 <div id="llamaTestStatus" style="margin-top:8px;font-size:12px"></div>
@@ -690,7 +707,7 @@ Save outgoing audio as WAV</label>
 </div>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
-<button class="wt-btn wt-btn-primary" onclick="runKokoroQualityTest()">&#x25B6; Run Quality Test</button>
+<button class="wt-btn wt-btn-primary" id="kokoroQualityRunBtn" onclick="runKokoroQualityTest()">&#x25B6; Run Quality Test</button>
 <button class="wt-btn wt-btn-secondary" onclick="runKokoroBenchmark()">&#x23F1; Benchmark</button>
 <select class="wt-select" id="kokoroBenchIter" style="width:80px">
 <option value="3">3 iter</option>
@@ -729,7 +746,7 @@ Save outgoing audio as WAV</label>
 </select>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
-<button class="wt-btn wt-btn-primary" onclick="runShutupPipelineTest()">&#x25B6; Run Pipeline Shut-Up Test</button>
+<button class="wt-btn wt-btn-primary" id="shutupPipelineRunBtn" onclick="runShutupPipelineTest()">&#x25B6; Run Pipeline Shut-Up Test</button>
 </div>
 <div id="shutupPipelineStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="shutupPipelineResults" style="margin-top:12px"></div>

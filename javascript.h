@@ -33,6 +33,148 @@ const STATUS_CLEAR_MS=5000,POLL_LLAMA_BENCH_MS=2000;
 const POLL_PIPELINE_STRESS_MS=2000,POLL_DOWNLOAD_MS=1000;
 const TOAST_FADE_MS=300,DELAY_DEBOUNCE_MS=300;
 const COUNTUP_STEP_MS=20,COUNTUP_DURATION_MS=400;
+const TEST_SETUP_POLL_MS=1000,TEST_TIMEOUT_MS=600000;
+
+let _ttsPreference='auto';
+let _testSetupActive=false;
+function loadTtsPreference(){
+  fetch('/api/tests/tts_preference').then(r=>r.json()).then(d=>{
+    _ttsPreference=d.preference||'auto';
+    document.querySelectorAll('.tts-pref-select').forEach(sel=>{sel.value=_ttsPreference;});
+  }).catch(()=>{});
+}
+function setTtsPreference(val){
+  _ttsPreference=val;
+  document.querySelectorAll('.tts-pref-select').forEach(sel=>{sel.value=val;});
+  fetch('/api/tests/tts_preference',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({preference:val})}).catch(()=>{});
+}
+
+// runWithTestSetup(testFn, opts) — Universal test setup wrapper.
+// opts: { statusEl (DOM element for progress), btnEl (button to disable), ttsOverride }
+// Returns a Promise that resolves when both runs complete (or rejects on setup failure).
+async function runWithTestSetup(testFn,opts){
+  opts=opts||{};
+  const statusEl=opts.statusEl||null;
+  const btnEl=opts.btnEl||null;
+  const ttsOverride=opts.ttsOverride||null;
+  function setStatus(html){if(statusEl)statusEl.innerHTML=html;}
+  if(_testSetupActive){
+    try{return await testFn({tts:_ttsPreference==='neutts'?'neutts':'kokoro',runIndex:0});}finally{}
+  }
+  if(btnEl){btnEl.disabled=true;btnEl._origText=btnEl.textContent;btnEl.textContent='Setting up...';}
+
+  const ttsOrder=ttsOverride?[ttsOverride]:
+    (_ttsPreference==='kokoro'?['kokoro']:
+    _ttsPreference==='neutts'?['neutts']:
+    ['kokoro','neutts']);
+
+  const runResults=[];
+  try{
+    for(let ri=0;ri<ttsOrder.length;ri++){
+      const tts=ttsOrder[ri];
+      const runLabel=ttsOrder.length>1?(ri===0?'Run 1/2 (Kokoro)':'Run 2/2 (NeuTTS)'):'';
+
+      // --- Setup ---
+      setStatus(`<span style="color:var(--wt-accent)">&#x23F3; ${runLabel?runLabel+' — ':''}Setting up pipeline...</span>`);
+      let setupResp;
+      try{
+        setupResp=await fetch('/api/tests/setup/start',{method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({tts})});
+      }catch(e){
+        setStatus(`<span style="color:var(--wt-danger)">Setup network error: ${escapeHtml(String(e))}</span>`);
+        throw e;
+      }
+      if(!setupResp.ok){
+        const err=await setupResp.json().catch(()=>({error:'Setup failed'}));
+        setStatus(`<span style="color:var(--wt-danger)">Setup failed: ${escapeHtml(err.error||'unknown')}</span>`);
+        throw new Error(err.error||'setup failed');
+      }
+      const {task_id}=await setupResp.json();
+
+      // --- Poll setup progress ---
+      await new Promise((res,rej)=>{
+        const iv=setInterval(async()=>{
+          try{
+            const d=await fetch(`/api/async/status?task_id=${task_id}`).then(r=>r.json());
+            if(d.status==='running'){
+              const stepLabel=d.step?`[Step ${d.step}] `:'';
+              setStatus(`<span style="color:var(--wt-accent)">&#x23F3; ${runLabel?runLabel+' — ':''}${stepLabel}${escapeHtml(d.detail||'Setting up...')}</span>`);
+              return;
+            }
+            clearInterval(iv);
+            if(d.error){
+              setStatus(`<span style="color:var(--wt-danger)">Setup error: ${escapeHtml(d.error)}</span>`);
+              rej(new Error(d.error));
+            }else{
+              setStatus(`<span style="color:var(--wt-success)">&#x2713; Setup complete${runLabel?' ('+runLabel+')':''} — running test...</span>`);
+              res(d);
+            }
+          }catch(e){clearInterval(iv);rej(e);}
+        },TEST_SETUP_POLL_MS);
+      });
+
+      // --- Run test with 10-min timeout ---
+      let teardownCalled=false;
+      async function doTeardown(){
+        if(teardownCalled)return;teardownCalled=true;
+        await fetch('/api/tests/teardown',{method:'POST'}).catch(()=>{});
+      }
+      const timeoutHandle=setTimeout(async()=>{
+        setStatus(`<span style="color:var(--wt-danger)">&#x23F0; Test timed out after 10 minutes — tearing down</span>`);
+        await doTeardown();
+      },TEST_TIMEOUT_MS);
+      let testResult=null,testError=null;
+      _testSetupActive=true;
+      try{
+        testResult=await testFn({tts,runIndex:ri});
+      }catch(e){
+        testError=e;
+      }finally{
+        _testSetupActive=false;
+        clearTimeout(timeoutHandle);
+        await doTeardown();
+      }
+      if(testError&&ttsOrder.length===1)throw testError;
+      runResults.push({tts,result:testResult,error:testError?String(testError):null});
+    }
+
+    // --- Show comparison if auto (both runs) ---
+    if(ttsOrder.length>1&&statusEl){
+      const r0=runResults[0],r1=runResults[1];
+      let cmp=`<div style="display:flex;gap:12px;margin-top:8px">`;
+      cmp+=`<div style="flex:1;padding:8px;border:1px solid var(--wt-border);border-radius:4px">`;
+      cmp+=`<strong>Kokoro</strong><br>`;
+      cmp+=r0.error?`<span style="color:var(--wt-danger)">${escapeHtml(r0.error)}</span>`
+        :`<span style="color:var(--wt-success)">Completed</span>`;
+      cmp+=`</div>`;
+      cmp+=`<div style="flex:1;padding:8px;border:1px solid var(--wt-border);border-radius:4px">`;
+      cmp+=`<strong>NeuTTS</strong><br>`;
+      cmp+=r1.error?`<span style="color:var(--wt-danger)">${escapeHtml(r1.error)}</span>`
+        :`<span style="color:var(--wt-success)">Completed</span>`;
+      cmp+=`</div></div>`;
+      statusEl.innerHTML=`<span style="color:var(--wt-success)">Both runs complete</span>${cmp}`;
+    }
+    return runResults;
+  }finally{
+    if(btnEl){btnEl.disabled=false;btnEl.textContent=btnEl._origText||'Run Test';}
+  }
+}
+
+// _waitForTask(taskId, intervalMs) — polls /api/async/status until the task
+// is no longer running and returns a Promise with the final result object.
+function _waitForTask(taskId,intervalMs){
+  return new Promise((resolve,reject)=>{
+    const iv=setInterval(()=>{
+      fetch(`/api/async/status?task_id=${taskId}`).then(r=>r.json()).then(d=>{
+        if(d.status==='running')return;
+        clearInterval(iv);
+        if(d.error)reject(new Error(d.error));else resolve(d);
+      }).catch(e=>{clearInterval(iv);reject(e);});
+    },intervalMs||2000);
+  });
+}
 
 // showPage(p) — Navigation/page-transition controller.
 //
@@ -262,20 +404,39 @@ function showTestsOverview(){
 
 function startTestDetail(){
   if(!currentTest)return;
-  const args=document.getElementById('testDetailArgs').value;
-  fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({test:currentTest,args:args})}).then(r=>r.json().then(d=>{
-  if(d.error){
-    document.getElementById('testDetailLog').textContent=`Error: ${d.error}`;
-    showToast(`Failed to start test: ${d.error}`,'error');
-  }else{
-    document.getElementById('testDetailLog').textContent='Starting...';
-    setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
-  }
-})).catch(e=>{
-document.getElementById('testDetailLog').textContent=`Network error: ${e}`;
-showToast(`Failed to start test: ${e}`,'error');
-  });
+  const logEl=document.getElementById('testDetailLog');
+  const btnEl=document.getElementById('testDetailRunBtn');
+  const statusEl=document.getElementById('testDetailSetupStatus');
+  runWithTestSetup(async()=>{
+    const args=document.getElementById('testDetailArgs').value;
+    return new Promise((resolve,reject)=>{
+      fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({test:currentTest,args})}).then(r=>r.json()).then(d=>{
+        if(d.error){
+          logEl.textContent=`Error: ${d.error}`;
+          showToast(`Failed to start test: ${d.error}`,'error');
+          reject(new Error(d.error));
+        }else{
+          logEl.textContent='Running...';
+          setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
+          // Resolve when the test process exits (poll for running=false)
+          let seenRunning=false;
+          const iv=setInterval(()=>{
+            fetch('/api/tests').then(r=>r.json()).then(tests=>{
+              const t=(tests.tests||[]).find(x=>x.name===currentTest);
+              if(t&&t.running)seenRunning=true;
+              if(seenRunning&&(!t||!t.running)){clearInterval(iv);resolve();}
+            }).catch(()=>{});
+          },2000);
+          setTimeout(()=>{clearInterval(iv);resolve();},TEST_TIMEOUT_MS);
+        }
+      }).catch(e=>{
+        logEl.textContent=`Network error: ${e}`;
+        showToast(`Failed to start test: ${e}`,'error');
+        reject(e);
+      });
+    });
+  },{statusEl,btnEl});
 }
 
 function stopTestDetail(){
@@ -1391,21 +1552,17 @@ async function runLlamaQualityTest(){
   const llamaTopP=parseFloat(document.getElementById('llamaTopPSlider')?.value)||0.95;
   if(custom){prompts.push({id:0,prompt:custom,expected_keywords:[],category:'custom',max_words:llamaMaxWords});}
   if(prompts.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one prompt or enter a custom prompt.</span>';return;}
-  status.innerHTML=`<span style="color:var(--wt-accent)">Applying sampling params (temp=${llamaTemp}, top_p=${llamaTopP})...</span>`;
   results.innerHTML='';
   try{await fetch('/api/llama/set_sampling',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({temperature:llamaTemp,top_p:llamaTopP})});}catch(e){}
-  status.innerHTML=`<span style="color:var(--wt-accent)">Running quality test (${prompts.length} prompts)...</span>`;
-  fetch('/api/llama/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts})})
-.then(r=>{
-  if(r.status===202) return r.json();
-  return r.json().then(d=>{throw new Error(d.error||`HTTP ${r.status}`);});
-}).then(d=>{
-  status.innerHTML=`<span style="color:var(--wt-accent)">Quality test running (task ${d.task_id}, ${prompts.length} prompts)...</span>`;
-  llamaQualityPoll=setInterval(()=>pollLlamaQualityTask(d.task_id),POLL_LLAMA_QUALITY_MS);
-}).catch(e=>{
-  if(llamaQualityPoll){clearInterval(llamaQualityPoll);llamaQualityPoll=null;}
-  status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
-});
+  const btnEl=document.getElementById('llamaQualityRunBtn');
+  runWithTestSetup(async()=>{
+    const r=await fetch('/api/llama/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompts})});
+    if(r.status!==202){const e=await r.json();throw new Error(e.error||`HTTP ${r.status}`);}
+    const d=await r.json();
+    status.innerHTML=`<span style="color:var(--wt-accent)">Quality test running (task ${d.task_id}, ${prompts.length} prompts)...</span>`;
+    llamaQualityPoll=setInterval(()=>pollLlamaQualityTask(d.task_id),POLL_LLAMA_QUALITY_MS);
+    return _waitForTask(d.task_id,POLL_LLAMA_QUALITY_MS);
+  },{statusEl:status,btnEl});
 }
 
 function pollLlamaQualityTask(taskId){
@@ -1441,19 +1598,15 @@ function runLlamaShutupTest(){
   if(llamaShutupPoll){clearInterval(llamaShutupPoll);llamaShutupPoll=null;}
   const status=document.getElementById('llamaTestStatus');
   const result=document.getElementById('llamaShutupResult');
-  status.innerHTML='<span style="color:var(--wt-accent)">Running shut-up test...</span>';
   result.innerHTML='';
-  fetch('/api/llama/shutup_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:'Erzähl mir eine lange Geschichte über einen Ritter.'})})
-.then(r=>{
-  if(r.status===202) return r.json();
-  return r.json().then(d=>{throw new Error(d.error||`HTTP ${r.status}`);});
-}).then(d=>{
-  status.innerHTML=`<span style="color:var(--wt-accent)">Shut-up test running (task ${d.task_id})...</span>`;
-  llamaShutupPoll=setInterval(()=>pollLlamaShutupTask(d.task_id),POLL_LLAMA_SHUTUP_MS);
-}).catch(e=>{
-  if(llamaShutupPoll){clearInterval(llamaShutupPoll);llamaShutupPoll=null;}
-  status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
-});
+  runWithTestSetup(async()=>{
+    const r=await fetch('/api/llama/shutup_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:'Erzähl mir eine lange Geschichte über einen Ritter.'})});
+    if(r.status!==202){const e=await r.json();throw new Error(e.error||`HTTP ${r.status}`);}
+    const d=await r.json();
+    status.innerHTML=`<span style="color:var(--wt-accent)">Shut-up test running (task ${d.task_id})...</span>`;
+    llamaShutupPoll=setInterval(()=>pollLlamaShutupTask(d.task_id),POLL_LLAMA_SHUTUP_MS);
+    return _waitForTask(d.task_id,POLL_LLAMA_SHUTUP_MS);
+  },{statusEl:status});
 }
 
 function pollLlamaShutupTask(taskId){
@@ -1481,22 +1634,19 @@ function runShutupPipelineTest(){
   if(shutupPipelinePoll){clearInterval(shutupPipelinePoll);shutupPipelinePoll=null;}
   const status=document.getElementById('shutupPipelineStatus');
   const results=document.getElementById('shutupPipelineResults');
-  status.innerHTML='<span style="color:var(--wt-accent)">Running pipeline shut-up test...</span>';
   results.innerHTML='';
-  const sel=document.getElementById('shutupScenarios');
-  const scenarios=Array.from(sel.options).filter(o=>o.selected).map(o=>o.value);
-  if(!scenarios.length)scenarios.push('basic','early','late','rapid');
-  fetch('/api/shutup_pipeline_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scenarios})})
-.then(r=>{
-  if(r.status===202) return r.json();
-  return r.json().then(d=>{throw new Error(d.error||`HTTP ${r.status}`);});
-}).then(d=>{
-  status.innerHTML=`<span style="color:var(--wt-accent)">Pipeline shut-up test running (task ${d.task_id})...</span>`;
-  shutupPipelinePoll=setInterval(()=>pollShutupPipelineTask(d.task_id),POLL_SHUTUP_MS);
-}).catch(e=>{
-  if(shutupPipelinePoll){clearInterval(shutupPipelinePoll);shutupPipelinePoll=null;}
-  status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
-});
+  const btnEl=document.getElementById('shutupPipelineRunBtn');
+  runWithTestSetup(async()=>{
+    const sel=document.getElementById('shutupScenarios');
+    const scenarios=Array.from(sel.options).filter(o=>o.selected).map(o=>o.value);
+    if(!scenarios.length)scenarios.push('basic','early','late','rapid');
+    const r=await fetch('/api/shutup_pipeline_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scenarios})});
+    if(r.status!==202){const e=await r.json();throw new Error(e.error||`HTTP ${r.status}`);}
+    const d=await r.json();
+    status.innerHTML=`<span style="color:var(--wt-accent)">Pipeline shut-up test running (task ${d.task_id})...</span>`;
+    shutupPipelinePoll=setInterval(()=>pollShutupPipelineTask(d.task_id),POLL_SHUTUP_MS);
+    return _waitForTask(d.task_id,POLL_SHUTUP_MS);
+  },{statusEl:status,btnEl});
 }
 
 function pollShutupPipelineTask(taskId){
@@ -1538,20 +1688,17 @@ function runKokoroQualityTest(){
   const results=document.getElementById('kokoroTestResults');
   const custom=document.getElementById('kokoroCustomPhrase').value.trim();
   const kokoroSpeed=parseFloat(document.getElementById('kokoroSpeedSlider')?.value)||1.0;
-  const body=custom?{phrases:[custom],speed:kokoroSpeed}:{speed:kokoroSpeed};
-  status.innerHTML='<span style="color:var(--wt-accent)">Running Kokoro quality test...</span>';
+  const ttsBody=custom?{phrases:[custom],speed:kokoroSpeed}:{speed:kokoroSpeed};
   results.innerHTML='';
-  fetch('/api/kokoro/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-.then(r=>{
-  if(r.status===202) return r.json();
-  return r.json().then(d=>{throw new Error(d.error||`HTTP ${r.status}`);});
-}).then(d=>{
-  status.innerHTML=`<span style="color:var(--wt-accent)">Quality test running (task ${d.task_id})...</span>`;
-  kokoroQualityPoll=setInterval(()=>pollKokoroQualityTask(d.task_id),POLL_KOKORO_QUALITY_MS);
-}).catch(e=>{
-  if(kokoroQualityPoll){clearInterval(kokoroQualityPoll);kokoroQualityPoll=null;}
-  status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
-});
+  const btn=document.getElementById('kokoroQualityRunBtn');
+  runWithTestSetup(async({tts})=>{
+    const r=await fetch('/api/kokoro/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ttsBody)});
+    if(r.status!==202){const e=await r.json();throw new Error(e.error||`HTTP ${r.status}`);}
+    const d=await r.json();
+    status.innerHTML=`<span style="color:var(--wt-accent)">Quality test running (task ${d.task_id})... [${tts}]</span>`;
+    kokoroQualityPoll=setInterval(()=>pollKokoroQualityTask(d.task_id),POLL_KOKORO_QUALITY_MS);
+    return _waitForTask(d.task_id,POLL_KOKORO_QUALITY_MS);
+  },{statusEl:status,btnEl:btn,ttsOverride:'kokoro'});
 }
 
 function pollKokoroQualityTask(taskId){
@@ -1677,47 +1824,42 @@ function runMultilineStress(){
   const results=document.getElementById('stressResults');
   const lines=parseInt(document.getElementById('stressLines').value)||4;
   const dur=parseInt(document.getElementById('stressDuration').value)||10;
-  btn.disabled=true;
-  status.innerHTML=`<span style="color:var(--wt-accent)">Starting stress test (${lines} lines, ${dur}s)...</span>`;
   results.innerHTML='';
-  fetch('/api/multiline_stress',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({lines,duration_s:dur})})
-  .then(r=>r.json()).then(d=>{
-if(d.error){status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(d.error)}</span>`;btn.disabled=false;return;}
-const task_id=d.task_id;
-status.innerHTML=`<span style="color:var(--wt-accent)">Running... (task ${task_id})</span>`;
-stressPollInterval=setInterval(()=>{
-  fetch(`/api/async/status?task_id=${task_id}`).then(r=>r.json()).then(r=>{
-    if(r.status==='running'){
-      status.innerHTML='<span style="color:var(--wt-accent)">&#x23F3; Stress test in progress...</span>';
-      return;
-    }
-    clearInterval(stressPollInterval);stressPollInterval=null;
-    btn.disabled=false;
-    if(r.error){status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(r.error)}</span>`;return;}
-    const overall_ok=(r.overall_success_pct||0)>=95;
-    const col=overall_ok?'var(--wt-success)':r.overall_success_pct>=75?'var(--wt-warning)':'var(--wt-danger)';
-    status.innerHTML=`<span style="color:${col};font-weight:bold">${r.overall_success_pct}% success</span>`
-      +` &nbsp;(${r.total_ok}/${r.total_pings} pings OK, ${r.lines} lines, ${r.duration_s}s)`;
-    let html='<table class="wt-table"><tr><th>Service</th><th>OK</th><th>Fail</th><th>Success%</th><th>Avg latency</th></tr>';
-    (r.services||[]).forEach(s=>{
-      const c=s.success_pct>=95?'var(--wt-success)':s.success_pct>=75?'var(--wt-warning)':'var(--wt-danger)';
-      html+=`<tr><td>${escapeHtml(s.name)}</td><td>${s.ok}</td><td>${s.fail}</td>`
-           +`<td style="color:${c};font-weight:bold">${s.success_pct}%</td>`
-           +`<td>${s.avg_ms}ms</td></tr>`;
-    });
-    html+='</table>';
-    results.innerHTML=html;
-  }).catch(e=>{
-    clearInterval(stressPollInterval);stressPollInterval=null;
-    btn.disabled=false;
-    status.innerHTML=`<span style="color:var(--wt-danger)">Poll error: ${escapeHtml(String(e))}</span>`;
-  });
-},POLL_STRESS_MS);
-  }).catch(e=>{
-btn.disabled=false;
-status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
-  });
+  runWithTestSetup(async()=>{
+    const r=await fetch('/api/multiline_stress',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({lines,duration_s:dur})});
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const task_id=d.task_id;
+    status.innerHTML=`<span style="color:var(--wt-accent)">Running... (task ${task_id})</span>`;
+    stressPollInterval=setInterval(()=>{
+      fetch(`/api/async/status?task_id=${task_id}`).then(r=>r.json()).then(r=>{
+        if(r.status==='running'){
+          status.innerHTML='<span style="color:var(--wt-accent)">&#x23F3; Stress test in progress...</span>';
+          return;
+        }
+        clearInterval(stressPollInterval);stressPollInterval=null;
+        if(r.error){status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(r.error)}</span>`;return;}
+        const overall_ok=(r.overall_success_pct||0)>=95;
+        const col=overall_ok?'var(--wt-success)':r.overall_success_pct>=75?'var(--wt-warning)':'var(--wt-danger)';
+        status.innerHTML=`<span style="color:${col};font-weight:bold">${r.overall_success_pct}% success</span>`
+          +` &nbsp;(${r.total_ok}/${r.total_pings} pings OK, ${r.lines} lines, ${r.duration_s}s)`;
+        let html='<table class="wt-table"><tr><th>Service</th><th>OK</th><th>Fail</th><th>Success%</th><th>Avg latency</th></tr>';
+        (r.services||[]).forEach(s=>{
+          const c=s.success_pct>=95?'var(--wt-success)':s.success_pct>=75?'var(--wt-warning)':'var(--wt-danger)';
+          html+=`<tr><td>${escapeHtml(s.name)}</td><td>${s.ok}</td><td>${s.fail}</td>`
+               +`<td style="color:${c};font-weight:bold">${s.success_pct}%</td>`
+               +`<td>${s.avg_ms}ms</td></tr>`;
+        });
+        html+='</table>';
+        results.innerHTML=html;
+      }).catch(e=>{
+        clearInterval(stressPollInterval);stressPollInterval=null;
+        status.innerHTML=`<span style="color:var(--wt-danger)">Poll error: ${escapeHtml(String(e))}</span>`;
+      });
+    },POLL_STRESS_MS);
+    return _waitForTask(task_id,POLL_STRESS_MS);
+  },{statusEl:status,btnEl:btn});
 }
 
 let pstressPoll=null;
@@ -1730,23 +1872,27 @@ function runPipelineStressTest(){
   const metrics=document.getElementById('pstressMetrics');
   const results=document.getElementById('pstressResults');
   const dur=parseInt(document.getElementById('pstressDuration').value)||120;
-  btn.disabled=true;stopBtn.style.display='inline-block';
+  stopBtn.style.display='inline-block';
   progress.style.display='block';metrics.style.display='block';
   results.innerHTML='';
-  status.innerHTML=`<span style="color:var(--wt-accent)">Starting full pipeline stress test (${dur}s)...</span>`;
   document.getElementById('pstressElapsed').textContent=`0s / ${dur}s`;
   document.getElementById('pstressCycles').textContent='0 cycles';
   document.getElementById('pstressBar').style.width='0%';
-  fetch('/api/pipeline_stress_test',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({duration_s:dur})})
-  .then(r=>r.json()).then(d=>{
-if(d.error){status.innerHTML=`<span style="color:var(--wt-danger)">${escapeHtml(d.error)}</span>`;btn.disabled=false;stopBtn.style.display='none';progress.style.display='none';return;}
-status.innerHTML='<span style="color:var(--wt-accent)">Running...</span>';
-pstressPoll=setInterval(()=>pollPipelineStress(dur),POLL_PIPELINE_STRESS_MS);
-  }).catch(e=>{
-btn.disabled=false;stopBtn.style.display='none';progress.style.display='none';
-status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
-  });
+  runWithTestSetup(async()=>{
+    const r=await fetch('/api/pipeline_stress_test',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({duration_s:dur})});
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    status.innerHTML='<span style="color:var(--wt-accent)">Running...</span>';
+    pstressPoll=setInterval(()=>pollPipelineStress(dur),POLL_PIPELINE_STRESS_MS);
+    return new Promise((resolve,reject)=>{
+      const iv=setInterval(()=>{
+        fetch('/api/pipeline_stress/progress').then(r=>r.json()).then(d=>{
+          if(!d.running){clearInterval(iv);resolve(d);}
+        }).catch(e=>{clearInterval(iv);reject(e);});
+      },POLL_PIPELINE_STRESS_MS);
+    });
+  },{statusEl:status,btnEl:btn});
 }
 function stopPipelineStressTest(){
   fetch('/api/pipeline_stress/stop',{method:'POST'}).then(()=>{
@@ -1813,23 +1959,17 @@ function runTtsRoundtrip(){
   const status=document.getElementById('ttsRoundtripStatus');
   const results=document.getElementById('ttsRoundtripResults');
   const btn=document.getElementById('ttsRoundtripBtn');
-  const customStr=document.getElementById('ttsRoundtripPhrases').value.trim();
-  const body=customStr?{phrases:customStr.split(',').map(s=>s.trim()).filter(s=>s.length>0)}:{};
-  btn.disabled=true;
-  status.innerHTML='<span style="color:var(--wt-accent)">Starting TTS round-trip test...</span>';
   results.innerHTML='';
-  fetch('/api/tts_roundtrip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-.then(r=>{
-  if(r.status===202) return r.json();
-  return r.json().then(d=>{throw new Error(d.error||`HTTP ${r.status}`);});
-}).then(d=>{
-  status.innerHTML=`<span style="color:var(--wt-accent)">Round-trip test running (task ${d.task_id})... This may take several minutes.</span>`;
-  ttsRoundtripPoll=setInterval(()=>pollTtsRoundtripTask(d.task_id),POLL_TTS_ROUNDTRIP_MS);
-}).catch(e=>{
-  btn.disabled=false;
-  if(ttsRoundtripPoll){clearInterval(ttsRoundtripPoll);ttsRoundtripPoll=null;}
-  status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
-});
+  runWithTestSetup(async({tts})=>{
+    const customStr=document.getElementById('ttsRoundtripPhrases').value.trim();
+    const body=customStr?{phrases:customStr.split(',').map(s=>s.trim()).filter(s=>s.length>0)}:{};
+    const r=await fetch('/api/tts_roundtrip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(r.status!==202){const e=await r.json();throw new Error(e.error||`HTTP ${r.status}`);}
+    const d=await r.json();
+    status.innerHTML=`<span style="color:var(--wt-accent)">Round-trip test running (task ${d.task_id})... [${tts}]</span>`;
+    ttsRoundtripPoll=setInterval(()=>pollTtsRoundtripTask(d.task_id),POLL_TTS_ROUNDTRIP_MS);
+    return _waitForTask(d.task_id,POLL_TTS_ROUNDTRIP_MS);
+  },{statusEl:status,btnEl:btn});
 }
 
 function pollTtsRoundtripTask(taskId){
@@ -1882,20 +2022,15 @@ function runFullLoopTest(){
   const sel=document.getElementById('fullLoopFiles');
   const files=Array.from(sel.options).filter(o=>o.selected).map(o=>o.value);
   if(files.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one test file</span>';return;}
-  btn.disabled=true;
-  status.innerHTML='<span style="color:var(--wt-accent)">Starting full loop test...</span>';
   results.innerHTML='';
-  fetch('/api/full_loop_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files})})
-.then(r=>{
-  if(r.status===202) return r.json();
-  return r.json().then(d=>{throw new Error(d.error||`HTTP ${r.status}`);});
-}).then(d=>{
-  status.innerHTML=`<span style="color:var(--wt-accent)">Full loop test running (task ${d.task_id})... This may take several minutes.</span>`;
-  fullLoopPoll=setInterval(()=>pollFullLoopTask(d.task_id),POLL_FULL_LOOP_MS);
-}).catch(e=>{
-  btn.disabled=false;
-  status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
-});
+  runWithTestSetup(async({tts})=>{
+    const r=await fetch('/api/full_loop_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files})});
+    if(r.status!==202){const e=await r.json();throw new Error(e.error||`HTTP ${r.status}`);}
+    const d=await r.json();
+    status.innerHTML=`<span style="color:var(--wt-accent)">Full loop test running (task ${d.task_id})... [${tts}] This may take several minutes.</span>`;
+    fullLoopPoll=setInterval(()=>pollFullLoopTask(d.task_id),POLL_FULL_LOOP_MS);
+    return _waitForTask(d.task_id,POLL_FULL_LOOP_MS);
+  },{statusEl:status,btnEl:btn});
 }
 
 function pollFullLoopTask(taskId){
@@ -2290,7 +2425,7 @@ function exportTestResultsPage(){
 setInterval(fetchStatus,POLL_STATUS_MS);
 setInterval(fetchTests,POLL_TESTS_MS);
 setInterval(fetchServices,POLL_SERVICES_MS);
-fetchStatus();fetchTests();fetchServices();showPage('dashboard');
+fetchStatus();fetchTests();fetchServices();loadTtsPreference();showPage('dashboard');
 document.getElementById('statusText').textContent='Port )JS" + port_str + R"JS(';
 
 document.getElementById('sqlQuery').addEventListener('keydown',e=>{
@@ -2445,19 +2580,25 @@ statusDiv.innerHTML='<span style="color:var(--wt-danger)">SIP provider not reach
 }
 
 let sipRtpTestInterval=null;
+let _sipRtpTestResolve=null;
 function startSipRtpTest(){
   const statusDiv=document.getElementById('sipRtpTestStatus');
-  statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x25B6; Test running. Use Services page to start/stop SIP Client and IAP.</span>';
-  refreshSipStats();
-  if(sipRtpTestInterval)clearInterval(sipRtpTestInterval);
-  sipRtpTestInterval=setInterval(refreshSipStats,POLL_SIP_STATS_MS);
+  const btn=document.getElementById('sipRtpStartBtn');
+  runWithTestSetup(async()=>{
+    statusDiv.innerHTML='<span style="color:var(--wt-success)">&#x25B6; Test running. Press Stop to end.</span>';
+    refreshSipStats();
+    if(sipRtpTestInterval)clearInterval(sipRtpTestInterval);
+    sipRtpTestInterval=setInterval(refreshSipStats,POLL_SIP_STATS_MS);
+    return new Promise(resolve=>{_sipRtpTestResolve=resolve;});
+  },{statusEl:statusDiv,btnEl:btn});
 }
 
 function stopSipRtpTest(){
   if(sipRtpTestInterval){
-clearInterval(sipRtpTestInterval);
-sipRtpTestInterval=null;
+    clearInterval(sipRtpTestInterval);
+    sipRtpTestInterval=null;
   }
+  if(_sipRtpTestResolve){_sipRtpTestResolve();_sipRtpTestResolve=null;}
   const statusDiv=document.getElementById('sipRtpTestStatus');
   statusDiv.innerHTML='<span style="color:var(--wt-text-secondary)">&#x25A0; Test stopped</span>';
 }
@@ -2498,44 +2639,31 @@ document.getElementById('iapConnectionStatus').innerHTML='<span style="color:var
 function runIapQualityTest(){
   const file=document.getElementById('iapTestFileSelect').value;
   if(!file){showToast('Please select a test file','error');return;}
-  
   const statusDiv=document.getElementById('iapTestStatus');
-  statusDiv.innerHTML=`<span style="color:var(--wt-warning)">&#x23F3; Running IAP quality test on ${file}...</span>`;
-  
-  fetch('/api/iap/quality_test',{
-method:'POST',
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file})
-  }).then(r=>r.json()).then(d=>{
-if(d.error){
-  statusDiv.innerHTML=`<span style="color:var(--wt-danger)">&#x2717; Error: ${escapeHtml(d.error)}</span>`;
-  return;
-}
-
-const sc=d.pkt_count?` (${d.pkt_count} packets, ${d.samples_compared.toLocaleString()} samples)`:'';
-statusDiv.innerHTML=`<span style="color:var(--wt-success)">&#x2713; Test completed${sc}</span>`;
-
-const tbody=document.getElementById('iapResultsBody');
-const statusColor=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
-const now=new Date().toLocaleString();
-const row=`<tr>`
-  +`<td>${escapeHtml(d.file)}</td>`
-  +`<td>${d.latency_ms.toFixed(4)}</td>`
-  +`<td>${(d.max_latency_ms||0).toFixed(4)}</td>`
-  +`<td>${d.snr.toFixed(2)}</td>`
-  +`<td>${d.rms_error.toFixed(2)}</td>`
-  +`<td style="color:${statusColor};font-weight:600">${escapeHtml(d.status)}</td>`
-  +`<td style="font-size:11px">${now}</td>`
-  +`</tr>`;
-tbody.innerHTML=row+tbody.innerHTML;
-
-if(!window.iapTestHistory)window.iapTestHistory=[];
-window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,maxLatency:d.max_latency_ms||0,status:d.status});
-renderIapChart();
-
-  }).catch(e=>{
-statusDiv.innerHTML=`<span style="color:var(--wt-danger)">&#x2717; Error: ${escapeHtml(String(e))}</span>`;
-  });
+  const btn=document.getElementById('iapRunBtn');
+  runWithTestSetup(async()=>{
+    const r=await fetch('/api/iap/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file})});
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const sc=d.pkt_count?` (${d.pkt_count} packets, ${d.samples_compared.toLocaleString()} samples)`:'';
+    statusDiv.innerHTML=`<span style="color:var(--wt-success)">&#x2713; Test completed${sc}</span>`;
+    const tbody=document.getElementById('iapResultsBody');
+    const statusColor=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
+    const now=new Date().toLocaleString();
+    const row=`<tr>`
+      +`<td>${escapeHtml(d.file)}</td>`
+      +`<td>${d.latency_ms.toFixed(4)}</td>`
+      +`<td>${(d.max_latency_ms||0).toFixed(4)}</td>`
+      +`<td>${d.snr.toFixed(2)}</td>`
+      +`<td>${d.rms_error.toFixed(2)}</td>`
+      +`<td style="color:${statusColor};font-weight:600">${escapeHtml(d.status)}</td>`
+      +`<td style="font-size:11px">${now}</td>`
+      +`</tr>`;
+    tbody.innerHTML=row+tbody.innerHTML;
+    if(!window.iapTestHistory)window.iapTestHistory=[];
+    window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,maxLatency:d.max_latency_ms||0,status:d.status});
+    renderIapChart();
+  },{statusEl:statusDiv,btnEl:btn});
 }
 
 function renderIapChart(){
@@ -2611,32 +2739,35 @@ async function runAllIapQualityTests(){
   if(files.length===0){showToast('No test files found','error');return;}
   const statusDiv=document.getElementById('iapTestStatus');
   const tbody=document.getElementById('iapResultsBody');
+  const btn=document.getElementById('iapRunAllBtn');
   tbody.innerHTML='';
   if(!window.iapTestHistory)window.iapTestHistory=[];
-  let passed=0,failed=0;
-  for(let fi=0;fi<files.length;fi++){
-const file=files[fi];
-statusDiv.innerHTML=`<span style="color:var(--wt-warning)">&#x23F3; Testing ${fi+1}/${files.length}: ${file}...</span>`;
-try{
-  const r=await fetch('/api/iap/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file})});
-  const d=await r.json();
-  if(d.error){
-    failed++;
-    tbody.innerHTML+=`<tr><td>${escapeHtml(file)}</td><td>-</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>${escapeHtml(d.error)}</td></tr>`;
-    continue;
-  }
-  if(d.status==='PASS')passed++;else failed++;
-  const sc=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
-  const now=new Date().toLocaleString();
-  tbody.innerHTML+=`<tr><td>${escapeHtml(d.file)}</td><td>${d.latency_ms.toFixed(4)}</td><td>${(d.max_latency_ms||0).toFixed(4)}</td><td>${d.snr.toFixed(2)}</td><td>${d.rms_error.toFixed(2)}</td><td style="color:${sc};font-weight:600">${escapeHtml(d.status)}</td><td style="font-size:11px">${now}</td></tr>`;
-  window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,maxLatency:d.max_latency_ms||0,status:d.status});
-}catch(e){
-  failed++;
-  tbody.innerHTML+=`<tr><td>${escapeHtml(file)}</td><td colspan="6" style="color:var(--wt-danger)">${escapeHtml(String(e))}</td></tr>`;
-}
-  }
-  statusDiv.innerHTML=`<span style="color:var(--wt-success)">&#x2713; All tests complete: ${passed} passed, ${failed} failed out of ${files.length}</span>`;
-  renderIapChart();
+  return runWithTestSetup(async()=>{
+    let passed=0,failed=0;
+    for(let fi=0;fi<files.length;fi++){
+      const file=files[fi];
+      statusDiv.innerHTML=`<span style="color:var(--wt-warning)">&#x23F3; Testing ${fi+1}/${files.length}: ${file}...</span>`;
+      try{
+        const r=await fetch('/api/iap/quality_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file})});
+        const d=await r.json();
+        if(d.error){
+          failed++;
+          tbody.innerHTML+=`<tr><td>${escapeHtml(file)}</td><td>-</td><td>-</td><td>-</td><td>-</td><td style="color:var(--wt-danger)">ERROR</td><td>${escapeHtml(d.error)}</td></tr>`;
+          continue;
+        }
+        if(d.status==='PASS')passed++;else failed++;
+        const sc=d.status==='PASS'?'var(--wt-success)':'var(--wt-danger)';
+        const now=new Date().toLocaleString();
+        tbody.innerHTML+=`<tr><td>${escapeHtml(d.file)}</td><td>${d.latency_ms.toFixed(4)}</td><td>${(d.max_latency_ms||0).toFixed(4)}</td><td>${d.snr.toFixed(2)}</td><td>${d.rms_error.toFixed(2)}</td><td style="color:${sc};font-weight:600">${escapeHtml(d.status)}</td><td style="font-size:11px">${now}</td></tr>`;
+        window.iapTestHistory.push({file:d.file,snr:d.snr,rmsError:d.rms_error,latency:d.latency_ms,maxLatency:d.max_latency_ms||0,status:d.status});
+      }catch(e){
+        failed++;
+        tbody.innerHTML+=`<tr><td>${escapeHtml(file)}</td><td colspan="6" style="color:var(--wt-danger)">${escapeHtml(String(e))}</td></tr>`;
+      }
+    }
+    statusDiv.innerHTML=`<span style="color:var(--wt-success)">&#x2713; All tests complete: ${passed} passed, ${failed} failed out of ${files.length}</span>`;
+    renderIapChart();
+  },{statusEl:statusDiv,btnEl:btn});
 }
 
 function updateVadWindowDisplay(val){
@@ -2684,8 +2815,7 @@ async function runAllBetaTests(){
   const detailEl=document.getElementById('runAllDetails');
   const btn=document.getElementById('runAllTestsBtn');
   statusEl.style.display='block';
-  btn.disabled=true;
-  btn.textContent='Running...';
+  return runWithTestSetup(async()=>{
   const svcData=await fetch('/api/services').then(r=>r.json()).catch(()=>({services:[]}));
   const online=new Set(svcData.services.filter(s=>s.online).map(s=>s.name));
   const tests=[
@@ -2750,9 +2880,8 @@ async function runAllBetaTests(){
     detailEl.innerHTML=lines.join('<br>');
   }
   progEl.textContent=`${done}/${total} \u2014 ${pass} passed, ${fail} failed, ${skip} skipped`;
-  btn.disabled=false;
-  btn.textContent='\u25B6 Run All Tests';
   updateBetaSummaryDots();
+  },{statusEl:statusEl,btnEl:btn});
 }
 
 function updateBetaSummaryDots(){
@@ -3611,36 +3740,20 @@ function runWhisperAccuracyTest(){
   if(accuracyPollInterval){clearInterval(accuracyPollInterval);accuracyPollInterval=null;}
   const select=document.getElementById('accuracyTestFiles');
   const selected=Array.from(select.selectedOptions).map(o=>o.value);
-  
-  if(selected.length===0){
-showToast('Please select at least one test file','warn');
-return;
-  }
-  
-  accuracyTestRunning=true;
+  if(selected.length===0){showToast('Please select at least one test file','warn');return;}
   const btn=document.querySelector('[onclick*="runWhisperAccuracyTest"]');
-  if(btn){btn.disabled=true;btn.textContent='Running...';}
   const resultsDiv=document.getElementById('accuracyResults');
   const summaryDiv=document.getElementById('accuracySummary');
-  resultsDiv.innerHTML=`<p style="color:var(--wt-warning)">&#x23F3; Running accuracy test on ${selected.length} file(s)... This may take several minutes.</p>`;
   summaryDiv.style.display='none';
-  
-  fetch('/api/whisper/accuracy_test',{
-method:'POST',
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({files:selected})
-  }).then(r=>{
-if(r.status===202) return r.json();
-return r.json().then(d=>{throw new Error(d.error||'HTTP '+r.status);});
-  }).then(d=>{
-resultsDiv.innerHTML=`<p style="color:var(--wt-warning)">&#x23F3; Accuracy test running (task ${d.task_id}, ${selected.length} files)...</p>`;
-accuracyPollInterval=setInterval(()=>pollAccuracyTask(d.task_id),POLL_ACCURACY_MS);
-  }).catch(e=>{
-accuracyTestRunning=false;
-if(btn){btn.disabled=false;btn.textContent='Run Accuracy Test';}
-if(accuracyPollInterval){clearInterval(accuracyPollInterval);accuracyPollInterval=null;}
-resultsDiv.innerHTML=`<p style="color:var(--wt-danger)">&#x2717; Error: ${escapeHtml(String(e))}</p>`;
-  });
+  accuracyTestRunning=true;
+  runWithTestSetup(async()=>{
+    const r=await fetch('/api/whisper/accuracy_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:selected})});
+    if(r.status!==202){const e=await r.json();throw new Error(e.error||'HTTP '+r.status);}
+    const d=await r.json();
+    resultsDiv.innerHTML=`<p style="color:var(--wt-warning)">&#x23F3; Accuracy test running (task ${d.task_id}, ${selected.length} files)...</p>`;
+    accuracyPollInterval=setInterval(()=>pollAccuracyTask(d.task_id),POLL_ACCURACY_MS);
+    return _waitForTask(d.task_id,POLL_ACCURACY_MS).finally(()=>{accuracyTestRunning=false;});
+  },{statusEl:resultsDiv,btnEl:btn}).catch(()=>{accuracyTestRunning=false;});
 }
 
 function pollAccuracyTask(taskId){

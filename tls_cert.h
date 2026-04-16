@@ -190,10 +190,11 @@ struct CertData {
     std::string key_pem;
 };
 
-static std::mutex  g_cert_mutex;
-static CertData    g_cert_data;
-static bool        g_cert_loaded     = false;
-static bool        g_cert_generating = false;
+static std::mutex              g_cert_mutex;
+static std::condition_variable g_cert_cv;
+static CertData                g_cert_data;
+static bool                    g_cert_loaded     = false;
+static bool                    g_cert_generating = false;
 
 static inline bool reload_certs(const std::string& cert_path, const std::string& key_path) {
     CertData tmp;
@@ -210,12 +211,11 @@ static inline bool reload_certs(const std::string& cert_path, const std::string&
 }
 
 static inline const CertData& ensure_certs() {
-    {
-        std::lock_guard<std::mutex> lk(g_cert_mutex);
-        if (g_cert_loaded) return g_cert_data;
-        if (g_cert_generating) return g_cert_data;
-        g_cert_generating = true;
-    }
+    std::unique_lock<std::mutex> lk(g_cert_mutex);
+    g_cert_cv.wait(lk, []{ return g_cert_loaded || !g_cert_generating; });
+    if (g_cert_loaded) return g_cert_data;
+    g_cert_generating = true;
+    lk.unlock();
 
     std::string dir = tls_dir();
     mkdir(dir.c_str(), 0700);
@@ -223,29 +223,31 @@ static inline const CertData& ensure_certs() {
     std::string cert_path = dir + "/server.crt";
     std::string key_path  = dir + "/server.key";
 
+    bool ok = true;
     if (!file_exists(cert_path) || !file_exists(key_path)) {
         if (!generate_self_signed_cert_90d(cert_path, key_path)) {
             std::fprintf(stderr, "[tls_cert] FATAL: cannot generate TLS certificate\n");
-            std::lock_guard<std::mutex> lk(g_cert_mutex);
-            g_cert_generating = false;
-            return g_cert_data;
+            ok = false;
         }
     }
 
-    reload_certs(cert_path, key_path);
+    if (ok) reload_certs(cert_path, key_path);
 
-    std::lock_guard<std::mutex> lk(g_cert_mutex);
+    lk.lock();
     g_cert_generating = false;
+    lk.unlock();
+    g_cert_cv.notify_all();
+
+    lk.lock();
     return g_cert_data;
 }
 
 static inline CertData get_certs() {
-    {
-        std::lock_guard<std::mutex> lk(g_cert_mutex);
-        if (g_cert_loaded) return g_cert_data;
-    }
+    std::unique_lock<std::mutex> lk(g_cert_mutex);
+    if (g_cert_loaded) return g_cert_data;
+    lk.unlock();
     ensure_certs();
-    std::lock_guard<std::mutex> lk(g_cert_mutex);
+    lk.lock();
     return g_cert_data;
 }
 

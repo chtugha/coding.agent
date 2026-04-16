@@ -508,6 +508,7 @@ private:
         std::atomic<bool> running{true};
         std::atomic<bool> result_read{false};
         std::string result_json;
+        std::string progress_json;
         std::thread worker;
     };
     std::mutex async_mutex_;
@@ -566,6 +567,14 @@ private:
         std::lock_guard<std::mutex> lock(async_mutex_);
         async_tasks_[id] = task;
         return id;
+    }
+
+    void update_async_task_progress(int64_t id, const std::string& progress) {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        auto it = async_tasks_.find(id);
+        if (it != async_tasks_.end()) {
+            it->second->progress_json = progress;
+        }
     }
 
     void finish_async_task(int64_t id, const std::string& result) {
@@ -1248,6 +1257,12 @@ private:
                 handle_ollama_install(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/rag/wipe_vectors")) == 0) {
                 handle_rag_wipe_vectors(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/tests/setup/start")) == 0) {
+                handle_test_setup_start(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/tests/teardown")) == 0) {
+                handle_test_teardown(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/tests/tts_preference")) == 0) {
+                handle_test_tts_preference(c, hm);
             } else {
                 mg_http_reply(c, 404, "", "Not Found\n");
             }
@@ -1828,6 +1843,253 @@ private:
         std::thread([this, target]() { switch_tts(target); }).detach();
         mg_http_reply(c, 200, "Content-Type: application/json\r\n",
             "{\"status\":\"switching\",\"target\":\"%s\"}", target.c_str());
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Setup / Teardown
+    // -------------------------------------------------------------------------
+
+    // POST /api/tests/setup/start — Start the async pre-test setup procedure.
+    // Body: {"tts":"auto"|"kokoro"|"neutts"}
+    // Returns: 202 {"task_id":N}
+    void handle_test_setup_start(struct mg_connection *c, struct mg_http_message *hm) {
+        std::string body(hm->body.buf, hm->body.len);
+        std::string tts = extract_json_string(body, "tts");
+        if (tts != "kokoro" && tts != "neutts") tts = "auto";
+
+        int64_t task_id = create_async_task("test_setup");
+        std::thread([this, task_id, tts]() {
+            run_test_setup_async(task_id, tts);
+        }).detach();
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+            "{\"task_id\":%lld}", (long long)task_id);
+    }
+
+    // Helper: update a task's progress JSON while it is still running.
+    void set_setup_progress(int64_t task_id, const std::string& step, const std::string& detail) {
+        std::string json = "{\"status\":\"running\",\"step\":\"" + step
+            + "\",\"detail\":\"" + escape_json(detail) + "\"}";
+        update_async_task_progress(task_id, json);
+    }
+
+    // Core async setup logic: Steps A–D.
+    void run_test_setup_async(int64_t task_id, const std::string& tts_choice) {
+        // ---- Step A: check which of the 9 services are running ----
+        set_setup_progress(task_id, "A", "Checking service state...");
+
+        const std::vector<std::string> all_svcs = {
+            "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE",
+            "WHISPER_SERVICE", "LLAMA_SERVICE", "KOKORO_SERVICE",
+            "NEUTTS_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", "TOMEDO_CRAWL_SERVICE"
+        };
+        const std::vector<std::string> core_svcs = {
+            "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE",
+            "WHISPER_SERVICE", "LLAMA_SERVICE", "OUTBOUND_AUDIO_PROCESSOR"
+        };
+        const std::vector<std::string> tts_svcs  = {"KOKORO_SERVICE", "NEUTTS_SERVICE"};
+        const std::vector<std::string> rag_svcs   = {"TOMEDO_CRAWL_SERVICE"};
+
+        int running_count = 0;
+        for (const auto& s : all_svcs) {
+            if (is_service_running(s)) running_count++;
+        }
+        bool all_running = (running_count == (int)all_svcs.size());
+
+        // ---- Step B: normalise service state ----
+        set_setup_progress(task_id, "B", all_running
+            ? "All services running — stopping TTS and RAG for clean restart..."
+            : "Stopping all services and starting core pipeline...");
+
+        if (all_running) {
+            // Case 1: hang up any active call, remove SIP lines, stop TTS+RAG
+            std::string sip_err;
+            http_post_localhost(TEST_SIP_PROVIDER_PORT, "/hangup", "{}", sip_err);
+            send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "REMOVE_ALL_LINES");
+            stop_service("KOKORO_SERVICE");
+            stop_service("NEUTTS_SERVICE");
+            stop_service("TOMEDO_CRAWL_SERVICE");
+            usleep(1000000); // 1s settling
+        } else {
+            // Case 2: stop everything, start core pipeline in order
+            static const std::vector<std::string> stop_order = {
+                "TOMEDO_CRAWL_SERVICE", "NEUTTS_SERVICE", "KOKORO_SERVICE",
+                "OUTBOUND_AUDIO_PROCESSOR", "LLAMA_SERVICE", "WHISPER_SERVICE",
+                "VAD_SERVICE", "INBOUND_AUDIO_PROCESSOR", "SIP_CLIENT"
+            };
+            for (const auto& s : stop_order) {
+                if (is_service_running(s)) {
+                    stop_service(s);
+                    usleep(500000);
+                }
+            }
+
+            // Hang up and clear lines too, in case TEST_SIP_PROVIDER is still running
+            std::string sip_err;
+            http_post_localhost(TEST_SIP_PROVIDER_PORT, "/hangup", "{}", sip_err);
+
+            // Start core pipeline with mandatory delays
+            struct StartStep { std::string name; int sleep_s; };
+            static const std::vector<StartStep> start_order = {
+                {"SIP_CLIENT",               3},
+                {"INBOUND_AUDIO_PROCESSOR",  3},
+                {"VAD_SERVICE",              3},
+                {"WHISPER_SERVICE",         10},
+                {"LLAMA_SERVICE",           10},
+                {"OUTBOUND_AUDIO_PROCESSOR", 3},
+            };
+            for (const auto& step : start_order) {
+                set_setup_progress(task_id, "B", "Starting " + step.name + "...");
+                if (!start_service(step.name, "")) {
+                    finish_async_task(task_id,
+                        "{\"error\":\"Failed to start " + step.name + "\"}");
+                    return;
+                }
+                for (int i = 0; i < step.sleep_s; i++) {
+                    usleep(1000000);
+                }
+            }
+        }
+
+        // ---- Step C: start TTS ----
+        std::string tts_to_start = (tts_choice == "neutts") ? "NEUTTS_SERVICE" : "KOKORO_SERVICE";
+        std::string tts_label    = (tts_choice == "neutts") ? "NeuTTS" : "Kokoro";
+        set_setup_progress(task_id, "C", "Starting " + tts_label + " TTS...");
+
+        stop_service("KOKORO_SERVICE");
+        stop_service("NEUTTS_SERVICE");
+        usleep(500000);
+
+        if (!start_service(tts_to_start, "")) {
+            finish_async_task(task_id, "{\"error\":\"Failed to start TTS service: " + tts_to_start + "\"}");
+            return;
+        }
+        usleep(2000000); // 2s for TTS to initialise
+
+        // Tell LLaMA which TTS to use
+        if (tts_choice == "neutts") {
+            send_negotiation_command(whispertalk::ServiceType::LLAMA_SERVICE, "SET_TTS:NEUTTS");
+        } else {
+            send_negotiation_command(whispertalk::ServiceType::LLAMA_SERVICE, "SET_TTS:KOKORO");
+        }
+
+        // Record active TTS so teardown knows what to stop
+        set_setting("test_active_tts", (tts_choice == "neutts") ? "neutts" : "kokoro");
+
+        // ---- Step D: test SIP provider + conference ----
+        set_setup_progress(task_id, "D", "Starting Test SIP Provider...");
+
+        if (!is_service_running("TEST_SIP_PROVIDER")) {
+            if (!start_service("TEST_SIP_PROVIDER", "")) {
+                finish_async_task(task_id, "{\"error\":\"Failed to start TEST_SIP_PROVIDER\"}");
+                return;
+            }
+        }
+
+        // Wait up to 5s for provider HTTP to be reachable
+        bool provider_up = false;
+        for (int i = 0; i < 10; i++) {
+            std::string err;
+            std::string resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", err);
+            if (!resp.empty()) { provider_up = true; break; }
+            usleep(500000);
+        }
+        if (!provider_up) {
+            finish_async_task(task_id, "{\"error\":\"Test SIP provider did not become reachable within 5s\"}");
+            return;
+        }
+
+        // Register Alice and Bob
+        set_setup_progress(task_id, "D", "Registering SIP lines (Alice + Bob)...");
+        send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "ADD_LINE alice 127.0.0.1");
+        usleep(500000);
+        send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "ADD_LINE bob 127.0.0.1");
+
+        // Wait up to 10s for both lines to appear in /users
+        bool lines_ready = false;
+        for (int i = 0; i < 20; i++) {
+            std::string err;
+            std::string resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/users", err);
+            if (resp.find("\"alice\"") != std::string::npos
+                && resp.find("\"bob\"") != std::string::npos) {
+                lines_ready = true;
+                break;
+            }
+            usleep(500000);
+        }
+        if (!lines_ready) {
+            finish_async_task(task_id, "{\"error\":\"SIP lines did not register within 10s\"}");
+            return;
+        }
+
+        // Start conference
+        set_setup_progress(task_id, "D", "Starting Alice+Bob conference...");
+        std::string conf_err;
+        std::string conf_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/conference",
+            "{\"users\":[\"alice\",\"bob\"]}", conf_err);
+        if (conf_resp.find("\"success\":true") == std::string::npos) {
+            finish_async_task(task_id, "{\"error\":\"Failed to start conference: "
+                + escape_json(conf_err.empty() ? conf_resp : conf_err) + "\"}");
+            return;
+        }
+
+        // Wait up to 10s for call to be active
+        bool call_active = false;
+        for (int i = 0; i < 20; i++) {
+            std::string err;
+            std::string resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", err);
+            if (resp.find("\"call_active\":true") != std::string::npos) {
+                call_active = true;
+                break;
+            }
+            usleep(500000);
+        }
+        if (!call_active) {
+            finish_async_task(task_id, "{\"error\":\"Conference call did not become active within 10s\"}");
+            return;
+        }
+
+        std::string active_tts = (tts_choice == "neutts") ? "neutts" : "kokoro";
+        finish_async_task(task_id,
+            "{\"status\":\"done\",\"tts\":\"" + active_tts + "\"}");
+    }
+
+    // POST /api/tests/teardown — Hang up conference, remove SIP lines, stop active TTS.
+    void handle_test_teardown(struct mg_connection *c, struct mg_http_message *hm) {
+        (void)hm;
+        // Hang up any active conference
+        std::string err;
+        http_post_localhost(TEST_SIP_PROVIDER_PORT, "/hangup", "{}", err);
+
+        // Remove all SIP lines
+        send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "REMOVE_ALL_LINES");
+
+        // Stop the TTS that was active for this run
+        std::string active_tts = get_setting("test_active_tts", "");
+        if (active_tts == "neutts") {
+            stop_service("NEUTTS_SERVICE");
+        } else if (active_tts == "kokoro") {
+            stop_service("KOKORO_SERVICE");
+        }
+        set_setting("test_active_tts", "");
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+    }
+
+    // GET/POST /api/tests/tts_preference — Get or set the TTS preference for test runs.
+    // GET:  returns {"preference":"auto"|"kokoro"|"neutts"}
+    // POST: {"preference":"..."} — persists to settings
+    void handle_test_tts_preference(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            std::string pref = get_setting("test_tts_preference", "auto");
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"preference\":\"%s\"}", pref.c_str());
+        } else {
+            std::string body(hm->body.buf, hm->body.len);
+            std::string pref = extract_json_string(body, "preference");
+            if (pref != "kokoro" && pref != "neutts") pref = "auto";
+            set_setting("test_tts_preference", pref);
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+        }
     }
 
     // POST /api/services/stop — Stop a running service by sending SIGTERM.
@@ -4771,7 +5033,12 @@ private:
             return;
         }
         if (it->second->running.load()) {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"running\"}");
+            std::string prog = it->second->progress_json;
+            if (prog.empty()) {
+                mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"running\"}");
+            } else {
+                mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", prog.c_str());
+            }
         } else {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", it->second->result_json.c_str());
             it->second->result_read = true;
