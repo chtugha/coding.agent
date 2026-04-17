@@ -587,6 +587,11 @@ private:
             }
             if (ch == '\n') return true;
             if (ch == '\r') continue;
+            // Security: dock replies are strictly printable ASCII
+            // (`OK\n` or `ERR <reason>\n`). Reject any other control
+            // byte so we don't propagate garbage to callers.
+            if (static_cast<unsigned char>(ch) < 0x20 ||
+                static_cast<unsigned char>(ch) == 0x7f) return false;
             out.push_back(ch);
         }
         return false;

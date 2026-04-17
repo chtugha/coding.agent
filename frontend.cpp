@@ -151,6 +151,10 @@ static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;    // poll interval for do
 // TTS engine cmd-ports (engines dock into TTS_SERVICE but keep a private
 // diagnostic cmd-port for quality tests / benchmarks). These ports are owned
 // by the engine processes, not by the TTS dock.
+// NOTE: the authoritative values are defined in the engine sources
+// (`kokoro-service.cpp::KOKORO_ENGINE_CMD_PORT`,
+//  `neutts-service.cpp::NEUTTS_ENGINE_CMD_PORT`). If either changes there,
+// the value here must be updated in lockstep.
 static constexpr uint16_t KOKORO_ENGINE_CMD_PORT = 13144;
 static constexpr uint16_t NEUTTS_ENGINE_CMD_PORT = 13174;
 
@@ -1825,8 +1829,11 @@ private:
     // Used by quality_test / benchmark handlers that talk directly to the
     // engine's private cmd-port (TEST_SYNTH, BENCHMARK, SYNTH_WAV, etc.).
     static uint16_t tts_engine_cmd_port_for(const std::string& engine_name) {
+        if (engine_name == "kokoro") return KOKORO_ENGINE_CMD_PORT;
         if (engine_name == "neutts") return NEUTTS_ENGINE_CMD_PORT;
-        return KOKORO_ENGINE_CMD_PORT; // default: kokoro
+        // Unknown engine name: return 0 so the caller can surface a
+        // diagnostic error instead of silently misrouting to kokoro.
+        return 0;
     }
 
     // Query the TTS dock's cmd-port for the currently docked engine name.
@@ -3572,7 +3579,7 @@ private:
         ShutupScenarioResult r;
         uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
         std::string active_tts_s = get_setting("test_active_tts", "kokoro");
-        uint16_t kokoro_cmd_port = tts_engine_cmd_port_for(active_tts_s);
+        uint16_t engine_cmd_port = tts_engine_cmd_port_for(active_tts_s);
         uint16_t oap_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
 
         std::string prompt = "Erzähl mir eine sehr lange und detaillierte Geschichte über einen Ritter, der durch dunkle Wälder reist.";
@@ -3651,10 +3658,19 @@ private:
 
         {
             std::string err;
-            std::string kokoro_status = tcp_command(kokoro_cmd_port, "STATUS", err, 3);
+            // Unknown-engine guard: port 0 means tts_engine_cmd_port_for
+            // didn't recognise the configured engine. Surface that
+            // explicitly instead of an "unreachable" false negative.
+            std::string engine_status;
+            if (engine_cmd_port == 0) {
+                engine_status = "unknown engine (" + active_tts_s + ")";
+            } else {
+                std::string s = tcp_command(engine_cmd_port, "STATUS", err, 3);
+                engine_status = s.empty() ? std::string("unreachable") : s;
+            }
             std::string oap_status = tcp_command(oap_cmd_port, "STATUS", err, 3);
             if (!r.detail.empty()) r.detail += " | ";
-            r.detail += "Kokoro: " + (kokoro_status.empty() ? "unreachable" : kokoro_status);
+            r.detail += active_tts_s + ": " + engine_status;
             r.detail += " OAP: " + (oap_status.empty() ? "unreachable" : oap_status);
         }
 
@@ -3968,12 +3984,16 @@ private:
 
     void run_kokoro_quality_test_async(int64_t task_id, std::vector<std::string> phrases) {
         std::string active_tts_q = get_setting("test_active_tts", "kokoro");
-        uint16_t kokoro_cmd_port = tts_engine_cmd_port_for(active_tts_q);
+        uint16_t engine_cmd_port = tts_engine_cmd_port_for(active_tts_q);
+        if (engine_cmd_port == 0) {
+            finish_async_task(task_id, "{\"error\":\"unknown TTS engine: " + escape_json(active_tts_q) + "\"}");
+            return;
+        }
 
         std::string ping_err;
-        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+        if (tcp_command(engine_cmd_port, "PING", ping_err, 3) != "PONG") {
             finish_async_task(task_id, "{\"error\":\"TTS service not reachable (port "
-                + std::to_string(kokoro_cmd_port) + "): " + escape_json(ping_err) + "\"}");
+                + std::to_string(engine_cmd_port) + "): " + escape_json(ping_err) + "\"}");
             return;
         }
 
@@ -3985,7 +4005,7 @@ private:
 
         for (size_t i = 0; i < phrases.size(); i++) {
             std::string err;
-            std::string resp = tcp_command(kokoro_cmd_port, "TEST_SYNTH:" + phrases[i], err, 15);
+            std::string resp = tcp_command(engine_cmd_port, "TEST_SYNTH:" + phrases[i], err, 15);
 
             double latency_ms = 0;
             long samples = 0;
@@ -4105,18 +4125,22 @@ private:
 
     void run_kokoro_benchmark_async(int64_t task_id, std::string phrase, int iterations) {
         std::string active_tts_b = get_setting("test_active_tts", "kokoro");
-        uint16_t kokoro_cmd_port = tts_engine_cmd_port_for(active_tts_b);
+        uint16_t engine_cmd_port = tts_engine_cmd_port_for(active_tts_b);
+        if (engine_cmd_port == 0) {
+            finish_async_task(task_id, "{\"error\":\"unknown TTS engine: " + escape_json(active_tts_b) + "\"}");
+            return;
+        }
 
         std::string ping_err;
-        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+        if (tcp_command(engine_cmd_port, "PING", ping_err, 3) != "PONG") {
             finish_async_task(task_id, "{\"error\":\"TTS service not reachable (port "
-                + std::to_string(kokoro_cmd_port) + "): " + escape_json(ping_err) + "\"}");
+                + std::to_string(engine_cmd_port) + "): " + escape_json(ping_err) + "\"}");
             return;
         }
 
         std::string bench_cmd = "BENCHMARK:" + phrase + "|" + std::to_string(iterations);
         std::string err;
-        std::string resp = tcp_command(kokoro_cmd_port, bench_cmd, err, 60);
+        std::string resp = tcp_command(engine_cmd_port, bench_cmd, err, 60);
 
         if (resp.rfind("BENCH_RESULT:", 0) != 0) {
             finish_async_task(task_id, "{\"error\":\"Benchmark failed: " + escape_json(err.empty() ? resp : err) + "\"}");
@@ -4303,10 +4327,14 @@ private:
 
     void run_tts_roundtrip_async(int64_t task_id, std::vector<std::string> phrases) {
         std::string active_tts = get_setting("test_active_tts", "kokoro");
-        uint16_t kokoro_cmd_port = tts_engine_cmd_port_for(active_tts);
+        uint16_t engine_cmd_port = tts_engine_cmd_port_for(active_tts);
+        if (engine_cmd_port == 0) {
+            finish_async_task(task_id, "{\"error\":\"unknown TTS engine: " + escape_json(active_tts) + "\"}");
+            return;
+        }
 
         std::string ping_err;
-        if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
+        if (tcp_command(engine_cmd_port, "PING", ping_err, 3) != "PONG") {
             finish_async_task(task_id, "{\"error\":\"TTS service not reachable\"}");
             return;
         }
@@ -4333,7 +4361,7 @@ private:
 
             std::string synth_err;
             std::string synth_cmd = "SYNTH_WAV:" + tmp_path + "|" + phrase;
-            std::string synth_resp = tcp_command(kokoro_cmd_port, synth_cmd, synth_err, 30);
+            std::string synth_resp = tcp_command(engine_cmd_port, synth_cmd, synth_err, 30);
 
             bool synth_ok = (synth_resp.rfind("WAV_RESULT:", 0) == 0);
             if (!synth_ok) {

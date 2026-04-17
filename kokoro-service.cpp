@@ -75,8 +75,9 @@
 
 using namespace whispertalk;
 
-static constexpr int KOKORO_SAMPLE_RATE = 24000;
-static constexpr size_t MAX_AUDIO_SAMPLES = 10 * KOKORO_SAMPLE_RATE;
+// Shared TTS audio constants (single source of truth: tts-common.h).
+static constexpr int KOKORO_SAMPLE_RATE = static_cast<int>(whispertalk::tts::kTTSSampleRate);
+static constexpr size_t MAX_AUDIO_SAMPLES = 10 * static_cast<size_t>(KOKORO_SAMPLE_RATE);
 static constexpr size_t PHONEME_CACHE_MAX = 10000;
 // Diagnostic cmd port for the Kokoro engine (see spec §4.2). Separate from
 // the TTS dock's own cmd port (13142) so operators can query the engine
@@ -1455,7 +1456,7 @@ private:
             return;
         }
 
-        static constexpr size_t CHUNK_SAMPLES = 4800;
+        static constexpr size_t CHUNK_SAMPLES = whispertalk::tts::kTTSMaxFrameSamples;
         size_t header_size = sizeof(int32_t);
         size_t total_sent = 0;
 

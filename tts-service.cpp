@@ -59,15 +59,17 @@
 #include <getopt.h>
 
 #include "interconnect.h"
-#include "tts-engine-client.h"  // EngineFrameTag, shared protocol constants
+#include "tts-common.h"          // shared TTS audio constants
+#include "tts-engine-client.h"   // EngineFrameTag, shared protocol constants
 
 using namespace whispertalk;
 
 namespace {
 
 // Protocol constants. No magic numbers on the hot path.
-constexpr uint32_t kTTSSampleRate       = 24000;
-constexpr uint16_t kTTSChannels         = 1;
+// Audio format: single source of truth is whispertalk::tts::k* in tts-common.h.
+using whispertalk::tts::kTTSSampleRate;
+using whispertalk::tts::kTTSChannels;
 constexpr const char* kTTSFormat        = "f32le";
 
 constexpr int kEngineAcceptPollMs       = 100;
@@ -86,7 +88,11 @@ constexpr int kEnginePingMaxMisses      = 3;
 constexpr int kEngineSwapGraceMs        = 2000;
 
 constexpr size_t kEngineSocketBufBytes  = 128 * 1024;  // ≥ 2 audio frames
-constexpr int kCustomMgmtMaxLen         = 65535;
+// Application-level cap on CUSTOM mgmt payload (the wire field is 16-bit
+// unsigned; this is a tighter semantic limit so the runtime check is
+// meaningful and doesn't blow memory on a bogus frame).
+constexpr uint16_t kCustomMgmtMaxLen    = 4096;
+static_assert(kCustomMgmtMaxLen <= 0xFFFF, "CUSTOM length field is uint16_t");
 
 constexpr int kCmdAcceptPollMs          = 200;
 constexpr int kCmdRecvTimeoutMs         = 10 * 1000;
@@ -399,6 +405,18 @@ public:
         }
         if (slot) retire_slot(slot, /*send_flush=*/false);
 
+        // Join any swap-watcher threads spawned by install_new_slot so
+        // they cannot outlive TTSDock and reference freed members.
+        std::vector<std::thread> watchers;
+        {
+            std::lock_guard<std::mutex> wlock(watchers_mutex_);
+            watchers = std::move(swap_watchers_);
+            swap_watchers_.clear();
+        }
+        for (auto& t : watchers) {
+            if (t.joinable()) t.join();
+        }
+
         node_.shutdown();
     }
 
@@ -541,7 +559,6 @@ private:
             std::lock_guard<std::mutex> lock(slot_mutex_);
             old_slot = active_slot_;
             active_slot_ = new_slot;
-            active_fd_.store(fd, std::memory_order_release);
         }
 
         // Spawn recv + ping threads for the new slot. They run as long
@@ -565,7 +582,11 @@ private:
             // engine). After the grace window, force the socket down
             // so threads unblock. Close fd only after both threads
             // are joined.
-            std::thread([old_slot]() {
+            //
+            // Tracked in `swap_watchers_` (not detached) so `shutdown()`
+            // joins it before TTSDock is destroyed — otherwise the
+            // lambda could outlive `this` and reference dead members.
+            std::thread watcher([old_slot]() {
                 auto start = std::chrono::steady_clock::now();
                 while (old_slot->alive.load() &&
                        std::chrono::steady_clock::now() - start <
@@ -578,7 +599,11 @@ private:
                 if (old_slot->recv_thread.joinable()) old_slot->recv_thread.join();
                 if (old_slot->ping_thread.joinable()) old_slot->ping_thread.join();
                 ::close(old_slot->fd);
-            }).detach();
+            });
+            {
+                std::lock_guard<std::mutex> wlock(watchers_mutex_);
+                swap_watchers_.push_back(std::move(watcher));
+            }
         } else {
             std::fprintf(stderr, "[TTS] engine connected (%s)\n", new_slot->name.c_str());
             log_fwd_.forward(LogLevel::INFO, 0, "engine connected (%s)",
@@ -611,7 +636,6 @@ private:
             std::lock_guard<std::mutex> lock(slot_mutex_);
             if (active_slot_ && active_slot_->generation == slot->generation) {
                 active_slot_.reset();
-                active_fd_.store(-1, std::memory_order_release);
                 was_active = true;
             }
         }
@@ -923,7 +947,6 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<int> engine_listen_sock_{-1};
     std::atomic<int> cmd_listen_sock_{-1};
-    std::atomic<int> active_fd_{-1};
 
     std::thread engine_accept_thread_;
     std::thread cmd_thread_;
@@ -931,6 +954,12 @@ private:
     mutable std::mutex slot_mutex_;
     std::shared_ptr<EngineSlot> active_slot_;
     std::atomic<uint64_t> next_generation_{0};
+
+    // Background watchers that tear down retired engine slots after a
+    // swap. Tracked here (not detached) so `shutdown()` can join them
+    // before TTSDock goes out of scope.
+    std::mutex watchers_mutex_;
+    std::vector<std::thread> swap_watchers_;
 
     mutable std::mutex drop_log_mutex_;
     std::map<uint32_t, int64_t> last_drop_log_ms_;

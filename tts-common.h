@@ -3,6 +3,8 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <sys/stat.h>
 
@@ -12,6 +14,16 @@
 
 namespace whispertalk {
 namespace tts {
+
+// Shared TTS audio format — the single source of truth for every
+// engine and the TTS dock. The dock's HELLO contract requires these
+// exact values (see `tts-service.cpp`).
+constexpr uint32_t kTTSSampleRate     = 24000;  // Hz
+constexpr uint16_t kTTSChannels       = 1;      // mono
+// Max samples per streamed chunk (200 ms at 24 kHz). Engines MUST NOT
+// emit chunks larger than this; OAP sizes its per-frame buffers from
+// this constant.
+constexpr size_t   kTTSMaxFrameSamples = 4800;
 
 inline float normalize_audio(std::vector<float>& samples, float ceiling = 0.90f) {
     float peak = 0.0f;

@@ -55,7 +55,8 @@
 
 using namespace whispertalk;
 
-static constexpr int NEUTTS_SAMPLE_RATE = 24000;
+// Shared TTS audio constants (single source of truth: tts-common.h).
+static constexpr int NEUTTS_SAMPLE_RATE = static_cast<int>(whispertalk::tts::kTTSSampleRate);
 // Diagnostic cmd port for the NeuTTS engine (see spec §4.2). Separate from
 // the TTS dock's own cmd port (13142) so operators can query the engine
 // process directly without going through the dock.
@@ -72,7 +73,7 @@ static constexpr uint32_t SAMPLER_SEED = 42;
 static constexpr int MAX_GENERATION_TOKENS = 1500;
 static constexpr int FIRST_BATCH_CODES = 16;
 static constexpr int STREAM_BATCH_CODES = 64;
-static constexpr size_t DOWNSTREAM_CHUNK_SAMPLES = 4800;
+static constexpr size_t DOWNSTREAM_CHUNK_SAMPLES = whispertalk::tts::kTTSMaxFrameSamples;
 static constexpr float AUDIO_CEILING = 0.90f;
 static constexpr int CMD_RECV_TIMEOUT_SEC = 30;
 static constexpr int CMD_POLL_TIMEOUT_MS = 200;
