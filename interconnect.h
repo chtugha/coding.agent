@@ -4,7 +4,7 @@
 //   All pipeline services communicate exclusively through this header.
 //   The pipeline is a linear chain of 7 C++ processes:
 //
-//     SIP_CLIENT → IAP → VAD → WHISPER → LLAMA → KOKORO → OAP → SIP_CLIENT (loop)
+//     SIP_CLIENT → IAP → VAD → WHISPER → LLAMA → TTS → OAP → SIP_CLIENT (loop)
 //
 //   Every adjacent pair shares two persistent TCP connections:
 //     • mgmt channel (base port +0): carries typed control messages
@@ -30,9 +30,9 @@
 // Port map (all on 127.0.0.1):
 //   SIP_CLIENT (13100/13101/13102), IAP (13110/13111/13112)
 //   VAD (13115/13116/13117), WHISPER (13120/13121/13122)
-//   LLAMA (13130/13131/13132), KOKORO (13140/13141/13142)
+//   LLAMA (13130/13131/13132), TTS (13140/13141/13142/13143)
 //   OAP (13150/13151/13152), FRONTEND (13160/13161/13162)
-//   NEUTTS (13170/13171/13172), TOMEDO_CRAWL (13180/13181/13182)
+//   TOMEDO_CRAWL (13180/13181/13182)
 //   Log UDP: 22022
 //
 // Usage pattern for a service:
@@ -141,7 +141,7 @@ inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
 //
 // Pipeline services (is_pipeline_service() == true):
 //   SIP_CLIENT, INBOUND_AUDIO_PROCESSOR, VAD_SERVICE, WHISPER_SERVICE,
-//   LLAMA_SERVICE, KOKORO_SERVICE, NEUTTS_SERVICE, OUTBOUND_AUDIO_PROCESSOR
+//   LLAMA_SERVICE, TTS_SERVICE, OUTBOUND_AUDIO_PROCESSOR
 //
 // Sidecar services (is_pipeline_service() == false):
 //   FRONTEND (13160) — web UI and log aggregator; not in the audio path.
@@ -157,10 +157,9 @@ enum class ServiceType : uint8_t {
     VAD_SERVICE = 8,
     WHISPER_SERVICE = 3,
     LLAMA_SERVICE = 4,
-    KOKORO_SERVICE = 5,
+    TTS_SERVICE = 5,            // generic TTS stage/dock; engines (kokoro, neutts, ...) connect via engine-dock port
     OUTBOUND_AUDIO_PROCESSOR = 6,
     FRONTEND = 7,
-    NEUTTS_SERVICE = 9,
     TOMEDO_CRAWL_SERVICE = 10   // RAG sidecar; REST API only, not in pipeline graph
 };
 
@@ -171,8 +170,7 @@ inline bool is_pipeline_service(ServiceType type) {
         case ServiceType::VAD_SERVICE:
         case ServiceType::WHISPER_SERVICE:
         case ServiceType::LLAMA_SERVICE:
-        case ServiceType::KOKORO_SERVICE:
-        case ServiceType::NEUTTS_SERVICE:
+        case ServiceType::TTS_SERVICE:
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR:
             return true;
         default:
@@ -187,17 +185,16 @@ inline const char* service_type_to_string(ServiceType type) {
         case ServiceType::VAD_SERVICE: return "VAD_SERVICE";
         case ServiceType::WHISPER_SERVICE: return "WHISPER_SERVICE";
         case ServiceType::LLAMA_SERVICE: return "LLAMA_SERVICE";
-        case ServiceType::KOKORO_SERVICE: return "KOKORO_SERVICE";
+        case ServiceType::TTS_SERVICE: return "TTS_SERVICE";
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return "OUTBOUND_AUDIO_PROCESSOR";
         case ServiceType::FRONTEND: return "FRONTEND";
-        case ServiceType::NEUTTS_SERVICE: return "NEUTTS_SERVICE";
         case ServiceType::TOMEDO_CRAWL_SERVICE: return "TOMEDO_CRAWL";
         default: return "UNKNOWN";
     }
 }
 
 // Pipeline topology:
-//   SIP_CLIENT -> IAP -> VAD -> WHISPER -> LLAMA -> KOKORO -> OAP -> SIP_CLIENT (loop)
+//   SIP_CLIENT -> IAP -> VAD -> WHISPER -> LLAMA -> TTS -> OAP -> SIP_CLIENT (loop)
 // "downstream" = the service we SEND data TO (next in pipeline)
 // "upstream"   = the service that sends data TO US (previous in pipeline)
 inline ServiceType upstream_of(ServiceType type) {
@@ -206,9 +203,8 @@ inline ServiceType upstream_of(ServiceType type) {
         case ServiceType::VAD_SERVICE: return ServiceType::INBOUND_AUDIO_PROCESSOR;
         case ServiceType::WHISPER_SERVICE: return ServiceType::VAD_SERVICE;
         case ServiceType::LLAMA_SERVICE: return ServiceType::WHISPER_SERVICE;
-        case ServiceType::KOKORO_SERVICE: return ServiceType::LLAMA_SERVICE;
-        case ServiceType::NEUTTS_SERVICE: return ServiceType::LLAMA_SERVICE;
-        case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::KOKORO_SERVICE; // default; NEUTTS may also be upstream (dynamic via set_downstream_override)
+        case ServiceType::TTS_SERVICE: return ServiceType::LLAMA_SERVICE;
+        case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::TTS_SERVICE;
         case ServiceType::SIP_CLIENT: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         default: return ServiceType::SIP_CLIENT;
     }
@@ -220,9 +216,8 @@ inline ServiceType downstream_of(ServiceType type) {
         case ServiceType::INBOUND_AUDIO_PROCESSOR: return ServiceType::VAD_SERVICE;
         case ServiceType::VAD_SERVICE: return ServiceType::WHISPER_SERVICE;
         case ServiceType::WHISPER_SERVICE: return ServiceType::LLAMA_SERVICE;
-        case ServiceType::LLAMA_SERVICE: return ServiceType::KOKORO_SERVICE;
-        case ServiceType::KOKORO_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
-        case ServiceType::NEUTTS_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
+        case ServiceType::LLAMA_SERVICE: return ServiceType::TTS_SERVICE;
+        case ServiceType::TTS_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::SIP_CLIENT;
         default: return ServiceType::SIP_CLIENT;
     }
@@ -283,10 +278,9 @@ struct PacketTrace {
             case 8: return "VAD";
             case 3: return "WHI";
             case 4: return "LLM";
-            case 5: return "KOK";
+            case 5: return "TTS";
             case 6: return "OAP";
             case 7: return "FRN";
-            case 9: return "NTS";
             case 10: return "RAG";
             default: return "???";
         }
@@ -303,10 +297,9 @@ struct PacketTrace {
 //   VAD        (base 13115): mgmt_listen=13115, data_listen=13116
 //   WHISPER    (base 13120): mgmt_listen=13120, data_listen=13121
 //   LLAMA      (base 13130): mgmt_listen=13130, data_listen=13131
-//   KOKORO     (base 13140): mgmt_listen=13140, data_listen=13141
+//   TTS        (base 13140): mgmt_listen=13140, data_listen=13141, engine_listen=13143
 //   OAP        (base 13150): mgmt_listen=13150, data_listen=13151
 //   FRONTEND   (base 13160): mgmt_listen=13160, data_listen=13161
-//   NEUTTS     (base 13170): mgmt_listen=13170, data_listen=13171
 //   TOMEDO_CRAWL (base 13180): mgmt_listen=13180, data_listen=13181
 //
 // Data flow example: SIP sends data to IAP by connecting to IAP's data_listen (13111).
@@ -318,8 +311,7 @@ inline uint16_t service_base_port(ServiceType type) {
         case ServiceType::VAD_SERVICE:               return 13115;
         case ServiceType::WHISPER_SERVICE:            return 13120;
         case ServiceType::LLAMA_SERVICE:              return 13130;
-        case ServiceType::KOKORO_SERVICE:             return 13140;
-        case ServiceType::NEUTTS_SERVICE:             return 13170;
+        case ServiceType::TTS_SERVICE:                return 13140;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR:   return 13150;
         case ServiceType::FRONTEND:                   return 13160;
         case ServiceType::TOMEDO_CRAWL_SERVICE:       return 13180;
@@ -332,6 +324,15 @@ inline uint16_t service_data_port(ServiceType type) { return service_base_port(t
 // Command port: for out-of-band text commands from the frontend (e.g., ADD_LINE, GET_STATS).
 // Only services that need frontend commands use this (+2 offset).
 inline uint16_t service_cmd_port(ServiceType type) { return service_base_port(type) + 2; }
+// Engine-dock port: TTS_SERVICE only. TTS engines (kokoro, neutts, ...) open a local
+// TCP connection to this port and send a HELLO line to dock with the generic TTS
+// stage. Returns 0 for services that do not expose an engine-dock listener.
+inline uint16_t service_engine_port(ServiceType type) {
+    switch (type) {
+        case ServiceType::TTS_SERVICE: return service_base_port(type) + 3;
+        default: return 0;
+    }
+}
 
 struct Packet {
     static constexpr uint32_t MAX_PAYLOAD_SIZE = 1024 * 1024;
@@ -514,35 +515,6 @@ public:
 
     ServiceType type() const { return type_; }
 
-    void set_downstream_override(ServiceType target) {
-        downstream_override_.store(static_cast<int>(target));
-        mark_downstream_failed();
-    }
-
-    void clear_downstream_override() {
-        downstream_override_.store(-1);
-        mark_downstream_failed();
-    }
-
-    ServiceType effective_downstream() const {
-        int ovr = downstream_override_.load();
-        if (ovr >= 0) return static_cast<ServiceType>(ovr);
-        return downstream_of(type_);
-    }
-
-    void pause_downstream() {
-        downstream_paused_.store(true);
-        mark_downstream_failed();
-    }
-
-    void resume_downstream() {
-        downstream_paused_.store(false);
-    }
-
-    bool is_downstream_paused() const {
-        return downstream_paused_.load();
-    }
-
     ConnectionState upstream_state() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         return upstream_state_;
@@ -558,7 +530,7 @@ public:
     bool connect_to_downstream() {
         if (!is_pipeline_service(type_)) return false;
 
-        ServiceType ds = effective_downstream();
+        ServiceType ds = downstream_of(type_);
         uint16_t ds_mgmt = service_mgmt_port(ds);
         uint16_t ds_data = service_data_port(ds);
 
@@ -800,8 +772,6 @@ public:
 private:
     ServiceType type_;
     std::atomic<bool> running_;
-    std::atomic<int> downstream_override_{-1};
-    std::atomic<bool> downstream_paused_{false};
     static constexpr size_t SEND_BUF_SIZE = 65536;
     static constexpr int DOWNSTREAM_RECONNECT_MS = 200;
     static constexpr size_t MAX_ENDED_CALL_IDS = 1000;
@@ -938,11 +908,6 @@ private:
         if (!is_pipeline_service(type_)) return;
 
         while (running_) {
-            if (downstream_paused_.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(DOWNSTREAM_RECONNECT_MS));
-                continue;
-            }
-
             ConnectionState ds;
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);

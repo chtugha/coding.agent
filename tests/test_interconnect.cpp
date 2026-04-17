@@ -1,10 +1,18 @@
 #include <gtest/gtest.h>
 #include "interconnect.h"
+#include "tts-engine-client.h"
 #include <thread>
 #include <chrono>
 #include <vector>
 #include <set>
 #include <atomic>
+#include <string>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <poll.h>
+#include <fcntl.h>
 
 using namespace whispertalk;
 
@@ -62,10 +70,14 @@ TEST(PortAssignmentTest, FixedPortsPerService) {
     EXPECT_EQ(service_base_port(ServiceType::VAD_SERVICE), 13115);
     EXPECT_EQ(service_base_port(ServiceType::WHISPER_SERVICE), 13120);
     EXPECT_EQ(service_base_port(ServiceType::LLAMA_SERVICE), 13130);
-    EXPECT_EQ(service_base_port(ServiceType::KOKORO_SERVICE), 13140);
+    EXPECT_EQ(service_base_port(ServiceType::TTS_SERVICE), 13140);
     EXPECT_EQ(service_base_port(ServiceType::OUTBOUND_AUDIO_PROCESSOR), 13150);
     EXPECT_EQ(service_base_port(ServiceType::FRONTEND), 13160);
-    EXPECT_EQ(service_base_port(ServiceType::NEUTTS_SERVICE), 13170);
+
+    // Engine-dock port: TTS_SERVICE exposes +3 for engine docking; others return 0.
+    EXPECT_EQ(service_engine_port(ServiceType::TTS_SERVICE), 13143);
+    EXPECT_EQ(service_engine_port(ServiceType::LLAMA_SERVICE), 0);
+    EXPECT_EQ(service_engine_port(ServiceType::SIP_CLIENT), 0);
 }
 
 TEST(PortAssignmentTest, MgmtAndDataPortsAreDeterministic) {
@@ -85,10 +97,9 @@ TEST(PortAssignmentTest, NoPortConflictsAcrossServices) {
         ServiceType::VAD_SERVICE,
         ServiceType::WHISPER_SERVICE,
         ServiceType::LLAMA_SERVICE,
-        ServiceType::KOKORO_SERVICE,
+        ServiceType::TTS_SERVICE,
         ServiceType::OUTBOUND_AUDIO_PROCESSOR,
-        ServiceType::FRONTEND,
-        ServiceType::NEUTTS_SERVICE
+        ServiceType::FRONTEND
     };
     for (auto t : types) {
         uint16_t mgmt = service_mgmt_port(t);
@@ -100,8 +111,13 @@ TEST(PortAssignmentTest, NoPortConflictsAcrossServices) {
         all_ports.insert(mgmt);
         all_ports.insert(data);
         all_ports.insert(cmd);
+        uint16_t eng = service_engine_port(t);
+        if (eng != 0) {
+            EXPECT_EQ(all_ports.count(eng), 0u) << "engine port conflict for " << service_type_to_string(t);
+            all_ports.insert(eng);
+        }
     }
-    EXPECT_EQ(all_ports.size(), 27u);
+    EXPECT_EQ(all_ports.size(), 25u);
 }
 
 TEST(TopologyTest, UpstreamDownstreamMapping) {
@@ -109,13 +125,15 @@ TEST(TopologyTest, UpstreamDownstreamMapping) {
     EXPECT_EQ(downstream_of(ServiceType::INBOUND_AUDIO_PROCESSOR), ServiceType::VAD_SERVICE);
     EXPECT_EQ(downstream_of(ServiceType::VAD_SERVICE), ServiceType::WHISPER_SERVICE);
     EXPECT_EQ(downstream_of(ServiceType::WHISPER_SERVICE), ServiceType::LLAMA_SERVICE);
-    EXPECT_EQ(downstream_of(ServiceType::LLAMA_SERVICE), ServiceType::KOKORO_SERVICE);
-    EXPECT_EQ(downstream_of(ServiceType::KOKORO_SERVICE), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+    EXPECT_EQ(downstream_of(ServiceType::LLAMA_SERVICE), ServiceType::TTS_SERVICE);
+    EXPECT_EQ(downstream_of(ServiceType::TTS_SERVICE), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
     EXPECT_EQ(downstream_of(ServiceType::OUTBOUND_AUDIO_PROCESSOR), ServiceType::SIP_CLIENT);
 
     EXPECT_EQ(upstream_of(ServiceType::INBOUND_AUDIO_PROCESSOR), ServiceType::SIP_CLIENT);
     EXPECT_EQ(upstream_of(ServiceType::VAD_SERVICE), ServiceType::INBOUND_AUDIO_PROCESSOR);
     EXPECT_EQ(upstream_of(ServiceType::WHISPER_SERVICE), ServiceType::VAD_SERVICE);
+    EXPECT_EQ(upstream_of(ServiceType::TTS_SERVICE), ServiceType::LLAMA_SERVICE);
+    EXPECT_EQ(upstream_of(ServiceType::OUTBOUND_AUDIO_PROCESSOR), ServiceType::TTS_SERVICE);
     EXPECT_EQ(upstream_of(ServiceType::SIP_CLIENT), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
 }
 
@@ -124,7 +142,7 @@ TEST(ServiceTypeTest, EnumToString) {
     EXPECT_STREQ(service_type_to_string(ServiceType::INBOUND_AUDIO_PROCESSOR), "INBOUND_AUDIO_PROCESSOR");
     EXPECT_STREQ(service_type_to_string(ServiceType::WHISPER_SERVICE), "WHISPER_SERVICE");
     EXPECT_STREQ(service_type_to_string(ServiceType::LLAMA_SERVICE), "LLAMA_SERVICE");
-    EXPECT_STREQ(service_type_to_string(ServiceType::KOKORO_SERVICE), "KOKORO_SERVICE");
+    EXPECT_STREQ(service_type_to_string(ServiceType::TTS_SERVICE), "TTS_SERVICE");
     EXPECT_STREQ(service_type_to_string(ServiceType::OUTBOUND_AUDIO_PROCESSOR), "OUTBOUND_AUDIO_PROCESSOR");
     EXPECT_STREQ(service_type_to_string(ServiceType::FRONTEND), "FRONTEND");
 }
@@ -756,7 +774,7 @@ TEST(PipelineServiceTest, FrontendIsNotPipelineService) {
     EXPECT_TRUE(is_pipeline_service(ServiceType::VAD_SERVICE));
     EXPECT_TRUE(is_pipeline_service(ServiceType::WHISPER_SERVICE));
     EXPECT_TRUE(is_pipeline_service(ServiceType::LLAMA_SERVICE));
-    EXPECT_TRUE(is_pipeline_service(ServiceType::KOKORO_SERVICE));
+    EXPECT_TRUE(is_pipeline_service(ServiceType::TTS_SERVICE));
     EXPECT_TRUE(is_pipeline_service(ServiceType::OUTBOUND_AUDIO_PROCESSOR));
     EXPECT_FALSE(is_pipeline_service(ServiceType::FRONTEND));
 }
@@ -1063,4 +1081,287 @@ TEST(SpeechActiveTest, HasEndedReturnsFalseForActiveCall) {
     EXPECT_TRUE(node.has_ended(cid));
 
     node.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// EngineClient tests — fake dock listener on an ephemeral port.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct FakeDock {
+    int listen_sock = -1;
+    uint16_t port = 0;
+
+    bool start() {
+        listen_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_sock < 0) return false;
+        int opt = 1;
+        setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;  // ephemeral
+        if (bind(listen_sock, (sockaddr*)&addr, sizeof(addr)) < 0) return false;
+        socklen_t alen = sizeof(addr);
+        if (getsockname(listen_sock, (sockaddr*)&addr, &alen) < 0) return false;
+        port = ntohs(addr.sin_port);
+        if (listen(listen_sock, 4) < 0) return false;
+        return true;
+    }
+
+    int accept_one(int timeout_ms = 2000) {
+        pollfd pfd = {listen_sock, POLLIN, 0};
+        if (::poll(&pfd, 1, timeout_ms) <= 0) return -1;
+        sockaddr_in a{}; socklen_t al = sizeof(a);
+        return ::accept(listen_sock, (sockaddr*)&a, &al);
+    }
+
+    ~FakeDock() { if (listen_sock >= 0) ::close(listen_sock); }
+};
+
+static bool read_hello_line(int sock, std::string& out, int timeout_ms = 2000) {
+    out.clear();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (out.size() < 1024) {
+        auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remain <= 0) return false;
+        pollfd pfd = {sock, POLLIN, 0};
+        if (::poll(&pfd, 1, (int)remain) <= 0) return false;
+        char ch;
+        ssize_t n = ::recv(sock, &ch, 1, 0);
+        if (n <= 0) return false;
+        if (ch == '\n') return true;
+        out.push_back(ch);
+    }
+    return false;
+}
+
+static bool send_all_raw(int sock, const void* data, size_t len) {
+    const uint8_t* p = (const uint8_t*)data;
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = ::send(sock, p + sent, len - sent, 0);
+        if (n <= 0) return false;
+        sent += (size_t)n;
+    }
+    return true;
+}
+
+static bool recv_exact_raw(int sock, void* buf, size_t len, int timeout_ms) {
+    uint8_t* p = (uint8_t*)buf;
+    size_t got = 0;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (got < len) {
+        auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remain <= 0) return false;
+        pollfd pfd = {sock, POLLIN, 0};
+        if (::poll(&pfd, 1, (int)remain) <= 0) return false;
+        ssize_t n = ::recv(sock, p + got, len - got, 0);
+        if (n <= 0) return false;
+        got += (size_t)n;
+    }
+    return true;
+}
+
+}  // namespace
+
+TEST(EngineClientTest, HelloExchangePacketReconnect) {
+    FakeDock dock;
+    ASSERT_TRUE(dock.start());
+
+    EngineClient client;
+    client.set_name("kokoro-test");
+    client.set_endpoint("127.0.0.1", dock.port);
+    ASSERT_TRUE(client.start());
+
+    // --- first connection ---
+    int s1 = dock.accept_one();
+    ASSERT_GE(s1, 0);
+
+    std::string hello;
+    ASSERT_TRUE(read_hello_line(s1, hello));
+    EXPECT_NE(hello.find("\"name\":\"kokoro-test\""), std::string::npos);
+    EXPECT_NE(hello.find("\"sample_rate\":24000"), std::string::npos);
+    EXPECT_NE(hello.find("\"channels\":1"), std::string::npos);
+    EXPECT_NE(hello.find("\"format\":\"f32le\""), std::string::npos);
+
+    ASSERT_TRUE(send_all_raw(s1, "OK\n", 3));
+
+    // Wait for client to flip connected.
+    for (int i = 0; i < 100 && !client.is_connected(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(client.is_connected());
+
+    // Dock -> engine: send a text Packet framed with tag 0x01.
+    {
+        const char* text = "hello world";
+        Packet out_pkt(7, text, (uint32_t)strlen(text));
+        auto body = out_pkt.serialize();
+        std::vector<uint8_t> frame;
+        frame.push_back(0x01);
+        frame.insert(frame.end(), body.begin(), body.end());
+        ASSERT_TRUE(send_all_raw(s1, frame.data(), frame.size()));
+    }
+
+    Packet rx;
+    bool got = false;
+    for (int i = 0; i < 100 && !got; i++)
+        got = client.recv_text(rx, 20);
+    ASSERT_TRUE(got);
+    EXPECT_EQ(rx.call_id, 7u);
+    ASSERT_EQ(rx.payload_size, (uint32_t)strlen("hello world"));
+    EXPECT_EQ(0, memcmp(rx.payload.data(), "hello world", rx.payload_size));
+
+    // Engine -> dock: send an audio Packet via send_audio.
+    {
+        uint8_t fake_audio[16];
+        for (int i = 0; i < 16; i++) fake_audio[i] = (uint8_t)(i * 7);
+        Packet audio_pkt(7, fake_audio, sizeof(fake_audio));
+        EXPECT_TRUE(client.send_audio(audio_pkt));
+    }
+
+    uint8_t tag = 0;
+    ASSERT_TRUE(recv_exact_raw(s1, &tag, 1, 2000));
+    EXPECT_EQ(tag, (uint8_t)0x01);
+    uint8_t hdr[8];
+    ASSERT_TRUE(recv_exact_raw(s1, hdr, 8, 2000));
+    uint32_t net_cid, net_size;
+    memcpy(&net_cid, hdr, 4);
+    memcpy(&net_size, hdr + 4, 4);
+    EXPECT_EQ(ntohl(net_cid), 7u);
+    EXPECT_EQ(ntohl(net_size), 16u);
+    uint8_t payload[16];
+    ASSERT_TRUE(recv_exact_raw(s1, payload, 16, 2000));
+    for (int i = 0; i < 16; i++) EXPECT_EQ(payload[i], (uint8_t)(i * 7));
+
+    // --- close and reconnect ---
+    ::shutdown(s1, SHUT_RDWR);
+    ::close(s1);
+
+    for (int i = 0; i < 200 && client.is_connected(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(client.is_connected());
+
+    int s2 = dock.accept_one(5000);
+    ASSERT_GE(s2, 0);
+    std::string hello2;
+    ASSERT_TRUE(read_hello_line(s2, hello2));
+    EXPECT_NE(hello2.find("\"name\":\"kokoro-test\""), std::string::npos);
+    ASSERT_TRUE(send_all_raw(s2, "OK\n", 3));
+
+    for (int i = 0; i < 200 && !client.is_connected(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_TRUE(client.is_connected());
+
+    ::close(s2);
+    client.shutdown();
+}
+
+TEST(EngineClientTest, HelloErrorTriggersRetry) {
+    FakeDock dock;
+    ASSERT_TRUE(dock.start());
+
+    EngineClient client;
+    client.set_name("neutts-test");
+    client.set_endpoint("127.0.0.1", dock.port);
+    ASSERT_TRUE(client.start());
+
+    int s1 = dock.accept_one();
+    ASSERT_GE(s1, 0);
+    std::string line;
+    ASSERT_TRUE(read_hello_line(s1, line));
+    ASSERT_TRUE(send_all_raw(s1, "ERR sample_rate\n", 16));
+    ::shutdown(s1, SHUT_RDWR);
+    ::close(s1);
+
+    // Client must NOT be connected, and should attempt a new HELLO.
+    EXPECT_FALSE(client.is_connected());
+    int s2 = dock.accept_one(3000);
+    ASSERT_GE(s2, 0);
+    ASSERT_TRUE(read_hello_line(s2, line));
+    ASSERT_TRUE(send_all_raw(s2, "OK\n", 3));
+    for (int i = 0; i < 200 && !client.is_connected(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_TRUE(client.is_connected());
+
+    ::close(s2);
+    client.shutdown();
+}
+
+TEST(EngineClientTest, MgmtFramesDispatchHandlers) {
+    FakeDock dock;
+    ASSERT_TRUE(dock.start());
+
+    std::atomic<uint32_t> got_call_end{0};
+    std::atomic<int> speech_events{0};
+    std::atomic<bool> last_active{false};
+    std::atomic<bool> shutdown_fired{false};
+
+    EngineClient client;
+    client.set_name("kokoro-test");
+    client.set_endpoint("127.0.0.1", dock.port);
+    client.register_call_end_handler([&](uint32_t cid) { got_call_end.store(cid); });
+    client.register_speech_signal_handler([&](uint32_t, bool a) {
+        speech_events.fetch_add(1);
+        last_active.store(a);
+    });
+    client.register_custom_handler("SHUTDOWN", [&] { shutdown_fired.store(true); });
+    ASSERT_TRUE(client.start());
+
+    int s1 = dock.accept_one();
+    ASSERT_GE(s1, 0);
+    std::string line;
+    ASSERT_TRUE(read_hello_line(s1, line));
+    ASSERT_TRUE(send_all_raw(s1, "OK\n", 3));
+
+    for (int i = 0; i < 100 && !client.is_connected(); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(client.is_connected());
+
+    // SPEECH_ACTIVE
+    {
+        uint8_t frame[6];
+        frame[0] = 0x02;
+        frame[1] = (uint8_t)MgmtMsgType::SPEECH_ACTIVE;
+        uint32_t net_cid = htonl(42);
+        memcpy(frame + 2, &net_cid, 4);
+        ASSERT_TRUE(send_all_raw(s1, frame, 6));
+    }
+    // CALL_END
+    {
+        uint8_t frame[6];
+        frame[0] = 0x02;
+        frame[1] = (uint8_t)MgmtMsgType::CALL_END;
+        uint32_t net_cid = htonl(42);
+        memcpy(frame + 2, &net_cid, 4);
+        ASSERT_TRUE(send_all_raw(s1, frame, 6));
+    }
+    // CUSTOM "SHUTDOWN"
+    {
+        const char* payload = "SHUTDOWN";
+        uint16_t plen = (uint16_t)strlen(payload);
+        std::vector<uint8_t> frame;
+        frame.push_back(0x02);
+        frame.push_back((uint8_t)MgmtMsgType::CUSTOM);
+        uint16_t net_len = htons(plen);
+        frame.insert(frame.end(), (uint8_t*)&net_len, (uint8_t*)&net_len + 2);
+        frame.insert(frame.end(), payload, payload + plen);
+        ASSERT_TRUE(send_all_raw(s1, frame.data(), frame.size()));
+    }
+
+    for (int i = 0; i < 200; i++) {
+        if (got_call_end.load() == 42 && speech_events.load() >= 1 && shutdown_fired.load()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    EXPECT_EQ(got_call_end.load(), 42u);
+    EXPECT_GE(speech_events.load(), 1);
+    EXPECT_TRUE(last_active.load());
+    EXPECT_TRUE(shutdown_fired.load());
+
+    ::close(s1);
+    client.shutdown();
 }
