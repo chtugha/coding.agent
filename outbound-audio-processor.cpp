@@ -180,6 +180,8 @@ public:
         interconnect_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
             if (active) {
                 handle_speech_active(call_id);
+            } else {
+                prewarm_call(call_id);
             }
         });
 
@@ -578,6 +580,30 @@ private:
         calls_[cid] = state;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created outbound audio state");
         return state;
+    }
+
+    void prewarm_call(uint32_t call_id) {
+        std::shared_ptr<CallState> state;
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            auto it = calls_.find(call_id);
+            if (it == calls_.end()) {
+                state = std::make_shared<CallState>();
+                state->id = call_id;
+                state->last_activity_ns.store(steady_now_ns(), std::memory_order_relaxed);
+                calls_[call_id] = state;
+                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
+                    "Prewarmed outbound audio state on SPEECH_IDLE");
+            } else {
+                state = it->second;
+            }
+        }
+        std::lock_guard<std::mutex> sl(state->mutex);
+        std::memset(state->fir_history, 0, sizeof(state->fir_history));
+        state->dc_x_prev = 0.0f;
+        state->dc_y_prev = 0.0f;
+        state->pres_x1 = state->pres_x2 = state->pres_y1 = state->pres_y2 = 0.0f;
+        state->first_chunk = false;
     }
 
     void handle_speech_active(uint32_t call_id) {

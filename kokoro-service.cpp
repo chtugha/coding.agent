@@ -1079,6 +1079,8 @@ public:
         engine_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
             if (active) {
                 handle_speech_active(call_id);
+            } else {
+                prewarm_call(call_id);
             }
         });
 
@@ -1354,6 +1356,19 @@ private:
                 + "\n";
         }
         return "ERROR:Unknown command\n";
+    }
+
+    void prewarm_call(uint32_t call_id) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        auto it = calls_.find(call_id);
+        if (it == calls_.end()) {
+            auto ctx = std::make_shared<CallContext>();
+            ctx->call_id = call_id;
+            ctx->worker = std::thread(&KokoroService::call_worker, this, ctx);
+            it = calls_.emplace(call_id, std::move(ctx)).first;
+            log_fwd_.forward(LogLevel::DEBUG, call_id, "Prewarmed synthesis thread on SPEECH_IDLE");
+        }
+        it->second->interrupted = false;
     }
 
     void dispatch_text_packet(const Packet& pkt) {

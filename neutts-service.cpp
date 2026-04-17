@@ -641,6 +641,8 @@ public:
         engine_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
             if (active) {
                 handle_speech_active(call_id);
+            } else {
+                prewarm_call(call_id);
             }
         });
 
@@ -856,6 +858,20 @@ private:
                 + "\n";
         }
         return "ERROR:Unknown command\n";
+    }
+
+    void prewarm_call(uint32_t call_id) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        auto [it, inserted] = calls_.try_emplace(call_id, nullptr);
+        if (inserted) {
+            auto ctx = std::make_shared<CallContext>();
+            ctx->call_id = call_id;
+            ctx->worker = std::thread(&NeuTTSService::call_worker, this, ctx);
+            ctx->audio_sender = std::thread(&NeuTTSService::audio_sender_loop, this, ctx);
+            it->second = ctx;
+            log_fwd_.forward(LogLevel::DEBUG, call_id, "Prewarmed NeuTTS synthesis thread on SPEECH_IDLE");
+        }
+        it->second->interrupted = false;
     }
 
     void dispatch_text_packet(const Packet& pkt) {

@@ -12,14 +12,18 @@ Args:
                    (default: "Testfiles")
 
 Prerequisites:
-    - All pipeline services must be running (SIP, IAP, VAD, Whisper, LLaMA, Kokoro, OAP).
-    - Frontend server must be at http://127.0.0.1:8080 (log API).
+    - All pipeline services must be running (SIP, IAP, VAD, Whisper, LLaMA,
+      TTS_SERVICE stage with a docked engine such as KOKORO_ENGINE or
+      NEUTTS_ENGINE, OAP).
+    - Frontend server must be at http://127.0.0.1:8080 (log API + service
+      controls: /api/services/start, /api/services/stop, /api/tts/status).
     - TestSipProvider must be at http://127.0.0.1:22011 (audio injection API).
     - The "alice" SIP account must be registered with the provider.
 
 Test flow for each sample (sample_NN.wav):
     1. POST /inject to SipProvider: injects WAV audio into alice's RTP stream.
-    2. Audio flows through the pipeline: SIP→IAP→VAD→Whisper→LLaMA→Kokoro→OAP→SIP.
+    2. Audio flows through the pipeline:
+       SIP→IAP→VAD→Whisper→LLaMA→TTS(dock)→<engine>→TTS(dock)→OAP→SIP.
     3. Poll GET /api/logs on the frontend every 2s to find new transcription entries.
        Entries match: "Transcription (Xms): <text>" in the Whisper service logs.
     4. Collect ALL transcription chunks until no new chunk appears for 6s (idle timeout).
@@ -119,6 +123,114 @@ def similarity(a, b):
     dist = levenshtein(na, nb)
     mx = max(len(na), len(nb))
     return (1 - dist/mx) * 100 if mx > 0 else 100
+
+def tts_status():
+    """Return the name of the currently docked TTS engine, or None."""
+    data = fetch_json(f"{FRONTEND}/api/tts/status")
+    if "error" in data:
+        return None
+    return data.get("engine")
+
+def wait_for_tts_engine(expected, timeout_s=60):
+    """Poll /api/tts/status until `engine == expected` or timeout."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        cur = tts_status()
+        if cur == expected:
+            return True
+        time.sleep(1)
+    return False
+
+def wait_for_tts_engine_gone(previous, timeout_s=30):
+    """Wait until /api/tts/status reports a different engine (or None)."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        cur = tts_status()
+        if cur != previous:
+            return True
+        time.sleep(0.5)
+    return False
+
+def start_service(name):
+    r = fetch_json(f"{FRONTEND}/api/services/start", {"name": name})
+    return "error" not in r
+
+def stop_service(name):
+    r = fetch_json(f"{FRONTEND}/api/services/stop", {"name": name})
+    return "error" not in r
+
+def scenario_switch_engine_mid_call():
+    """Spec §5.4 scenario: switch engine mid-call.
+
+    The TTS dock uses last-connect-wins: starting a second engine while the
+    first is active triggers a HELLO-first swap. The SIP leg must NOT drop
+    and the dock's /api/tts/status must flip to the new engine.
+    """
+    print("=== Scenario: switch engine mid-call ===")
+    start = tts_status()
+    if start is None:
+        print("  SKIP: no engine currently docked; nothing to switch from.")
+        return True
+    target = "neutts" if start == "kokoro" else "kokoro"
+    target_service = "NEUTTS_ENGINE" if target == "neutts" else "KOKORO_ENGINE"
+    print(f"  Current engine: {start}  →  target: {target} ({target_service})")
+
+    if not start_service(target_service):
+        print(f"  FAIL: could not start {target_service}")
+        return False
+
+    if not wait_for_tts_engine(target, timeout_s=90):
+        print(f"  FAIL: dock did not swap to {target} within 90s (status={tts_status()})")
+        return False
+
+    # SIP leg must still be active
+    calls = fetch_json(f"{SIP_PROVIDER}/calls").get("calls", [])
+    if not calls:
+        print("  FAIL: SIP leg was dropped during swap")
+        return False
+
+    print(f"  PASS: dock swapped {start} → {target}, SIP leg intact")
+    return True
+
+def scenario_kill_restart_engine():
+    """Spec §5.4 scenario: SIGKILL the active engine, restart it, re-dock.
+
+    The dock must go to NONE after the kill, and back to the engine name
+    after the restart; audio must resume without restarting LLaMA / OAP /
+    TTS stage.
+    """
+    print("=== Scenario: kill + restart engine ===")
+    cur = tts_status()
+    if cur is None:
+        print("  SKIP: no engine docked.")
+        return True
+    svc = "NEUTTS_ENGINE" if cur == "neutts" else "KOKORO_ENGINE"
+    print(f"  Killing active engine: {cur} ({svc})")
+    if not stop_service(svc):
+        print(f"  FAIL: could not stop {svc}")
+        return False
+
+    # Dock must drop the slot (STATUS → NONE)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if tts_status() is None:
+            break
+        time.sleep(0.5)
+    else:
+        print(f"  FAIL: dock did not clear slot after {svc} stopped (status={tts_status()})")
+        return False
+
+    print(f"  Dock cleared. Restarting {svc}...")
+    if not start_service(svc):
+        print(f"  FAIL: could not restart {svc}")
+        return False
+
+    if not wait_for_tts_engine(cur, timeout_s=90):
+        print(f"  FAIL: dock did not re-dock {cur} within 90s (status={tts_status()})")
+        return False
+
+    print(f"  PASS: {cur} re-docked without restarting TTS stage / LLaMA / OAP")
+    return True
 
 def get_latest_transcription():
     data = fetch_json(f"{FRONTEND}/api/logs?limit=500")
@@ -304,3 +416,14 @@ with open(outfile, 'w') as f:
         "summary": {"pass": pass_count, "warn": warn_count, "fail": fail_count, "avg_ms": avg_time}
     }, f, indent=2, ensure_ascii=False)
 print(f"\nResults saved to {outfile}")
+
+# Optional TTS dock scenarios (spec §5.4). Enable with RUN_TTS_SCENARIOS=1
+if os.environ.get("RUN_TTS_SCENARIOS") == "1":
+    print()
+    print("=" * 60)
+    print("TTS dock scenarios")
+    print("=" * 60)
+    ok1 = scenario_switch_engine_mid_call()
+    ok2 = scenario_kill_restart_engine()
+    if not (ok1 and ok2):
+        sys.exit(2)

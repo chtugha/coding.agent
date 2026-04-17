@@ -92,7 +92,9 @@ struct Pipeline {
     pid_t vad = -1;
     pid_t whisper = -1;
     pid_t llama = -1;
-    pid_t kokoro = -1;
+    pid_t tts = -1;        // Generic TTS stage/dock (tts-service binary)
+    pid_t kokoro = -1;     // Kokoro engine — docks into TTS stage
+    pid_t neutts = -1;     // Optional NeuTTS engine — docks into TTS stage
     pid_t oap = -1;
     pid_t provider = -1;
 
@@ -137,6 +139,12 @@ struct Pipeline {
         if (llama <= 0) return false;
         std::this_thread::sleep_for(std::chrono::seconds(5));
 
+        // Generic TTS dock/stage MUST come up before any engine so the
+        // engine's HELLO handshake succeeds on its first connection attempt.
+        tts = launch_process("tts-service", {}, env);
+        if (tts <= 0) return false;
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+
         kokoro = launch_process("kokoro-service", {}, env);
         if (kokoro <= 0) return false;
         std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -149,21 +157,26 @@ struct Pipeline {
     }
 
     bool all_alive() {
+        // NeuTTS is optional — only checked if it was actually launched.
+        bool neutts_ok = (neutts <= 0) || process_alive(neutts);
         return process_alive(sip) && process_alive(iap) && process_alive(vad) &&
                process_alive(whisper) && process_alive(llama) &&
-               process_alive(kokoro) && process_alive(oap);
+               process_alive(tts) && process_alive(kokoro) && neutts_ok &&
+               process_alive(oap);
     }
 
     void shutdown() {
         kill_process(provider);
         kill_process(oap);
+        kill_process(neutts);
         kill_process(kokoro);
+        kill_process(tts);
         kill_process(llama);
         kill_process(whisper);
         kill_process(vad);
         kill_process(iap);
         kill_process(sip);
-        provider = sip = iap = vad = whisper = llama = kokoro = oap = -1;
+        provider = sip = iap = vad = whisper = llama = tts = kokoro = neutts = oap = -1;
     }
 };
 
@@ -276,7 +289,10 @@ TEST_F(RegressionTest, NeuTTSCodecShapeRegressionSynthesisSucceeds) {
         {{"WHISPERTALK_MODELS_DIR", g_models_dir}});
     ASSERT_GT(service_pid, 0) << "Failed to launch neutts-service";
 
-    constexpr uint16_t CMD_PORT = 13142;
+    // NeuTTS engine diagnostic cmd port is 13174 (separate from the TTS
+    // dock's cmd port at 13142 — neutts no longer hosts the pipeline
+    // interconnect itself, it docks into tts-service).
+    constexpr uint16_t CMD_PORT = 13174;
     ASSERT_TRUE(wait_for_port(CMD_PORT, 120)) << "neutts-service cmd port not ready (warmup may take ~30s)";
     std::this_thread::sleep_for(std::chrono::seconds(5));  // wait for warmup synthesis to complete after port opens
 
@@ -322,7 +338,7 @@ protected:
         const char* required[] = {
             "test_sip_provider", "sip-client", "inbound-audio-processor",
             "vad-service", "whisper-service", "llama-service",
-            "kokoro-service", "outbound-audio-processor"
+            "tts-service", "kokoro-service", "outbound-audio-processor"
         };
         for (const char* bin : required) {
             if (!binary_exists(bin))
@@ -363,7 +379,7 @@ TEST_F(EndToEndTest, SingleCallFullPipeline) {
     std::this_thread::sleep_for(std::chrono::seconds(10));
     ASSERT_TRUE(pipeline.all_alive()) << "One or more services crashed during startup";
 
-    std::printf("  All 7 services alive. Call in progress.\n");
+    std::printf("  All 8 services alive (incl. generic TTS dock). Call in progress.\n");
     std::printf("  Monitoring pipeline stability for 30 seconds...\n");
 
     bool any_crashed = false;
@@ -486,6 +502,116 @@ TEST_F(EndToEndTest, OneHourStressTest) {
     std::printf("  =====================================================\n\n");
 
     EXPECT_FALSE(any_crashed) << "Service crashed during stress test";
+}
+
+// Spec §5.4 scenario: switch engine mid-call.
+//
+// While a call is live with kokoro docked, launch neutts-service. The TTS
+// dock uses "last-connect-wins": the new engine's HELLO triggers a swap,
+// kokoro receives SHUTDOWN, dock flips to neutts, SIP leg stays intact.
+TEST_F(EndToEndTest, SwitchEngineMidCall) {
+    if (!binary_exists("neutts-service"))
+        GTEST_SKIP() << "neutts-service binary not found — swap scenario needs a second engine";
+    {
+        std::string neutts_dir = g_models_dir + "/neutts-nano-german";
+        if (!file_exists(neutts_dir + "/ref_codes.bin") ||
+            !file_exists(neutts_dir + "/neucodec_decoder.mlmodelc"))
+            GTEST_SKIP() << "NeuTTS model files not found in " << neutts_dir;
+    }
+
+    int sip_port = find_free_port();
+    ASSERT_TRUE(pipeline.launch_provider(sip_port));
+    ASSERT_TRUE(pipeline.launch_services(2, "swap", "127.0.0.1", sip_port));
+
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    ASSERT_TRUE(pipeline.all_alive()) << "Services crashed during startup";
+
+    // Query the TTS dock: active engine must be "kokoro".
+    constexpr uint16_t TTS_DOCK_CMD_PORT = 13142;
+    std::string before = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+    std::printf("  Dock STATUS before swap: '%s'\n", before.c_str());
+    ASSERT_NE(before.find("ACTIVE kokoro"), std::string::npos)
+        << "TTS dock did not report kokoro as active engine before swap";
+
+    // Launch the second engine. The dock must swap within a few seconds.
+    pipeline.neutts = launch_process("neutts-service", {}, pipeline.model_env());
+    ASSERT_GT(pipeline.neutts, 0);
+
+    bool swapped = false;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::string st = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+        if (st.find("ACTIVE neutts") != std::string::npos) {
+            swapped = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(swapped) << "TTS dock did not swap to neutts within 120s";
+
+    // SIP call must still be in progress — provider + sip-client alive.
+    EXPECT_TRUE(process_alive(pipeline.sip)) << "sip-client died during engine swap";
+    EXPECT_TRUE(process_alive(pipeline.provider)) << "provider died during engine swap";
+    EXPECT_TRUE(process_alive(pipeline.tts)) << "tts-service died during engine swap";
+    EXPECT_TRUE(process_alive(pipeline.llama)) << "llama-service died during engine swap";
+    EXPECT_TRUE(process_alive(pipeline.oap)) << "oap died during engine swap";
+}
+
+// Spec §5.4 scenario: SIGKILL the active engine, restart it, audio resumes.
+TEST_F(EndToEndTest, KillAndRestartEngine) {
+    int sip_port = find_free_port();
+    ASSERT_TRUE(pipeline.launch_provider(sip_port));
+    ASSERT_TRUE(pipeline.launch_services(2, "restart", "127.0.0.1", sip_port));
+
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    ASSERT_TRUE(pipeline.all_alive()) << "Services crashed during startup";
+
+    constexpr uint16_t TTS_DOCK_CMD_PORT = 13142;
+    std::string before = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+    ASSERT_NE(before.find("ACTIVE kokoro"), std::string::npos)
+        << "Expected kokoro to be active before kill (got: " << before << ")";
+
+    // SIGKILL the kokoro engine (not SIGTERM — simulate a crash).
+    ASSERT_GT(pipeline.kokoro, 0);
+    kill(pipeline.kokoro, SIGKILL);
+    int status = 0;
+    waitpid(pipeline.kokoro, &status, 0);
+    pipeline.kokoro = -1;
+
+    // Dock must report NONE within 15s.
+    bool cleared = false;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::string st = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+        if (st.find("NONE") != std::string::npos) {
+            cleared = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    EXPECT_TRUE(cleared) << "TTS dock did not clear slot after engine SIGKILL";
+
+    // Other pipeline services must still be alive.
+    EXPECT_TRUE(process_alive(pipeline.tts)) << "tts-service died after engine kill";
+    EXPECT_TRUE(process_alive(pipeline.llama)) << "llama-service died after engine kill";
+    EXPECT_TRUE(process_alive(pipeline.oap)) << "oap died after engine kill";
+    EXPECT_TRUE(process_alive(pipeline.sip)) << "sip-client died after engine kill";
+
+    // Restart kokoro; dock must re-dock it.
+    pipeline.kokoro = launch_process("kokoro-service", {}, pipeline.model_env());
+    ASSERT_GT(pipeline.kokoro, 0);
+
+    bool redocked = false;
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::string st = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+        if (st.find("ACTIVE kokoro") != std::string::npos) {
+            redocked = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(redocked) << "TTS dock did not re-dock kokoro within 120s";
 }
 
 TEST_F(EndToEndTest, MultiLineSimultaneous) {

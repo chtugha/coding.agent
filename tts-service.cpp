@@ -95,6 +95,12 @@ constexpr int kEngineListenBacklog      = 4;
 
 constexpr int kDropLogRateLimitMs       = 1000;
 
+// Upstream recv poll (main loop) / backoff when upstream is FAILED.
+constexpr int kUpstreamRecvPollMs       = 100;
+constexpr int kUpstreamFailedBackoffMs  = 200;
+// Timeout for the FLUSH_TTS CUSTOM mgmt request/response to OAP.
+constexpr int kFlushTtsReplyTimeoutMs   = 200;
+
 int64_t now_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
@@ -351,9 +357,9 @@ public:
         // the dock→engine text path.
         while (running_.load()) {
             Packet pkt;
-            if (!node_.recv_from_upstream(pkt, 100)) {
+            if (!node_.recv_from_upstream(pkt, kUpstreamRecvPollMs)) {
                 if (node_.upstream_state() == ConnectionState::FAILED) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kUpstreamFailedBackoffMs));
                 }
                 continue;
             }
@@ -837,7 +843,7 @@ private:
         // InterconnectNode::send_custom_to_downstream is a
         // request/response call. We don't care about the response for
         // a flush; empty string on timeout is fine.
-        node_.send_custom_to_downstream("FLUSH_TTS", 200);
+        node_.send_custom_to_downstream("FLUSH_TTS", kFlushTtsReplyTimeoutMs);
     }
 
     void log_dropped_text(uint32_t call_id) {

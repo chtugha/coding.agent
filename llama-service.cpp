@@ -248,6 +248,9 @@ public:
                     work_cv_.notify_one();
                     log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
                         "Speech ended — flushing accumulated transcription to work queue");
+                } else {
+                    work_cv_.notify_one();
+                    idle_prewarm_count_.fetch_add(1, std::memory_order_relaxed);
                 }
                 std::lock_guard<std::mutex> lock(speech_time_mutex_);
                 speech_active_since_.erase(call_id);
@@ -1246,6 +1249,7 @@ private:
     std::queue<WorkItem> work_queue_;
     std::mutex work_mutex_;
     std::condition_variable work_cv_;
+    std::atomic<uint64_t> idle_prewarm_count_{0};
     std::mutex speech_time_mutex_;
     std::map<uint32_t, std::chrono::steady_clock::time_point> speech_active_since_;
     std::map<uint32_t, std::string> pending_transcriptions_;
