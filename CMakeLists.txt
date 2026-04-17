@@ -333,7 +333,17 @@ if(TARGET thirdparty_ggml)
     target_link_libraries(llama-service PRIVATE thirdparty_ggml)
 endif()
 
-# 6. Kokoro TTS Service (espeak-ng + CoreML, no PyTorch dependency)
+# 6. TTS Service (generic TTS stage/dock: bridges LLaMA <-> engines <-> OAP)
+add_executable(tts-service tts-service.cpp)
+target_include_directories(tts-service PRIVATE ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(tts-service PRIVATE Threads::Threads
+    ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO})
+if(APPLE)
+    target_link_libraries(tts-service PRIVATE "-framework Security" "-framework CoreFoundation")
+endif()
+set_property(TARGET tts-service PROPERTY CXX_STANDARD 17)
+
+# 6b. Kokoro TTS Service (espeak-ng + CoreML, no PyTorch dependency)
 option(KOKORO_COREML "Enable CoreML acceleration for Kokoro (required on macOS)" ON)
 find_library(ESPEAK_NG_LIB NAMES libespeak-ng.a espeak-ng PATHS /opt/homebrew/lib /usr/local/lib /usr/lib)
 find_library(PCAUDIO_LIB NAMES libpcaudio.a pcaudio PATHS /opt/homebrew/lib /usr/local/lib /usr/lib)
@@ -494,7 +504,7 @@ if(APPLE)
 endif()
 
 # Install
-set(INSTALL_TARGETS sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service frontend tomedo-crawl)
+set(INSTALL_TARGETS sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service tts-service frontend tomedo-crawl)
 if(TARGET kokoro-service)
     list(APPEND INSTALL_TARGETS kokoro-service)
 endif()
