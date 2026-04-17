@@ -38,12 +38,13 @@
 //   the current synthesis is abandoned immediately and the output buffer is cleared.
 //   This prevents stale TTS audio from playing over the caller's speech.
 //
-// CMD port (Kokoro base+2 = 13142): PING, STATUS, SET_LOG_LEVEL commands.
-//   STATUS returns: model path, upstream/downstream state, active call count.
+// CMD port (Kokoro diagnostic port 13144): PING, STATUS, SET_LOG_LEVEL commands.
+//   STATUS returns: model path, engine-dock connection state, active call count.
 #include "ktensor.h"
 #include "har_source.h"
 #include <espeak-ng/speak_lib.h>
 #include "interconnect.h"
+#include "tts-engine-client.h"
 #include "tts-common.h"
 #include <atomic>
 #include <chrono>
@@ -77,6 +78,10 @@ using namespace whispertalk;
 static constexpr int KOKORO_SAMPLE_RATE = 24000;
 static constexpr size_t MAX_AUDIO_SAMPLES = 10 * KOKORO_SAMPLE_RATE;
 static constexpr size_t PHONEME_CACHE_MAX = 10000;
+// Diagnostic cmd port for the Kokoro engine (see spec §4.2). Separate from
+// the TTS dock's own cmd port (13142) so operators can query the engine
+// process directly without going through the dock.
+static constexpr uint16_t KOKORO_ENGINE_CMD_PORT = 13144;
 
 struct KokoroVocab {
     std::map<std::string, int64_t> phoneme_to_id;
@@ -1039,20 +1044,9 @@ struct CallContext {
 
 class KokoroService {
 public:
-    KokoroService() : node_(ServiceType::KOKORO_SERVICE) {}
+    KokoroService() = default;
 
     bool initialize(const std::string& voice_name) {
-        if (!check_tts_exclusion()) {
-            std::fprintf(stderr, "Another TTS service is already running on port %d\n",
-                        whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE));
-            return false;
-        }
-
-        if (!node_.initialize()) {
-            std::fprintf(stderr, "Failed to initialize interconnect node\n");
-            return false;
-        }
-
         const char* env_models = std::getenv("WHISPERTALK_MODELS_DIR");
         std::string models_dir = env_models ? env_models :
 #ifdef WHISPERTALK_MODELS_DIR
@@ -1065,42 +1059,53 @@ public:
             return false;
         }
 
-        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::KOKORO_SERVICE);
+        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::TTS_SERVICE);
 
         std::printf("Kokoro TTS Service initialized (German, voice=%s, decoder=coreml-split)\n",
                    voice_name.c_str());
         std::printf("  CoreML duration: %s\n", pipeline_.has_coreml() ? "ENABLED (ANE)" : "DISABLED");
 
-        node_.register_call_end_handler([this](uint32_t call_id) {
+        engine_.set_name("kokoro");
+        EngineAudioFormat fmt;
+        fmt.sample_rate = KOKORO_SAMPLE_RATE;
+        fmt.channels = 1;
+        fmt.format = "f32le";
+        engine_.set_audio_format(fmt);
+
+        engine_.register_call_end_handler([this](uint32_t call_id) {
             handle_call_end(call_id);
         });
 
-        node_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
+        engine_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
             if (active) {
                 handle_speech_active(call_id);
             }
         });
 
+        engine_.register_custom_handler("SHUTDOWN", [this]() {
+            std::fprintf(stderr, "[kokoro] received SHUTDOWN from TTS dock — exiting\n");
+            this->shutdown();
+            std::_Exit(0);
+        });
+
+        if (!engine_.start()) {
+            std::fprintf(stderr, "Failed to start TTS engine client\n");
+            return false;
+        }
+
         return true;
     }
 
     void run() {
-        if (!node_.connect_to_downstream()) {
-            std::printf("Downstream (OAP) not available yet - will auto-reconnect\n");
-        }
-
         std::thread cmd_thread(&KokoroService::command_listener_loop, this);
 
-        std::printf("Kokoro service ready - waiting for text from LLaMA\n");
+        std::printf("Kokoro service ready - connecting to TTS dock at 127.0.0.1:%u\n",
+                    (unsigned)service_engine_port(ServiceType::TTS_SERVICE));
 
         while (running_) {
             Packet pkt;
-            if (node_.recv_from_upstream(pkt, 100)) {
+            if (engine_.recv_text(pkt, 100)) {
                 dispatch_text_packet(pkt);
-            }
-
-            if (node_.upstream_state() == ConnectionState::FAILED) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         }
 
@@ -1116,7 +1121,7 @@ public:
         int s2 = cmd_sock_.exchange(-1);
         if (s2 >= 0) ::close(s2);
         shutdown_all_calls();
-        node_.shutdown();
+        engine_.shutdown();
     }
 
     void set_log_level(const char* level) {
@@ -1124,40 +1129,8 @@ public:
     }
 
 private:
-    bool check_tts_exclusion() {
-        uint16_t cmd_port = whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE);
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) return true;
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = htons(cmd_port);
-
-        struct timeval tv{1, 0};
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-            const char* ping = "PING\n";
-            send(sock, ping, strlen(ping), 0);
-            char buf[64];
-            int n = (int)recv(sock, buf, sizeof(buf) - 1, 0);
-            ::close(sock);
-            if (n > 0) {
-                buf[n] = '\0';
-                if (strstr(buf, "PONG")) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        ::close(sock);
-        return true;
-    }
-
     void command_listener_loop() {
-        uint16_t port = whispertalk::service_cmd_port(ServiceType::KOKORO_SERVICE);
+        uint16_t port = KOKORO_ENGINE_CMD_PORT;
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) return;
 
@@ -1350,14 +1323,6 @@ private:
         if (cmd == "PING") {
             return "PONG\n";
         }
-        if (cmd == "PAUSE_DOWNSTREAM") {
-            node_.pause_downstream();
-            return "OK DOWNSTREAM_PAUSED\n";
-        }
-        if (cmd == "RESUME_DOWNSTREAM") {
-            node_.resume_downstream();
-            return "OK DOWNSTREAM_RESUMED\n";
-        }
         if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
             std::string level = cmd.substr(14);
             log_fwd_.set_level(level.c_str());
@@ -1384,8 +1349,7 @@ private:
             char spd[16];
             std::snprintf(spd, sizeof(spd), "%.2f", speed_.load());
             return "ACTIVE_CALLS:" + std::to_string(calls_.size())
-                + ":UPSTREAM:" + (node_.upstream_state() == ConnectionState::CONNECTED ? "connected" : "disconnected")
-                + ":DOWNSTREAM:" + (node_.downstream_state() == ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":DOCK:" + (engine_.is_connected() ? "connected" : "disconnected")
                 + ":SPEED:" + spd
                 + "\n";
         }
@@ -1471,8 +1435,8 @@ private:
 
     void send_audio_to_downstream(uint32_t call_id, const std::vector<float>& samples,
                                    std::atomic<bool>* interrupted = nullptr) {
-        if (node_.downstream_state() != ConnectionState::CONNECTED) {
-            std::printf("Downstream (OAP) not connected - discarding audio for call %u\n", call_id);
+        if (!engine_.is_connected()) {
+            std::printf("TTS dock not connected - discarding audio for call %u\n", call_id);
             return;
         }
 
@@ -1498,12 +1462,12 @@ private:
             std::memcpy(audio_pkt.payload.data() + header_size,
                        samples.data() + offset, count * sizeof(float));
 
-            audio_pkt.trace.record(whispertalk::ServiceType::KOKORO_SERVICE, 0);
-            if (node_.send_to_downstream(audio_pkt)) {
+            audio_pkt.trace.record(whispertalk::ServiceType::TTS_SERVICE, 0);
+            if (engine_.send_audio(audio_pkt)) {
                 total_sent += count;
             } else {
                 std::fprintf(stderr, "Failed to send audio chunk for call %u at offset %zu\n", call_id, offset);
-                log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio chunk to OAP");
+                log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio chunk to TTS dock");
                 break;
             }
         }
@@ -1556,7 +1520,7 @@ private:
         calls_.clear();
     }
 
-    InterconnectNode node_;
+    EngineClient engine_;
     LogForwarder log_fwd_;
     KokoroPipeline pipeline_;
     std::atomic<bool> running_{true};

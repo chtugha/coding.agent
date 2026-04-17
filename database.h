@@ -368,13 +368,18 @@ inline bool FrontendServer::init_database() {
             ('VAD_SERVICE', 'bin/vad-service', '', 'Voice Activity Detection + speech segmentation'),
             ('WHISPER_SERVICE', 'bin/whisper-service', '--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', 'Whisper ASR (Metal)'),
             ('LLAMA_SERVICE', 'bin/llama-service', '', 'LLaMA 3.2-1B response generation'),
-            ('KOKORO_SERVICE', 'bin/kokoro-service', '', 'Kokoro TTS (CoreML)'),
-            ('NEUTTS_SERVICE', 'bin/neutts-service', '', 'NeuTTS Nano German TTS (CoreML)'),
+            ('TTS_SERVICE', 'bin/tts-service', '', 'Generic TTS stage/dock (engine hotplug)'),
+            ('KOKORO_ENGINE', 'bin/kokoro-service', '', 'Kokoro TTS engine (CoreML) — docks into TTS_SERVICE'),
+            ('NEUTTS_ENGINE', 'bin/neutts-service', '', 'NeuTTS Nano German TTS engine (CoreML) — docks into TTS_SERVICE'),
             ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP'),
             ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection'),
             ('TOMEDO_CRAWL_SERVICE', 'bin/tomedo-crawl', '', 'Tomedo RAG — patient context & caller ID');
         UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
         UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args='--lines 1 alice 127.0.0.1 5060' OR default_args='--lines 2 alice 127.0.0.1 5060');
+        UPDATE service_config SET service='KOKORO_ENGINE', description='Kokoro TTS engine (CoreML) — docks into TTS_SERVICE' WHERE service='KOKORO_SERVICE';
+        UPDATE service_config SET service='NEUTTS_ENGINE', description='NeuTTS Nano German TTS engine (CoreML) — docks into TTS_SERVICE' WHERE service='NEUTTS_SERVICE';
+        INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
+            ('TTS_SERVICE', 'bin/tts-service', '', 'Generic TTS stage/dock (engine hotplug)');
     )";
     sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
 

@@ -1,6 +1,6 @@
 // llama-service.cpp — LLM response generation stage using llama.cpp.
 //
-// Pipeline position: Whisper → [LLaMA] → Kokoro
+// Pipeline position: Whisper → [LLaMA] → TTS
 //
 // Receives transcribed text from Whisper and generates a spoken German reply
 // using Llama-3.2-1B-Instruct (Q8_0 GGUF) via the llama.cpp C API.
@@ -206,7 +206,7 @@ public:
         }
 
         if (!interconnect_.connect_to_downstream()) {
-            std::cout << "Downstream (Kokoro) not available yet - will auto-reconnect" << std::endl;
+            std::cout << "Downstream (TTS) not available yet - will auto-reconnect" << std::endl;
         }
 
         interconnect_.register_call_end_handler([this](uint32_t call_id) {
@@ -985,7 +985,7 @@ private:
         pkt.trace.record(whispertalk::ServiceType::LLAMA_SERVICE, 1);
         if (!interconnect_.send_to_downstream(pkt)) {
             if (interconnect_.downstream_state() != whispertalk::ConnectionState::CONNECTED) {
-                log_fwd_.forward(whispertalk::LogLevel::WARN, cid, "Kokoro disconnected, discarding response");
+                log_fwd_.forward(whispertalk::LogLevel::WARN, cid, "TTS disconnected, discarding response");
             }
         }
     }
@@ -1101,16 +1101,6 @@ private:
             std::string level = cmd.substr(14);
             log_fwd_.set_level(level.c_str());
             return "OK\n";
-        }
-        if (cmd == "SET_TTS:KOKORO") {
-            interconnect_.clear_downstream_override();
-            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Downstream switched to KOKORO_SERVICE");
-            return "OK TTS=KOKORO\n";
-        }
-        if (cmd == "SET_TTS:NEUTTS") {
-            interconnect_.set_downstream_override(whispertalk::ServiceType::NEUTTS_SERVICE);
-            log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Downstream switched to NEUTTS_SERVICE");
-            return "OK TTS=NEUTTS\n";
         }
         if (cmd.rfind("SET_SAMPLING:", 0) == 0) {
             std::string params = cmd.substr(13);

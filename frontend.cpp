@@ -148,6 +148,12 @@ static constexpr int PIPELINE_ROUND_POLL_MS = 250;       // poll interval for pi
 static constexpr int ACCURACY_INTER_FILE_MS = 2000;      // pause between accuracy test files
 static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;    // poll interval for download progress
 
+// TTS engine cmd-ports (engines dock into TTS_SERVICE but keep a private
+// diagnostic cmd-port for quality tests / benchmarks). These ports are owned
+// by the engine processes, not by the TTS dock.
+static constexpr uint16_t KOKORO_ENGINE_CMD_PORT = 13144;
+static constexpr uint16_t NEUTTS_ENGINE_CMD_PORT = 13174;
+
 using namespace whispertalk;
 
 static std::atomic<bool> s_sigint_received(false);
@@ -984,8 +990,7 @@ private:
         if (name == "VAD_SERVICE") return ServiceType::VAD_SERVICE;
         if (name == "WHISPER_SERVICE") return ServiceType::WHISPER_SERVICE;
         if (name == "LLAMA_SERVICE") return ServiceType::LLAMA_SERVICE;
-        if (name == "KOKORO_SERVICE") return ServiceType::KOKORO_SERVICE;
-        if (name == "NEUTTS_SERVICE") return ServiceType::NEUTTS_SERVICE;
+        if (name == "TTS_SERVICE") return ServiceType::TTS_SERVICE;
         if (name == "OUTBOUND_AUDIO_PROCESSOR") return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         if (name == "TOMEDO_CRAWL_SERVICE" || name == "TOMEDO_CRAWL") return ServiceType::TOMEDO_CRAWL_SERVICE;
         if (name == "FRONTEND") return ServiceType::FRONTEND;
@@ -1135,8 +1140,8 @@ private:
                 handle_service_stop(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/services/restart")) == 0) {
                 handle_service_restart(c, hm);
-            } else if (mg_strcmp(hm->uri, mg_str("/api/switch_tts")) == 0) {
-                handle_switch_tts(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/tts/status")) == 0) {
+                handle_tts_status(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/services/config")) == 0) {
                 handle_service_config(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/logs")) == 0) {
@@ -1816,33 +1821,43 @@ private:
         }
     }
 
-    void switch_tts(const std::string& target) {
-        if (target == "NEUTTS") {
-            send_negotiation_command(whispertalk::ServiceType::KOKORO_SERVICE, "PAUSE_DOWNSTREAM");
-            usleep(300000);
-            send_negotiation_command(whispertalk::ServiceType::NEUTTS_SERVICE, "RESUME_DOWNSTREAM");
-            usleep(500000);
-            send_negotiation_command(whispertalk::ServiceType::LLAMA_SERVICE, "SET_TTS:NEUTTS");
-        } else {
-            send_negotiation_command(whispertalk::ServiceType::NEUTTS_SERVICE, "PAUSE_DOWNSTREAM");
-            usleep(300000);
-            send_negotiation_command(whispertalk::ServiceType::KOKORO_SERVICE, "RESUME_DOWNSTREAM");
-            usleep(500000);
-            send_negotiation_command(whispertalk::ServiceType::LLAMA_SERVICE, "SET_TTS:KOKORO");
-        }
+    // Engine cmd-port lookup by engine name (dock-local diagnostic ports).
+    // Used by quality_test / benchmark handlers that talk directly to the
+    // engine's private cmd-port (TEST_SYNTH, BENCHMARK, SYNTH_WAV, etc.).
+    static uint16_t tts_engine_cmd_port_for(const std::string& engine_name) {
+        if (engine_name == "neutts") return NEUTTS_ENGINE_CMD_PORT;
+        return KOKORO_ENGINE_CMD_PORT; // default: kokoro
     }
 
-    void handle_switch_tts(struct mg_connection *c, struct mg_http_message *hm) {
-        std::string body(hm->body.buf, hm->body.len);
-        std::string target = extract_json_string(body, "target");
-        if (target != "KOKORO" && target != "NEUTTS") {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
-                "{\"error\":\"target must be KOKORO or NEUTTS\"}");
-            return;
+    // Query the TTS dock's cmd-port for the currently docked engine name.
+    // Returns the engine name (e.g. "kokoro", "neutts") or "" if no engine
+    // is docked / the dock is unreachable.
+    std::string query_tts_active_engine() {
+        uint16_t port = whispertalk::service_cmd_port(whispertalk::ServiceType::TTS_SERVICE);
+        std::string err;
+        std::string resp = tcp_command(port, "STATUS", err, 2);
+        if (resp.empty()) return "";
+        while (!resp.empty() && (resp.back() == '\n' || resp.back() == '\r')) resp.pop_back();
+        // Dock protocol: "ACTIVE <name>" or "NONE"
+        const std::string prefix = "ACTIVE ";
+        if (resp.compare(0, prefix.size(), prefix) == 0) {
+            return resp.substr(prefix.size());
         }
-        std::thread([this, target]() { switch_tts(target); }).detach();
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-            "{\"status\":\"switching\",\"target\":\"%s\"}", target.c_str());
+        return "";
+    }
+
+    // GET /api/tts/status — Returns the currently docked TTS engine (or null).
+    // {"engine":"kokoro"} | {"engine":"neutts"} | {"engine":null}
+    void handle_tts_status(struct mg_connection *c, struct mg_http_message *hm) {
+        (void)hm;
+        std::string engine = query_tts_active_engine();
+        if (engine.empty()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"engine\":null}");
+        } else {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"engine\":\"%s\"}", escape_json(engine).c_str());
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1879,14 +1894,15 @@ private:
 
         const std::vector<std::string> all_svcs = {
             "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE",
-            "WHISPER_SERVICE", "LLAMA_SERVICE", "KOKORO_SERVICE",
-            "NEUTTS_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", "TOMEDO_CRAWL_SERVICE"
+            "WHISPER_SERVICE", "LLAMA_SERVICE", "TTS_SERVICE",
+            "KOKORO_ENGINE", "NEUTTS_ENGINE",
+            "OUTBOUND_AUDIO_PROCESSOR", "TOMEDO_CRAWL_SERVICE"
         };
         const std::vector<std::string> core_svcs = {
             "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE",
             "WHISPER_SERVICE", "LLAMA_SERVICE", "OUTBOUND_AUDIO_PROCESSOR"
         };
-        const std::vector<std::string> tts_svcs  = {"KOKORO_SERVICE", "NEUTTS_SERVICE"};
+        const std::vector<std::string> tts_svcs  = {"TTS_SERVICE", "KOKORO_ENGINE", "NEUTTS_ENGINE"};
         const std::vector<std::string> rag_svcs   = {"TOMEDO_CRAWL_SERVICE"};
 
         int running_count = 0;
@@ -1901,18 +1917,19 @@ private:
             : "Stopping all services and starting core pipeline...");
 
         if (all_running) {
-            // Case 1: hang up any active call, remove SIP lines, stop TTS+RAG
+            // Case 1: hang up any active call, remove SIP lines, stop TTS engines+dock+RAG
             std::string sip_err;
             http_post_localhost(TEST_SIP_PROVIDER_PORT, "/hangup", "{}", sip_err);
             send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "REMOVE_ALL_LINES");
-            stop_service("KOKORO_SERVICE");
-            stop_service("NEUTTS_SERVICE");
+            stop_service("KOKORO_ENGINE");
+            stop_service("NEUTTS_ENGINE");
+            stop_service("TTS_SERVICE");
             stop_service("TOMEDO_CRAWL_SERVICE");
             usleep(1000000); // 1s settling
         } else {
             // Case 2: stop everything, start core pipeline in order
             static const std::vector<std::string> stop_order = {
-                "TOMEDO_CRAWL_SERVICE", "NEUTTS_SERVICE", "KOKORO_SERVICE",
+                "TOMEDO_CRAWL_SERVICE", "NEUTTS_ENGINE", "KOKORO_ENGINE", "TTS_SERVICE",
                 "OUTBOUND_AUDIO_PROCESSOR", "LLAMA_SERVICE", "WHISPER_SERVICE",
                 "VAD_SERVICE", "INBOUND_AUDIO_PROCESSOR", "SIP_CLIENT"
             };
@@ -1935,6 +1952,7 @@ private:
                 {"VAD_SERVICE",              3},
                 {"WHISPER_SERVICE",         10},
                 {"LLAMA_SERVICE",           10},
+                {"TTS_SERVICE",              2},
                 {"OUTBOUND_AUDIO_PROCESSOR", 3},
             };
             for (const auto& step : start_order) {
@@ -1950,52 +1968,68 @@ private:
             }
         }
 
-        // ---- Step C: start TTS ----
-        std::string tts_to_start = (tts_choice == "neutts") ? "NEUTTS_SERVICE" : "KOKORO_SERVICE";
-        std::string tts_label    = (tts_choice == "neutts") ? "NeuTTS" : "Kokoro";
-        set_setup_progress(task_id, "C", "Starting " + tts_label + " TTS...");
+        // ---- Step C: ensure TTS dock is up, then start the chosen engine ----
+        std::string engine_to_start = (tts_choice == "neutts") ? "NEUTTS_ENGINE" : "KOKORO_ENGINE";
+        std::string engine_label    = (tts_choice == "neutts") ? "NeuTTS" : "Kokoro";
+        std::string engine_name     = (tts_choice == "neutts") ? "neutts" : "kokoro";
 
-        stop_service("KOKORO_SERVICE");
-        stop_service("NEUTTS_SERVICE");
+        // Make sure the generic TTS dock is running (it may have been skipped in Case 1 above).
+        if (!is_service_running("TTS_SERVICE")) {
+            set_setup_progress(task_id, "C", "Starting generic TTS dock (TTS_SERVICE)...");
+            if (!start_service("TTS_SERVICE", "")) {
+                finish_async_task(task_id, "{\"error\":\"Failed to start TTS_SERVICE (dock)\"}");
+                return;
+            }
+            // Wait up to 10s for dock cmd-port to respond.
+            uint16_t dock_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::TTS_SERVICE);
+            bool dock_ready = false;
+            for (int i = 0; i < 20; i++) {
+                std::string err;
+                std::string resp = tcp_command(dock_cmd_port, "PING", err, 1);
+                if (resp.find("PONG") != std::string::npos) { dock_ready = true; break; }
+                usleep(500000);
+            }
+            if (!dock_ready) {
+                finish_async_task(task_id, "{\"error\":\"TTS dock did not become reachable within 10s\"}");
+                return;
+            }
+        }
+
+        // Stop any previously docked engine and start the requested one.
+        set_setup_progress(task_id, "C", "Starting " + engine_label + " engine...");
+        stop_service("KOKORO_ENGINE");
+        stop_service("NEUTTS_ENGINE");
         usleep(500000);
 
-        if (!start_service(tts_to_start, "")) {
-            finish_async_task(task_id, "{\"error\":\"Failed to start TTS service: " + tts_to_start + "\"}");
+        if (!start_service(engine_to_start, "")) {
+            finish_async_task(task_id, "{\"error\":\"Failed to start TTS engine: " + engine_to_start + "\"}");
             return;
         }
 
+        // Poll the dock's /api/tts/status equivalent (STATUS cmd) until the
+        // chosen engine shows up as ACTIVE. Engines take a while to load
+        // their models before they send HELLO.
         {
-            whispertalk::ServiceType tts_svc_type = (tts_choice == "neutts")
-                ? whispertalk::ServiceType::NEUTTS_SERVICE
-                : whispertalk::ServiceType::KOKORO_SERVICE;
-            uint16_t tts_cmd_port = whispertalk::service_cmd_port(tts_svc_type);
             bool tts_ready = false;
             for (int i = 0; i < 720; i++) {
                 set_setup_progress(task_id, "C",
-                    "Waiting for " + tts_label + " TTS to initialise (" + std::to_string(i) + "s)...");
-                std::string err;
-                std::string resp = tcp_command(tts_cmd_port, "PING", err, 1);
-                if (resp.find("PONG") != std::string::npos) {
+                    "Waiting for " + engine_label + " engine to dock (" + std::to_string(i) + "s)...");
+                std::string active = query_tts_active_engine();
+                if (active == engine_name) {
                     tts_ready = true;
                     break;
                 }
                 usleep(1000000);
             }
             if (!tts_ready) {
-                finish_async_task(task_id, "{\"error\":\"" + tts_label + " TTS did not become reachable within 12 minutes\"}");
+                finish_async_task(task_id,
+                    "{\"error\":\"" + engine_label + " engine did not dock within 12 minutes\"}");
                 return;
             }
         }
 
-        // Tell LLaMA which TTS to use
-        if (tts_choice == "neutts") {
-            send_negotiation_command(whispertalk::ServiceType::LLAMA_SERVICE, "SET_TTS:NEUTTS");
-        } else {
-            send_negotiation_command(whispertalk::ServiceType::LLAMA_SERVICE, "SET_TTS:KOKORO");
-        }
-
         // Record active TTS so teardown knows what to stop
-        set_setting("test_active_tts", (tts_choice == "neutts") ? "neutts" : "kokoro");
+        set_setting("test_active_tts", engine_name);
 
         // ---- Step D: test SIP provider + conference ----
         set_setup_progress(task_id, "D", "Starting Test SIP Provider...");
@@ -2088,9 +2122,9 @@ private:
         // Stop the TTS that was active for this run
         std::string active_tts = get_setting("test_active_tts", "");
         if (active_tts == "neutts") {
-            stop_service("NEUTTS_SERVICE");
+            stop_service("NEUTTS_ENGINE");
         } else if (active_tts == "kokoro") {
-            stop_service("KOKORO_SERVICE");
+            stop_service("KOKORO_ENGINE");
         }
         set_setting("test_active_tts", "");
 
@@ -2124,13 +2158,7 @@ private:
             return;
         }
 
-        if (name == "NEUTTS_SERVICE") {
-            std::thread([this, name]() {
-                switch_tts("KOKORO");
-                stop_service(name);
-            }).detach();
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"stopping\"}");
-        } else if (stop_service(name)) {
+        if (stop_service(name)) {
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"stopped\"}");
         } else {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Cannot stop service (not managed by frontend)\"}");
@@ -3544,10 +3572,7 @@ private:
         ShutupScenarioResult r;
         uint16_t llama_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::LLAMA_SERVICE);
         std::string active_tts_s = get_setting("test_active_tts", "kokoro");
-        whispertalk::ServiceType tts_type_s = (active_tts_s == "neutts")
-            ? whispertalk::ServiceType::NEUTTS_SERVICE
-            : whispertalk::ServiceType::KOKORO_SERVICE;
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(tts_type_s);
+        uint16_t kokoro_cmd_port = tts_engine_cmd_port_for(active_tts_s);
         uint16_t oap_cmd_port = whispertalk::service_cmd_port(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR);
 
         std::string prompt = "Erzähl mir eine sehr lange und detaillierte Geschichte über einen Ritter, der durch dunkle Wälder reist.";
@@ -3943,10 +3968,7 @@ private:
 
     void run_kokoro_quality_test_async(int64_t task_id, std::vector<std::string> phrases) {
         std::string active_tts_q = get_setting("test_active_tts", "kokoro");
-        whispertalk::ServiceType tts_type_q = (active_tts_q == "neutts")
-            ? whispertalk::ServiceType::NEUTTS_SERVICE
-            : whispertalk::ServiceType::KOKORO_SERVICE;
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(tts_type_q);
+        uint16_t kokoro_cmd_port = tts_engine_cmd_port_for(active_tts_q);
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
@@ -4083,10 +4105,7 @@ private:
 
     void run_kokoro_benchmark_async(int64_t task_id, std::string phrase, int iterations) {
         std::string active_tts_b = get_setting("test_active_tts", "kokoro");
-        whispertalk::ServiceType tts_type_b = (active_tts_b == "neutts")
-            ? whispertalk::ServiceType::NEUTTS_SERVICE
-            : whispertalk::ServiceType::KOKORO_SERVICE;
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(tts_type_b);
+        uint16_t kokoro_cmd_port = tts_engine_cmd_port_for(active_tts_b);
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
@@ -4180,7 +4199,7 @@ private:
             {"vad-service",               whispertalk::ServiceType::VAD_SERVICE},
             {"whisper-service",           whispertalk::ServiceType::WHISPER_SERVICE},
             {"llama-service",             whispertalk::ServiceType::LLAMA_SERVICE},
-            {"tts-service",               whispertalk::ServiceType::KOKORO_SERVICE},
+            {"tts-service",               whispertalk::ServiceType::TTS_SERVICE},
             {"outbound-audio-processor",  whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
             {"tomedo-crawl",              whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE},
         };
@@ -4284,10 +4303,7 @@ private:
 
     void run_tts_roundtrip_async(int64_t task_id, std::vector<std::string> phrases) {
         std::string active_tts = get_setting("test_active_tts", "kokoro");
-        whispertalk::ServiceType tts_type = (active_tts == "neutts")
-            ? whispertalk::ServiceType::NEUTTS_SERVICE
-            : whispertalk::ServiceType::KOKORO_SERVICE;
-        uint16_t kokoro_cmd_port = whispertalk::service_cmd_port(tts_type);
+        uint16_t kokoro_cmd_port = tts_engine_cmd_port_for(active_tts);
 
         std::string ping_err;
         if (tcp_command(kokoro_cmd_port, "PING", ping_err, 3) != "PONG") {
@@ -4499,9 +4515,7 @@ private:
         }
 
         std::string active_tts = get_setting("test_active_tts", "kokoro");
-        whispertalk::ServiceType tts_svc_type = (active_tts == "neutts")
-            ? whispertalk::ServiceType::NEUTTS_SERVICE
-            : whispertalk::ServiceType::KOKORO_SERVICE;
+        (void)active_tts;
 
         std::vector<std::pair<whispertalk::ServiceType, const char*>> required_services = {
             {whispertalk::ServiceType::SIP_CLIENT, "SIP Client"},
@@ -4509,7 +4523,7 @@ private:
             {whispertalk::ServiceType::VAD_SERVICE, "VAD"},
             {whispertalk::ServiceType::WHISPER_SERVICE, "Whisper"},
             {whispertalk::ServiceType::LLAMA_SERVICE, "LLaMA"},
-            {tts_svc_type, "TTS"},
+            {whispertalk::ServiceType::TTS_SERVICE, "TTS"},
             {whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
         };
         for (const auto& [svc, name] : required_services) {
@@ -4756,7 +4770,7 @@ private:
             {"vad",    whispertalk::ServiceType::VAD_SERVICE},
             {"whisper",whispertalk::ServiceType::WHISPER_SERVICE},
             {"llama",  whispertalk::ServiceType::LLAMA_SERVICE},
-            {"tts",    whispertalk::ServiceType::KOKORO_SERVICE},
+            {"tts",    whispertalk::ServiceType::TTS_SERVICE},
             {"oap",    whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
         };
         constexpr int NSVC = 7;
@@ -4865,7 +4879,7 @@ private:
             {ServiceType::VAD_SERVICE, "VAD"},
             {ServiceType::WHISPER_SERVICE, "Whisper"},
             {ServiceType::LLAMA_SERVICE, "LLaMA"},
-            {ServiceType::KOKORO_SERVICE, "TTS"},
+            {ServiceType::TTS_SERVICE, "TTS"},
             {ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
         };
         for (const auto& [svc, name] : required_svc) {
@@ -4923,7 +4937,7 @@ private:
             return;
         }
 
-        static const char* svc_names[] = {"SIP","IAP","VAD","Whisper","LLaMA","Kokoro","OAP"};
+        static const char* svc_names[] = {"SIP","IAP","VAD","Whisper","LLaMA","TTS","OAP"};
         std::stringstream json;
         json << "{\"running\":" << (p->running.load() ? "true" : "false")
              << ",\"elapsed_s\":" << p->elapsed_s.load()
@@ -4982,12 +4996,12 @@ private:
             ServiceType::VAD_SERVICE,
             ServiceType::WHISPER_SERVICE,
             ServiceType::LLAMA_SERVICE,
-            ServiceType::KOKORO_SERVICE,
+            ServiceType::TTS_SERVICE,
             ServiceType::OUTBOUND_AUDIO_PROCESSOR,
         };
         static const char* svc_service_names[] = {
             "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE",
-            "WHISPER_SERVICE", "LLAMA_SERVICE", "KOKORO_SERVICE",
+            "WHISPER_SERVICE", "LLAMA_SERVICE", "TTS_SERVICE",
             "OUTBOUND_AUDIO_PROCESSOR"
         };
 
@@ -5749,7 +5763,8 @@ private:
 
             const char* services[] = {
                 "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE", "WHISPER_SERVICE",
-                "LLAMA_SERVICE", "KOKORO_SERVICE", "NEUTTS_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", "TOMEDO_CRAWL_SERVICE", nullptr
+                "LLAMA_SERVICE", "TTS_SERVICE", "KOKORO_ENGINE", "NEUTTS_ENGINE",
+                "OUTBOUND_AUDIO_PROCESSOR", "TOMEDO_CRAWL_SERVICE", nullptr
             };
 
             std::stringstream json;
@@ -5803,23 +5818,36 @@ private:
 
             bool live_update = false;
             {
+                // Map by ServiceType for pipeline services that go through
+                // send_negotiation_command (uses service_cmd_port()), and
+                // by raw cmd-port for TTS engines (which dock into TTS_SERVICE
+                // but keep their own private diagnostic cmd-port).
                 static const struct { const char* name; whispertalk::ServiceType type; } svc_map[] = {
                     {"SIP_CLIENT",               whispertalk::ServiceType::SIP_CLIENT},
                     {"INBOUND_AUDIO_PROCESSOR",  whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR},
                     {"VAD_SERVICE",              whispertalk::ServiceType::VAD_SERVICE},
                     {"WHISPER_SERVICE",          whispertalk::ServiceType::WHISPER_SERVICE},
                     {"LLAMA_SERVICE",            whispertalk::ServiceType::LLAMA_SERVICE},
-                    {"KOKORO_SERVICE",           whispertalk::ServiceType::KOKORO_SERVICE},
-                    {"NEUTTS_SERVICE",           whispertalk::ServiceType::NEUTTS_SERVICE},
+                    {"TTS_SERVICE",              whispertalk::ServiceType::TTS_SERVICE},
                     {"OUTBOUND_AUDIO_PROCESSOR", whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
                     {"TOMEDO_CRAWL_SERVICE",     whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE},
                 };
+                bool handled = false;
                 for (const auto& m : svc_map) {
                     if (service == m.name) {
                         std::string resp = send_negotiation_command(m.type, "SET_LOG_LEVEL:" + level);
                         live_update = (resp.find("OK") != std::string::npos);
+                        handled = true;
                         break;
                     }
+                }
+                if (!handled && (service == "KOKORO_ENGINE" || service == "NEUTTS_ENGINE")) {
+                    uint16_t port = (service == "NEUTTS_ENGINE")
+                        ? NEUTTS_ENGINE_CMD_PORT
+                        : KOKORO_ENGINE_CMD_PORT;
+                    std::string err;
+                    std::string resp = tcp_command(port, "SET_LOG_LEVEL:" + level, err, 2);
+                    live_update = (resp.find("OK") != std::string::npos);
                 }
             }
 
@@ -6875,7 +6903,7 @@ private:
              << ",\"ollama_running\":" << (ollama_running ? "true" : "false")
              << ",\"services\":" << svc_json.str()
              << ",\"recent_logs\":" << logs_json.str()
-             << ",\"pipeline\":[\"SIP_CLIENT\",\"INBOUND_AUDIO_PROCESSOR\",\"VAD_SERVICE\",\"WHISPER_SERVICE\",\"LLAMA_SERVICE\",\"KOKORO_SERVICE\",\"OUTBOUND_AUDIO_PROCESSOR\"]"
+             << ",\"pipeline\":[\"SIP_CLIENT\",\"INBOUND_AUDIO_PROCESSOR\",\"VAD_SERVICE\",\"WHISPER_SERVICE\",\"LLAMA_SERVICE\",\"TTS_SERVICE\",\"OUTBOUND_AUDIO_PROCESSOR\"]"
              << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
@@ -8186,6 +8214,7 @@ document.getElementById('f').onsubmit=async function(e){
     }
 
     void handle_api_auth_users(struct mg_connection *c, struct mg_http_message *hm) {
+        (void)hm;
         if (!db_) {
             mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"DB unavailable\"}");
             return;

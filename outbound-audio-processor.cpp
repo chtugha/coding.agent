@@ -1,8 +1,8 @@
 // outbound-audio-processor.cpp — 24kHz→8kHz downsampler + G.711 encoder + RTP scheduler.
 //
-// Pipeline position: Kokoro → [OAP] → SIP_CLIENT
+// Pipeline position: TTS → [OAP] → SIP_CLIENT
 //
-// Receives 24kHz float32 PCM audio chunks from the Kokoro TTS service and converts
+// Receives 24kHz float32 PCM audio chunks from the TTS service and converts
 // them to 160-byte G.711 μ-law frames for transmission to the SIP client.
 //
 // Downsampling pipeline (24kHz → 8kHz, ratio 3:1):
@@ -17,11 +17,11 @@
 // Output scheduling — constant-rate 20ms timer:
 //   A dedicated sender thread fires every 20ms (hardware timer based on steady_clock).
 //   Each tick sends exactly 160 G.711 bytes to the SIP_CLIENT via the interconnect
-//   data channel. If the TTS buffer is empty (Kokoro silent or not connected), the
+//   data channel. If the TTS buffer is empty (TTS silent or not connected), the
 //   sender emits ULAW_SILENCE frames (0xFF) to maintain RTP clock continuity.
 //
 // Per-call state (CallState):
-//   buffer:    raw G.711 byte queue fed by the Kokoro receive thread.
+//   buffer:    raw G.711 byte queue fed by the TTS receive thread.
 //   read_pos:  logical read head; compact() reclaims memory when read_pos > COMPACT_THRESHOLD.
 //   fir_history: per-call anti-aliasing filter state; avoids cross-call contamination.
 //   ext[]:     pre-allocated extended buffer (history + one input batch) to avoid
@@ -102,7 +102,7 @@ static constexpr float PRES_A2 =  0.36942f;
 // DC-blocking first-order high-pass: α = 1 − 2π·fc/fs ≈ 1 − 2π·20/24000 ≈ 0.994764
 static constexpr float DC_BLOCK_ALPHA = 0.9947697f;
 
-// Max samples per Kokoro chunk (Kokoro sends CHUNK_SAMPLES = 4800 @ 24kHz = 200ms).
+// Max samples per TTS chunk (TTS engines send CHUNK_SAMPLES = 4800 @ 24kHz = 200ms).
 // 6000 gives 25 % headroom without preallocating 5× too much per call.
 static constexpr size_t OAP_MAX_PREALLOC_SAMPLES = 6000;
 // Default guard window (ms) suppressing SPEECH_ACTIVE flushes immediately after TTS audio
@@ -120,7 +120,7 @@ struct CallState {
     std::vector<uint8_t> buffer;
     size_t read_pos = 0;
     std::atomic<int64_t> last_activity_ns{0};
-    // Set each time new TTS audio is received from Kokoro. Used by the SPEECH_ACTIVE
+    // Set each time new TTS audio is received. Used by the SPEECH_ACTIVE
     // guard to distinguish sidetone echo (arrives <500ms after playback starts) from
     // genuine caller interruption (arrives >800ms after last audio chunk).
     std::chrono::steady_clock::time_point last_audio_received{};

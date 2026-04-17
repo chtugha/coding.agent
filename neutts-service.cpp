@@ -1,11 +1,11 @@
 // neutts-service.cpp
 //
-// Pipeline position: LLaMA → [NeuTTS] → OAP
+// Pipeline position: LLaMA → [TTS dock] → (engine: NeuTTS) → [TTS dock] → OAP
 //
-// Alternative TTS service using NeuTTS Nano German model.
-// Uses llama.cpp for backbone inference and CoreML NeuCodec for audio decoding.
-// Has its own pipeline slot (ports 13170-13172).
-// Both TTS services can run simultaneously; frontend switches LLaMA's downstream target.
+// Alternative TTS engine using NeuTTS Nano German model. Connects to the
+// generic TTS dock (`tts-service`) via the EngineClient hotplug protocol
+// instead of being a pipeline node itself. Last engine to dock wins; the
+// dock arbitrates between kokoro/neutts/future engines.
 //
 // Inference pipeline:
 //   1. espeak-ng converts text → IPA phonemes (language="de", with stress)
@@ -16,15 +16,17 @@
 //   5. Extract speech codes from <|speech_N|> tokens
 //   6. Stop at <|SPEECH_GENERATION_END|> or EOS
 //   7. Decode speech codes through NeuCodec (CoreML mlmodelc) → 24kHz float32 PCM
-//   8. Normalize + fade-in, send to OAP
+//   8. Normalize + fade-in, send via EngineClient to TTS dock → OAP
 //
 // Reference voice:
 //   Pre-computed codec codes (ref_codes.bin) and phonemized text (ref_text.txt)
 //   are loaded at startup. These define the voice timbre and speaking style.
 //
-// CMD port (NeuTTS base+2 = 13172): PING, STATUS, SET_LOG_LEVEL, TEST_SYNTH.
+// CMD port (NeuTTS engine diagnostic port 13174): PING, STATUS, SET_LOG_LEVEL,
+//   TEST_SYNTH, SYNTH_WAV. Separate from the TTS dock's cmd port (13142).
 #include <espeak-ng/speak_lib.h>
 #include "interconnect.h"
+#include "tts-engine-client.h"
 #include "tts-common.h"
 #include "llama.h"
 #include <atomic>
@@ -54,6 +56,10 @@
 using namespace whispertalk;
 
 static constexpr int NEUTTS_SAMPLE_RATE = 24000;
+// Diagnostic cmd port for the NeuTTS engine (see spec §4.2). Separate from
+// the TTS dock's own cmd port (13142) so operators can query the engine
+// process directly without going through the dock.
+static constexpr uint16_t NEUTTS_ENGINE_CMD_PORT = 13174;
 static constexpr size_t MAX_AUDIO_SAMPLES = 30 * NEUTTS_SAMPLE_RATE;
 static constexpr size_t PHONEME_CACHE_MAX = 10000;
 
@@ -602,14 +608,9 @@ struct CallContext {
 
 class NeuTTSService {
 public:
-    NeuTTSService() : node_(ServiceType::NEUTTS_SERVICE) {}
+    NeuTTSService() = default;
 
     bool initialize() {
-        if (!node_.initialize()) {
-            std::fprintf(stderr, "Failed to initialize interconnect node\n");
-            return false;
-        }
-
         const char* env_models = std::getenv("WHISPERTALK_MODELS_DIR");
         std::string models_dir = env_models ? env_models :
 #ifdef WHISPERTALK_MODELS_DIR
@@ -622,39 +623,51 @@ public:
             return false;
         }
 
-        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::NEUTTS_SERVICE);
+        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::TTS_SERVICE);
 
         std::printf("NeuTTS Service initialized (German, NeuTTS Nano, NeuCodec CoreML)\n");
 
-        node_.register_call_end_handler([this](uint32_t call_id) {
+        engine_.set_name("neutts");
+        EngineAudioFormat fmt;
+        fmt.sample_rate = NEUTTS_SAMPLE_RATE;
+        fmt.channels = 1;
+        fmt.format = "f32le";
+        engine_.set_audio_format(fmt);
+
+        engine_.register_call_end_handler([this](uint32_t call_id) {
             handle_call_end(call_id);
         });
 
-        node_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
+        engine_.register_speech_signal_handler([this](uint32_t call_id, bool active) {
             if (active) {
                 handle_speech_active(call_id);
             }
         });
 
+        engine_.register_custom_handler("SHUTDOWN", [this]() {
+            std::fprintf(stderr, "[neutts] received SHUTDOWN from TTS dock — exiting\n");
+            this->shutdown();
+            std::_Exit(0);
+        });
+
+        if (!engine_.start()) {
+            std::fprintf(stderr, "Failed to start TTS engine client\n");
+            return false;
+        }
+
         return true;
     }
 
     void run() {
-        node_.pause_downstream();
-        std::printf("NeuTTS downstream paused at startup (Kokoro is default TTS)\n");
-
         std::thread cmd_thread(&NeuTTSService::command_listener_loop, this);
 
-        std::printf("NeuTTS service ready - waiting for text from LLaMA\n");
+        std::printf("NeuTTS service ready - connecting to TTS dock at 127.0.0.1:%u\n",
+                    (unsigned)service_engine_port(ServiceType::TTS_SERVICE));
 
         while (running_) {
             Packet pkt;
-            if (node_.recv_from_upstream(pkt, 100)) {
+            if (engine_.recv_text(pkt, 100)) {
                 dispatch_text_packet(pkt);
-            }
-
-            if (node_.upstream_state() == ConnectionState::FAILED) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         }
 
@@ -670,7 +683,7 @@ public:
         int s2 = cmd_sock_.exchange(-1);
         if (s2 >= 0) ::close(s2);
         shutdown_all_calls();
-        node_.shutdown();
+        engine_.shutdown();
     }
 
     void set_log_level(const char* level) {
@@ -679,7 +692,7 @@ public:
 
 private:
     void command_listener_loop() {
-        uint16_t port = service_cmd_port(ServiceType::NEUTTS_SERVICE);
+        uint16_t port = NEUTTS_ENGINE_CMD_PORT;
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) return;
 
@@ -830,14 +843,6 @@ private:
         if (cmd == "PING") {
             return "PONG\n";
         }
-        if (cmd == "PAUSE_DOWNSTREAM") {
-            node_.pause_downstream();
-            return "OK DOWNSTREAM_PAUSED\n";
-        }
-        if (cmd == "RESUME_DOWNSTREAM") {
-            node_.resume_downstream();
-            return "OK DOWNSTREAM_RESUMED\n";
-        }
         if (cmd.rfind("SET_LOG_LEVEL:", 0) == 0) {
             std::string level = cmd.substr(14);
             log_fwd_.set_level(level.c_str());
@@ -846,8 +851,7 @@ private:
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             return "ACTIVE_CALLS:" + std::to_string(calls_.size())
-                + ":UPSTREAM:" + (node_.upstream_state() == ConnectionState::CONNECTED ? "connected" : "disconnected")
-                + ":DOWNSTREAM:" + (node_.downstream_state() == ConnectionState::CONNECTED ? "connected" : "disconnected")
+                + ":DOCK:" + (engine_.is_connected() ? "connected" : "disconnected")
                 + ":ENGINE:neutts-nano-german"
                 + "\n";
         }
@@ -968,7 +972,7 @@ private:
     }
 
     void send_audio_to_downstream(uint32_t call_id, const std::vector<float>& samples) {
-        if (node_.downstream_state() != ConnectionState::CONNECTED) return;
+        if (!engine_.is_connected()) return;
 
         static constexpr size_t HEADER_SIZE = sizeof(int32_t);
 
@@ -985,10 +989,9 @@ private:
             std::memcpy(audio_pkt.payload.data() + HEADER_SIZE,
                        samples.data() + offset, count * sizeof(float));
 
-            audio_pkt.trace.record(ServiceType::NEUTTS_SERVICE, 0);
-            audio_pkt.trace.record(ServiceType::NEUTTS_SERVICE, 1);
-            if (!node_.send_to_downstream(audio_pkt)) {
-                log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio chunk to OAP");
+            audio_pkt.trace.record(ServiceType::TTS_SERVICE, 0);
+            if (!engine_.send_audio(audio_pkt)) {
+                log_fwd_.forward(LogLevel::ERROR, call_id, "Failed to send audio chunk to TTS dock");
                 break;
             }
         }
@@ -1067,7 +1070,7 @@ private:
         calls_.clear();
     }
 
-    InterconnectNode node_;
+    EngineClient engine_;
     LogForwarder log_fwd_;
     NeuTTSPipeline pipeline_;
     std::mutex pipeline_mutex_;
@@ -1108,7 +1111,7 @@ int main(int argc, char* argv[]) {
                 std::printf("Usage: neutts-service [OPTIONS]\n");
                 std::printf("  --log-level LEVEL Log level: ERROR WARN INFO DEBUG TRACE (default: INFO)\n");
                 std::printf("\nAlternative TTS engine using NeuTTS Nano German + NeuCodec\n");
-                std::printf("Occupies the same pipeline slot as kokoro-service (mutually exclusive)\n");
+                std::printf("Connects to the TTS dock via EngineClient (last engine to dock wins)\n");
                 return 0;
             default: break;
         }
