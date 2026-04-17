@@ -33,7 +33,7 @@ const STATUS_CLEAR_MS=5000,POLL_LLAMA_BENCH_MS=2000;
 const POLL_PIPELINE_STRESS_MS=2000,POLL_DOWNLOAD_MS=1000;
 const TOAST_FADE_MS=300,DELAY_DEBOUNCE_MS=300;
 const COUNTUP_STEP_MS=20,COUNTUP_DURATION_MS=400;
-const TEST_SETUP_POLL_MS=1000,TEST_TIMEOUT_MS=600000;
+const TEST_SETUP_POLL_MS=1000,TEST_TIMEOUT_MS=1800000;
 
 let _ttsPreference='auto';
 let _testSetupActive=false;
@@ -122,7 +122,7 @@ async function runWithTestSetup(testFn,opts){
         await fetch('/api/tests/teardown',{method:'POST'}).catch(()=>{});
       }
       const timeoutHandle=setTimeout(async()=>{
-        setStatus(`<span style="color:var(--wt-danger)">&#x23F0; Test timed out after 10 minutes — tearing down</span>`);
+        setStatus(`<span style="color:var(--wt-danger)">&#x23F0; Test timed out after 30 minutes — tearing down</span>`);
         await doTeardown();
       },TEST_TIMEOUT_MS);
       let testResult=null,testError=null;
@@ -2043,19 +2043,20 @@ const results=document.getElementById('fullLoopResults');
 if(d.error){status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(d.error)}</span>`;return;}
 const s=d.summary;
 status.innerHTML=`<span style="color:${s.avg_wer<=10?'var(--wt-success)':s.avg_wer<=30?'var(--wt-warning)':'var(--wt-danger)'}">Full loop complete — ${s.pass}/${s.total} passed | Avg WER: ${s.avg_wer.toFixed(1)}% | Avg Sim: ${s.avg_similarity.toFixed(1)}%</span>`;
-let html='<table class="wt-table"><tr><th>File</th><th>Whisper L1</th><th>LLaMA Response</th><th>Whisper L2</th><th>WER%</th><th>Sim%</th><th>E2E</th><th>Status</th></tr>';
+let html='<table class="wt-table"><tr><th>File</th><th>Whisper L1</th><th>LLaMA Response (last)</th><th>Turns</th><th>Whisper L2</th><th>WER%</th><th>Sim%</th><th>Conv</th><th>Status</th></tr>';
 d.results.forEach(r=>{
   const color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
   const werColor=(r.wer||100)<=10?'var(--wt-success)':(r.wer||100)<=30?'var(--wt-warning)':'var(--wt-danger)';
   const simColor=(r.similarity||0)>=70?'var(--wt-success)':(r.similarity||0)>=40?'var(--wt-warning)':'var(--wt-danger)';
   html+='<tr>';
   html+=`<td style="font-size:11px">${escapeHtml(r.file)}</td>`;
-  html+=`<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.whisper_l1||'')}</td>`;
-  html+=`<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.llama_response||r.error||'')}</td>`;
-  html+=`<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.whisper_l2||'')}</td>`;
+  html+=`<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.whisper_l1||'')}</td>`;
+  html+=`<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.llama_response||r.error||'')}</td>`;
+  html+=`<td style="text-align:center">${r.llama_turns!=null?r.llama_turns:'—'}</td>`;
+  html+=`<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.whisper_l2||'')}</td>`;
   html+=`<td style="color:${werColor};font-weight:bold">${r.wer!=null?r.wer.toFixed(1):'—'}</td>`;
   html+=`<td style="color:${simColor};font-weight:bold">${r.similarity!=null?r.similarity.toFixed(1):'—'}</td>`;
-  html+=`<td>${((r.e2e_ms||0)/1000).toFixed(1)}s</td>`;
+  html+=`<td>${((r.e2e_ms||0)/1000).toFixed(0)}s</td>`;
   html+=`<td style="color:${color}">${escapeHtml(r.status)}</td>`;
   html+='</tr>';
 });

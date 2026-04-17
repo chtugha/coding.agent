@@ -209,6 +209,7 @@ public:
         std::thread processor_thread(&VadService::processing_loop, this);
         std::thread cmd_thread(&VadService::command_listener_loop, this);
 
+        std::printf("VAD service fully loaded and ready\n");
         while (running_ && g_running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }

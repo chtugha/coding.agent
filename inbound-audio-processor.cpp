@@ -90,6 +90,7 @@ public:
         std::thread processor_thread(&InboundAudioProcessor::processing_loop, this);
         std::thread cmd_thread(&InboundAudioProcessor::command_listener_loop, this);
 
+        std::printf("IAP service fully loaded and ready\n");
         while (running_ && g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             cleanup_inactive_calls();

@@ -1970,19 +1970,19 @@ private:
                 : whispertalk::ServiceType::KOKORO_SERVICE;
             uint16_t tts_cmd_port = whispertalk::service_cmd_port(tts_svc_type);
             bool tts_ready = false;
-            for (int i = 0; i < 120; i++) {
+            for (int i = 0; i < 720; i++) {
                 set_setup_progress(task_id, "C",
-                    "Waiting for " + tts_label + " TTS to initialise (" + std::to_string(i * 3) + "s)...");
+                    "Waiting for " + tts_label + " TTS to initialise (" + std::to_string(i) + "s)...");
                 std::string err;
-                std::string resp = tcp_command(tts_cmd_port, "PING", err, 3);
+                std::string resp = tcp_command(tts_cmd_port, "PING", err, 1);
                 if (resp.find("PONG") != std::string::npos) {
                     tts_ready = true;
                     break;
                 }
-                usleep(3000000);
+                usleep(1000000);
             }
             if (!tts_ready) {
-                finish_async_task(task_id, "{\"error\":\"" + tts_label + " TTS did not become reachable within 6 minutes\"}");
+                finish_async_task(task_id, "{\"error\":\"" + tts_label + " TTS did not become reachable within 12 minutes\"}");
                 return;
             }
         }
@@ -4532,10 +4532,13 @@ private:
         double total_e2e = 0.0;
         int processed = 0;
 
+        static constexpr int FULL_LOOP_CONV_DURATION_MS = 180000;
+
         for (size_t fi = 0; fi < files.size(); fi++) {
             const auto& file = files[fi];
             uint64_t seq_before = current_log_seq();
             auto e2e_start = std::chrono::steady_clock::now();
+            auto conv_deadline = e2e_start + std::chrono::milliseconds(FULL_LOOP_CONV_DURATION_MS);
 
             std::string inject_body = "{\"file\":\"" + escape_json(file) + "\",\"leg\":\"a\",\"no_silence\":true}";
             std::string inject_err;
@@ -4561,31 +4564,97 @@ private:
                 }
             }
 
-            TranscriptionResult tr1 = wait_for_whisper_transcription(seq_before, 60000, l1_call_id);
-            std::string whisper_l1 = tr1.found ? tr1.text : "";
+            // Collect data for 180 seconds: let the loopback conversation run multiple round-trips.
+            // L1 Whisper: transcription of injected audio (input side, call_id=l1)
+            // LLaMA: AI responses triggered by L1 transcriptions
+            // L2 Whisper: re-transcription of TTS output (quality measure, call_id=l2)
+            std::string whisper_l1_all, llama_text_all, whisper_l2_all;
+            std::string last_llama;
+            double total_llama_ms = 0.0;
+            int llama_count = 0;
+            uint64_t scan_seq = seq_before;
 
-            LlamaResponseResult llama_res = wait_for_llama_response(seq_before, 60000);
-            std::string llama_text = llama_res.found ? llama_res.text : "";
+            while (std::chrono::steady_clock::now() < conv_deadline) {
+                {
+                    std::lock_guard<std::mutex> lock(logs_mutex_);
+                    for (const auto& entry : recent_logs_) {
+                        if (entry.seq <= scan_seq) continue;
+                        scan_seq = entry.seq;
 
-            uint64_t seq_after_llama = current_log_seq();
+                        const std::string& msg = entry.message;
 
-            TranscriptionResult tr2 = wait_for_whisper_transcription(seq_after_llama, 120000, l2_call_id);
+                        if (entry.service == ServiceType::WHISPER_SERVICE) {
+                            size_t tpos = msg.find("Transcription (");
+                            if (tpos != std::string::npos) {
+                                size_t ms_end = msg.find("ms", tpos + 15);
+                                if (ms_end != std::string::npos) {
+                                    size_t paren_close = msg.find("):", ms_end);
+                                    if (paren_close != std::string::npos) {
+                                        size_t text_start = paren_close + 2;
+                                        if (text_start < msg.size()) {
+                                            std::string chunk = msg.substr(text_start);
+                                            while (!chunk.empty() && (chunk.front() == ' ' || chunk.front() == ':'))
+                                                chunk.erase(chunk.begin());
+                                            while (!chunk.empty() && (chunk.back() == ' ' || chunk.back() == '\n'))
+                                                chunk.pop_back();
+                                            if (!chunk.empty()) {
+                                                bool is_l1 = (l1_call_id == 0 || entry.call_id == l1_call_id);
+                                                bool is_l2 = (l2_call_id != 0 && entry.call_id == l2_call_id);
+                                                if (is_l2) {
+                                                    if (!whisper_l2_all.empty()) whisper_l2_all += " ";
+                                                    whisper_l2_all += chunk;
+                                                } else if (is_l1) {
+                                                    if (!whisper_l1_all.empty()) whisper_l1_all += " ";
+                                                    whisper_l1_all += chunk;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (entry.service == ServiceType::LLAMA_SERVICE && entry.level == "INFO") {
+                            size_t rpos = msg.find("Response (");
+                            if (rpos != std::string::npos) {
+                                size_t ms_end = msg.find("ms)", rpos + 10);
+                                if (ms_end != std::string::npos) {
+                                    try {
+                                        double ms_val = std::stod(msg.substr(rpos + 10, ms_end - (rpos + 10)));
+                                        total_llama_ms += ms_val;
+                                        llama_count++;
+                                    } catch (...) {}
+                                    size_t text_start = ms_end + 5;
+                                    if (text_start < msg.size()) {
+                                        std::string resp = msg.substr(text_start);
+                                        while (!resp.empty() && (resp.back() == ' ' || resp.back() == '\n'))
+                                            resp.pop_back();
+                                        if (!resp.empty()) {
+                                            last_llama = resp;
+                                            if (!llama_text_all.empty()) llama_text_all += " ";
+                                            llama_text_all += resp;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
 
             auto e2e_end = std::chrono::steady_clock::now();
             double e2e_ms = std::chrono::duration_cast<std::chrono::milliseconds>(e2e_end - e2e_start).count();
+            double avg_llama_ms = llama_count > 0 ? total_llama_ms / llama_count : 0.0;
 
-            std::string whisper_l2 = tr2.found ? tr2.text : "";
             double wer = 100.0;
             double similarity = 0.0;
-            if (!llama_text.empty() && !whisper_l2.empty()) {
-                wer = calculate_word_error_rate(llama_text, whisper_l2);
-                similarity = calculate_levenshtein_similarity(llama_text, whisper_l2);
+            bool llama_ok = !llama_text_all.empty();
+            bool l2_ok = !whisper_l2_all.empty();
+            if (llama_ok && l2_ok) {
+                wer = calculate_word_error_rate(llama_text_all, whisper_l2_all);
+                similarity = calculate_levenshtein_similarity(llama_text_all, whisper_l2_all);
             }
 
             std::string status_str;
-            bool llama_ok = llama_res.found && !llama_text.empty();
-            bool l2_ok = tr2.found && !whisper_l2.empty();
-
             if (llama_ok && l2_ok && wer <= 10.0) {
                 status_str = "PASS"; pass_count++;
             } else if (llama_ok && l2_ok && wer <= 30.0) {
@@ -4606,12 +4675,12 @@ private:
                 if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
                     sqlite3_bind_text(stmt, 1, "full_pipeline", -1, SQLITE_STATIC);
                     sqlite3_bind_text(stmt, 2, status_str.c_str(), -1, SQLITE_TRANSIENT);
-                    std::string details = file + " -> L1:" + whisper_l1
-                        + " -> LLaMA:" + llama_text
-                        + " -> L2:" + whisper_l2
+                    std::string details = file + " -> L1:" + whisper_l1_all
+                        + " -> LLaMA[" + std::to_string(llama_count) + "]:" + last_llama
+                        + " -> L2:" + whisper_l2_all
                         + " (WER=" + std::to_string((int)wer) + "%"
                         + " sim=" + std::to_string((int)similarity) + "%)"
-                        + " e2e=" + std::to_string((int)e2e_ms) + "ms";
+                        + " conv=" + std::to_string((int)e2e_ms) + "ms";
                     sqlite3_bind_text(stmt, 3, details.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_step(stmt);
                     sqlite3_finalize(stmt);
@@ -4620,26 +4689,16 @@ private:
 
             if (!first) json << ",";
             json << "{\"file\":\"" << escape_json(file) << "\""
-                 << ",\"whisper_l1\":\"" << escape_json(whisper_l1) << "\""
-                 << ",\"llama_response\":\"" << escape_json(llama_text) << "\""
-                 << ",\"whisper_l2\":\"" << escape_json(whisper_l2) << "\""
+                 << ",\"whisper_l1\":\"" << escape_json(whisper_l1_all) << "\""
+                 << ",\"llama_response\":\"" << escape_json(last_llama) << "\""
+                 << ",\"llama_turns\":" << llama_count
+                 << ",\"whisper_l2\":\"" << escape_json(whisper_l2_all) << "\""
                  << ",\"wer\":" << wer
                  << ",\"similarity\":" << similarity
-                 << ",\"llama_ms\":" << (int)llama_res.gen_ms
+                 << ",\"llama_ms\":" << (int)avg_llama_ms
                  << ",\"e2e_ms\":" << (int)e2e_ms
                  << ",\"status\":\"" << status_str << "\"}";
             first = false;
-
-            if (fi + 1 < files.size()) {
-                uint64_t drain_seq = current_log_seq();
-                std::this_thread::sleep_for(std::chrono::seconds(4));
-                for (int drain = 0; drain < 5; drain++) {
-                    uint64_t cur = current_log_seq();
-                    if (cur == drain_seq) break;
-                    drain_seq = cur;
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                }
-            }
         }
 
         json << "]";
