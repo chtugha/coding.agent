@@ -77,12 +77,16 @@ using namespace whispertalk;
 
 // Shared TTS audio constants (single source of truth: tts-common.h).
 static constexpr int KOKORO_SAMPLE_RATE = static_cast<int>(whispertalk::tts::kTTSSampleRate);
-static constexpr size_t MAX_AUDIO_SAMPLES = 10 * static_cast<size_t>(KOKORO_SAMPLE_RATE);
+// Hard upper bound on a single synthesis output. Long LLaMA responses can
+// easily exceed 10 s after multi-chunk merging in pipeline_.synthesize();
+// 120 s is the realistic ceiling for a single conversational turn and
+// covers the worst-case sentence we have observed in production.
+static constexpr size_t MAX_AUDIO_SAMPLES = 120 * static_cast<size_t>(KOKORO_SAMPLE_RATE);
 static constexpr size_t PHONEME_CACHE_MAX = 10000;
 // Diagnostic cmd port for the Kokoro engine (see spec §4.2). Separate from
 // the TTS dock's own cmd port (13142) so operators can query the engine
 // process directly without going through the dock.
-static constexpr uint16_t KOKORO_ENGINE_CMD_PORT = 13144;
+static constexpr uint16_t KOKORO_ENGINE_CMD_PORT = whispertalk::tts::kKokoroEngineCmdPort;
 
 struct KokoroVocab {
     std::map<std::string, int64_t> phoneme_to_id;
@@ -1086,9 +1090,14 @@ public:
         });
 
         engine_.register_custom_handler("SHUTDOWN", [this]() {
-            std::fprintf(stderr, "[kokoro] received SHUTDOWN from TTS dock — exiting\n");
-            this->shutdown();
-            std::_Exit(0);
+            std::fprintf(stderr, "[kokoro] received SHUTDOWN from TTS dock — signalling exit\n");
+            // SHUTDOWN is dispatched from the EngineClient's own recv thread.
+            // Calling engine_.shutdown() here would self-join and deadlock.
+            // Instead, just clear running_ so the main recv loop in run()
+            // exits, which then performs an orderly shutdown (joins worker
+            // threads, calls engine_.shutdown() from outside the recv thread,
+            // flushes LogForwarder, and lets main() return normally).
+            running_.store(false);
         });
 
         if (!engine_.start()) {
@@ -1457,7 +1466,7 @@ private:
         }
 
         static constexpr size_t CHUNK_SAMPLES = whispertalk::tts::kTTSMaxFrameSamples;
-        size_t header_size = sizeof(int32_t);
+        constexpr size_t header_size = whispertalk::tts::kTTSAudioHeaderBytes;
         size_t total_sent = 0;
 
         for (size_t offset = 0; offset < samples.size(); offset += CHUNK_SAMPLES) {
@@ -1475,6 +1484,13 @@ private:
 
             int32_t sr = KOKORO_SAMPLE_RATE;
             std::memcpy(audio_pkt.payload.data(), &sr, sizeof(int32_t));
+            // t_engine_out_us (big-endian uint64) for per-frame latency.
+            uint64_t t_out_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            uint8_t ts_be[8];
+            for (int i = 0; i < 8; ++i) ts_be[7 - i] = static_cast<uint8_t>((t_out_us >> (i * 8)) & 0xff);
+            std::memcpy(audio_pkt.payload.data() + sizeof(int32_t), ts_be, sizeof(ts_be));
             std::memcpy(audio_pkt.payload.data() + header_size,
                        samples.data() + offset, count * sizeof(float));
 

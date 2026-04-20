@@ -220,7 +220,15 @@ bool send_iov(int sock, iovec* iov, int iovcnt, int timeout_ms) {
         if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return false;
         iovec local[8];
         int lcount = 0;
-        if (iovcnt - idx > 8) return false;
+        if (iovcnt - idx > 8) {
+            // Defensive guard: callers are expected to pass ≤ 8 iovecs.
+            // Log and bail if a future caller violates the assumption
+            // rather than silently dropping the frame.
+            std::fprintf(stderr,
+                "[TTS] send_iov: iovcnt=%d exceeds local[8] capacity (idx=%d); dropping frame\n",
+                iovcnt, idx);
+            return false;
+        }
         for (int i = idx; i < iovcnt; i++) {
             iovec& dst = local[lcount++];
             if (i == idx) {
@@ -301,7 +309,6 @@ struct EngineSlot {
     uint64_t generation = 0;
     std::atomic<bool> alive{true};             // recv loop still running
     std::atomic<int64_t> last_pong_ms{0};
-    std::atomic<int> consecutive_missed_pings{0};
     std::thread recv_thread;
     std::thread ping_thread;
     std::mutex send_mutex;                     // serialize outbound writes on fd
@@ -552,7 +559,6 @@ private:
         new_slot->name = name;
         new_slot->generation = next_generation_.fetch_add(1) + 1;
         new_slot->last_pong_ms.store(now_ms());
-        new_slot->consecutive_missed_pings.store(0);
 
         std::shared_ptr<EngineSlot> old_slot;
         {
@@ -619,12 +625,11 @@ private:
         if (slot->alive.exchange(false)) {
             ::shutdown(slot->fd, SHUT_RDWR);
         }
-        if (slot->recv_thread.joinable() && std::this_thread::get_id() != slot->recv_thread.get_id()) {
-            slot->recv_thread.join();
-        }
-        if (slot->ping_thread.joinable() && std::this_thread::get_id() != slot->ping_thread.get_id()) {
-            slot->ping_thread.join();
-        }
+        // retire_slot is only invoked from shutdown() on the main thread,
+        // never from recv/ping threads themselves, so a plain join() is
+        // sufficient.
+        if (slot->recv_thread.joinable()) slot->recv_thread.join();
+        if (slot->ping_thread.joinable()) slot->ping_thread.join();
         ::close(slot->fd);
 
         if (send_flush) send_flush_tts_to_oap();
@@ -645,6 +650,27 @@ private:
             log_fwd_.forward(LogLevel::INFO, 0, "engine disconnected (%s)",
                              slot->name.c_str());
             send_flush_tts_to_oap();
+
+            // Off-hot-path watcher: join the slot's recv/ping threads
+            // and close the fd. The recv thread is the caller of this
+            // function (so we cannot join it from here); the ping
+            // thread holds the last shared_ptr ref to the slot. If we
+            // let the slot fall out of scope from the ping thread, its
+            // EngineSlot destructor would try to destruct a joinable
+            // std::thread that is its own currently-executing thread,
+            // tripping std::terminate ("libc++abi: terminating"). The
+            // watcher runs from a *different* thread, joins both, then
+            // closes the fd. Tracked in `swap_watchers_` so `shutdown()`
+            // joins it before the dock is destroyed.
+            std::thread watcher([slot]() {
+                if (slot->recv_thread.joinable()) slot->recv_thread.join();
+                if (slot->ping_thread.joinable()) slot->ping_thread.join();
+                if (slot->fd >= 0) ::close(slot->fd);
+            });
+            {
+                std::lock_guard<std::mutex> wlock(watchers_mutex_);
+                swap_watchers_.push_back(std::move(watcher));
+            }
         }
     }
 
@@ -736,7 +762,6 @@ private:
             }
             case MgmtMsgType::PONG: {
                 slot->last_pong_ms.store(now_ms());
-                slot->consecutive_missed_pings.store(0);
                 return true;
             }
             case MgmtMsgType::CUSTOM: {

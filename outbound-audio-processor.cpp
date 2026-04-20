@@ -53,6 +53,8 @@
 #include <unistd.h>
 #include <getopt.h>
 #include "interconnect.h"
+#include "tts-common.h"
+#include <algorithm>
 
 static constexpr int    AA_FILTER_TAPS    = 63;
 static constexpr int    AA_HALF_TAPS      = AA_FILTER_TAPS / 2;
@@ -202,6 +204,9 @@ public:
         receiver_thread.join();
         scheduler_thread.join();
         cmd_thread.join();
+        // Flush any remaining latency samples to disk before we close
+        // the interconnect (the log-forwarder is still alive).
+        dump_latency_histogram();
         interconnect_.shutdown();
     }
 
@@ -476,17 +481,32 @@ private:
                 continue;
             }
 
-            if (!pkt.is_valid() || pkt.payload_size <= sizeof(int32_t)) {
+            if (!pkt.is_valid() || pkt.payload_size < whispertalk::tts::kTTSAudioHeaderBytes) {
                 continue;
             }
 
             pkt.trace.record(whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, 0);
             auto state = get_or_create_call(pkt.call_id);
 
-            size_t audio_bytes = pkt.payload_size - sizeof(int32_t);
+            // Decode engine-out timestamp (bytes [4..12), big-endian) and
+            // record per-hop latency for the histogram dump.
+            uint64_t t_engine_out_us = 0;
+            const uint8_t* ts_bytes = pkt.payload.data() + sizeof(int32_t);
+            for (int i = 0; i < 8; ++i) {
+                t_engine_out_us = (t_engine_out_us << 8) | static_cast<uint64_t>(ts_bytes[i]);
+            }
+            uint64_t t_oap_in_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (t_engine_out_us > 0 && t_oap_in_us >= t_engine_out_us) {
+                record_latency_sample(t_oap_in_us - t_engine_out_us);
+            }
+
+            size_t audio_bytes = pkt.payload_size - whispertalk::tts::kTTSAudioHeaderBytes;
             if (audio_bytes == 0 || (audio_bytes % sizeof(float)) != 0) continue;
             size_t sample_count = audio_bytes / sizeof(float);
-            const float* pcm_buf = reinterpret_cast<const float*>(pkt.payload.data() + sizeof(int32_t));
+            const float* pcm_buf = reinterpret_cast<const float*>(
+                pkt.payload.data() + whispertalk::tts::kTTSAudioHeaderBytes);
 
             std::lock_guard<std::mutex> lock(state->mutex);
             auto now = std::chrono::steady_clock::now();
@@ -719,6 +739,92 @@ private:
             write_wav_file(call_id, in_samples, wav_dir, 24000, "input", ts);
         }
     }
+
+    // ----- Engine→OAP latency histogram (spec §5.4) ---------------------
+    //
+    // Records per-audio-frame engine_out→oap_in delta in microseconds.
+    // Bounded-size ring buffer; when we reach capacity we dump and reset so
+    // we never unbounded-grow. Latency JSON lands in test-results/ for the
+    // 60 s loopback run to inspect against the median/p99 budget.
+    void record_latency_sample(uint64_t delta_us) {
+        bool should_dump = false;
+        {
+            std::lock_guard<std::mutex> lock(latency_mutex_);
+            if (latency_samples_us_.size() < kLatencySampleCap) {
+                latency_samples_us_.push_back(delta_us);
+            }
+            if (latency_samples_us_.size() >= kLatencyAutoDumpAt) should_dump = true;
+        }
+        if (should_dump) dump_latency_histogram();
+    }
+
+    // Compute summary statistics and persist to test-results/tts_latency_<ts>.json.
+    void dump_latency_histogram() {
+        std::vector<uint64_t> samples;
+        {
+            std::lock_guard<std::mutex> lock(latency_mutex_);
+            if (latency_samples_us_.empty()) return;
+            samples.swap(latency_samples_us_);
+        }
+        std::sort(samples.begin(), samples.end());
+        size_t n = samples.size();
+        auto q = [&](double p) -> uint64_t {
+            size_t idx = static_cast<size_t>(p * (n - 1));
+            return samples[idx];
+        };
+        uint64_t p50 = q(0.50), p90 = q(0.90), p99 = q(0.99);
+        uint64_t min_us = samples.front(), max_us = samples.back();
+        double mean_us = 0.0;
+        for (auto v : samples) mean_us += static_cast<double>(v);
+        mean_us /= static_cast<double>(n);
+
+        // Coarse histogram: 20 buckets, 500 µs wide, up to 10 ms. Overflow
+        // counted into the last bucket.
+        constexpr int BUCKETS = 20;
+        constexpr uint64_t BUCKET_US = 500;
+        uint64_t hist[BUCKETS] = {};
+        for (auto v : samples) {
+            size_t b = std::min<size_t>(BUCKETS - 1, v / BUCKET_US);
+            hist[b]++;
+        }
+
+        mkdir("test-results", 0755);
+        std::time_t t = std::time(nullptr);
+        struct tm tm_buf{};
+        localtime_r(&t, &tm_buf);
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
+        std::string path = std::string("test-results/tts_latency_") + ts + ".json";
+        std::ofstream f(path);
+        if (!f) {
+            log_fwd_.forward(whispertalk::LogLevel::WARN, 0,
+                "Failed to write latency histogram to %s", path.c_str());
+            return;
+        }
+        f << "{\"samples\":" << n
+          << ",\"min_us\":" << min_us
+          << ",\"max_us\":" << max_us
+          << ",\"mean_us\":" << mean_us
+          << ",\"p50_us\":" << p50
+          << ",\"p90_us\":" << p90
+          << ",\"p99_us\":" << p99
+          << ",\"bucket_width_us\":" << BUCKET_US
+          << ",\"buckets\":[";
+        for (int i = 0; i < BUCKETS; ++i) {
+            if (i) f << ",";
+            f << hist[i];
+        }
+        f << "]}\n";
+        f.close();
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0,
+            "TTS latency histogram: n=%zu p50=%lluus p99=%lluus path=%s",
+            n, (unsigned long long)p50, (unsigned long long)p99, path.c_str());
+    }
+
+    static constexpr size_t kLatencySampleCap    = 200000;
+    static constexpr size_t kLatencyAutoDumpAt   = 50000;
+    std::mutex latency_mutex_;
+    std::vector<uint64_t> latency_samples_us_;
 
     std::atomic<bool> running_;
     std::atomic<int> cmd_sock_{-1};

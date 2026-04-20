@@ -83,6 +83,7 @@
 //   Scores generated responses by keyword match%, brevity (vs. max_words), and German
 //   language detection. Used by the frontend test panel to evaluate LLM quality.
 #include "interconnect.h"
+#include "tts-common.h"
 #include "mongoose.h"
 #include "sqlite3.h"
 #include "db_key.h"
@@ -149,14 +150,12 @@ static constexpr int ACCURACY_INTER_FILE_MS = 2000;      // pause between accura
 static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;    // poll interval for download progress
 
 // TTS engine cmd-ports (engines dock into TTS_SERVICE but keep a private
-// diagnostic cmd-port for quality tests / benchmarks). These ports are owned
-// by the engine processes, not by the TTS dock.
-// NOTE: the authoritative values are defined in the engine sources
-// (`kokoro-service.cpp::KOKORO_ENGINE_CMD_PORT`,
-//  `neutts-service.cpp::NEUTTS_ENGINE_CMD_PORT`). If either changes there,
-// the value here must be updated in lockstep.
-static constexpr uint16_t KOKORO_ENGINE_CMD_PORT = 13144;
-static constexpr uint16_t NEUTTS_ENGINE_CMD_PORT = 13174;
+// diagnostic cmd-port for quality tests / benchmarks). Single source of
+// truth is `whispertalk::tts::kKokoroEngineCmdPort` /
+// `kNeuTTSEngineCmdPort` in `tts-common.h` — shared with the engine
+// processes so these values cannot drift.
+static constexpr uint16_t KOKORO_ENGINE_CMD_PORT = whispertalk::tts::kKokoroEngineCmdPort;
+static constexpr uint16_t NEUTTS_ENGINE_CMD_PORT = whispertalk::tts::kNeuTTSEngineCmdPort;
 
 using namespace whispertalk;
 

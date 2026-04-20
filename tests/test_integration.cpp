@@ -14,6 +14,9 @@
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
 
 static std::string g_bin_dir;
 static std::string g_models_dir;
@@ -526,9 +529,18 @@ TEST_F(EndToEndTest, SwitchEngineMidCall) {
     std::this_thread::sleep_for(std::chrono::seconds(10));
     ASSERT_TRUE(pipeline.all_alive()) << "Services crashed during startup";
 
-    // Query the TTS dock: active engine must be "kokoro".
+    // Query the TTS dock: active engine must be "kokoro" (poll — Kokoro can
+    // take several minutes to load/compile CoreML ANE models on a cold cache).
     constexpr uint16_t TTS_DOCK_CMD_PORT = 13142;
-    std::string before = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+    std::string before;
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(600);
+        while (std::chrono::steady_clock::now() < deadline) {
+            before = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+            if (before.find("ACTIVE kokoro") != std::string::npos) break;
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+    }
     std::printf("  Dock STATUS before swap: '%s'\n", before.c_str());
     ASSERT_NE(before.find("ACTIVE kokoro"), std::string::npos)
         << "TTS dock did not report kokoro as active engine before swap";
@@ -567,7 +579,15 @@ TEST_F(EndToEndTest, KillAndRestartEngine) {
     ASSERT_TRUE(pipeline.all_alive()) << "Services crashed during startup";
 
     constexpr uint16_t TTS_DOCK_CMD_PORT = 13142;
-    std::string before = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+    std::string before;
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(600);
+        while (std::chrono::steady_clock::now() < deadline) {
+            before = send_cmd(TTS_DOCK_CMD_PORT, "STATUS", 5);
+            if (before.find("ACTIVE kokoro") != std::string::npos) break;
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+    }
     ASSERT_NE(before.find("ACTIVE kokoro"), std::string::npos)
         << "Expected kokoro to be active before kill (got: " << before << ")";
 
@@ -646,6 +666,80 @@ TEST_F(EndToEndTest, MultiLineSimultaneous) {
 
     EXPECT_FALSE(any_crashed) << "Service crashed during multi-line simultaneous test";
     std::printf("  ============================================================\n\n");
+}
+
+// ----- Latency-budget assertion ------------------------------------------------
+//
+// After EndToEndTest.SingleCallFullPipeline (or any preceding test that
+// brings up the full pipeline) shuts down OAP, OAP writes a histogram to
+// test-results/tts_latency_<ts>.json (see outbound-audio-processor.cpp
+// dump_latency_histogram()). This test scans for the most-recent file
+// and asserts the engine→OAP per-frame budget from spec §5.4:
+//   p50_us ≤ 2000, p99_us ≤ 5000.
+// If no histogram file exists (e.g. test ran in isolation without OAP
+// shutting down cleanly, or no audio frames flowed), the test is skipped.
+TEST(LatencyBudget, EngineToOapWithinBudget) {
+    DIR* d = opendir("test-results");
+    if (!d) {
+        GTEST_SKIP() << "test-results/ does not exist; pipeline never produced a histogram.";
+        return;
+    }
+    std::string latest;
+    time_t latest_mtime = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        std::string name(ent->d_name);
+        if (name.rfind("tts_latency_", 0) != 0) continue;
+        if (name.size() < 5 || name.substr(name.size() - 5) != ".json") continue;
+        std::string path = std::string("test-results/") + name;
+        struct stat st;
+        if (stat(path.c_str(), &st) != 0) continue;
+        if (st.st_mtime > latest_mtime) {
+            latest_mtime = st.st_mtime;
+            latest = path;
+        }
+    }
+    closedir(d);
+    if (latest.empty()) {
+        GTEST_FAIL() << "No tts_latency_*.json present in test-results/. "
+                        "Run a full-pipeline loopback (e.g. EndToEndTest.SingleCallFullPipeline "
+                        "or `python3 tests/run_pipeline_test.py`) BEFORE this test so OAP can "
+                        "dump the engine\xe2\x86\x92OAP latency histogram. The latency budget "
+                        "(p50 \xe2\x89\xa4 2 ms, p99 \xe2\x89\xa4 5 ms) cannot be verified "
+                        "without that input file.";
+        return;
+    }
+    std::ifstream f(latest);
+    ASSERT_TRUE(f.good()) << "Cannot open " << latest;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string body = ss.str();
+
+    auto extract = [&](const std::string& key) -> long long {
+        std::string needle = "\"" + key + "\":";
+        auto p = body.find(needle);
+        if (p == std::string::npos) return -1;
+        p += needle.size();
+        while (p < body.size() && (body[p] == ' ' || body[p] == '\t')) p++;
+        long long val = 0;
+        bool any = false;
+        while (p < body.size() && body[p] >= '0' && body[p] <= '9') {
+            val = val * 10 + (body[p] - '0');
+            p++;
+            any = true;
+        }
+        return any ? val : -1;
+    };
+    long long samples = extract("samples");
+    long long p50_us  = extract("p50_us");
+    long long p99_us  = extract("p99_us");
+    ASSERT_GT(samples, 0) << "Histogram in " << latest << " contains zero samples.";
+    ASSERT_GE(p50_us, 0) << "Histogram in " << latest << " missing p50_us field.";
+    ASSERT_GE(p99_us, 0) << "Histogram in " << latest << " missing p99_us field.";
+    std::printf("  Latency histogram %s: n=%lld p50=%lldus p99=%lldus\n",
+                latest.c_str(), samples, p50_us, p99_us);
+    EXPECT_LE(p50_us, 2000) << "Engine→OAP median latency exceeds 2 ms budget.";
+    EXPECT_LE(p99_us, 5000) << "Engine→OAP p99 latency exceeds 5 ms budget.";
 }
 
 int main(int argc, char** argv) {

@@ -25,6 +25,36 @@ constexpr uint16_t kTTSChannels       = 1;      // mono
 // this constant.
 constexpr size_t   kTTSMaxFrameSamples = 4800;
 
+// Diagnostic cmd ports exposed by each TTS engine process. These are
+// *not* the dock's cmd port (13142) — they are the engines' own
+// per-process diagnostic / quality-test endpoints. Defined here so the
+// frontend and tests share a single source of truth with the engines.
+constexpr uint16_t kKokoroEngineCmdPort = 13144;
+constexpr uint16_t kNeuTTSEngineCmdPort = 13174;
+
+// Audio payload header emitted by every TTS engine and parsed by OAP.
+// Wire layout:
+//   [0..4)   int32   sample_rate (Hz) — INTENTIONALLY HOST BYTE ORDER.
+//                    Engines always emit kTTSSampleRate (24000); OAP does
+//                    not read this field on the hot path (it uses the
+//                    global constant) and therefore tolerates either
+//                    endianness. The field is reserved for future format
+//                    negotiation. New engine implementations MUST emit
+//                    host byte order here for parity with existing
+//                    engines until/unless the negotiation protocol is
+//                    introduced; do NOT byte-swap. The deliberate
+//                    deviation from the t_engine_out_us big-endian
+//                    convention below is documented here so future
+//                    implementors do not "fix" it.
+//   [4..12)  uint64  t_engine_out_us — BIG-ENDIAN. Steady-clock microseconds at
+//                    the moment the engine hands the chunk to its
+//                    EngineClient::send_audio(). Used by OAP to measure
+//                    engine→OAP hop latency for the histogram dumped to
+//                    test-results/tts_latency_<ts>.json.
+//   [12..)   float32 PCM samples (native host endianness, count =
+//                    (payload_size - 12) / sizeof(float))
+constexpr size_t   kTTSAudioHeaderBytes = sizeof(int32_t) + sizeof(uint64_t);
+
 inline float normalize_audio(std::vector<float>& samples, float ceiling = 0.90f) {
     float peak = 0.0f;
     for (float s : samples) {

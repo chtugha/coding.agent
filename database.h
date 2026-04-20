@@ -361,7 +361,18 @@ inline bool FrontendServer::init_database() {
         sqlite3_exec(db_, migrations[i], nullptr, nullptr, nullptr);
     }
 
+    // Order matters: run the KOKORO_SERVICE→KOKORO_ENGINE / NEUTTS_SERVICE→NEUTTS_ENGINE
+    // renames BEFORE any INSERT OR IGNORE that would create the target rows. If the INSERTs
+    // ran first, the subsequent UPDATE … WHERE service='KOKORO_SERVICE' would hit a PRIMARY
+    // KEY conflict on 'KOKORO_ENGINE', sqlite3_exec would silently skip it, and the old
+    // orphan rows would linger and show up in the service manager as ghosts. On a fresh DB
+    // the UPDATEs affect 0 rows and the INSERTs then populate the table; on an upgrade the
+    // UPDATEs rename the old rows and INSERT OR IGNORE is a no-op for them and fills any
+    // missing services.
     const char* seed = R"(
+        UPDATE service_config SET service='KOKORO_ENGINE', description='Kokoro TTS engine (CoreML) — docks into TTS_SERVICE' WHERE service='KOKORO_SERVICE';
+        UPDATE service_config SET service='NEUTTS_ENGINE', description='NeuTTS Nano German TTS engine (CoreML) — docks into TTS_SERVICE' WHERE service='NEUTTS_SERVICE';
+        DELETE FROM service_config WHERE service IN ('KOKORO_SERVICE','NEUTTS_SERVICE');
         INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
             ('SIP_CLIENT', 'bin/sip-client', '', 'SIP client / RTP gateway'),
             ('INBOUND_AUDIO_PROCESSOR', 'bin/inbound-audio-processor', '', 'G.711 decode + 8kHz to 16kHz resample'),
@@ -376,10 +387,6 @@ inline bool FrontendServer::init_database() {
             ('TOMEDO_CRAWL_SERVICE', 'bin/tomedo-crawl', '', 'Tomedo RAG — patient context & caller ID');
         UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
         UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args='--lines 1 alice 127.0.0.1 5060' OR default_args='--lines 2 alice 127.0.0.1 5060');
-        UPDATE service_config SET service='KOKORO_ENGINE', description='Kokoro TTS engine (CoreML) — docks into TTS_SERVICE' WHERE service='KOKORO_SERVICE';
-        UPDATE service_config SET service='NEUTTS_ENGINE', description='NeuTTS Nano German TTS engine (CoreML) — docks into TTS_SERVICE' WHERE service='NEUTTS_SERVICE';
-        INSERT OR IGNORE INTO service_config (service, binary_path, default_args, description) VALUES
-            ('TTS_SERVICE', 'bin/tts-service', '', 'Generic TTS stage/dock (engine hotplug)');
     )";
     sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
 

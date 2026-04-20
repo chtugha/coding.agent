@@ -30,7 +30,7 @@ inline std::string FrontendServer::build_ui_pages() {
 <div class="wt-pipeline-connector"></div>
 <div class="wt-pipeline-node" id="pipeline-node-LLAMA_SERVICE"><span class="node-label">LLM</span><span class="node-status offline" id="pipeline-status-LLAMA_SERVICE"></span></div>
 <div class="wt-pipeline-connector"></div>
-<div class="wt-pipeline-node" id="pipeline-node-KOKORO_SERVICE"><span class="node-label">TTS</span><span class="node-status offline" id="pipeline-status-KOKORO_SERVICE"></span></div>
+<div class="wt-pipeline-node" id="pipeline-node-TTS_SERVICE"><span class="node-label">TTS</span><span class="node-status offline" id="pipeline-status-TTS_SERVICE"></span><span class="node-status-sub" id="pipeline-tts-engine" style="display:block;font-size:9px;margin-top:2px;color:rgba(255,255,255,0.7);letter-spacing:0.05em">no engine</span></div>
 <div class="wt-pipeline-connector"></div>
 <div class="wt-pipeline-node" id="pipeline-node-OUTBOUND_AUDIO_PROCESSOR"><span class="node-label">OAP</span><span class="node-status offline" id="pipeline-status-OUTBOUND_AUDIO_PROCESSOR"></span></div>
 </div>
@@ -317,8 +317,9 @@ Save outgoing audio as WAV</label>
 <option value="VAD_SERVICE">VAD</option>
 <option value="WHISPER_SERVICE">Whisper ASR</option>
 <option value="LLAMA_SERVICE">LLaMA LLM</option>
-<option value="KOKORO_SERVICE">Kokoro TTS</option>
-<option value="NEUTTS_SERVICE">NeuTTS</option>
+<option value="TTS_SERVICE">TTS Stage (dock)</option>
+<option value="KOKORO_ENGINE">Kokoro Engine</option>
+<option value="NEUTTS_ENGINE">NeuTTS Engine</option>
 <option value="OUTBOUND_AUDIO_PROCESSOR">Outbound Audio</option>
 <option value="TOMEDO_CRAWL">Tomedo RAG</option>
 <option value="FRONTEND">Frontend</option>

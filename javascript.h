@@ -287,6 +287,15 @@ if(d.services){
     if(dot)dot.className=`node-status ${svcMap[name]?'online':'offline'}`;
   });
 }
+fetch('/api/tts/status').then(r=>r.ok?r.json():null).then(ts=>{
+  const lbl=document.getElementById('pipeline-tts-engine');
+  if(!lbl)return;
+  if(ts&&ts.engine){lbl.textContent=ts.engine;lbl.style.color='var(--wt-success,#34c759)';}
+  else{lbl.textContent='no engine';lbl.style.color='rgba(255,255,255,0.5)';}
+}).catch(()=>{
+  const lbl=document.getElementById('pipeline-tts-engine');
+  if(lbl){lbl.textContent='no engine';lbl.style.color='rgba(255,255,255,0.5)';}
+});
 
 const ollamaDot=document.getElementById('pipeline-status-OLLAMA');
 if(ollamaDot)ollamaDot.className=`node-status ${d.ollama_running?'online':'offline'}`;
@@ -483,8 +492,10 @@ c.innerHTML=d.services.map(s=>{
   const status=s.online?'<span class="wt-badge wt-badge-success"><span class="wt-status-dot online"></span>Online</span>'
     :'<span class="wt-badge wt-badge-secondary"><span class="wt-status-dot offline"></span>Offline</span>';
   const desc={'SIP_CLIENT':'SIP/RTP Gateway','INBOUND_AUDIO_PROCESSOR':'G.711 Decode & Resample',
-    'VAD_SERVICE':'Voice Activity Detection','WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM','KOKORO_SERVICE':'Kokoro TTS',
-    'NEUTTS_SERVICE':'NeuTTS Nano German','OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP',
+    'VAD_SERVICE':'Voice Activity Detection','WHISPER_SERVICE':'Whisper ASR','LLAMA_SERVICE':'LLaMA LLM',
+    'TTS_SERVICE':'TTS Stage (generic dock, hot-plug engines)',
+    'KOKORO_ENGINE':'Kokoro TTS Engine','NEUTTS_ENGINE':'NeuTTS Nano German Engine',
+    'OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP',
     'TOMEDO_CRAWL_SERVICE':'Tomedo RAG — Patient Context','TEST_SIP_PROVIDER':'SIP B2BUA Test Provider'};
   const eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
   const svcAttr=escapeHtml(s.name);
@@ -1457,8 +1468,8 @@ if(sel4)sel4.innerHTML=opts;
 function loadLogLevels(){
   fetch('/api/settings/log_level').then(r=>r.json()).then(d=>{
 const c=document.getElementById('logLevelControls');
-const services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','NEUTTS_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
-const names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','VAD_SERVICE':'VAD','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','KOKORO_SERVICE':'Kokoro TTS','NEUTTS_SERVICE':'NeuTTS','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
+const services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','NEUTTS_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
+const names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','VAD_SERVICE':'VAD','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','TTS_SERVICE':'TTS Stage','KOKORO_ENGINE':'Kokoro Engine','NEUTTS_ENGINE':'NeuTTS Engine','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
 const levels=['ERROR','WARN','INFO','DEBUG','TRACE'];
 c.innerHTML=services.map(s=>{
   const current=d.log_levels&&d.log_levels[s]?d.log_levels[s]:'INFO';
@@ -1469,7 +1480,7 @@ c.innerHTML=services.map(s=>{
 }
 
 function saveAllLogLevels(){
-  const services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','NEUTTS_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
+  const services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','NEUTTS_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
   const promises=services.map(s=>{
 const level=document.getElementById(`loglevel_${s}`).value;
 return fetch('/api/settings/log_level',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2861,7 +2872,7 @@ async function runAllBetaTests(){
         },1000);
         setTimeout(()=>{clearInterval(poll);res();},30000);
       }).catch(rej);
-    }),requires:['KOKORO_SERVICE']},
+    }),requires:['TTS_SERVICE','KOKORO_ENGINE']},
   ];
   let done=0,pass=0,fail=0,skip=0;
   const total=tests.length;
@@ -2936,13 +2947,13 @@ function updatePrereqBadges(){
       'prereq-iap':[],
       'prereq-whisper':['WHISPER_SERVICE','VAD_SERVICE'],
       'prereq-llama':['LLAMA_SERVICE'],
-      'prereq-kokoro':['KOKORO_SERVICE'],
+      'prereq-kokoro':['TTS_SERVICE','KOKORO_ENGINE'],
       'prereq-shutup-pipeline':['LLAMA_SERVICE'],
-      'prereq-roundtrip':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'],
-      'prereq-fullloop':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-roundtrip':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-fullloop':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
       'prereq-health':[],
-      'prereq-multiline':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'],
-      'prereq-stress':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','KOKORO_SERVICE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-multiline':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-stress':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
     };
     for(const[id,reqs] of Object.entries(prereqs)){
       const el=document.getElementById(id);

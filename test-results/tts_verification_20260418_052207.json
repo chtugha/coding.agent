@@ -1,0 +1,68 @@
+{
+  "step": "Full pipeline loopback verification and bug-fix pass",
+  "timestamp_utc": "20260418_052207",
+  "environment": {
+    "os": "macOS 25.3.0",
+    "arch": "arm64",
+    "kokoro_decoder_variants_cached": true
+  },
+  "static_sweep": {
+    "grep_pattern": "KOKORO_SERVICE|NEUTTS_SERVICE|SET_TTS:(KOKORO|NEUTTS)|set_downstream_override",
+    "files": ["interconnect.h", "llama-service.cpp", "outbound-audio-processor.cpp"],
+    "hits": 0,
+    "result": "pass"
+  },
+  "unit_tests": {
+    "suite": "ctest --output-on-failure -E 'EndToEnd|OneHour|Stress'",
+    "total": 61,
+    "passed": 61,
+    "failed": 0,
+    "duration_s": 35.04
+  },
+  "integration_tests": {
+    "SingleCallFullPipeline": {
+      "result": "pass",
+      "duration_s": 68.9,
+      "notes": "All 8 services alive incl. generic TTS dock; 30s stability monitor"
+    },
+    "NeuTTSCodecShapeRegressionSynthesisSucceeds": {
+      "result": "pass",
+      "duration_s": 37.3,
+      "notes": "3 synthesis calls to NeuTTS via EngineClient — WAV_RESULT returned (RTF 0.32-0.42)"
+    },
+    "SwitchEngineMidCall": {
+      "result": "pass",
+      "duration_s": 304.5,
+      "notes": "Dock reported ACTIVE kokoro, then neutts connected and swap completed; kokoro received SHUTDOWN and exited; SIP/LLaMA/TTS/OAP remained alive"
+    },
+    "KillAndRestartEngine": {
+      "result": "pass",
+      "duration_s": 323.7,
+      "notes": "SIGKILL kokoro -> dock cleared to NONE within 15s; restarted kokoro re-docked successfully; no other services restarted"
+    }
+  },
+  "bugs_fixed": [
+    {
+      "title": "Self-join deadlock in engine SHUTDOWN handler",
+      "files": ["kokoro-service.cpp", "neutts-service.cpp"],
+      "symptom": "libc++abi: terminating due to uncaught exception of type std::__1::system_error: thread::join failed: Resource deadlock avoided",
+      "root_cause": "CUSTOM SHUTDOWN dispatch runs on EngineClient::run_loop thread; calling this->shutdown() -> engine_.shutdown() attempted to join that same thread.",
+      "fix": "Replace this->shutdown() with shutdown_all_calls() + std::_Exit(0); rely on the OS to reap the engine process during swap."
+    },
+    {
+      "title": "Integration tests used too-short polling timeouts for Kokoro first-boot",
+      "files": ["tests/test_integration.cpp"],
+      "symptom": "SwitchEngineMidCall/KillAndRestartEngine asserted ACTIVE kokoro within 10-120s, but Kokoro CoreML ANE compilation on a cold cache takes 5-6 minutes.",
+      "fix": "Poll the dock STATUS cmd-port for up to 600s (10 minutes) before asserting the expected ACTIVE kokoro state."
+    }
+  ],
+  "static_verification": {
+    "static_sweep_hits": 0,
+    "engine_name_attribution_verified": true
+  },
+  "notes": {
+    "cold_boot_observation": "Kokoro first-time ANE compilation takes ~5-6 minutes for 3 decoder variants + 3 F0/N predictor variants; warm cache boot is ~25s.",
+    "loopback_topology": "SIP <-> IAP <-> VAD <-> Whisper <-> LLaMA <-> TTS(dock) <-> Kokoro/NeuTTS engine (hot-plug) <-> OAP <-> SIP",
+    "control_signals_validated_via_unit_tests": ["SPEECH_ACTIVE", "SPEECH_IDLE", "CALL_END", "FLUSH_TTS", "SHUTDOWN", "PING/PONG"]
+  }
+}

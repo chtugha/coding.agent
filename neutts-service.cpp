@@ -60,8 +60,11 @@ static constexpr int NEUTTS_SAMPLE_RATE = static_cast<int>(whispertalk::tts::kTT
 // Diagnostic cmd port for the NeuTTS engine (see spec §4.2). Separate from
 // the TTS dock's own cmd port (13142) so operators can query the engine
 // process directly without going through the dock.
-static constexpr uint16_t NEUTTS_ENGINE_CMD_PORT = 13174;
-static constexpr size_t MAX_AUDIO_SAMPLES = 30 * NEUTTS_SAMPLE_RATE;
+static constexpr uint16_t NEUTTS_ENGINE_CMD_PORT = whispertalk::tts::kNeuTTSEngineCmdPort;
+// Hard upper bound on a single synthesis output (per call, per text). 120 s
+// covers worst-case long LLaMA responses; the synthesis loop truncates
+// gracefully when it would exceed this ceiling.
+static constexpr size_t MAX_AUDIO_SAMPLES = 120 * NEUTTS_SAMPLE_RATE;
 static constexpr size_t PHONEME_CACHE_MAX = 10000;
 
 static constexpr int MODEL_CONTEXT_SIZE = 2048;
@@ -648,9 +651,13 @@ public:
         });
 
         engine_.register_custom_handler("SHUTDOWN", [this]() {
-            std::fprintf(stderr, "[neutts] received SHUTDOWN from TTS dock — exiting\n");
-            this->shutdown();
-            std::_Exit(0);
+            std::fprintf(stderr, "[neutts] received SHUTDOWN from TTS dock — signalling exit\n");
+            // SHUTDOWN is dispatched from the EngineClient's own recv thread.
+            // Calling engine_.shutdown() here would self-join and deadlock.
+            // Just clear running_; the main recv loop in run() will exit and
+            // perform an orderly shutdown (flush LogForwarder, join workers,
+            // call engine_.shutdown() from outside the recv thread).
+            running_.store(false);
         });
 
         if (!engine_.start()) {
@@ -991,7 +998,7 @@ private:
     void send_audio_to_downstream(uint32_t call_id, const std::vector<float>& samples) {
         if (!engine_.is_connected()) return;
 
-        static constexpr size_t HEADER_SIZE = sizeof(int32_t);
+        constexpr size_t HEADER_SIZE = whispertalk::tts::kTTSAudioHeaderBytes;
 
         for (size_t offset = 0; offset < samples.size(); offset += DOWNSTREAM_CHUNK_SAMPLES) {
             size_t count = std::min(DOWNSTREAM_CHUNK_SAMPLES, samples.size() - offset);
@@ -1003,6 +1010,12 @@ private:
 
             int32_t sr = NEUTTS_SAMPLE_RATE;
             std::memcpy(audio_pkt.payload.data(), &sr, sizeof(int32_t));
+            uint64_t t_out_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            uint8_t ts_be[8];
+            for (int i = 0; i < 8; ++i) ts_be[7 - i] = static_cast<uint8_t>((t_out_us >> (i * 8)) & 0xff);
+            std::memcpy(audio_pkt.payload.data() + sizeof(int32_t), ts_be, sizeof(ts_be));
             std::memcpy(audio_pkt.payload.data() + HEADER_SIZE,
                        samples.data() + offset, count * sizeof(float));
 
