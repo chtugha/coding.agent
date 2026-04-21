@@ -1289,6 +1289,17 @@ private:
     }
 
     bool send_encrypted(int sock, const void* data, size_t len, int timeout_ms) {
+        // When IC encryption is disabled (default), send a length-prefixed
+        // plaintext frame. The 4-byte big-endian length prefix is the same
+        // as the encrypted path so both sides stay in framing-lockstep as
+        // long as the flag matches (it's read once per process).
+        if (!prodigy_tls::ic_encryption_enabled()) {
+            std::vector<uint8_t> buf(4 + len);
+            uint32_t net_len = htonl(static_cast<uint32_t>(len));
+            memcpy(buf.data(), &net_len, 4);
+            if (len > 0) memcpy(buf.data() + 4, data, len);
+            return send_all_with_timeout(sock, buf.data(), 4 + len, timeout_ms);
+        }
         size_t enc_size = prodigy_tls::ic_encrypted_size(len);
         std::vector<uint8_t> enc_buf(4 + enc_size);
         size_t actual_enc_len = 0;
@@ -1304,13 +1315,21 @@ private:
     bool recv_encrypted(int sock, std::vector<uint8_t>& plaintext, int timeout_ms) {
         uint32_t net_len;
         if (!recv_exact(sock, &net_len, 4, timeout_ms)) return false;
-        uint32_t enc_len = ntohl(net_len);
-        if (enc_len > Packet::MAX_PAYLOAD_SIZE + 256) return false;
-        std::vector<uint8_t> enc_buf(enc_len);
-        if (!recv_exact(sock, enc_buf.data(), enc_len, timeout_ms)) return false;
-        plaintext.resize(enc_len);
+        uint32_t frame_len = ntohl(net_len);
+        if (frame_len > Packet::MAX_PAYLOAD_SIZE + 256) return false;
+        if (!prodigy_tls::ic_encryption_enabled()) {
+            plaintext.resize(frame_len);
+            if (frame_len > 0 &&
+                !recv_exact(sock, plaintext.data(), frame_len, timeout_ms)) {
+                return false;
+            }
+            return true;
+        }
+        std::vector<uint8_t> enc_buf(frame_len);
+        if (!recv_exact(sock, enc_buf.data(), frame_len, timeout_ms)) return false;
+        plaintext.resize(frame_len);
         size_t plain_len = 0;
-        if (!prodigy_tls::ic_decrypt(enc_buf.data(), enc_len,
+        if (!prodigy_tls::ic_decrypt(enc_buf.data(), frame_len,
                                       plaintext.data(), plain_len)) {
             return false;
         }

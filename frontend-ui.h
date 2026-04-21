@@ -1294,6 +1294,13 @@ Save outgoing audio as WAV</label>
 <span style="display:block;font-size:12px;color:var(--wt-text-secondary)">Respond to plain-HTTP requests (port +1) with an HTTP 301 redirect to the HTTPS port.</span>
 </span>
 </label>
+<label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+<input type="checkbox" id="certIcEncryption" onchange="saveCertSettings()">
+<span>
+<strong>Encrypt interconnect traffic (AES-256-GCM)</strong>
+<span style="display:block;font-size:12px;color:var(--wt-text-secondary)">Encrypt all loopback traffic between pipeline services (SIP &#8594; IAP &#8594; VAD &#8594; ASR &#8594; LLM &#8594; TTS &#8594; OAP). Disabled by default for debugging. The setting is read once on service startup &#8212; restart every pipeline service (and the frontend) after toggling for the change to take effect.</span>
+</span>
+</label>
 </div>
 </div>
 

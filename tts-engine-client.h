@@ -291,7 +291,9 @@ private:
             switch (static_cast<EngineFrameTag>(tag)) {
                 case EngineFrameTag::PACKET: {
                     Packet pkt;
-                    if (!recv_packet_body(sock, pkt)) return;
+                    if (!recv_packet_body(sock, pkt)) {
+                        return;
+                    }
                     enqueue_text(std::move(pkt));
                     break;
                 }

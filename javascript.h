@@ -3952,8 +3952,10 @@ function fetchCerts(){
     }
     const sr=document.getElementById('certSelfRefresh');
     const hr=document.getElementById('certHttpRedirect');
+    const ic=document.getElementById('certIcEncryption');
     if(sr)sr.checked=(d.self_refresh==='1');
     if(hr)hr.checked=(d.http_redirect==='1');
+    if(ic)ic.checked=(d.ic_encryption==='1');
   }).catch(e=>console.error('fetchCerts:',e));
 }
 
@@ -4033,8 +4035,16 @@ function uploadCert(){
 function saveCertSettings(){
   const sr=document.getElementById('certSelfRefresh');
   const hr=document.getElementById('certHttpRedirect');
-  const body={self_refresh:sr&&sr.checked?'1':'0',http_redirect:hr&&hr.checked?'1':'0'};
+  const ic=document.getElementById('certIcEncryption');
+  const body={
+    self_refresh:sr&&sr.checked?'1':'0',
+    http_redirect:hr&&hr.checked?'1':'0',
+    ic_encryption:ic&&ic.checked?'1':'0'
+  };
   fetch('/api/certs/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(()=>{
+      if(ic){showToast('Interconnect encryption '+(ic.checked?'ENABLED':'DISABLED')+' \u2014 restart all pipeline services for the change to take effect.');}
+    })
     .catch(e=>console.error('saveCertSettings:',e));
 }
 

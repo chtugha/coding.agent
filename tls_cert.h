@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -8,11 +10,11 @@
 #include <fstream>
 #include <sstream>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #ifdef __APPLE__
-#  include <Security/Security.h>
 #  include <mach-o/dyld.h>
 #endif
 
@@ -251,98 +253,125 @@ static inline CertData get_certs() {
     return g_cert_data;
 }
 
-static const char* IC_KEYCHAIN_SERVICE = "com.prodigy.interconnect_encryption";
-static const char* IC_KEYCHAIN_ACCOUNT = "ic_key";
-
 static std::string    g_ic_key;
 static std::once_flag g_ic_key_once;
+
+static inline std::string ic_encryption_flag_path() {
+    return get_exe_dir() + "/ic_encryption.flag";
+}
+
+// Interconnect traffic encryption is OPT-IN. Default is OFF (plaintext
+// framing) — especially for debug purposes on a fresh install. Operators
+// enable it via the TLS Certificates tab in the web frontend, which
+// writes "1" to ic_encryption.flag; disabling deletes the file or
+// writes "0". Services read the flag once on startup (call_once),
+// so a change requires restarting every pipeline service for the new
+// setting to take effect.
+static std::atomic<int> g_ic_encryption_enabled{-1};
+static std::once_flag   g_ic_encryption_once;
+
+static inline bool ic_encryption_enabled() {
+    std::call_once(g_ic_encryption_once, []() {
+        std::string path = ic_encryption_flag_path();
+        FILE* f = fopen(path.c_str(), "rb");
+        int enabled = 0;
+        if (f) {
+            char buf[4] = {0};
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            if (n > 0 && buf[0] == '1') enabled = 1;
+        }
+        g_ic_encryption_enabled.store(enabled, std::memory_order_release);
+        if (enabled) {
+            std::fprintf(stderr, "[ic_key] Interconnect traffic encryption: ENABLED (AES-256-GCM)\n");
+        } else {
+            std::fprintf(stderr,
+                "[ic_key] *** WARNING *** Interconnect traffic encryption is DISABLED (plaintext framing).\n"
+                "[ic_key] *** WARNING *** Enable it in the web frontend (TLS Certificates tab) and restart all pipeline services for production deployments.\n");
+        }
+    });
+    return g_ic_encryption_enabled.load(std::memory_order_acquire) == 1;
+}
+
+static inline bool ic_encryption_set_persistent(bool enabled) {
+    std::string path = ic_encryption_flag_path();
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return false;
+    const char* v = enabled ? "1" : "0";
+    ssize_t n = write(fd, v, 1);
+    close(fd);
+    return n == 1;
+}
 
 static inline void secure_zero_tls(void* ptr, std::size_t len) noexcept {
     volatile unsigned char* p = static_cast<volatile unsigned char*>(ptr);
     while (len--) *p++ = 0;
 }
 
-#ifdef __APPLE__
-static inline std::string ic_keychain_load() {
-    CFStringRef cfSvc = CFStringCreateWithCString(nullptr, IC_KEYCHAIN_SERVICE, kCFStringEncodingUTF8);
-    CFStringRef cfAcc = CFStringCreateWithCString(nullptr, IC_KEYCHAIN_ACCOUNT, kCFStringEncodingUTF8);
+static inline std::string ic_key_file_path() {
+    return get_exe_dir() + "/ic_key.bin";
+}
 
-    CFMutableDictionaryRef q = CFDictionaryCreateMutable(
-        nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(q, kSecClass,      kSecClassGenericPassword);
-    CFDictionarySetValue(q, kSecAttrService, cfSvc);
-    CFDictionarySetValue(q, kSecAttrAccount, cfAcc);
-    CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
-    CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
+static inline std::string ic_file_load() {
+    std::string path = ic_key_file_path();
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return {};
+    char buf[32];
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    if (n != 32) return {};
+    std::string key(buf, 32);
+    secure_zero_tls(buf, sizeof(buf));
+    return key;
+}
 
-    CFDataRef data = nullptr;
-    OSStatus  st   = SecItemCopyMatching(q, reinterpret_cast<CFTypeRef*>(&data));
-    CFRelease(q); CFRelease(cfSvc); CFRelease(cfAcc);
-
-    if (st == errSecSuccess && data) {
-        std::string key(reinterpret_cast<const char*>(CFDataGetBytePtr(data)),
-                        static_cast<std::size_t>(CFDataGetLength(data)));
-        CFRelease(data);
-        return key;
+// Atomically create the key file with mode 0600 via O_EXCL so two racing
+// processes cannot both write different keys; the loser sees EEXIST and
+// falls back to reading the winner's key from disk. Permissions are set
+// at creation time (no fopen→chmod TOCTOU window).
+static inline bool ic_file_store(const std::string& key) {
+    if (key.size() != 32) return false;
+    std::string path = ic_key_file_path();
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return false;
+    ssize_t written = 0;
+    const char* buf = key.data();
+    while (written < 32) {
+        ssize_t n = write(fd, buf + written, 32 - written);
+        if (n <= 0) { close(fd); unlink(path.c_str()); return false; }
+        written += n;
     }
-    if (data) CFRelease(data);
-    return {};
+    close(fd);
+    return true;
 }
-
-static inline bool ic_keychain_store(const std::string& key) {
-    CFStringRef cfSvc  = CFStringCreateWithCString(nullptr, IC_KEYCHAIN_SERVICE, kCFStringEncodingUTF8);
-    CFStringRef cfAcc  = CFStringCreateWithCString(nullptr, IC_KEYCHAIN_ACCOUNT, kCFStringEncodingUTF8);
-    CFDataRef   cfData = CFDataCreate(nullptr,
-                             reinterpret_cast<const UInt8*>(key.data()),
-                             static_cast<CFIndex>(key.size()));
-
-    CFMutableDictionaryRef addQ = CFDictionaryCreateMutable(
-        nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(addQ, kSecClass,         kSecClassGenericPassword);
-    CFDictionarySetValue(addQ, kSecAttrService,   cfSvc);
-    CFDictionarySetValue(addQ, kSecAttrAccount,   cfAcc);
-    CFDictionarySetValue(addQ, kSecValueData,     cfData);
-    CFDictionarySetValue(addQ, kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
-
-    OSStatus st = SecItemAdd(addQ, nullptr);
-    CFRelease(addQ); CFRelease(cfSvc); CFRelease(cfAcc); CFRelease(cfData);
-
-    if (st == errSecSuccess) return true;
-    if (st == errSecDuplicateItem) return false;
-    return false;
-}
-#endif
 
 static inline const std::string& get_interconnect_key() {
     std::call_once(g_ic_key_once, []() {
-#ifdef __APPLE__
-        g_ic_key = ic_keychain_load();
+        g_ic_key = ic_file_load();
         if (!g_ic_key.empty() && g_ic_key.size() == 32) {
-            std::fprintf(stderr, "[ic_key] Loaded interconnect AES-256 key from macOS Keychain\n");
+            std::fprintf(stderr, "[ic_key] Loaded interconnect AES-256 key from key file\n");
             return;
         }
         unsigned char raw[32];
+#ifdef __APPLE__
         arc4random_buf(raw, sizeof(raw));
-        g_ic_key.assign(reinterpret_cast<char*>(raw), 32);
-        secure_zero_tls(raw, sizeof(raw));
-        if (ic_keychain_store(g_ic_key)) {
-            std::fprintf(stderr, "[ic_key] Generated new interconnect AES-256 key "
-                         "and stored in macOS Keychain\n");
-        } else {
-            std::string winner = ic_keychain_load();
-            if (!winner.empty() && winner.size() == 32) {
-                g_ic_key = winner;
-                std::fprintf(stderr, "[ic_key] Race detected — loaded winner's key from Keychain\n");
-            } else {
-                std::fprintf(stderr, "[ic_key] Warning: interconnect key Keychain storage failed\n");
-            }
-        }
 #else
-        g_ic_key.resize(32, '\0');
-        if (RAND_bytes(reinterpret_cast<unsigned char*>(&g_ic_key[0]), 32) != 1) {
+        if (RAND_bytes(raw, sizeof(raw)) != 1) {
             std::fprintf(stderr, "[ic_key] FATAL: RAND_bytes failed for interconnect key\n");
         }
 #endif
+        g_ic_key.assign(reinterpret_cast<char*>(raw), 32);
+        secure_zero_tls(raw, sizeof(raw));
+        if (ic_file_store(g_ic_key)) {
+            std::fprintf(stderr, "[ic_key] Generated new interconnect AES-256 key and stored in key file\n");
+        } else {
+            g_ic_key = ic_file_load();
+            if (!g_ic_key.empty() && g_ic_key.size() == 32) {
+                std::fprintf(stderr, "[ic_key] Race detected — loaded winner's key from key file\n");
+            } else {
+                std::fprintf(stderr, "[ic_key] Warning: interconnect key file storage failed\n");
+            }
+        }
     });
     return g_ic_key;
 }

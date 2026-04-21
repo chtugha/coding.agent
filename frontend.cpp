@@ -8470,6 +8470,7 @@ document.getElementById('f').onsubmit=async function(e){
         std::string active = get_setting("active_cert_name", "server.crt");
         std::string self_refresh = get_setting("cert_self_refresh", "1");
         std::string http_redirect = get_setting("http_redirect_to_https", "0");
+        std::string ic_encryption = get_setting("ic_encryption_enabled", "0");
 
         time_t now = time(nullptr);
         std::stringstream json;
@@ -8493,7 +8494,8 @@ document.getElementById('f').onsubmit=async function(e){
         json << "]"
              << ",\"active_cert\":\"" << escape_json(active) << "\""
              << ",\"self_refresh\":\"" << self_refresh << "\""
-             << ",\"http_redirect\":\"" << http_redirect << "\"}";
+             << ",\"http_redirect\":\"" << http_redirect << "\""
+             << ",\"ic_encryption\":\"" << ic_encryption << "\"}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
@@ -8655,15 +8657,21 @@ document.getElementById('f').onsubmit=async function(e){
         if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
             std::string self_refresh  = get_setting("cert_self_refresh", "1");
             std::string http_redirect = get_setting("http_redirect_to_https", "0");
+            std::string ic_encryption = get_setting("ic_encryption_enabled", "0");
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                          "{\"self_refresh\":\"%s\",\"http_redirect\":\"%s\"}",
-                          self_refresh.c_str(), http_redirect.c_str());
+                          "{\"self_refresh\":\"%s\",\"http_redirect\":\"%s\",\"ic_encryption\":\"%s\"}",
+                          self_refresh.c_str(), http_redirect.c_str(), ic_encryption.c_str());
         } else {
             std::string body(hm->body.buf, hm->body.len);
             std::string sr = extract_json_string(body, "self_refresh");
             std::string hr = extract_json_string(body, "http_redirect");
+            std::string ic = extract_json_string(body, "ic_encryption");
             if (!sr.empty()) set_setting("cert_self_refresh", sr);
             if (!hr.empty()) set_setting("http_redirect_to_https", hr);
+            if (!ic.empty()) {
+                set_setting("ic_encryption_enabled", ic);
+                prodigy_tls::ic_encryption_set_persistent(ic == "1");
+            }
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
         }
     }

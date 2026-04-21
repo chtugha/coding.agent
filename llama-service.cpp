@@ -1210,6 +1210,25 @@ private:
 
             return "SHUTUP_RESULT:" + std::to_string(interrupt_ms) + "ms:" + std::to_string(total_ms) + "ms\n";
         }
+        if (cmd.rfind("INJECT_TTS:", 0) == 0) {
+            std::string rest = cmd.substr(11);
+            size_t colon = rest.find(':');
+            if (colon == std::string::npos) return "ERROR:Usage: INJECT_TTS:<call_id>:<text>\n";
+            uint32_t cid = 0;
+            try {
+                cid = static_cast<uint32_t>(std::stoul(rest.substr(0, colon)));
+            } catch (...) {
+                return "ERROR:Invalid call_id\n";
+            }
+            std::string text = rest.substr(colon + 1);
+            if (cid == 0 || text.empty()) return "ERROR:Invalid call_id or empty text\n";
+            static constexpr size_t kMaxInjectTextBytes = 4096;
+            if (text.size() > kMaxInjectTextBytes) {
+                return "ERROR:Injected text exceeds " + std::to_string(kMaxInjectTextBytes) + " bytes\n";
+            }
+            send_to_tts(cid, text);
+            return "OK:injected " + std::to_string(text.size()) + " bytes for call " + std::to_string(cid) + "\n";
+        }
         if (cmd == "PING") {
             return "PONG\n";
         }
