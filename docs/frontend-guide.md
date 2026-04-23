@@ -48,7 +48,7 @@ The sidebar is organized into four sections:
 
 The default landing page. Shows:
 
-- **Pipeline Overview**: A horizontal node chain (SIP > IAP > VAD > ASR > LLM > TTS > OAP > **RAG** > **Ollama**) with live status dots. Green = online, grey = offline, red = error.
+- **Pipeline Overview**: A horizontal node chain (SIP > IAP > VAD > ASR > LLM > TTS > OAP > **RAG** > **Ollama**) with live status dots. Green = online, grey = offline, red = error. The **TTS** node is the generic dock (`TTS_SERVICE`); its sub-label shows the currently docked engine (`kokoro`, `neutts`, or `no engine`), fetched from `GET /api/tts/status`. The two engines are surfaced as separate service rows (`KOKORO_ENGINE`, `NEUTTS_ENGINE`) on the Services page so operators can start/stop them independently — the dock hot-swaps whichever one is live.
 - **Health Badge**: "Healthy" (all services up), "Degraded" (some down), or "Offline" (most/all down).
 - **Metric Cards**: Services Online, Running Tests, Tests Passed (with fail count), and Uptime.
 - **Activity Feed**: Last 10 log entries from all services.

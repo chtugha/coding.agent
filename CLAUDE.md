@@ -10,11 +10,17 @@ Each SIP caller gets their own INDEPENDENT pipeline instance. The pipeline is NO
 
 ```
 Alice calls in -> gets her own pipeline instance:
-  Alice's RTP -> IAP(call=1) -> VAD(call=1) -> Whisper(call=1) -> LLaMA(call=1) -> Kokoro(call=1) -> OAP(call=1) -> RTP to BOB
+  Alice's RTP -> IAP(call=1) -> VAD(call=1) -> Whisper(call=1) -> LLaMA(call=1) -> TTS(call=1) -> OAP(call=1) -> RTP to BOB
 
 Bob calls in -> gets his own pipeline instance:
-  Bob's RTP -> IAP(call=2) -> VAD(call=2) -> Whisper(call=2) -> LLaMA(call=2) -> Kokoro(call=2) -> OAP(call=2) -> RTP to ALICE
+  Bob's RTP -> IAP(call=2) -> VAD(call=2) -> Whisper(call=2) -> LLaMA(call=2) -> TTS(call=2) -> OAP(call=2) -> RTP to ALICE
 ```
+
+The TTS stage is a generic pipeline node (`ServiceType::TTS_SERVICE`). A
+concrete TTS engine (Kokoro or NeuTTS) docks into the TTS stage over
+127.0.0.1:13143; at most one engine is active ("last-connect-wins").
+Per-call state (VAD session, Whisper context, LLaMA KV, engine synth
+thread, OAP buffer) is still isolated by call_id.
 
 ### Critical rules:
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## TTS pipeline redesign (2026-04)
+
+### Added
+- **Generic TTS stage (`bin/tts-service`)**: new pipeline node sitting between LLaMA and OAP that owns the interconnect sockets (`ServiceType::TTS_SERVICE`, base port 13140) and a dedicated **engine dock** on port 13143. Concrete TTS engines are no longer pipeline nodes — they connect as dock clients.
+- **Engine-dock protocol (loopback-only TCP on 13143)**: engines open a TCP connection, send one-line JSON HELLO `{"name":..., "sample_rate":24000, "channels":1, "format":"f32le"}`, and receive `OK\n` or `ERR <reason>\n`. After OK, frames are tag-prefixed (`0x01` = `Packet`, `0x02` = mgmt + optional payload). `127.0.0.1`-only; HELLO name constrained to `[A-Za-z0-9_-]{1..32}`.
+- **Single-slot, last-connect-wins state machine**: at most one engine is active. A new engine completing HELLO triggers a swap — the dock sends `CUSTOM SHUTDOWN` to the outgoing engine, a `CUSTOM FLUSH_TTS` to OAP, and switches the slot. Old-engine TCP close is bounded at 2 s before force-close.
+- **`GET /api/tts/status`** REST endpoint returning `{"engine":"kokoro"}`, `{"engine":"neutts"}`, or `{"engine":null}`.
+- **Per-engine cmd ports**: Kokoro engine on **13144**, NeuTTS engine on **13174** (was 13142 for both before — they shared the pipeline slot).
+- **Frontend service table**: `TTS_SERVICE` (dock), `KOKORO_ENGINE` (binary `kokoro-service`), `NEUTTS_ENGINE` (binary `neutts-service`). Dashboard pipeline node shows the currently docked engine under the TTS node, queried from `/api/tts/status`.
+- **SPEECH_IDLE warm-up**: LLaMA, Kokoro, NeuTTS, and OAP now each implement a `prewarm_call(call_id)` path that the dock invokes by forwarding SPEECH_IDLE to the active engine. Eliminates several lazy-init hot spots on the first TTS frame of a turn.
+- **PacketTrace latency fields**: `t_engine_out` / `t_oap_in` monotonic timestamps for the engine→OAP hop, enabling the median ≤ 2 ms / p99 ≤ 5 ms forwarding-budget verification.
+
+### Changed
+- **`ServiceType` renamed**: `KOKORO_SERVICE` → `TTS_SERVICE` (wire value `5` preserved for `PacketTrace` compatibility). `NEUTTS_SERVICE` removed. `service_type_to_string` and `PacketTrace::service_type_name` updated (`"KOK"` → `"TTS"`; `"NEU"` dropped).
+- **Upstream / downstream topology**: `LLAMA_SERVICE → TTS_SERVICE → OAP_SERVICE`. Engines are not part of the chain.
+- **Engine lifecycle**: Kokoro / NeuTTS use the new header-only `EngineClient` helper (`tts-engine-client.h`) instead of `InterconnectNode`. On `CUSTOM SHUTDOWN` the engine joins synthesis workers, releases model handles, and calls `std::_Exit(0)`.
+- **Kokoro / NeuTTS max utterance buffer**: bumped from 10 s to 120 s of PCM (covers worst-case multi-chunk LLaMA responses).
+
+### Removed
+- **`/api/switch_tts` REST endpoint** and frontend `handle_switch_tts` handler. Operators switch engines by starting the desired engine process — the dock handles the swap transparently.
+- **`InterconnectNode::set_downstream_override` / `clear_downstream_override` / `pause_downstream` / `resume_downstream`** and the corresponding `downstream_override_` / `downstream_paused_` state.
+- **LLaMA `SET_TTS:KOKORO` / `SET_TTS:NEUTTS` cmd-port handlers** — redundant now that the downstream resolves to `TTS_SERVICE`.
+- **Kokoro `check_tts_exclusion()` startup dance** — the single-slot dock is the sole arbiter.
+- **NeuTTS `ServiceType::NEUTTS_SERVICE` port block (13170–13172)**.
+
+### Fixed
+- **Dock `std::terminate` on engine disconnect**: the disconnect path reset the slot without joining its recv/ping threads. Replaced with an off-hot-path watcher thread that joins and closes the fd (tracked in `swap_watchers_` so `shutdown()` joins them on dock exit).
+- **Engine self-join deadlock on `CUSTOM SHUTDOWN`**: the SHUTDOWN handler ran on the `EngineClient` thread and tried to join itself. Replaced with `shutdown_all_calls() + std::_Exit(0)`; the engine exits without unwinding.
+- **macOS Keychain TLS key-fetch hang** in headless contexts: `prodigy_tls::get_interconnect_key()` moved to a file-based store (`bin/ic_key.bin`, chmod 600). Unblocks every encrypted interconnect on first call.
+
 ## Frontend Overhaul (2026-03)
 
 ### Fixed

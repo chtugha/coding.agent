@@ -32,9 +32,9 @@ This file catalogues complex logic decisions and their resolution paths during t
 - **Resolution**: Follow same pattern — forward-declare member functions in class body, implement in separate .h files included after class closing brace.
 
 ## 5. Detached Threads Without Lifecycle Management
-- **Problem**: Four locations use std::thread(...).detach(): handle_switch_tts() (line 1636), handle_service_stop() for NEUTTS (line 1655), run_pipeline_stress_async() (line 4310), and model download (line 6214).
-- **Path**: frontend.cpp lines 1636, 1655, 4310, 6214
-- **Resolution**: The TTS-related threads (1636, 1655) are fire-and-forget operations that complete quickly. The stress test (4310) and model download (6214) are long-running but tracked via shared progress objects. All acceptable for local-only server; documented as known limitation.
+- **Problem**: Long-running operations from HTTP handlers are fired off as detached std::threads.
+- **Path**: frontend.cpp run_pipeline_stress_async() and model download, remaining fire-and-forget service-start paths.
+- **Resolution**: The TTS-related detached threads that previously powered `handle_switch_tts` and the NEUTTS `handle_service_stop` dance have been removed alongside the 2026-04 TTS redesign — engine swaps are now handled by the TTS dock itself (last-connect-wins) with no frontend-side orchestration. The remaining stress-test and model-download threads are still tracked via shared progress objects. All acceptable for local-only server; documented as known limitation.
 
 ## 6. Additional Null Pointer Dereferences Found in Triple Audit
 - **Problem**: Two more locations with unchecked sqlite3_column_text: model lookup in handle_llama_benchmark (lines 3190-3192) and handle_models_get benchmark detail (lines 6412-6415) cast directly to std::string.
@@ -81,7 +81,12 @@ This file catalogues complex logic decisions and their resolution paths during t
 - **Path**: frontend.cpp → two fork() sites (start_service and handle_test_start)
 - **Resolution**: Store return in long, check for < 0, fall back to 1024 on error before the close loop.
 
-## 15. CDN Elimination — Self-Contained Frontend
+## 15. TTS engine setup flow (post 2026-04 dock redesign)
+- **Problem**: Before the redesign the frontend orchestrated the TTS engine swap by (a) POSTing to `/api/switch_tts`, (b) running a detached PAUSE/RESUME dance on the Kokoro/NeuTTS `InterconnectNode` via `pause_downstream`/`resume_downstream`, and (c) restarting the pipeline neighbour services. None of this infrastructure exists any more.
+- **Path**: frontend.cpp `run_test_setup_async()`, `handle_switch_tts`, service table
+- **Resolution**: The new flow starts `TTS_SERVICE` first (it binds the pipeline slot on 13140/13141/13142 and the engine dock on 13143), then starts the chosen engine (`KOKORO_ENGINE` or `NEUTTS_ENGINE`), and polls `GET /api/tts/status` until `engine` matches the expected name. No selection POST is sent — the dock accepts the engine by virtue of a successful HELLO. To switch mid-call the frontend simply starts the other engine process; the dock sees the new HELLO, issues a `CUSTOM SHUTDOWN` to the outgoing engine, `CUSTOM FLUSH_TTS` to OAP, and swaps the slot. Neither LLaMA, OAP, nor the TTS dock restart.
+
+## 16. CDN Elimination — Self-Contained Frontend
 - **Problem**: Frontend loaded Orbitron/Space Mono from Google Fonts CDN, Font Awesome from cdnjs, and Chart.js/Hammer.js/chartjs-plugin-zoom from jsdelivr. This leaked user IPs to third parties and broke offline operation.
 - **Path**: Initially replaced Google Fonts with @font-face src:local() — this failed because Orbitron/Space Mono are not system fonts. Then downloaded actual woff2 files from Google Fonts and embedded as base64 data URIs in fonts.h (~67KB). Font Awesome CSS + fa-solid-900.woff2 also embedded in fonts.h with dead .eot references stripped. Chart.js, Hammer.js, chartjs-plugin-zoom embedded as raw string literals in vendors.h.
 - **Resolution**: All external CDN dependencies eliminated. Frontend makes zero network requests at runtime. Binary size increased to ~2.4MB but is fully self-contained for offline operation.

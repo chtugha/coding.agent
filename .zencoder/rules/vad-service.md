@@ -13,7 +13,7 @@ The **VAD Service** (`vad-service.cpp`) performs Voice Activity Detection on the
 - **Micro-pause Detection**: Triggers speech-end after 400ms of silence (8 frames × 50ms), capturing word-boundary pauses instead of waiting for full sentence gaps. This keeps chunks at 1.5-8 seconds for fast Whisper inference.
 - **Chunk Constraints**: Maximum 8s chunks (default, configurable via `--vad-max-chunk-ms`), minimum 0.5s (reject noise bursts). RMS energy filter (threshold 0.005) prevents near-silence hallucinations. Smart-split searches for energy dips near chunk boundaries when max length is reached.
 - **Inactivity Flush**: If no new audio arrives for 1000ms while speech is active, flushes the buffer immediately.
-- **Speech Signal Broadcasting**: Sends SPEECH_ACTIVE/SPEECH_IDLE management messages downstream to coordinate with TTS (e.g., stop playback when caller speaks).
+- **Speech Signal Broadcasting**: Sends SPEECH_ACTIVE/SPEECH_IDLE management messages downstream. The signals propagate along the pipeline (Whisper → LLaMA → TTS stage → OAP). The TTS stage tees SPEECH_ACTIVE/SPEECH_IDLE to the currently docked engine (Kokoro or NeuTTS) so it can interrupt synthesis and pre-warm per-call state; OAP receives the same signal via the auto-forwarded mgmt channel.
 - **Context Preservation**: Includes 8 frames (400ms) of pre-speech context audio for natural chunk boundaries, capturing weak initial vowels, consonants, and articles.
 
 ## Inbound Connections

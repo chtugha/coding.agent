@@ -19,19 +19,17 @@ The **Kokoro TTS Service** (`kokoro-service.cpp`) is a high-fidelity Text-to-Spe
 - **Output normalization**: Always normalizes to a 0.90 peak ceiling. Scales both up and down — signals quieter than peak 0.90 are amplified to use the full G.711 dynamic range. Signals with peak < 0.03 (silence) are left untouched to avoid boosting noise.
 - **SPEECH_ACTIVE handling**: Abandons synthesis and clears output buffer immediately when caller speech is detected.
 
-## Inbound Connections
-- **LLaMA Service (TCP)**: Receives response text via interconnect on ports 13140 (mgmt) and 13141 (data).
+## Pipeline role (post 2026-04)
+Kokoro is **not** a pipeline node. It is a dock client of the generic TTS stage (`tts-service`). It opens a TCP connection to `127.0.0.1:13143`, sends a one-line JSON HELLO (`{"name":"kokoro","sample_rate":24000,"channels":1,"format":"f32le"}`), and receives `OK\n`. Thereafter the dock forwards LLaMA text to Kokoro and Kokoro's audio frames back to OAP. On a `CUSTOM SHUTDOWN` mgmt frame from the dock (issued when a different engine wins the slot) Kokoro joins its synthesis workers and exits via `std::_Exit(0)`.
 
-## Outbound Connections
-- **Outbound Audio Processor (TCP)**: Streams float32 PCM audio to OAP on ports 13150 (mgmt) and 13151 (data).
+## Inbound / Outbound Connections
+- **TTS dock (TCP, loopback)**: single socket on port 13143. Tag-prefixed frames carry LLaMA text in and PCM audio out. Mgmt signals (CALL_END, SPEECH_ACTIVE, SPEECH_IDLE, CUSTOM SHUTDOWN) arrive on the same socket.
 
 ## Command-Line Parameters
-- `--model <path>`: Path to Kokoro TorchScript model (default: models/kokoro.pt)
-- `--voice <path>`: Path to voice style embedding (default: models/voice.bin)
-- `--vocab <path>`: Path to vocab.json (default: models/vocab.json)
+- `--voice <name>`: Voice (`df_eva`, `dm_bernd`)
 - `--log-level <LEVEL>`: Initial log verbosity (ERROR/WARN/INFO/DEBUG/TRACE, default: INFO)
 
-## Runtime Commands (cmd port 13142)
+## Runtime Commands (cmd port 13144)
 - `PING`: Health check (returns `PONG`)
 - `STATUS`: Returns model path, upstream/downstream state, active call count, current speed
 - `SET_LOG_LEVEL:<LEVEL>`: Change log verbosity at runtime without restart

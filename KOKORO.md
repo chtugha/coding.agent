@@ -2,7 +2,29 @@
 
 ## Overview
 
-The Kokoro TTS service (`kokoro-service.cpp`) is a C++ implementation of the Kokoro German text-to-speech engine, optimized for Apple Silicon via CoreML (ANE). It replaces the original Python `kokoro_service.py` with a native binary that integrates with the Prodigy interconnect system.
+The Kokoro TTS service (`kokoro-service.cpp`) is a C++ implementation of the Kokoro German text-to-speech engine, optimized for Apple Silicon via CoreML (ANE). It replaces the original Python `kokoro_service.py` with a native binary.
+
+**Pipeline role.** As of the 2026-04 TTS redesign, Kokoro is **not** an interconnect pipeline node. It is a **dock client** that connects to the generic TTS stage (`bin/tts-service`) via a small TCP protocol on `127.0.0.1:13143`. The TTS stage owns the LLaMA↔OAP pipeline slot; Kokoro only produces audio in response to text frames the dock forwards to it. A sibling engine (e.g. `bin/neutts-service`) can dock at any time and will hot-swap Kokoro out.
+
+### Dock handshake (engine-side)
+
+On startup Kokoro:
+
+1. Connects to `127.0.0.1:13143`.
+2. Sends one line of JSON HELLO, terminated with `\n`:
+   ```json
+   {"name":"kokoro","sample_rate":24000,"channels":1,"format":"f32le"}
+   ```
+3. Reads one line back. `OK\n` → the slot is ours, proceed. `ERR <reason>\n` → close and retry after 200 ms.
+4. After `OK`, every frame on the socket is tag-prefixed: `0x01` for a serialized `Packet` (text in from LLaMA, audio out to OAP), `0x02` for a mgmt frame (`MgmtMsgType` byte + optional length-prefixed payload). PING/PONG keepalive runs on the same socket at 200 ms cadence.
+
+### SHUTDOWN handler
+
+The dock sends `CUSTOM SHUTDOWN` (`MgmtMsgType::CUSTOM` with payload `"SHUTDOWN"`) when another engine has won the slot. Kokoro's handler calls `shutdown_all_calls()` (joins per-call synthesis workers, releases CoreML model handles) and then `std::_Exit(0)`. The dock waits up to 2 s for the TCP close before force-closing. A replacement engine may restart Kokoro later via the frontend; it will simply re-dock.
+
+### Cmd port
+
+Engine-local diagnostics live on **cmd port 13144** (moved from 13142, which now belongs to the dock). `TEST_SYNTH`, `BENCHMARK`, `SYNTH_WAV`, `SET_SPEED`, `SET_LOG_LEVEL`, `PING`, `STATUS` behave as before.
 
 **Architecture**: CoreML split pipeline with HAR source on CPU
 
@@ -85,11 +107,12 @@ The build auto-detects:
 ```
 
 The service:
-1. Initializes the interconnect system (master/slave negotiation)
-2. Loads CoreML duration model, split decoder, HAR models, voice pack, and vocab
-3. Initializes espeak-ng for German phonemization
-4. Waits for text packets from LLaMA service (upstream)
-5. Synthesizes speech and sends audio packets to Outbound Audio Processor (downstream)
+1. Loads CoreML duration model, split decoder, HAR models, voice pack, and vocab
+2. Initializes espeak-ng for German phonemization
+3. Opens a TCP connection to the TTS dock on `127.0.0.1:13143`, sends the HELLO line described above, and waits for `OK\n`
+4. Reads text packets the dock forwards from LLaMA
+5. Synthesizes speech and sends audio packets back to the dock, which forwards them to the Outbound Audio Processor
+6. On `CUSTOM SHUTDOWN` from the dock, joins worker threads and exits
 
 ### Environment variables
 
@@ -156,9 +179,9 @@ CALL_END signals terminate the worker thread and clean up resources for that cal
 
 ## Crash Resilience
 
-- If downstream (Outbound Audio Processor) disconnects, synthesized audio is discarded (logged)
-- If upstream (LLaMA) disconnects, the service waits for reconnection
-- The interconnect system handles automatic reconnection via the master node
+- If the dock disconnects (TCP close on port 13143), Kokoro retries the HELLO every 200 ms until accepted again.
+- If LLaMA or OAP are down, the dock drops/queues frames — Kokoro is unaware and keeps its socket open.
+- If the dock sends `CUSTOM SHUTDOWN`, Kokoro exits cleanly via `std::_Exit(0)` after joining workers. The frontend may restart it.
 
 ## File Layout
 
@@ -210,5 +233,5 @@ Measured on Apple Silicon (M-series):
 - macOS-only (CoreML requires Apple frameworks)
 - Requires libtorch dynamic library at runtime (for HAR models and tensor operations)
 - espeak-ng dynamic library at runtime
-- Maximum utterance length: 10 seconds (largest decoder bucket)
+- Maximum utterance length is capped at 120 seconds of PCM buffer (dock-side limit). Individual decoder inference still uses the 3s/5s/10s buckets internally; longer utterances are concatenated chunk-by-chunk.
 - Phoneme cache uses simple clear-all eviction (not LRU)

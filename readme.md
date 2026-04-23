@@ -1,6 +1,6 @@
 # Prodigy
 
-A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. Prodigy integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** or **NeuTTS** (TTS) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal) with no PyTorch runtime dependency.
+A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. Prodigy integrates **Whisper** (ASR), **LLaMA** (LLM), and a generic **TTS stage** (with hot-pluggable **Kokoro** or **NeuTTS** engines) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal) with no PyTorch runtime dependency.
 
 An optional **RAG sidecar** (`tomedo-crawl`) connects to a [Tomedo](https://www.tomedo.de/) electronic medical records (EMR) server, crawls patient data, and feeds LLaMA with per-caller context so the AI can greet patients by name and give medically-informed responses.
 
@@ -15,8 +15,10 @@ An optional **RAG sidecar** (`tomedo-crawl`) connects to a [Tomedo](https://www.
                         |              ^                    GET /caller  │
                        IAP            OAP              GET /query        │
                         |              ^                                 ▼
-                       VAD          Kokoro / NeuTTS               [Ollama embed]
-                        |              ^                          [Vector store ]
+                       VAD            TTS stage                    [Ollama embed]
+                        |              ^  ▲                        [Vector store ]
+                        |              |  │ (engine dock, port 13143)
+                        |              |  └─ Kokoro engine OR NeuTTS engine
                      Whisper ────► LLaMA ◄──────────────────────────────┘
                                                     RAG context injection
 
@@ -137,7 +139,9 @@ All services bind to `127.0.0.1`:
 | VAD | 13115 | 13116 | 13117 | |
 | Whisper | 13120 | 13121 | 13122 | |
 | LLaMA | 13130 | 13131 | 13132 | |
-| Kokoro / NeuTTS | 13140 | 13141 | 13142 | Mutually exclusive |
+| TTS stage (dock) | 13140 | 13141 | 13142 | Engine dock listens on 13143 |
+| Kokoro engine | — | — | 13144 | Docks into TTS stage on 13143 |
+| NeuTTS engine | — | — | 13174 | Docks into TTS stage on 13143 |
 | OAP | 13150 | 13151 | 13152 | |
 | Frontend | - | - | - | HTTP 8080, Log UDP 22022 |
 | tomedo-crawl | 13180 | **13181** | 13182 | REST API on 13181; 13180/13182 reserved |
@@ -219,7 +223,7 @@ Energy-based Voice Activity Detection. Segments continuous 16kHz PCM into speech
 - **Smart-split**: when max chunk length is reached during speech, finds the lowest-energy frame near the boundary to avoid cutting mid-word
 - **Pre-speech context**: 400ms (8 frames × 50ms) before confirmed onset is prepended to each chunk
 - **RMS energy gate**: chunks with RMS < 0.005 discarded as near-silence
-- **SPEECH_ACTIVE/SPEECH_IDLE signals**: broadcast downstream to Kokoro/OAP for TTS interruption
+- **SPEECH_ACTIVE/SPEECH_IDLE signals**: broadcast downstream to the TTS stage (teed to the docked engine) and OAP for TTS interruption and SPEECH_IDLE-driven warm-up
 
 **Command-Line Parameters:**
 
@@ -307,9 +311,55 @@ Generates a spoken German reply from transcribed text using Llama-3.2-1B-Instruc
 
 ---
 
-### 6. Kokoro TTS Service (`bin/kokoro-service`)
+### 6. TTS Stage (`bin/tts-service`) and Engines
 
-Text-to-speech using the Kokoro model. Receives response text from LLaMA and streams 24kHz float32 PCM audio to OAP. No PyTorch dependency — all inference via CoreML on Apple Neural Engine.
+The TTS stage is a generic pipeline node that sits between LLaMA and OAP. It
+owns the interconnect sockets (mgmt 13140, data 13141, cmd 13142) and a
+dedicated **engine dock** on port **13143**. Concrete TTS engines
+(`bin/kokoro-service`, `bin/neutts-service`) are **not** pipeline nodes any
+more — they are client processes that connect to the dock, authenticate via
+a one-line JSON HELLO, and stream audio back through it.
+
+**Engine slot model (last-connect-wins).** The dock holds at most one active
+engine. State transitions:
+
+```
+                 HELLO ok             TCP close / SHUTDOWN ack
+  [NO ENGINE] ─────────────▶ [ACTIVE=X] ─────────────────────▶ [NO ENGINE]
+                                  │
+                                  │  new engine Y completes HELLO ok
+                                  ▼
+                            [SWAPPING X→Y]
+                                  │  dock sends CUSTOM SHUTDOWN to X;
+                                  │  X closes TCP (≤ 2 s) or is force-closed
+                                  ▼
+                              [ACTIVE=Y]
+```
+
+When no engine is docked, LLaMA text frames are dropped with a
+rate-limited WARN log; mgmt signals (CALL_END / SPEECH_ACTIVE /
+SPEECH_IDLE) are still auto-forwarded to OAP. On every swap the dock
+emits a `CUSTOM FLUSH_TTS` mgmt frame to OAP so residual PCM is
+discarded before the new engine's audio arrives.
+
+**Engine dock protocol (TCP, loopback only):**
+1. Engine connects to `127.0.0.1:13143`.
+2. Engine sends one-line JSON HELLO: `{"name":"kokoro","sample_rate":24000,"channels":1,"format":"f32le"}\n`.
+3. Dock replies `OK\n` (accepts) or `ERR <reason>\n` (rejects — the current active engine is untouched).
+4. After OK, frames are tag-prefixed: `0x01` = serialized data `Packet`, `0x02` = mgmt (`MgmtMsgType` + optional payload). The dock ferries LLaMA→engine text, engine→OAP audio, mgmt signals, and PING/PONG keepalives.
+5. On receipt of `CUSTOM SHUTDOWN` the engine process joins its workers, releases model handles, and calls `std::_Exit(0)`.
+
+**Runtime Commands (TTS dock cmd port 13142):**
+
+| Command | Description |
+|---------|-------------|
+| `PING` | Health check → `PONG` |
+| `STATUS` | `ACTIVE <engine-name>` when docked, `NONE` otherwise |
+| `SET_LOG_LEVEL:<LEVEL>` | Change dock log verbosity without restart |
+
+#### 6a. Kokoro engine (`bin/kokoro-service`)
+
+Text-to-speech using the Kokoro model. Receives text from the dock and streams 24kHz float32 PCM audio back through it. No PyTorch dependency — all inference via CoreML on Apple Neural Engine.
 
 **Phonemization pipeline:**
 1. **espeak-ng** (via `libespeak-ng`) converts input text → IPA phoneme string. Language auto-detected (`de` / `en-us`) via `detect_german()`.
@@ -335,12 +385,12 @@ Text-to-speech using the Kokoro model. Receives response text from LLaMA and str
 | `--voice <NAME>` | `df_eva` | Voice to use (`df_eva`, `dm_bernd`) |
 | `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
-**Runtime Commands (cmd port 13142):**
+**Runtime Commands (Kokoro engine cmd port 13144):**
 
 | Command | Description |
 |---------|-------------|
 | `PING` | Health check → `PONG` |
-| `STATUS` | Active calls, upstream/downstream state, current speed |
+| `STATUS` | Active calls, dock connection state, current speed |
 | `SET_SPEED:<0.5–2.0>` | Set synthesis speed (1.0 = normal, clamped to [0.5, 2.0]) |
 | `GET_SPEED` | Query current speed |
 | `TEST_SYNTH:<text>` | Synthesize text and return timing/peak/RMS stats (no audio output) |
@@ -348,11 +398,13 @@ Text-to-speech using the Kokoro model. Receives response text from LLaMA and str
 | `SYNTH_WAV:<path>\|<text>` | Synthesize text and save to WAV file at `<path>` (relative paths only) |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
+On a `CUSTOM SHUTDOWN` frame from the dock the engine joins its synthesis workers and exits; it does **not** restart the pipeline.
+
 ---
 
-### 7. NeuTTS Service (`bin/neutts-service`) — Alternative TTS
+#### 6b. NeuTTS engine (`bin/neutts-service`)
 
-Alternative TTS engine using the NeuTTS Nano German model. Occupies the same pipeline slot as Kokoro (ports 13140–13142) — only one TTS service can run at a time.
+Alternative TTS engine using the NeuTTS Nano German model. Like Kokoro it is a dock client — the dock's single engine slot means only one TTS engine serves traffic at a time, and starting a second engine transparently swaps it in (last-connect-wins).
 
 **Inference pipeline:**
 1. espeak-ng converts input text → IPA phonemes (language `de`, with stress markers)
@@ -372,21 +424,23 @@ Alternative TTS engine using the NeuTTS Nano German model. Occupies the same pip
 |----------|---------|-------------|
 | `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
-**Runtime Commands (cmd port 13142):**
+**Runtime Commands (NeuTTS engine cmd port 13174):**
 
 | Command | Description |
 |---------|-------------|
 | `PING` | Health check → `PONG` |
-| `STATUS` | Active calls, upstream/downstream state |
+| `STATUS` | Active calls, dock connection state |
 | `TEST_SYNTH:<text>` | Synthesize and return timing stats |
 | `SYNTH_WAV:<path>\|<text>` | Synthesize text to a WAV file at the given path |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
+
+On a `CUSTOM SHUTDOWN` frame from the dock the engine joins its synthesis workers and exits.
 
 ---
 
 ### 8. Outbound Audio Processor (`bin/outbound-audio-processor`)
 
-Converts 24kHz float32 PCM from Kokoro/NeuTTS into 160-byte G.711 μ-law frames for the SIP client. Maintains constant 20ms output cadence.
+Converts 24kHz float32 PCM from the TTS stage into 160-byte G.711 μ-law frames for the SIP client. Maintains constant 20ms output cadence.
 
 **Signal chain (per call):**
 1. **DC blocking** (first-order high-pass): α = 0.9947697 (~20Hz cutoff). Removes DC offset and LF rumble. Initialized with the first sample value to avoid onset click.
@@ -395,7 +449,7 @@ Converts 24kHz float32 PCM from Kokoro/NeuTTS into 160-byte G.711 μ-law frames 
 4. **3:1 Decimation**: Keep every 3rd filtered sample (24kHz → 8kHz).
 5. **G.711 μ-law encode** (ITU-T compliant): `ULAW_CLIP=32635`, `ULAW_BIAS=132`. Encodes int16 PCM to 8-bit μ-law byte.
 
-**Output scheduler:** Dedicated sender thread fires every 20ms using `steady_clock`. Sends exactly 160 bytes per tick. If the TTS buffer is empty (silence or Kokoro disconnected), sends `0xFF` (μ-law silence) to maintain RTP clock continuity. Scheduler resync guard: if OS sleep/load spike causes >100ms drift, snaps `next_tick` to `now` instead of firing a burst of catch-up frames.
+**Output scheduler:** Dedicated sender thread fires every 20ms using `steady_clock`. Sends exactly 160 bytes per tick. If the TTS buffer is empty (silence, no engine docked, or a `FLUSH_TTS` just drained residual PCM during an engine swap), sends `0xFF` (μ-law silence) to maintain RTP clock continuity. Scheduler resync guard: if OS sleep/load spike causes >100ms drift, snaps `next_tick` to `now` instead of firing a burst of catch-up frames.
 
 **SPEECH_ACTIVE handling:** Clears all per-call buffers and resets FIR/DC/biquad state immediately when VAD signals caller speech. A configurable sidetone guard (default 1500ms) suppresses flushes arriving shortly after new TTS audio — prevents echo from triggering a spurious flush.
 
@@ -450,6 +504,7 @@ Central control plane. Serves the web UI, manages service lifecycles, aggregates
 | GET | `/api/whisper/models` | List available GGML model files in `models/` |
 | POST | `/api/whisper/accuracy_test` | Run offline Whisper accuracy test on a WAV file |
 | POST | `/api/whisper/hallucination_filter` | Enable/disable Whisper hallucination filter |
+| GET | `/api/tts/status` | TTS-dock engine slot: `{"engine":"kokoro"}`, `{"engine":"neutts"}`, or `{"engine":null}` when no engine is docked |
 | GET/POST | `/api/vad/config` | Read/write VAD parameters (propagated to running service) |
 | GET/POST | `/api/oap/wav_recording` | Read/write OAP WAV recording settings |
 | POST | `/api/sip/add-line` | Register a new SIP account |

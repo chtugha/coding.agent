@@ -12,7 +12,8 @@ Pipeline A                                          Pipeline B
 └────┬─────┘    relay   │   relay)         │    relay   └────┬─────┘
      │                  └──────────────────┘                 │
      ▼                                                       ▼
-   IAP → Whisper → LLaMA → Kokoro → OAP         IAP → Whisper → LLaMA → Kokoro → OAP
+   IAP → VAD → Whisper → LLaMA → TTS → OAP      IAP → VAD → Whisper → LLaMA → TTS → OAP
+   (TTS = tts-service dock + docked Kokoro or NeuTTS engine)
 ```
 
 ### SIP Flow

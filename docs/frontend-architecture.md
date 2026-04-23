@@ -115,6 +115,25 @@ UDP:22022 ─→ log_receiver_loop() ─→ enqueue_log() ─→ flush_log_queue
 
 3. **Document** the endpoint in the file-header API index comment (search for `// HTTP API index` near the top of the file).
 
+### TTS dock status (`GET /api/tts/status`)
+
+The frontend exposes the TTS engine slot via a single read-only endpoint.
+`handle_tts_status()` opens a short-lived TCP connection to the dock's cmd
+port (`127.0.0.1:13142`), writes `STATUS\n`, parses the reply
+(`ACTIVE <name>\n` or `NONE\n`), and returns:
+
+```json
+{"engine": "kokoro"}   // dock up, Kokoro currently docked
+{"engine": "neutts"}   // dock up, NeuTTS currently docked
+{"engine": null}        // dock up, no engine docked
+```
+
+There is **no** selection endpoint — operators switch engines by starting
+the desired engine via `/api/services/start`; the dock performs the
+last-connect-wins swap on its own. `fetchDashboard()` polls this endpoint
+every `POLL_STATUS_MS` and updates the `#pipeline-tts-engine` sub-label
+under the TTS pipeline node.
+
 ## 6. CSS Design System Reference
 
 ### Custom Properties (--wt-*)
@@ -203,7 +222,7 @@ Hardcoded list of test binaries (6 entries):
 | `test_sanity` | Basic sanity checks (2 tests) |
 | `test_interconnect` | Inter-service communication (30 tests) |
 | `test_sip_provider_unit` | SIP provider unit tests (25 tests) |
-| `test_kokoro_cpp` | Kokoro TTS engine tests (4 tests, 2-4 may SKIP without models) |
+| `test_kokoro_cpp` | Kokoro TTS engine tests (4 tests, 2-4 may SKIP without models) — the engine is tested in isolation; full-pipeline TTS runs go through `test_integration` against the TTS dock |
 | `test_integration` | Full pipeline integration (SKIPs without running services) |
 | `test_sip_provider` | SIP provider integration tests |
 

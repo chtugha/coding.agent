@@ -133,8 +133,9 @@ All binaries go to `bin/`:
 - `bin/vad-service`
 - `bin/whisper-service`
 - `bin/llama-service`
-- `bin/kokoro-service`
-- `bin/neutts-service`
+- `bin/tts-service` — generic TTS stage (pipeline node + engine dock)
+- `bin/kokoro-service` — Kokoro engine (dock client)
+- `bin/neutts-service` — NeuTTS engine (dock client)
 - `bin/outbound-audio-processor`
 - `bin/frontend`
 
@@ -172,11 +173,15 @@ Kokoro models are exported by `scripts/export_kokoro_models.py`. It creates its 
 
 See `KOKORO.md` for full details.
 
-## TTS Services (Mutually Exclusive)
+## TTS stage + engines (hot-pluggable dock)
 
-Two TTS services are available. Only one can run at a time — they share the same pipeline slot (KOKORO_SERVICE, ports 13140-13142). Both check at startup if the other is already running:
-- `kokoro-service` — Kokoro TTS with CoreML split decoder (espeak-ng phonemization, HAR synthesis)
-- `neutts-service` — NeuTTS Nano German with llama.cpp backbone + NeuCodec CoreML decoder
+The TTS stage is split into a generic pipeline node plus engine clients.
+
+- `tts-service` — pipeline node (`ServiceType::TTS_SERVICE`, base port 13140: mgmt 13140 / data 13141 / cmd 13142) + engine dock listening on **13143**. This is the only TTS process on the pipeline chain.
+- `kokoro-service` — Kokoro engine. Dock client; cmd port 13144. Uses CoreML split decoder (espeak-ng phonemization, HAR synthesis).
+- `neutts-service` — NeuTTS Nano German engine. Dock client; cmd port 13174. Uses llama.cpp backbone + NeuCodec CoreML decoder.
+
+The dock has a single engine slot with **last-connect-wins** semantics: a new engine completing the one-line JSON HELLO (`{"name":..., "sample_rate":24000, "channels":1, "format":"f32le"}` on port 13143) causes the dock to send `CUSTOM SHUTDOWN` to the outgoing engine and a `CUSTOM FLUSH_TTS` mgmt frame to OAP. There is no startup "other engine already running" check — either engine can be started in any order.
 
 ## Build Order
 

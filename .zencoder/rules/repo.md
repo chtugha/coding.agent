@@ -6,7 +6,7 @@ alwaysApply: true
 # Prodigy Information
 
 ## Summary
-Prodigy is a high-performance, real-time speech-to-speech system designed for low-latency communication. It features a simplified microservice pipeline that integrates **Whisper** (ASR), **LLaMA** (LLM), and **Kokoro** (TTS). The system uses a standalone SIP client as an RTP gateway and is optimized for Apple Silicon (CoreML/Metal).
+Prodigy is a high-performance, real-time speech-to-speech system designed for low-latency communication. It features a simplified microservice pipeline that integrates **Whisper** (ASR), **LLaMA** (LLM), and a generic **TTS stage** with a hot-pluggable engine dock (currently **Kokoro** or **NeuTTS**). The system uses a standalone SIP client as an RTP gateway and is optimized for Apple Silicon (CoreML/Metal).
 
 ## Structure
 The project is organized as a linear pipeline of 7 core C++ programs.
@@ -38,7 +38,12 @@ The project is organized as a linear pipeline of 7 core C++ programs.
 
 ## Pipeline
 ```
-SIP Client → IAP → VAD → Whisper → LLaMA → Kokoro → OAP → SIP Client (loop)
+SIP Client → IAP → VAD → Whisper → LLaMA → TTS stage → OAP → SIP Client (loop)
+                                               ▲
+                                               │ engine dock (127.0.0.1:13143)
+                                               │
+                                       Kokoro engine  ⇄  NeuTTS engine
+                                       (last-connect-wins; only one active)
 ```
 
 ## Core Components
@@ -47,7 +52,9 @@ SIP Client → IAP → VAD → Whisper → LLaMA → Kokoro → OAP → SIP Clie
 - **VAD Service**: [./coding.agent/vad-service.cpp](./coding.agent/vad-service.cpp) ([Summary](./vad-service.md))
 - **Whisper Service**: [./coding.agent/whisper-service.cpp](./coding.agent/whisper-service.cpp) ([Summary](./whisper-service.md))
 - **LLaMA Service**: [./coding.agent/llama-service.cpp](./coding.agent/llama-service.cpp) ([Summary](./llama-service.md))
-- **Kokoro TTS Service**: [./coding.agent/kokoro-service.cpp](./coding.agent/kokoro-service.cpp) ([Summary](./kokoro-service.md))
+- **TTS Stage (dock)**: [./coding.agent/tts-service.cpp](./coding.agent/tts-service.cpp) ([Summary](./tts-service.md)) — `ServiceType::TTS_SERVICE`; owns the LLaMA↔OAP pipeline slot and the engine dock on 13143.
+- **Kokoro engine**: [./coding.agent/kokoro-service.cpp](./coding.agent/kokoro-service.cpp) ([Summary](./kokoro-service.md)) — dock client (not a pipeline node).
+- **NeuTTS engine**: [./coding.agent/neutts-service.cpp](./coding.agent/neutts-service.cpp) — dock client (not a pipeline node).
 - **Outbound Audio Processor**: [./coding.agent/outbound-audio-processor.cpp](./coding.agent/outbound-audio-processor.cpp) ([Summary](./outbound-audio-processor.md))
 
 ## Build & Installation
