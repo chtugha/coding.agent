@@ -2034,14 +2034,58 @@ function runFullLoopTest(){
   const files=Array.from(sel.options).filter(o=>o.selected).map(o=>o.value);
   if(files.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one test file</span>';return;}
   results.innerHTML='';
+  const perEngine=[];
   runWithTestSetup(async({tts})=>{
     const r=await fetch('/api/full_loop_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files})});
     if(r.status!==202){const e=await r.json();throw new Error(e.error||`HTTP ${r.status}`);}
     const d=await r.json();
     status.innerHTML=`<span style="color:var(--wt-accent)">Full loop test running (task ${d.task_id})... [${tts}] This may take several minutes.</span>`;
-    fullLoopPoll=setInterval(()=>pollFullLoopTask(d.task_id),POLL_FULL_LOOP_MS);
-    return _waitForTask(d.task_id,POLL_FULL_LOOP_MS);
-  },{statusEl:status,btnEl:btn});
+    const final=await _waitForTask(d.task_id,POLL_FULL_LOOP_MS);
+    perEngine.push({tts,data:final});
+    renderFullLoopMultiEngine(perEngine);
+    return final;
+  },{statusEl:status,btnEl:btn}).catch(e=>{
+    status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e&&e.message||e))}</span>`;
+  });
+}
+
+function renderFullLoopMultiEngine(perEngine){
+  const results=document.getElementById('fullLoopResults');
+  if(!results)return;
+  let html='';
+  perEngine.forEach(({tts,data})=>{
+    const s=data.summary||{avg_wer:100,avg_similarity:0,avg_e2e_ms:0,pass:0,warn:0,fail:0,total:0};
+    const headerColor=s.avg_wer<=10?'var(--wt-success)':s.avg_wer<=30?'var(--wt-warning)':'var(--wt-danger)';
+    html+=`<div style="margin-top:14px;padding:8px;border:1px solid var(--wt-border);border-radius:4px">`;
+    html+=`<div style="font-weight:bold;margin-bottom:6px;color:${headerColor}">TTS Engine: ${escapeHtml(tts)} &mdash; ${s.pass}/${s.total} passed | Avg WER ${s.avg_wer.toFixed(1)}% | Avg Sim ${s.avg_similarity.toFixed(1)}%</div>`;
+    html+='<table class="wt-table"><tr><th>File</th><th>Whisper L1</th><th>LLaMA Response (last)</th><th>Turns</th><th>Whisper L2</th><th>WER%</th><th>Sim%</th><th>Conv</th><th>Status</th></tr>';
+    (data.results||[]).forEach(r=>{
+      const color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
+      const werColor=(r.wer||100)<=10?'var(--wt-success)':(r.wer||100)<=30?'var(--wt-warning)':'var(--wt-danger)';
+      const simColor=(r.similarity||0)>=70?'var(--wt-success)':(r.similarity||0)>=40?'var(--wt-warning)':'var(--wt-danger)';
+      html+='<tr>';
+      html+=`<td style="font-size:11px">${escapeHtml(r.file||'')}</td>`;
+      html+=`<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.whisper_l1||'')}</td>`;
+      html+=`<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.llama_response||r.error||'')}</td>`;
+      html+=`<td style="text-align:center">${r.llama_turns!=null?r.llama_turns:'&mdash;'}</td>`;
+      html+=`<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.whisper_l2||'')}</td>`;
+      html+=`<td style="color:${werColor};font-weight:bold">${r.wer!=null?r.wer.toFixed(1):'&mdash;'}</td>`;
+      html+=`<td style="color:${simColor};font-weight:bold">${r.similarity!=null?r.similarity.toFixed(1):'&mdash;'}</td>`;
+      html+=`<td>${((r.e2e_ms||0)/1000).toFixed(0)}s</td>`;
+      html+=`<td style="color:${color}">${escapeHtml(r.status||'')}</td>`;
+      html+='</tr>';
+    });
+    html+='</table></div>';
+  });
+  if(perEngine.length>1){
+    html+='<div style="margin-top:14px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px"><strong>Engine comparison:</strong><table class="wt-table" style="margin-top:6px"><tr><th>Engine</th><th>Avg WER%</th><th>Avg Sim%</th><th>Pass</th><th>Warn</th><th>Fail</th></tr>';
+    perEngine.forEach(({tts,data})=>{
+      const s=data.summary||{};
+      html+=`<tr><td><strong>${escapeHtml(tts)}</strong></td><td>${(s.avg_wer||0).toFixed(1)}</td><td>${(s.avg_similarity||0).toFixed(1)}</td><td>${s.pass||0}</td><td>${s.warn||0}</td><td>${s.fail||0}</td></tr>`;
+    });
+    html+='</table></div>';
+  }
+  results.innerHTML=html;
 }
 
 function pollFullLoopTask(taskId){
