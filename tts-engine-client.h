@@ -85,6 +85,7 @@ public:
     static constexpr size_t MAX_HELLO_LINE     = 1024;
     static constexpr size_t MAX_TEXT_QUEUE     = 32;      // bounded backpressure
     static constexpr size_t MAX_PACKET_HEADER  = 8;       // Packet::serialized prefix
+    static constexpr uint16_t MAX_CUSTOM_PAYLOAD = 4096;  // match dock's kCustomMgmtMaxLen
 
     EngineClient() = default;
     ~EngineClient() { shutdown(); }
@@ -376,7 +377,8 @@ private:
                 uint16_t net_len;
                 std::memcpy(&net_len, len_buf, 2);
                 uint16_t len = ntohs(net_len);
-                if (len == 0) return true;  // empty payload: ignore
+                if (len > MAX_CUSTOM_PAYLOAD) return false;
+                if (len == 0) return true;
                 std::vector<uint8_t> payload(len);
                 if (!recv_exact(sock, payload.data(), len, RECV_POLL_TIMEOUT_MS * 5)) return false;
                 std::string key(reinterpret_cast<char*>(payload.data()), len);
@@ -519,7 +521,12 @@ private:
             // Build adjusted iovec accounting for partial sends.
             iovec local[8];
             int lcount = 0;
-            if (iovcnt - idx > 8) return false;
+            if (iovcnt - idx > 8) {
+                std::fprintf(stderr,
+                    "[EngineClient] send_iov: iovcnt=%d exceeds local[8] capacity (idx=%d); dropping frame\n",
+                    iovcnt, idx);
+                return false;
+            }
             for (int i = idx; i < iovcnt; i++) {
                 iovec& dst = local[lcount++];
                 if (i == idx) {

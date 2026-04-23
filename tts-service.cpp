@@ -412,16 +412,14 @@ public:
         }
         if (slot) retire_slot(slot, /*send_flush=*/false);
 
-        // Join any swap-watcher threads spawned by install_new_slot so
-        // they cannot outlive TTSDock and reference freed members.
-        std::vector<std::thread> watchers;
+        std::vector<WatcherEntry> watchers;
         {
             std::lock_guard<std::mutex> wlock(watchers_mutex_);
             watchers = std::move(swap_watchers_);
             swap_watchers_.clear();
         }
-        for (auto& t : watchers) {
-            if (t.joinable()) t.join();
+        for (auto& w : watchers) {
+            if (w.thread.joinable()) w.thread.join();
         }
 
         node_.shutdown();
@@ -592,7 +590,8 @@ private:
             // Tracked in `swap_watchers_` (not detached) so `shutdown()`
             // joins it before TTSDock is destroyed — otherwise the
             // lambda could outlive `this` and reference dead members.
-            std::thread watcher([old_slot]() {
+            auto done = std::make_shared<std::atomic<bool>>(false);
+            std::thread watcher([old_slot, done]() {
                 auto start = std::chrono::steady_clock::now();
                 while (old_slot->alive.load() &&
                        std::chrono::steady_clock::now() - start <
@@ -605,10 +604,12 @@ private:
                 if (old_slot->recv_thread.joinable()) old_slot->recv_thread.join();
                 if (old_slot->ping_thread.joinable()) old_slot->ping_thread.join();
                 ::close(old_slot->fd);
+                done->store(true, std::memory_order_release);
             });
             {
                 std::lock_guard<std::mutex> wlock(watchers_mutex_);
-                swap_watchers_.push_back(std::move(watcher));
+                prune_finished_watchers_locked();
+                swap_watchers_.push_back({std::move(watcher), done});
             }
         } else {
             std::fprintf(stderr, "[TTS] engine connected (%s)\n", new_slot->name.c_str());
@@ -662,14 +663,17 @@ private:
             // watcher runs from a *different* thread, joins both, then
             // closes the fd. Tracked in `swap_watchers_` so `shutdown()`
             // joins it before the dock is destroyed.
-            std::thread watcher([slot]() {
+            auto done = std::make_shared<std::atomic<bool>>(false);
+            std::thread watcher([slot, done]() {
                 if (slot->recv_thread.joinable()) slot->recv_thread.join();
                 if (slot->ping_thread.joinable()) slot->ping_thread.join();
                 if (slot->fd >= 0) ::close(slot->fd);
+                done->store(true, std::memory_order_release);
             });
             {
                 std::lock_guard<std::mutex> wlock(watchers_mutex_);
-                swap_watchers_.push_back(std::move(watcher));
+                prune_finished_watchers_locked();
+                swap_watchers_.push_back({std::move(watcher), done});
             }
         }
     }
@@ -849,6 +853,10 @@ private:
     }
 
     void tee_call_end_to_engine(uint32_t call_id) {
+        {
+            std::lock_guard<std::mutex> lock(drop_log_mutex_);
+            last_drop_log_ms_.erase(call_id);
+        }
         auto slot = current_slot();
         if (!slot) return;
         send_mgmt_call_id(slot, MgmtMsgType::CALL_END, call_id);
@@ -980,11 +988,24 @@ private:
     std::shared_ptr<EngineSlot> active_slot_;
     std::atomic<uint64_t> next_generation_{0};
 
-    // Background watchers that tear down retired engine slots after a
-    // swap. Tracked here (not detached) so `shutdown()` can join them
-    // before TTSDock goes out of scope.
+    struct WatcherEntry {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+
     std::mutex watchers_mutex_;
-    std::vector<std::thread> swap_watchers_;
+    std::vector<WatcherEntry> swap_watchers_;
+
+    void prune_finished_watchers_locked() {
+        for (auto& w : swap_watchers_) {
+            if (w.done->load(std::memory_order_acquire) && w.thread.joinable())
+                w.thread.join();
+        }
+        swap_watchers_.erase(
+            std::remove_if(swap_watchers_.begin(), swap_watchers_.end(),
+                [](const WatcherEntry& w) { return !w.thread.joinable(); }),
+            swap_watchers_.end());
+    }
 
     mutable std::mutex drop_log_mutex_;
     std::map<uint32_t, int64_t> last_drop_log_ms_;

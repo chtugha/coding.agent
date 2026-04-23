@@ -2024,9 +2024,7 @@ results.innerHTML=html;
   }).catch(e=>console.error('pollTtsRoundtripTask',e));
 }
 
-let fullLoopPoll=null;
 function runFullLoopTest(){
-  if(fullLoopPoll){clearInterval(fullLoopPoll);fullLoopPoll=null;}
   const status=document.getElementById('fullLoopStatus');
   const results=document.getElementById('fullLoopResults');
   const btn=document.getElementById('fullLoopBtn');
@@ -2086,46 +2084,6 @@ function renderFullLoopMultiEngine(perEngine){
     html+='</table></div>';
   }
   results.innerHTML=html;
-}
-
-function pollFullLoopTask(taskId){
-  fetch(`/api/async/status?task_id=${taskId}`).then(r=>r.json()).then(d=>{
-if(d.status==='running') return;
-clearInterval(fullLoopPoll);fullLoopPoll=null;
-document.getElementById('fullLoopBtn').disabled=false;
-const status=document.getElementById('fullLoopStatus');
-const results=document.getElementById('fullLoopResults');
-if(d.error){status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(d.error)}</span>`;return;}
-const s=d.summary;
-status.innerHTML=`<span style="color:${s.avg_wer<=10?'var(--wt-success)':s.avg_wer<=30?'var(--wt-warning)':'var(--wt-danger)'}">Full loop complete — ${s.pass}/${s.total} passed | Avg WER: ${s.avg_wer.toFixed(1)}% | Avg Sim: ${s.avg_similarity.toFixed(1)}%</span>`;
-let html='<table class="wt-table"><tr><th>File</th><th>Whisper L1</th><th>LLaMA Response (last)</th><th>Turns</th><th>Whisper L2</th><th>WER%</th><th>Sim%</th><th>Conv</th><th>Status</th></tr>';
-d.results.forEach(r=>{
-  const color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
-  const werColor=(r.wer||100)<=10?'var(--wt-success)':(r.wer||100)<=30?'var(--wt-warning)':'var(--wt-danger)';
-  const simColor=(r.similarity||0)>=70?'var(--wt-success)':(r.similarity||0)>=40?'var(--wt-warning)':'var(--wt-danger)';
-  html+='<tr>';
-  html+=`<td style="font-size:11px">${escapeHtml(r.file)}</td>`;
-  html+=`<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.whisper_l1||'')}</td>`;
-  html+=`<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.llama_response||r.error||'')}</td>`;
-  html+=`<td style="text-align:center">${r.llama_turns!=null?r.llama_turns:'—'}</td>`;
-  html+=`<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml(r.whisper_l2||'')}</td>`;
-  html+=`<td style="color:${werColor};font-weight:bold">${r.wer!=null?r.wer.toFixed(1):'—'}</td>`;
-  html+=`<td style="color:${simColor};font-weight:bold">${r.similarity!=null?r.similarity.toFixed(1):'—'}</td>`;
-  html+=`<td>${((r.e2e_ms||0)/1000).toFixed(0)}s</td>`;
-  html+=`<td style="color:${color}">${escapeHtml(r.status)}</td>`;
-  html+='</tr>';
-});
-html+='</table>';
-if(s){
-  html+=`<div style="margin-top:10px;padding:10px;background:var(--wt-bg);border-radius:4px;font-size:12px">`;
-  html+=`<strong>Summary:</strong> Avg WER: ${s.avg_wer.toFixed(1)}%`;
-  html+=` | Avg Similarity: ${s.avg_similarity.toFixed(1)}%`;
-  html+=` | Avg E2E: ${(s.avg_e2e_ms/1000).toFixed(1)}s`;
-  html+=` | Pass (WER&le;10%): ${s.pass} | Warn: ${s.warn} | Fail: ${s.fail}`;
-  html+='</div>';
-}
-results.innerHTML=html;
-  }).catch(e=>console.error('pollFullLoopTask',e));
 }
 
 function checkSipProvider(){
