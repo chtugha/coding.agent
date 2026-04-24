@@ -291,10 +291,80 @@ def load_kokoro_model(disable_complex=True):
             spec.loader.exec_module(mod)
 
     from kokoro.model import KModel
-    print(f"  Loading model from {MODEL_PATH}...")
-    kmodel = KModel(config=CONFIG_PATH, model=MODEL_PATH, disable_complex=disable_complex)
+    model_path = _remap_checkpoint_if_needed(MODEL_PATH)
+    print(f"  Loading model from {model_path}...")
+    kmodel = KModel(config=CONFIG_PATH, model=model_path, disable_complex=disable_complex)
     kmodel.eval()
     return kmodel
+
+
+def _remap_checkpoint_if_needed(path):
+    """Normalize StyleTTS2/Kokoro-derived checkpoints that were saved from a
+    DataParallel-wrapped model (`module.` prefix on every key) or with the
+    new `torch.nn.utils.parametrize` weight-norm API
+    (`parametrizations.weight.original0/1`). KModel's loader expects bare
+    keys with the deprecated `weight_g`/`weight_v` layout, so any foreign
+    checkpoint using the new conventions silently fails to load conv
+    weights and produces garbage audio. We rewrite to a sibling .remapped
+    file once and point the caller at it."""
+    import torch
+    try:
+        sd = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as e:
+        print(f"  _remap_checkpoint_if_needed: torch.load failed ({e}) — using original")
+        return path
+    if not isinstance(sd, dict):
+        return path
+
+    def needs_remap(d):
+        if not isinstance(d, dict):
+            return False
+        for k in d.keys():
+            if not isinstance(k, str):
+                continue
+            if k.startswith("module."):
+                return True
+            if ".parametrizations.weight.original" in k:
+                return True
+        return False
+
+    any_needed = False
+    for v in sd.values():
+        if needs_remap(v):
+            any_needed = True
+            break
+
+    if not any_needed:
+        return path
+
+    remapped_path = path + ".remapped.pth"
+    if os.path.exists(remapped_path) and os.path.getsize(remapped_path) > 1_000_000:
+        print(f"  Using previously remapped checkpoint: {remapped_path}")
+        return remapped_path
+
+    print("  Remapping checkpoint keys (DataParallel/parametrize -> KModel layout)...")
+    new_sd = {}
+    total_renames = 0
+    for group, tensors in sd.items():
+        if not isinstance(tensors, dict):
+            new_sd[group] = tensors
+            continue
+        new_group = {}
+        for k, v in tensors.items():
+            nk = k
+            if nk.startswith("module."):
+                nk = nk[len("module."):]
+            nk = nk.replace(".parametrizations.weight.original0", ".weight_g")
+            nk = nk.replace(".parametrizations.weight.original1", ".weight_v")
+            if nk != k:
+                total_renames += 1
+            new_group[nk] = v
+        new_sd[group] = new_group
+
+    torch.save(new_sd, remapped_path)
+    print(f"  Remapped {total_renames} keys -> {remapped_path} "
+          f"({os.path.getsize(remapped_path) / 1e6:.1f} MB)")
+    return remapped_path
 
 
 def remove_training_ops(model):
