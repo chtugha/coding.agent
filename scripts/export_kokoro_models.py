@@ -309,6 +309,7 @@ def _remap_checkpoint_if_needed(path):
     file once and point the caller at it."""
     import torch
     try:
+        # weights_only=False required: checkpoint may contain non-tensor metadata (e.g. config dicts).
         sd = torch.load(path, map_location="cpu", weights_only=False)
     except Exception as e:
         print(f"  _remap_checkpoint_if_needed: torch.load failed ({e}) — using original")
@@ -338,7 +339,9 @@ def _remap_checkpoint_if_needed(path):
         return path
 
     remapped_path = path + ".remapped.pth"
-    if os.path.exists(remapped_path) and os.path.getsize(remapped_path) > 1_000_000:
+    if (os.path.exists(remapped_path)
+            and os.path.getsize(remapped_path) > 1_000_000
+            and os.path.getmtime(remapped_path) >= os.path.getmtime(path)):
         print(f"  Using previously remapped checkpoint: {remapped_path}")
         return remapped_path
 
@@ -354,6 +357,8 @@ def _remap_checkpoint_if_needed(path):
             nk = k
             if nk.startswith("module."):
                 nk = nk[len("module."):]
+            # original0 = g (norm/magnitude), original1 = v (direction) — matches PyTorch
+            # WeightNorm parameter registration order in torch.nn.utils.parametrize.
             nk = nk.replace(".parametrizations.weight.original0", ".weight_g")
             nk = nk.replace(".parametrizations.weight.original1", ".weight_v")
             if nk != k:
