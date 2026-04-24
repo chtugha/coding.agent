@@ -76,17 +76,11 @@ When the **TOMEDO_CRAWL** service card is selected, an expanded configuration pa
 
 ### Testing Section
 
-**Test Runner**: Lists available test binaries (test_sanity, test_interconnect, etc.). Click a test to configure arguments and run it. Live output streams to the log view. History of past runs shown below.
-
-**Test Results**: Aggregated view across all test types with:
-- Summary metric cards (Total Tests, Pass Rate, Average Latency)
-- Chart.js trend chart with filters (test type, date range)
-- Sortable results table with status badges
-
-**Beta Tests**: Organized into three tabs:
+**Tests**: Organized into four tabs:
 - **Component Tests**: SIP RTP Routing, IAP Codec Quality, Whisper Accuracy, LLaMA Quality, Kokoro TTS Quality
 - **Pipeline Tests**: Shut-Up Mechanism, Full Pipeline Round-Trip, Pipeline Resilience, Stress Tests
 - **Tools**: Test Audio Files browser, Audio Injection, SIP Lines Management
+- **Test Results**: Aggregated view across all test types with summary metric cards (Total Tests, Pass Rate, Average Latency), Chart.js trend chart with filters (test type, date range), sortable results table with status badges, and side-by-side comparison
 
 Each test panel is collapsible (click the header to expand/collapse).
 
@@ -110,7 +104,9 @@ Click the palette icon at the bottom of the sidebar to choose a theme:
 
 The selected theme persists in the SQLite `settings` table.
 
-## Test Results Page
+## Test Results Tab
+
+The Test Results tab is accessible within the **Tests** page as the fourth tab.
 
 ### Filtering
 
@@ -126,11 +122,11 @@ The trend chart shows test results over time. Hover for details. The chart uses 
 
 Sortable columns: Type, Service, Status, Timestamp. Status badges are color-coded: green (pass), red (fail), yellow (warn).
 
-## Beta Tests Page
+## Tests Page
 
 ### Running a Component Test
 
-1. Navigate to **Beta Tests** > **Component Tests** tab
+1. Navigate to **Tests** > **Component Tests** tab
 2. Click a test panel header to expand it
 3. Configure parameters if needed (e.g., select audio file, choose model)
 4. Click **Run Test**
@@ -138,7 +134,7 @@ Sortable columns: Type, Service, Status, Timestamp. Status badges are color-code
 
 ### Running a Pipeline Test
 
-1. Navigate to **Beta Tests** > **Pipeline Tests** tab
+1. Navigate to **Tests** > **Pipeline Tests** tab
 2. Select a test (e.g., Full Pipeline Round-Trip)
 3. Ensure required services are running (check Dashboard)
 4. Click **Run Test**

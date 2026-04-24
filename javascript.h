@@ -8,8 +8,8 @@ inline std::string FrontendServer::build_ui_js() {
     std::string port_str = std::to_string(http_port_);
     std::string tsp_port_str = std::to_string(TEST_SIP_PROVIDER_PORT);
     std::string js = R"JS(
-let currentPage='dashboard',currentTest=null,currentSvc=null;
-let logSSE=null,svcLogSSE=null,testLogPoll=null;
+let currentPage='dashboard',currentSvc=null;
+let logSSE=null,svcLogSSE=null;
 const TSP_PORT=)JS" + tsp_port_str + R"JS(;
 // JS named constants — all setInterval/setTimeout delays and limits.
 // POLL_*  = recurring poll intervals.  DELAY_* = one-shot timeouts.
@@ -201,13 +201,11 @@ e.classList.toggle('active',e.dataset.page===p);
   });
   currentPage=p;
   if(p!=='dashboard')stopDashboardPoll();
-  if(p!=='test-results')stopTestResultsPoll();
+  if(p!=='beta-testing')stopTestResultsPoll();
   if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();}
-  if(p==='tests'){showTestsOverview();fetchTests();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){try{buildSipLinesGrid();}catch(e){console.error('buildSipLinesGrid:',e);}try{refreshTestFiles();}catch(e){console.error('refreshTestFiles:',e);}try{loadVadConfig();}catch(e){}try{loadLlamaPrompts();}catch(e){}try{refreshInjectLegs();}catch(e){}try{updateBetaSummaryDots();}catch(e){}startPrereqPoll();}else{stopPrereqPoll();}
   if(p==='models'){loadModels();loadModelComparison();}
-  if(p==='test-results'){fetchTestResultsPage();startTestResultsPoll();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
   if(p==='credentials'){loadCredentials();}
@@ -351,135 +349,6 @@ d.services.forEach(s=>{
   if(!s.online&&s.managed)fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service:s.name})});
 });
 setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
-  });
-}
-
-function fetchTests(){
-  fetch('/api/tests').then(r=>r.json()).then(d=>{
-document.getElementById('testsBadge').textContent=d.tests.length;
-const c=document.getElementById('testsContainer');
-c.innerHTML=d.tests.map(t=>{
-  const status=t.is_running?'<span class="wt-badge wt-badge-success"><span class="wt-status-dot running"></span>Running</span>'
-    :(t.exit_code===0&&t.end_time?'<span class="wt-badge wt-badge-secondary">Passed</span>'
-    :(t.exit_code>0?`<span class="wt-badge wt-badge-danger">Failed (${escapeHtml(String(t.exit_code))})</span>`
-    :'<span class="wt-badge wt-badge-secondary">Idle</span>'));
-  const eName=escapeHtml(t.name),eDesc=escapeHtml(t.description),ePath=escapeHtml(t.binary_path);
-  const dotState=t.is_running?'running':(t.exit_code===0&&t.end_time?'online':'offline');
-  return `<div class="wt-card" style="cursor:pointer" data-test-name="${escapeHtml(t.name)}" onclick="showTestDetail(this.dataset.testName)">`
-    +`<div class="wt-card-header"><span class="wt-card-title">`
-    +`<span class="wt-status-dot ${dotState}"></span>`
-    +`${eName}</span>${status}</div>`
-    +`<div style="font-size:12px;color:var(--wt-text-secondary)">${eDesc}</div>`
-    +`<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">${ePath}</div>`
-    +'</div>';
-}).join('');
-if(currentTest){
-  const t=d.tests.find(x=>x.name===currentTest);
-  if(t)updateTestDetail(t);
-}
-  });
-}
-
-function showTestDetail(name){
-  currentTest=name;
-  document.getElementById('tests-overview').classList.add('hidden');
-  document.getElementById('tests-detail').classList.remove('hidden');
-  document.getElementById('testDetailName').textContent=name;
-  fetch('/api/tests').then(r=>r.json()).then(d=>{
-const t=d.tests.find(x=>x.name===name);
-if(t)updateTestDetail(t);
-  });
-  loadTestHistory(name);
-  pollTestLog();
-}
-
-function updateTestDetail(t){
-  const s=t.is_running?'<span class="wt-badge wt-badge-success">Running</span>'
-:(t.exit_code===0&&t.end_time?'<span class="wt-badge wt-badge-secondary">Passed</span>'
-:(t.exit_code>0?'<span class="wt-badge wt-badge-danger">Failed</span>':'<span class="wt-badge wt-badge-secondary">Idle</span>'));
-  document.getElementById('testDetailStatus').innerHTML=s;
-  document.getElementById('testStopBtn').style.display=t.is_running?'':'none';
-  if(!document.getElementById('testDetailArgs').value&&t.default_args){
-document.getElementById('testDetailArgs').value=Array.isArray(t.default_args)?t.default_args.join(' '):t.default_args;
-  }
-}
-
-function showTestsOverview(){
-  currentTest=null;
-  if(testLogPoll){clearInterval(testLogPoll);testLogPoll=null;}
-  document.getElementById('tests-overview').classList.remove('hidden');
-  document.getElementById('tests-detail').classList.add('hidden');
-}
-
-function startTestDetail(){
-  if(!currentTest)return;
-  const logEl=document.getElementById('testDetailLog');
-  const btnEl=document.getElementById('testDetailRunBtn');
-  const statusEl=document.getElementById('testDetailSetupStatus');
-  runWithTestSetup(async()=>{
-    const args=document.getElementById('testDetailArgs').value;
-    return new Promise((resolve,reject)=>{
-      fetch('/api/tests/start',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({test:currentTest,args})}).then(r=>r.json()).then(d=>{
-        if(d.error){
-          logEl.textContent=`Error: ${d.error}`;
-          showToast(`Failed to start test: ${d.error}`,'error');
-          reject(new Error(d.error));
-        }else{
-          logEl.textContent='Running...';
-          setTimeout(fetchTests,DELAY_TEST_REFRESH_MS);pollTestLog();
-          // Resolve when the test process exits (poll for running=false)
-          let seenRunning=false;
-          const iv=setInterval(()=>{
-            fetch('/api/tests').then(r=>r.json()).then(tests=>{
-              const t=(tests.tests||[]).find(x=>x.name===currentTest);
-              if(t&&t.running)seenRunning=true;
-              if(seenRunning&&(!t||!t.running)){clearInterval(iv);resolve();}
-            }).catch(()=>{});
-          },2000);
-          setTimeout(()=>{clearInterval(iv);resolve();},TEST_TIMEOUT_MS);
-        }
-      }).catch(e=>{
-        logEl.textContent=`Network error: ${e}`;
-        showToast(`Failed to start test: ${e}`,'error');
-        reject(e);
-      });
-    });
-  },{statusEl,btnEl});
-}
-
-function stopTestDetail(){
-  if(!currentTest)return;
-  fetch('/api/tests/stop',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({test:currentTest})}).then(()=>setTimeout(fetchTests,DELAY_TEST_REFRESH_MS));
-}
-
-function clearTestLog(){document.getElementById('testDetailLog').textContent='';}
-
-function pollTestLog(){
-  if(testLogPoll)clearInterval(testLogPoll);
-  testLogPoll=setInterval(()=>{
-if(!currentTest)return;
-fetch(`/api/tests/${encodeURIComponent(currentTest)}/log`).then(r=>r.json()).then(d=>{
-  if(d.log){
-    const el=document.getElementById('testDetailLog');
-    el.textContent=d.log;
-    el.scrollTop=el.scrollHeight;
-  }
-}).catch(()=>{});
-  },POLL_TEST_LOG_MS);
-}
-
-function loadTestHistory(name){
-  fetch(`/api/tests/${encodeURIComponent(name)}/history`).then(r=>r.json()).then(d=>{
-const tb=document.getElementById('testHistoryBody');
-tb.innerHTML=d.runs.map(r=>{
-  const started=r.start_time?new Date(r.start_time*1000).toLocaleString():'--';
-  const dur=r.end_time&&r.start_time?`${r.end_time-r.start_time}s`:'--';
-  const code=r.exit_code===0?'<span class="wt-badge wt-badge-success">0</span>'
-    :`<span class="wt-badge wt-badge-danger">${escapeHtml(String(r.exit_code))}</span>`;
-  return `<tr><td>${escapeHtml(started)}</td><td>${escapeHtml(dur)}</td><td>${code}</td><td style="font-family:var(--wt-mono);font-size:12px">${escapeHtml(r.arguments||'--')}</td></tr>`;
-}).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--wt-text-secondary)">No history</td></tr>';
   });
 }
 
@@ -1910,7 +1779,7 @@ function stopPipelineStressTest(){
 document.getElementById('pstressStatus').innerHTML='<span style="color:var(--wt-warning)">Stopping...</span>';
   });
 }
-const svcNames=['SIP','IAP','VAD','Whisper','LLaMA','Kokoro','OAP'];
+const svcNames=['SIP','IAP','VAD','Whisper','LLaMA','TTS','OAP'];
 function pollPipelineStress(dur){
   fetch('/api/pipeline_stress/progress').then(r=>r.json()).then(d=>{
 if(d.error){return;}
@@ -2437,9 +2306,8 @@ function exportTestResultsPage(){
 }
 
 setInterval(fetchStatus,POLL_STATUS_MS);
-setInterval(fetchTests,POLL_TESTS_MS);
 setInterval(fetchServices,POLL_SERVICES_MS);
-fetchStatus();fetchTests();fetchServices();loadTtsPreference();showPage('dashboard');
+fetchStatus();fetchServices();loadTtsPreference();showPage('dashboard');
 document.getElementById('statusText').textContent='Port )JS" + port_str + R"JS(';
 
 document.getElementById('sqlQuery').addEventListener('keydown',e=>{
@@ -2844,7 +2712,7 @@ async function runAllBetaTests(){
         if(s&&s.style.display!=='none'){clearInterval(iv);res();}
       },1000);
       setTimeout(()=>{clearInterval(iv);res();},60000);
-    }),requires:['WHISPER_SERVICE','VAD_SERVICE']},
+    }),requires:['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE']},
     {name:'LLaMA Quality',fn:()=>new Promise((res,rej)=>{
       const sel=document.getElementById('llamaTestPrompts');
       if(sel&&sel.options.length>0)sel.options[0].selected=true;
@@ -2915,7 +2783,7 @@ if(hasPass) return 'success';
 return 'neutral';
   };
   var colorMap={success:'var(--wt-success,#34c759)',danger:'var(--wt-danger,#ff3b30)',neutral:'var(--wt-text-secondary)'};
-  ['Component','Pipeline','Tools'].forEach(function(name){
+  ['Component','Pipeline','Tools','Results'].forEach(function(name){
 var dot=document.getElementById('betaDot'+name);
 if(dot) dot.style.background=colorMap[getTabStatus('beta-'+name.toLowerCase())];
   });
@@ -2937,6 +2805,7 @@ btn.setAttribute('aria-selected',active?'true':'false');
   document.querySelectorAll('#betaTestPanes .wt-tab-pane').forEach(pane=>{
 pane.classList.toggle('active',pane.id===tabId);
   });
+  if(tabId==='beta-results'){fetchTestResultsPage();startTestResultsPoll();}else{stopTestResultsPoll();}
   updateBetaSummaryDots();
 }
 
@@ -2947,10 +2816,10 @@ function updatePrereqBadges(){
     const prereqs={
       'prereq-sip-rtp':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR'],
       'prereq-iap':[],
-      'prereq-whisper':['WHISPER_SERVICE','VAD_SERVICE'],
+      'prereq-whisper':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE'],
       'prereq-llama':['LLAMA_SERVICE'],
       'prereq-kokoro':['TTS_SERVICE','KOKORO_ENGINE'],
-      'prereq-shutup-pipeline':['LLAMA_SERVICE'],
+      'prereq-shutup-pipeline':['LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
       'prereq-roundtrip':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
       'prereq-fullloop':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
       'prereq-health':[],
@@ -2977,7 +2846,7 @@ if(debounceTimer) clearTimeout(debounceTimer);
 debounceTimer=setTimeout(updateBetaSummaryDots,DELAY_DEBOUNCE_MS);
   };
   const observer=new MutationObserver(debouncedUpdate);
-  ['beta-component','beta-pipeline','beta-tools'].forEach(id=>{
+  ['beta-component','beta-pipeline','beta-tools','beta-results'].forEach(id=>{
 const pane=document.getElementById(id);
 if(pane) observer.observe(pane,{childList:true,subtree:true,characterData:true});
   });

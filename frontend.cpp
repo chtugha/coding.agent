@@ -1336,12 +1336,8 @@ private:
 </div>
 <div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Testing</p>
-<a class="wt-nav-item" data-page="tests" onclick="showPage('tests')">
-<i class="nav-icon fas fa-flask" aria-hidden="true"></i><span class="nav-text">Test Runner</span><span class="nav-badge" id="testsBadge">0</span></a>
-<a class="wt-nav-item" data-page="test-results" onclick="showPage('test-results')">
-<i class="nav-icon fas fa-chart-bar" aria-hidden="true"></i><span class="nav-text">Test Results</span></a>
 <a class="wt-nav-item" data-page="beta-testing" onclick="showPage('beta-testing')">
-<i class="nav-icon fas fa-crosshairs" aria-hidden="true"></i><span class="nav-text">Beta Tests</span></a>
+<i class="nav-icon fas fa-crosshairs" aria-hidden="true"></i><span class="nav-text">Tests</span></a>
 </div>
 <div class="wt-sidebar-section">
 <p class="wt-sidebar-section-title">Configuration</p>

@@ -96,45 +96,6 @@ inline std::string FrontendServer::build_ui_pages() {
 
 </div></div>
 
-<div class="wt-page" id="page-tests">
-<div class="wt-content">
-<div id="tests-overview">
-<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px">
-<h2 class="wt-page-title" style="margin:0">Tests</h2>
-<label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-left:auto">TTS:
-<select class="wt-select tts-pref-select" onchange="setTtsPreference(this.value)" style="font-size:12px;padding:2px 6px">
-<option value="auto">Auto (Kokoro + NeuTTS)</option>
-<option value="kokoro">Kokoro only</option>
-<option value="neutts">NeuTTS only</option>
-</select>
-</label>
-</div>
-<div id="testsContainer"></div>
-</div>
-<div id="tests-detail" class="hidden">
-<div class="wt-detail-back" onclick="showTestsOverview()">&#x2190; All Tests</div>
-<h2 class="wt-page-title" id="testDetailName"></h2>
-<div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Configuration</span>
-<span id="testDetailStatus"></span></div>
-<div class="wt-field"><label>Arguments</label>
-<input class="wt-input" id="testDetailArgs" placeholder="e.g. --gtest_filter=*MyTest*"></div>
-<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-<button class="wt-btn wt-btn-primary" id="testDetailRunBtn" onclick="startTestDetail()">&#x25B6; Run</button>
-<button class="wt-btn wt-btn-danger" id="testStopBtn" onclick="stopTestDetail()" style="display:none">&#x25A0; Stop</button>
-<span id="testDetailSetupStatus" style="font-size:12px"></span>
-</div></div>
-<div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Live Output</span>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="clearTestLog()">Clear</button></div>
-<div class="wt-log-view" id="testDetailLog">Waiting for output...</div>
-</div>
-<div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Run History</span></div>
-<table class="wt-table"><thead><tr><th>Started</th><th>Duration</th><th>Exit Code</th><th>Arguments</th></tr></thead>
-<tbody id="testHistoryBody"></tbody></table>
-</div></div></div></div>
-
 <div class="wt-page" id="page-services">
 <div class="wt-content">
 <div id="services-overview">
@@ -340,60 +301,6 @@ Save outgoing audio as WAV</label>
 <div class="wt-log-view" id="liveLogView" style="max-height:calc(100vh - 200px)"></div>
 </div></div>
 
-<div class="wt-page" id="page-test-results">
-<div class="wt-content">
-<h2 class="wt-page-title">Test Results</h2>
-<div class="wt-metrics-grid" style="grid-template-columns:repeat(3,1fr)">
-<div class="wt-metric-card" style="background:var(--wt-gradient-info)">
-<div class="metric-value" id="trMetricTotal">0</div>
-<div class="metric-label">Total Tests</div>
-</div>
-<div class="wt-metric-card" style="background:var(--wt-gradient-success)">
-<div class="metric-value" id="trMetricPassRate">0%</div>
-<div class="metric-label">Pass Rate</div>
-</div>
-<div class="wt-metric-card" style="background:var(--wt-gradient-hero)">
-<div class="metric-value" id="trMetricAvgLatency">0</div>
-<div class="metric-label">Avg Latency (ms)</div>
-</div>
-</div>
-<div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Trends</span></div>
-<canvas id="trTrendChart" style="max-height:320px"></canvas>
-</div>
-<div class="wt-card">
-<div class="wt-card-header"><span class="wt-card-title">Results</span>
-<div style="display:flex;gap:8px">
-<button class="wt-btn wt-btn-sm wt-btn-primary" id="trCompareBtn" onclick="compareSelectedResults()" style="display:none">Compare Selected</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="fetchTestResultsPage()">&#x21BB; Refresh</button>
-<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="exportTestResultsPage()">&#x1F4E5; Export</button>
-</div>
-</div>
-<div class="wt-filter-bar">
-<select class="wt-select" id="trFilterType" onchange="fetchTestResultsPage()">
-<option value="">All Types</option>
-<option value="service_test">Service Tests</option>
-<option value="whisper_accuracy">Whisper Accuracy</option>
-<option value="iap_quality">IAP Quality</option>
-<option value="model_benchmark">Model Benchmark</option>
-</select>
-<select class="wt-select" id="trFilterStatus" onchange="fetchTestResultsPage()">
-<option value="">All Status</option>
-<option value="pass">Pass</option>
-<option value="fail">Fail</option>
-<option value="warn">Warn</option>
-</select>
-<input type="date" class="wt-input" id="trFilterDateFrom" onchange="fetchTestResultsPage()" style="width:auto;font-size:12px">
-<input type="date" class="wt-input" id="trFilterDateTo" onchange="fetchTestResultsPage()" style="width:auto;font-size:12px">
-</div>
-<div id="trComparePanel" style="display:none;margin-bottom:12px;padding:12px;background:var(--wt-card-bg);border:1px solid var(--wt-primary);border-radius:var(--wt-radius)">
-<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong style="font-size:13px">Side-by-Side Comparison</strong><button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="document.getElementById('trComparePanel').style.display='none'">Close</button></div>
-<div id="trCompareContent" style="font-size:12px"></div>
-</div>
-<div id="trResultsTable">No test results yet.</div>
-</div>
-</div></div>
-
 <div class="wt-page" id="page-database">
 <div class="wt-content">
 <h2 class="wt-page-title">Database Admin</h2>
@@ -447,19 +354,21 @@ Save outgoing audio as WAV</label>
 
 <div class="wt-page" id="page-beta-testing">
 <div class="wt-content">
-<h2 class="wt-page-title">Beta Testing & Optimization</h2>
+<h2 class="wt-page-title">Testing & Optimization</h2>
 
 <div id="betaTestSummary" class="wt-test-summary-bar">
 <span style="font-weight:600;color:var(--wt-text-secondary)">Status:</span>
 <span><span id="betaDotComponent" class="summary-dot"></span>Component</span>
 <span><span id="betaDotPipeline" class="summary-dot"></span>Pipeline</span>
 <span><span id="betaDotTools" class="summary-dot"></span>Tools</span>
+<span><span id="betaDotResults" class="summary-dot"></span>Results</span>
 </div>
 
 <div class="wt-tab-bar" id="betaTestTabs" role="tablist">
 <button class="wt-tab-btn active" role="tab" id="tab-beta-component" aria-selected="true" aria-controls="beta-component" onclick="switchBetaTab('beta-component')">Component Tests</button>
 <button class="wt-tab-btn" role="tab" id="tab-beta-pipeline" aria-selected="false" aria-controls="beta-pipeline" onclick="switchBetaTab('beta-pipeline')">Pipeline Tests</button>
 <button class="wt-tab-btn" role="tab" id="tab-beta-tools" aria-selected="false" aria-controls="beta-tools" onclick="switchBetaTab('beta-tools')">Tools</button>
+<button class="wt-tab-btn" role="tab" id="tab-beta-results" aria-selected="false" aria-controls="beta-results" onclick="switchBetaTab('beta-results')">Test Results</button>
 </div>
 <div style="display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end;align-items:center;flex-wrap:wrap">
 <label style="font-size:12px;display:flex;align-items:center;gap:6px">TTS:
@@ -992,6 +901,59 @@ Save outgoing audio as WAV</label>
 </div>
 
 </div><!-- end beta-tools -->
+
+<div class="wt-tab-pane" id="beta-results" role="tabpanel" aria-labelledby="tab-beta-results">
+<h3 style="font-size:16px;font-weight:600;margin-bottom:12px">Test Results</h3>
+<div class="wt-metrics-grid" style="grid-template-columns:repeat(3,1fr)">
+<div class="wt-metric-card" style="background:var(--wt-gradient-info)">
+<div class="metric-value" id="trMetricTotal">0</div>
+<div class="metric-label">Total Tests</div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-success)">
+<div class="metric-value" id="trMetricPassRate">0%</div>
+<div class="metric-label">Pass Rate</div>
+</div>
+<div class="wt-metric-card" style="background:var(--wt-gradient-hero)">
+<div class="metric-value" id="trMetricAvgLatency">0</div>
+<div class="metric-label">Avg Latency (ms)</div>
+</div>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Trends</span></div>
+<canvas id="trTrendChart" style="max-height:320px"></canvas>
+</div>
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Results</span>
+<div style="display:flex;gap:8px">
+<button class="wt-btn wt-btn-sm wt-btn-primary" id="trCompareBtn" onclick="compareSelectedResults()" style="display:none">Compare Selected</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="fetchTestResultsPage()">&#x21BB; Refresh</button>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="exportTestResultsPage()">&#x1F4E5; Export</button>
+</div>
+</div>
+<div class="wt-filter-bar">
+<select class="wt-select" id="trFilterType" onchange="fetchTestResultsPage()">
+<option value="">All Types</option>
+<option value="service_test">Service Tests</option>
+<option value="whisper_accuracy">Whisper Accuracy</option>
+<option value="iap_quality">IAP Quality</option>
+<option value="model_benchmark">Model Benchmark</option>
+</select>
+<select class="wt-select" id="trFilterStatus" onchange="fetchTestResultsPage()">
+<option value="">All Status</option>
+<option value="pass">Pass</option>
+<option value="fail">Fail</option>
+<option value="warn">Warn</option>
+</select>
+<input type="date" class="wt-input" id="trFilterDateFrom" onchange="fetchTestResultsPage()" style="width:auto;font-size:12px">
+<input type="date" class="wt-input" id="trFilterDateTo" onchange="fetchTestResultsPage()" style="width:auto;font-size:12px">
+</div>
+<div id="trComparePanel" style="display:none;margin-bottom:12px;padding:12px;background:var(--wt-card-bg);border:1px solid var(--wt-primary);border-radius:var(--wt-radius)">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong style="font-size:13px">Side-by-Side Comparison</strong><button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="document.getElementById('trComparePanel').style.display='none'">Close</button></div>
+<div id="trCompareContent" style="font-size:12px"></div>
+</div>
+<div id="trResultsTable">No test results yet.</div>
+</div>
+</div><!-- end beta-results -->
 
 </div><!-- end wt-tab-panes -->
 

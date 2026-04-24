@@ -24,7 +24,7 @@ thread, OAP buffer) is still isolated by call_id.
 
 ### Critical rules:
 
-1. Each call_id is a SEPARATE conversation with its own state (VAD session, Whisper context, LLaMA chat history, Kokoro synthesis thread, OAP buffer).
+1. Each call_id is a SEPARATE conversation with its own state (VAD session, Whisper context, LLaMA chat history, engine synthesis thread, OAP buffer).
 2. The TTS output of Alice's pipeline goes to BOB (the other party), NOT back to Alice.
 3. The TTS output of Bob's pipeline goes to ALICE (the other party), NOT back to Bob.
 4. In a conference bridge, audio from one leg is relayed to ALL OTHER legs. This is normal telephony behavior — it is NOT echo.

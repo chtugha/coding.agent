@@ -27,7 +27,7 @@
 
 ### Fixed
 - **Dock `std::terminate` on engine disconnect**: the disconnect path reset the slot without joining its recv/ping threads. Replaced with an off-hot-path watcher thread that joins and closes the fd (tracked in `swap_watchers_` so `shutdown()` joins them on dock exit).
-- **Engine self-join deadlock on `CUSTOM SHUTDOWN`**: the SHUTDOWN handler ran on the `EngineClient` thread and tried to join itself. Replaced with `shutdown_all_calls() + std::_Exit(0)`; the engine exits without unwinding.
+- **Engine self-join deadlock on `CUSTOM SHUTDOWN`**: the SHUTDOWN handler ran on the `EngineClient` thread and tried to join itself. Replaced with `shutdown_all_calls()` followed by a clean shutdown sequence; the engine tears down all per-call state before exiting.
 - **macOS Keychain TLS key-fetch hang** in headless contexts: `prodigy_tls::get_interconnect_key()` moved to a file-based store (`bin/ic_key.bin`, chmod 600). Unblocks every encrypted interconnect on first call.
 
 ## Frontend Overhaul (2026-03)
@@ -52,10 +52,10 @@
 ### Changed
 - **C++ magic numbers replaced**: All numeric literals in the event loop, log infrastructure, and test runners extracted to `static constexpr` named constants with descriptive names and unit suffixes (e.g., `LOG_FLUSH_INTERVAL_MS`, `UDP_BUFFER_SIZE`, `SERVICE_CHECK_INTERVAL_S`).
 - **JS magic numbers replaced**: All 45+ `setInterval`/`setTimeout` numeric literals extracted to a named-constants block at the top of the JS section (e.g., `POLL_STATUS_MS`, `DELAY_SERVICE_REFRESH_MS`, `SIP_MAX_LINES`).
-- **Navigation restructured**: Sidebar reorganized into logical sections: Dashboard (default) > Pipeline (Services, Live Logs) > Testing (Test Runner, Test Results, Beta Tests) > Configuration (Models, Database, Credentials).
+- **Navigation restructured**: Sidebar reorganized into logical sections: Dashboard (default) > Pipeline (Services, Live Logs) > Testing (Tests) > Configuration (Models, Database, Credentials). The Tests page contains four tabs: Component Tests, Pipeline Tests, Tools, and Test Results.
 - **Dashboard is now the default page** (was previously Tests).
 - **Page transitions**: Changed from `display:none/block` toggle to CSS `visibility`/`opacity`/`pointer-events` animation for smoother transitions. `.hidden` class retained for inline element toggling.
-- **Beta Testing page split into tabs**: Component Tests, Pipeline Tests, and Tools organized as Bootstrap tabs with a summary status bar. Test panels are now collapsible.
+- **Tests page split into tabs**: Component Tests, Pipeline Tests, Tools, and Test Results organized as tabs with a summary status bar. Test panels are now collapsible. Formerly "Beta Tests"; Test Runner and standalone Test Results pages removed.
 
 ### Added
 - **Dashboard page**: Pipeline visualization with horizontal node chain showing live service status. Metric cards (Services Online, Running Tests, Tests Passed, Uptime) with count-up animation. Activity feed showing recent log entries. Quick action buttons (Start All, Stop All, Restart Failed). Overall health badge (Healthy/Degraded/Offline).
