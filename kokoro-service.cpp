@@ -568,8 +568,8 @@ struct AlignedIntermediates {
 
 class KokoroPipeline {
 public:
-    bool initialize(const std::string& models_dir, const std::string& voice_name) {
-        std::string base_dir = models_dir + "/kokoro-german";
+    bool initialize(const std::string& models_dir, const std::string& voice_name, const std::string& variant) {
+        std::string base_dir = models_dir + "/" + variant;
         std::string vocab_path = base_dir + "/vocab.json";
         std::string voice_path = base_dir + "/" + voice_name + "_voice.bin";
         std::string variants_dir = base_dir + "/decoder_variants";
@@ -1051,7 +1051,7 @@ class KokoroService {
 public:
     KokoroService() = default;
 
-    bool initialize(const std::string& voice_name) {
+    bool initialize(const std::string& voice_name, const std::string& variant) {
         const char* env_models = std::getenv("WHISPERTALK_MODELS_DIR");
         std::string models_dir = env_models ? env_models :
 #ifdef WHISPERTALK_MODELS_DIR
@@ -1059,15 +1059,15 @@ public:
 #else
             "models";
 #endif
-        if (!pipeline_.initialize(models_dir, voice_name)) {
+        if (!pipeline_.initialize(models_dir, voice_name, variant)) {
             std::fprintf(stderr, "Failed to initialize Kokoro pipeline\n");
             return false;
         }
 
         log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::TTS_SERVICE);
 
-        std::printf("Kokoro TTS Service initialized (German, voice=%s, decoder=coreml-split)\n",
-                   voice_name.c_str());
+        std::printf("Kokoro TTS Service initialized (German, variant=%s, voice=%s, decoder=coreml-split)\n",
+                   variant.c_str(), voice_name.c_str());
         std::printf("  CoreML duration: %s\n", pipeline_.has_coreml() ? "ENABLED (ANE)" : "DISABLED");
 
         engine_.set_name("kokoro");
@@ -1578,35 +1578,49 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
+    std::string variant = "kokoro-german";
     std::string voice = "df_eva";
     std::string log_level = "INFO";
 
+    if (const char* env_variant = std::getenv("KOKORO_VARIANT")) {
+        if (env_variant[0] != '\0') variant = env_variant;
+    }
+    if (const char* env_voice = std::getenv("KOKORO_VOICE")) {
+        if (env_voice[0] != '\0') voice = env_voice;
+    }
+
     static struct option long_opts[] = {
         {"voice",     required_argument, 0, 'v'},
+        {"variant",   required_argument, 0, 'V'},
         {"log-level", required_argument, 0, 'L'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "v:L:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "v:V:L:h", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'v': voice = optarg; break;
+            case 'V': variant = optarg; break;
             case 'L': log_level = optarg; break;
             case 'h':
                 std::printf("Usage: kokoro-service [OPTIONS]\n");
-                std::printf("  --voice NAME      Voice to use (default: df_eva, also: dm_bernd)\n");
+                std::printf("  --variant NAME    Model variant subdir under models/ (default: kokoro-german = v1_1-de;\n");
+                std::printf("                    also: kokoro-german-martin for single-speaker Kikiri). Env: KOKORO_VARIANT\n");
+                std::printf("  --voice NAME      Voice to use (default: df_eva; for kokoro-german also dm_bernd;\n");
+                std::printf("                    for kokoro-german-martin: martin). Env: KOKORO_VOICE\n");
                 std::printf("  --log-level LEVEL Log level: ERROR WARN INFO DEBUG TRACE (default: INFO)\n");
                 return 0;
             default: break;
         }
     }
 
-    std::printf("Starting Kokoro TTS Service (voice=%s, decoder=coreml-split)\n", voice.c_str());
+    std::printf("Starting Kokoro TTS Service (variant=%s, voice=%s, decoder=coreml-split)\n",
+                variant.c_str(), voice.c_str());
 
     KokoroService service;
     g_service = &service;
 
-    if (!service.initialize(voice)) {
+    if (!service.initialize(voice, variant)) {
         return 1;
     }
 

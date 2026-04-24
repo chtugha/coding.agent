@@ -49,9 +49,15 @@ import types
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.realpath(os.path.join(SCRIPT_DIR, '..'))
-MODELS_DIR = os.path.join(ROOT_DIR, 'bin', 'models', 'kokoro-german')
+# Per-variant overrides (env vars) so the same script can export multiple
+# Kokoro-compatible checkpoints (e.g. kokoro-german-v1_1, kikiri-german-martin)
+# into independent subdirectories under bin/models/ without touching code.
+MODELS_SUBDIR = os.environ.get('KOKORO_EXPORT_DIR', 'kokoro-german')
+MODEL_FILENAME = os.environ.get('KOKORO_MODEL_FILENAME', 'kokoro-german-v1_1-de.pth')
+VOICE_NAMES = [v.strip() for v in os.environ.get('KOKORO_VOICES', 'df_eva,dm_bernd').split(',') if v.strip()]
+MODELS_DIR = os.path.join(ROOT_DIR, 'bin', 'models', MODELS_SUBDIR)
 CONFIG_PATH = os.path.join(MODELS_DIR, 'config.json')
-MODEL_PATH = os.path.join(MODELS_DIR, 'kokoro-german-v1_1-de.pth')
+MODEL_PATH = os.path.join(MODELS_DIR, MODEL_FILENAME)
 COREML_DIR = os.path.join(MODELS_DIR, 'coreml')
 DECODER_DIR = os.path.join(MODELS_DIR, 'decoder_variants')
 
@@ -59,7 +65,7 @@ CONDA_ENV_NAME = 'kokoro_coreml'
 REQUIRED_TORCH = '2.5'
 REQUIRED_COREMLTOOLS = '8.3'
 
-HF_REPO_ID = 'Tundragoon/Kokoro-German'
+HF_REPO_ID = os.environ.get('KOKORO_HF_REPO', 'Tundragoon/Kokoro-German')
 
 BUCKETS = [
     {"name": "3s",  "asr_frames": 72,  "f0_frames": 144},
@@ -136,11 +142,11 @@ def download_models():
     os.makedirs(os.path.join(MODELS_DIR, 'voices'), exist_ok=True)
 
     files = [
-        ('kokoro-german-v1_1-de.pth', MODEL_PATH),
+        (MODEL_FILENAME, MODEL_PATH),
         ('config.json', CONFIG_PATH),
-        ('voices/df_eva.pt', os.path.join(MODELS_DIR, 'voices', 'df_eva.pt')),
-        ('voices/dm_bernd.pt', os.path.join(MODELS_DIR, 'voices', 'dm_bernd.pt')),
     ]
+    for voice_name in VOICE_NAMES:
+        files.append((f'voices/{voice_name}.pt', os.path.join(MODELS_DIR, 'voices', f'{voice_name}.pt')))
 
     missing = []
     for repo_path, local_path in files:
@@ -837,7 +843,7 @@ def export_voices_and_vocab(kmodel):
 
     print("\n=== Exporting Voices and Vocab ===")
 
-    for voice_name in ['df_eva', 'dm_bernd']:
+    for voice_name in VOICE_NAMES:
         vp = os.path.join(MODELS_DIR, 'voices', f'{voice_name}.pt')
         if not os.path.exists(vp):
             print(f"  SKIP: {vp} not found")
