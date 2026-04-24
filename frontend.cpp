@@ -813,10 +813,16 @@ private:
                         size_t lpos = use_args.find("--language");
                         if (lpos != std::string::npos) {
                             size_t end = use_args.find(' ', lpos);
-                            size_t arg_end = (end == std::string::npos) ? use_args.size() : use_args.find_first_not_of(' ', end);
-                            size_t val_end = (arg_end == std::string::npos) ? use_args.size() : use_args.find(' ', arg_end);
-                            if (arg_end != std::string::npos) {
-                                use_args.erase(lpos, (val_end == std::string::npos ? use_args.size() : val_end) - lpos);
+                            if (end == std::string::npos) {
+                                use_args.erase(lpos);
+                            } else {
+                                size_t arg_end = use_args.find_first_not_of(' ', end);
+                                if (arg_end == std::string::npos) {
+                                    use_args.erase(lpos);
+                                } else {
+                                    size_t val_end = use_args.find(' ', arg_end);
+                                    use_args.erase(lpos, (val_end == std::string::npos ? use_args.size() : val_end) - lpos);
+                                }
                             }
                         }
                         if (!use_args.empty() && use_args.back() != ' ') use_args += " ";
