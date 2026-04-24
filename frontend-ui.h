@@ -95,6 +95,7 @@ inline std::string FrontendServer::build_ui_pages() {
 </div>
 </div>
 </div>
+</div>
 
 <div id="ollamaAlertOverlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:9999;align-items:center;justify-content:center">
 <div style="background:var(--wt-card-bg);border:1px solid rgba(255,159,10,0.5);border-radius:var(--wt-radius-lg);padding:24px;max-width:420px;width:90%">
