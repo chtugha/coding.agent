@@ -48,6 +48,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -100,6 +101,13 @@ constexpr int kCmdListenBacklog         = 4;
 constexpr int kEngineListenBacklog      = 4;
 
 constexpr int kDropLogRateLimitMs       = 1000;
+
+// Per-call bounded FIFO that holds inbound text Packets while no engine is
+// docked. When an engine connects (or swaps in), the buffered backlog is
+// drained through the new slot so the caller's first sentences are not lost
+// during a slow engine init or an engine switch.
+constexpr size_t kPendingTextMaxPerCall = 8;
+constexpr size_t kPendingTextMaxCalls   = 32;
 
 // Upstream recv poll (main loop) / backoff when upstream is FAILED.
 constexpr int kUpstreamRecvPollMs       = 100;
@@ -616,6 +624,11 @@ private:
             log_fwd_.forward(LogLevel::INFO, 0, "engine connected (%s)",
                              new_slot->name.c_str());
         }
+
+        // Flush any text packets that arrived while no engine was docked or
+        // while the previous engine was being torn down. Done after the slot
+        // is published so concurrently-arriving packets land in arrival order.
+        drain_pending_text(new_slot);
     }
 
     // Called when an active slot's TCP socket closes unexpectedly or
@@ -832,12 +845,9 @@ private:
         return active_slot_;
     }
 
-    void forward_text_to_engine(const Packet& pkt) {
-        auto slot = current_slot();
-        if (!slot) {
-            log_dropped_text(pkt.call_id);
-            return;
-        }
+    // Send a single Packet over an already-acquired slot. Returns true on
+     // successful send. Caller is responsible for selecting / holding the slot.
+     bool send_text_over_slot(const std::shared_ptr<EngineSlot>& slot, const Packet& pkt) {
         uint8_t tag = static_cast<uint8_t>(EngineFrameTag::PACKET);
         auto body = pkt.serialize();
         iovec iov[2];
@@ -849,6 +859,79 @@ private:
         if (!send_iov(slot->fd, iov, 2, kEngineSendTimeoutMs)) {
             std::fprintf(stderr, "[TTS] failed to forward text to engine %s\n",
                          slot->name.c_str());
+            return false;
+        }
+        return true;
+    }
+
+    void forward_text_to_engine(const Packet& pkt) {
+        auto slot = current_slot();
+        if (!slot) {
+            buffer_pending_text(pkt);
+            return;
+        }
+        send_text_over_slot(slot, pkt);
+    }
+
+    // Append a Packet to the per-call pending FIFO. If the FIFO is at its
+    // per-call cap, drop the oldest entry and rate-limit a WARN log so a
+    // chatty caller does not flood the log. If we are tracking too many
+    // distinct calls, evict the oldest (least-recently-used) call entirely.
+    void buffer_pending_text(const Packet& pkt) {
+        bool overflowed = false;
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            if (pending_text_.size() >= kPendingTextMaxCalls &&
+                pending_text_.find(pkt.call_id) == pending_text_.end()) {
+                // Evict an arbitrary call (map iteration order); we are well
+                // beyond the realistic concurrent-call count at this point.
+                pending_text_.erase(pending_text_.begin());
+            }
+            auto& q = pending_text_[pkt.call_id];
+            if (q.size() >= kPendingTextMaxPerCall) {
+                q.pop_front();
+                overflowed = true;
+            }
+            q.push_back(pkt);
+        }
+        if (overflowed) {
+            log_dropped_text(pkt.call_id);
+        }
+    }
+
+    // Called immediately after a new engine slot becomes active. Drains the
+    // per-call pending FIFOs through the new slot in arrival order. If a send
+    // fails the remaining packets are kept in the FIFO for the next slot.
+    void drain_pending_text(const std::shared_ptr<EngineSlot>& slot) {
+        std::map<uint32_t, std::deque<Packet>> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            snapshot.swap(pending_text_);
+        }
+        if (snapshot.empty()) return;
+        size_t total = 0;
+        for (auto& [cid, q] : snapshot) total += q.size();
+        std::fprintf(stderr, "[TTS] draining %zu buffered text packets to engine %s\n",
+                     total, slot->name.c_str());
+        log_fwd_.forward(LogLevel::INFO, 0,
+                         "draining %zu buffered text packets to engine %s",
+                         total, slot->name.c_str());
+        std::map<uint32_t, std::deque<Packet>> leftover;
+        for (auto& [cid, q] : snapshot) {
+            while (!q.empty()) {
+                if (!send_text_over_slot(slot, q.front())) {
+                    leftover[cid] = std::move(q);
+                    break;
+                }
+                q.pop_front();
+            }
+        }
+        if (!leftover.empty()) {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            for (auto& [cid, q] : leftover) {
+                auto& dst = pending_text_[cid];
+                for (auto& p : q) dst.push_back(std::move(p));
+            }
         }
     }
 
@@ -856,6 +939,10 @@ private:
         {
             std::lock_guard<std::mutex> lock(drop_log_mutex_);
             last_drop_log_ms_.erase(call_id);
+        }
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            pending_text_.erase(call_id);
         }
         auto slot = current_slot();
         if (!slot) return;
@@ -1009,6 +1096,11 @@ private:
 
     mutable std::mutex drop_log_mutex_;
     std::map<uint32_t, int64_t> last_drop_log_ms_;
+
+    // Per-call pending-text FIFO. Holds inbound text Packets while no engine
+    // is docked (or while one is being swapped). Drained on engine connect.
+    mutable std::mutex pending_mutex_;
+    std::map<uint32_t, std::deque<Packet>> pending_text_;
 };
 
 static TTSDock* g_dock = nullptr;
