@@ -7,14 +7,16 @@
 // by VAD — no voice activity detection is performed here.
 //
 // Decoding strategy:
-//   GREEDY (not beam search). On short 2-8s segments, greedy is ~3-5x faster
-//   than beam_size=5 with negligible accuracy difference. Temperature fallback
-//   (temp_inc=0.2) retries on high entropy or failed compression ratio checks.
+//   BEAM_SEARCH (beam_size=5, patience=1.0). On G.711-degraded telephony audio,
+//   beam search significantly outperforms greedy decoding — it reduces word-level
+//   errors on codec-distorted speech (e.g. "Betriebssystem" misread as "Betriebsstimm").
+//   Temperature fallback (temp_inc=0.2) retries on high entropy or failed compression
+//   ratio checks.
 //
 //   Telephony-optimized parameters:
-//     no_speech_thold=0.9  — prevents early decoder stop on G.711 audio artifacts.
-//     entropy_thold=2.8    — tolerant of codec-induced prediction uncertainty.
-//     initial_prompt       — German sentence to anchor language detection and reduce garbling.
+//     no_speech_thold=0.6  — aggressively rejects silence segments on G.711 audio.
+//     entropy_thold=2.4    — rejects noisy/uncertain transcriptions from codec artifacts.
+//     initial_prompt       — neutral German sentence to anchor language detection.
 //
 // Hallucination filter (default OFF, runtime-toggleable via cmd port or frontend UI):
 //   Exact-match list of known Whisper hallucination strings (e.g. "Untertitel",
@@ -62,8 +64,8 @@ static constexpr int WSP_SAMPLES_PER_MS  = WSP_SAMPLE_RATE / 1000;
 static constexpr int WSP_N_THREADS       = 4;
 static constexpr float RMS_SILENCE_THOLD = 0.005f;
 static constexpr float WSP_TEMP_INC      = 0.2f;
-static constexpr float WSP_ENTROPY_THOLD = 2.8f;
-static constexpr float WSP_NO_SPEECH_THOLD = 0.9f;
+static constexpr float WSP_ENTROPY_THOLD = 2.4f;
+static constexpr float WSP_NO_SPEECH_THOLD = 0.6f;
 static constexpr int MIN_TEXT_LEN        = 3;
 static constexpr int REPETITION_MIN_LEN  = 20;
 static constexpr int CMD_POLL_TIMEOUT_MS = 200;
@@ -366,12 +368,13 @@ private:
             return;
         }
 
-        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
         wparams.language = language_.c_str();
         wparams.n_threads = WSP_N_THREADS;
         wparams.no_timestamps = true;
         wparams.single_segment = false;
-        wparams.greedy.best_of = 1;
+        wparams.beam_search.beam_size = 5;
+        wparams.beam_search.patience = 1.0f;
         wparams.temperature = 0.0f;
         wparams.temperature_inc = WSP_TEMP_INC;
         wparams.entropy_thold = WSP_ENTROPY_THOLD;
@@ -381,7 +384,7 @@ private:
         wparams.audio_ctx = 0;
 
         wparams.no_context = true;
-        wparams.initial_prompt = "Hallo, wie geht es Ihnen? Ich spreche Deutsch.";
+        wparams.initial_prompt = "Guten Tag, willkommen bei der Telefonzentrale.";
 
         std::lock_guard<std::mutex> lock(whisper_mutex_);
         auto t0 = std::chrono::steady_clock::now();
@@ -513,6 +516,14 @@ const char* WhisperService::hallucination_patterns_[] = {
     "[Musik]",
     "[Applaus]",
     "MwSt",
+    "Ich spreche Deutsch",
+    "Ich spreche die Frage",
+    "Vielen Dank",
+    "Danke",
+    "Tschüss",
+    "Guten Tag",
+    "Willkommen",
+    "Hallo",
     nullptr
 };
 

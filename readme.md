@@ -471,7 +471,7 @@ Converts 24kHz float32 PCM from the TTS stage into 160-byte G.711 μ-law frames 
 | `SAVE_WAV:ON` / `OFF` / `STATUS` | Toggle WAV recording |
 | `SET_SAVE_WAV_DIR:<dir>` | Set WAV output directory |
 | `PRESENCE_BOOST:ON` / `OFF` / `STATUS` | Toggle +3dB presence boost biquad |
-| `SET_SIDETONE_GUARD_MS:<ms>` | Set SPEECH_ACTIVE guard window (default 1500ms) |
+| `SET_SIDETONE_GUARD_MS:<ms>` | Set SPEECH_ACTIVE guard window (default 800ms) |
 | `TEST_ENCODE:<freq>\|<dur_ms>` | Generate sine wave, encode, measure μ-law RMS output |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 

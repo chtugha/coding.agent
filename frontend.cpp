@@ -4600,6 +4600,9 @@ private:
                     if (ci.line_index == 1) l2_call_id = ci.call_id;
                 }
             }
+            if (l1_call_id == 0) {
+                std::cerr << "WARNING: WER test: could not resolve L1 call_id from SIP stats — LLaMA response filter disabled, WER may be inflated\n";
+            }
 
             // Collect data for 180 seconds: let the loopback conversation run multiple round-trips.
             // L1 Whisper: transcription of injected audio (input side, call_id=l1)
@@ -4649,7 +4652,8 @@ private:
                                     }
                                 }
                             }
-                        } else if (entry.service == ServiceType::LLAMA_SERVICE && entry.level == "INFO") {
+                        } else if (entry.service == ServiceType::LLAMA_SERVICE && entry.level == "INFO"
+                                   && (l1_call_id == 0 || entry.call_id == l1_call_id)) {
                             size_t rpos = msg.find("Response (");
                             if (rpos != std::string::npos) {
                                 size_t ms_end = msg.find("ms)", rpos + 10);

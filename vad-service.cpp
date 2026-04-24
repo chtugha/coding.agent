@@ -113,11 +113,14 @@ class VadService {
     //   mid-sentence splits (e.g., a 31-word response fragmenting into 4 VAD chunks).
     //   700ms tolerates comma pauses while still detecting turn-taking gaps (~800ms+).
     std::atomic<int> vad_silence_frames_{14};
-    // vad_max_speech_samples_: 8s max chunk — Whisper large-v3-turbo handles 8s
-    //   chunks in ~1s on Apple Silicon. Longer chunks preserve sentence boundaries.
-    std::atomic<size_t> vad_max_speech_samples_{VAD_SAMPLE_RATE * 8};
-    // vad_min_speech_samples_: 500ms — reject clicks and noise bursts.
-    size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE / 2;
+    // vad_max_speech_samples_: 12s max chunk — Whisper large-v3-turbo handles 12s
+    //   chunks in ~1.5s on Apple Silicon. 8s caused frequent mid-sentence splits
+    //   because TTS-generated German sentences routinely exceed 8s. 12s covers
+    //   most single sentences while keeping Whisper inference under 2s.
+    std::atomic<size_t> vad_max_speech_samples_{VAD_SAMPLE_RATE * 12};
+    // vad_min_speech_samples_: 800ms — reject clicks, noise bursts, and short
+    //   inter-sentence gaps that produce hallucinations like "Ich spreche Deutsch".
+    size_t vad_min_speech_samples_ = VAD_SAMPLE_RATE * 4 / 5;
     // vad_context_frames_: include 8 frames (400ms) of pre-speech context audio so the
     //   chunk captures the onset of speech including weak initial vowels/consonants.
     int vad_context_frames_ = 8;
@@ -904,7 +907,7 @@ int main(int argc, char** argv) {
     int vad_window_ms = 50;
     float vad_threshold = 2.0f;
     int vad_silence_ms = 700;
-    int vad_max_chunk_ms = 8000;
+    int vad_max_chunk_ms = 12000;
     int vad_onset_gap = -1;
     std::string log_level = "INFO";
 

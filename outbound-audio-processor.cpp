@@ -635,8 +635,9 @@ private:
 
         // Suppress flushes that arrive within SPEECH_ACTIVE_GUARD_MS of new TTS audio.
         // PBX sidetone (loopback of outgoing audio back into the RTP stream) causes
-        // spurious SPEECH_ACTIVE signals within 200-500ms of playback start.
-        // Guard at 800ms safely filters sidetone while allowing faster barge-in.
+        // spurious SPEECH_ACTIVE signals within 200-500ms of playback start. With VAD
+        // onset detection (~100ms) and network jitter, sidetone arrives within ~700ms.
+        // Guard at 800ms covers sidetone while preserving responsive barge-in.
         auto now = std::chrono::steady_clock::now();
         auto ms_since_audio = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - state->last_audio_received).count();
