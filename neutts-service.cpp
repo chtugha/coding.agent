@@ -11,8 +11,8 @@
 //   1. espeak-ng converts text → IPA phonemes (language="de", with stress)
 //   2. Build NeuTTS prompt:
 //        "user: Convert the text to speech:<|TEXT_PROMPT_START|>{ref_phones} {input_phones}<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>{ref_codes_str}"
-//   3. Tokenize prompt, feed to NeuTTS backbone (llama.cpp, Q4_0 GGUF)
-//   4. Sample autoregressively: temperature=1.0, top_k=50
+//   3. Tokenize prompt, feed to NeuTTS backbone (llama.cpp, Q8_0 GGUF — near-lossless)
+//   4. Sample autoregressively: top_k=30, temperature=0.8
 //   5. Extract speech codes from <|speech_N|> tokens
 //   6. Stop at <|SPEECH_GENERATION_END|> or EOS
 //   7. Decode speech codes through NeuCodec (CoreML mlmodelc) → 24kHz float32 PCM
@@ -70,14 +70,13 @@ static constexpr size_t PHONEME_CACHE_MAX = 10000;
 static constexpr int MODEL_CONTEXT_SIZE = 2048;
 static constexpr int MODEL_N_THREADS = 4;
 static constexpr int MODEL_N_THREADS_BATCH = 8;
-static constexpr int SAMPLER_TOP_K = 50;
-static constexpr float SAMPLER_TEMPERATURE = 1.0f;
+static constexpr int SAMPLER_TOP_K = 30;
+static constexpr float SAMPLER_TEMPERATURE = 0.8f;
 static constexpr uint32_t SAMPLER_SEED = 42;
 static constexpr int MAX_GENERATION_TOKENS = 1500;
-static constexpr int FIRST_BATCH_CODES = 16;
-static constexpr int STREAM_BATCH_CODES = 64;
+static constexpr int FIRST_BATCH_CODES = 32;
+static constexpr int STREAM_BATCH_CODES = 128;
 static constexpr size_t DOWNSTREAM_CHUNK_SAMPLES = whispertalk::tts::kTTSMaxFrameSamples;
-static constexpr float AUDIO_CEILING = 0.90f;
 static constexpr int CMD_RECV_TIMEOUT_SEC = 30;
 static constexpr int CMD_POLL_TIMEOUT_MS = 200;
 static constexpr int WORKER_WAIT_TIMEOUT_MS = 500;
@@ -225,7 +224,7 @@ class NeuTTSPipeline {
 public:
     bool initialize(const std::string& models_dir) {
         std::string neutts_dir = models_dir + "/neutts-nano-german";
-        std::string gguf_path = neutts_dir + "/neutts-nano-german-Q4_0.gguf";
+        std::string gguf_path = neutts_dir + "/neutts-nano-german-Q8_0.gguf";
         std::string codec_path = neutts_dir + "/neucodec_decoder.mlmodelc";
         std::string ref_codes_path = neutts_dir + "/ref_codes.bin";
         std::string ref_text_path = neutts_dir + "/ref_text.txt";
@@ -404,7 +403,7 @@ public:
         std::vector<int32_t> pending_codes;
         pending_codes.reserve(STREAM_BATCH_CODES + 1);
         size_t total_samples = 0;
-        int32_t context_code = -1;
+        int32_t context_code = ref_voice_.codes.empty() ? -1 : ref_voice_.codes.back();
         int batch_target = FIRST_BATCH_CODES;
 
         std::vector<int32_t> input_codes;
@@ -939,8 +938,8 @@ private:
                             float a = std::abs(s);
                             if (a > peak) peak = a;
                         }
-                        if (peak > AUDIO_CEILING) {
-                            float scale = AUDIO_CEILING / peak;
+                        if (peak > 0.90f) {
+                            float scale = 0.90f / peak;
                             for (float& s : chunk) s *= scale;
                         }
                         if (first_chunk) {

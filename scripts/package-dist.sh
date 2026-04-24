@@ -172,7 +172,7 @@ fi
 NEUTTS_SRC="$MODELS_SRC/neutts-nano-german"
 if [[ -d "$NEUTTS_SRC" ]]; then
     mkdir -p "$DIST_DIR/models/neutts-nano-german"
-    for f in "$NEUTTS_SRC"/neutts-nano-german-Q4_0.gguf "$NEUTTS_SRC"/ref_codes.bin "$NEUTTS_SRC"/ref_text.txt; do
+    for f in "$NEUTTS_SRC"/neutts-nano-german-Q8_0.gguf "$NEUTTS_SRC"/ref_codes.bin "$NEUTTS_SRC"/ref_text.txt; do
         [[ -f "$f" ]] && cp "$f" "$DIST_DIR/models/neutts-nano-german/"
     done
     if [[ -d "$NEUTTS_SRC/neucodec_decoder.mlmodelc" ]]; then

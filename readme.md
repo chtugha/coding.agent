@@ -123,7 +123,7 @@ Located in `bin/models/neutts-nano-german/`:
 
 | File | Size | Purpose |
 |------|------|---------|
-| `neutts-nano-german-Q4_0.gguf` | ~185 MB | LLaMA-based speech backbone |
+| `neutts-nano-german-Q8_0.gguf` | ~241 MB | LLaMA-based speech backbone (Q8_0, near-lossless) |
 | `neucodec_decoder.mlmodelc/` | ~3.4 GB | NeuCodec CoreML decoder |
 | `ref_codes.bin` | - | Pre-computed reference voice codec codes |
 | `ref_text.txt` | - | Reference voice phoneme transcript |
