@@ -799,6 +799,32 @@ private:
                 return true;
             };
 
+            if (name == "WHISPER_SERVICE" && args_override.empty()) {
+                std::string lang = get_setting("pipeline_language", "");
+                if (!lang.empty()) {
+                    auto valid_lang = [](const std::string& s) {
+                        if (s.size() < 2 || s.size() > 5) return false;
+                        for (char ch : s) {
+                            if (!(isalpha((unsigned char)ch) || ch == '-')) return false;
+                        }
+                        return true;
+                    };
+                    if (valid_lang(lang)) {
+                        size_t lpos = use_args.find("--language");
+                        if (lpos != std::string::npos) {
+                            size_t end = use_args.find(' ', lpos);
+                            size_t arg_end = (end == std::string::npos) ? use_args.size() : use_args.find_first_not_of(' ', end);
+                            size_t val_end = (arg_end == std::string::npos) ? use_args.size() : use_args.find(' ', arg_end);
+                            if (arg_end != std::string::npos) {
+                                use_args.erase(lpos, (val_end == std::string::npos ? use_args.size() : val_end) - lpos);
+                            }
+                        }
+                        if (!use_args.empty() && use_args.back() != ' ') use_args += " ";
+                        use_args += "--language " + lang;
+                    }
+                }
+            }
+
             if (name == "VAD_SERVICE" && args_override.empty()) {
                 std::string vad_w = get_setting("vad_window_ms", "");
                 std::string vad_t = get_setting("vad_threshold", "");

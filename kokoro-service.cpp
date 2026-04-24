@@ -48,6 +48,7 @@
 #include "tts-common.h"
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -832,10 +833,36 @@ public:
                         (long long)intermediates.total_frames, max_asr, chunks.size());
 
             std::vector<float> result;
+            // Equal-power crossfade at chunk seams masks F0/N discontinuities and
+            // zero-padded edges between independently-decoded segments. 8ms @24kHz
+            // = 192 samples — short enough to be inaudible musically, long enough
+            // to suppress the click/pop and brief energy gap that otherwise harms
+            // Whisper re-transcription.
+            constexpr int kCrossfadeSamples = 192;
             for (auto& c : chunks) {
                 auto part = decode_part(intermediates, c.phon_start, c.phon_end,
                                          c.frame_start, c.num_frames);
-                result.insert(result.end(), part.begin(), part.end());
+                if (part.empty()) continue;
+                if (result.empty()) {
+                    result = std::move(part);
+                    continue;
+                }
+                int xf = std::min<int>({kCrossfadeSamples,
+                                         (int)result.size(),
+                                         (int)part.size()});
+                if (xf <= 0) {
+                    result.insert(result.end(), part.begin(), part.end());
+                    continue;
+                }
+                int tail = (int)result.size() - xf;
+                for (int i = 0; i < xf; i++) {
+                    float t = (float)(i + 1) / (float)(xf + 1);
+                    // Equal-power (constant energy) crossfade weights.
+                    float w_out = std::cos(t * 1.5707963267948966f);
+                    float w_in  = std::sin(t * 1.5707963267948966f);
+                    result[tail + i] = result[tail + i] * w_out + part[i] * w_in;
+                }
+                result.insert(result.end(), part.begin() + xf, part.end());
             }
             return result;
         }

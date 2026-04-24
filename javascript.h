@@ -202,7 +202,7 @@ e.classList.toggle('active',e.dataset.page===p);
   currentPage=p;
   if(p!=='dashboard')stopDashboardPoll();
   if(p!=='beta-testing')stopTestResultsPoll();
-  if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();}
+  if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();dashLoadPipelineLanguage();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){
     try{buildSipLinesGrid();}catch(e){console.error('buildSipLinesGrid:',e);}
@@ -351,6 +351,23 @@ d.services.forEach(s=>{
 });
 setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
   });
+}
+
+function dashLoadPipelineLanguage(){
+  fetch('/api/settings').then(r=>r.json()).then(d=>{
+    const v=(d.settings&&d.settings.pipeline_language)||'de';
+    const sel=document.getElementById('dashLanguageSelect');
+    if(sel)sel.value=v;
+  }).catch(()=>{});
+}
+
+function dashSetPipelineLanguage(v){
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:'pipeline_language',value:v})})
+    .then(()=>{
+      const h=document.getElementById('dashLanguageHint');
+      if(h)h.textContent='Saved. Restart services to apply ('+v+').';
+    });
 }
 
 function dashRestartFailed(){

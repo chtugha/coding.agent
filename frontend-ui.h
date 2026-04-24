@@ -77,6 +77,20 @@ inline std::string FrontendServer::build_ui_pages() {
 <button class="wt-btn wt-btn-primary" style="width:100%;justify-content:center" onclick="dashStartAll()">&#x25B6; Start All Services</button>
 <button class="wt-btn wt-btn-danger" style="width:100%;justify-content:center" onclick="dashStopAll()">&#x25A0; Stop All Services</button>
 <button class="wt-btn wt-btn-secondary" style="width:100%;justify-content:center" onclick="dashRestartFailed()">&#x21BB; Restart Failed</button>
+<div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:8px;padding-top:10px">
+<label for="dashLanguageSelect" style="font-size:11px;color:var(--wt-text-secondary);letter-spacing:0.05em;display:block;margin-bottom:6px">PIPELINE LANGUAGE</label>
+<select id="dashLanguageSelect" class="wt-input" style="width:100%" onchange="dashSetPipelineLanguage(this.value)">
+<option value="de">German (de)</option>
+<option value="auto">Auto-detect</option>
+<option value="all">All</option>
+<option value="en">English (en)</option>
+<option value="fr">French (fr)</option>
+<option value="es">Spanish (es)</option>
+<option value="it">Italian (it)</option>
+<option value="ja">Japanese (ja)</option>
+<option value="zh">Chinese (zh)</option>
+</select>
+<div id="dashLanguageHint" style="font-size:10px;color:var(--wt-text-secondary);margin-top:6px;line-height:1.4">Restart services to apply.</div>
 </div>
 </div>
 </div>
