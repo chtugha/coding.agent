@@ -1580,28 +1580,51 @@ int main(int argc, char* argv[]) {
 
     std::string voice = "df_eva";
     std::string log_level = "INFO";
+    std::string language = "de";
 
     static struct option long_opts[] = {
         {"voice",     required_argument, 0, 'v'},
         {"log-level", required_argument, 0, 'L'},
+        {"language",  required_argument, 0, 'l'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "v:L:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "v:L:l:h", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'v': voice = optarg; break;
             case 'L': log_level = optarg; break;
+            case 'l': language = optarg; break;
             case 'h':
                 std::printf("Usage: kokoro-service [OPTIONS]\n");
                 std::printf("  --voice NAME      Voice to use (default: df_eva, also: dm_bernd)\n");
                 std::printf("  --log-level LEVEL Log level: ERROR WARN INFO DEBUG TRACE (default: INFO)\n");
+                std::printf("  --language CODE   Global pipeline language (de/en/es/fr/it/zh/auto, default: de).\n");
+                std::printf("                    If no explicit --voice is supplied, a matching default voice is chosen.\n");
                 return 0;
             default: break;
         }
     }
 
-    std::printf("Starting Kokoro TTS Service (voice=%s, decoder=coreml-split)\n", voice.c_str());
+    // If the user did not override --voice, select a default that matches the
+    // configured language. For languages without a bundled voice we fall back
+    // to the German default and rely on Kokoro's multilingual capability.
+    bool voice_explicit = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "-v" || a == "--voice" || a.rfind("--voice=", 0) == 0) { voice_explicit = true; break; }
+    }
+    if (!voice_explicit) {
+        if      (language == "en") voice = "af_heart";
+        else if (language == "es") voice = "ef_dora";
+        else if (language == "fr") voice = "ff_siwis";
+        else if (language == "it") voice = "if_sara";
+        else if (language == "zh") voice = "zf_xiaobei";
+        // de / auto / unknown → keep df_eva
+    }
+
+    std::printf("Starting Kokoro TTS Service (voice=%s, language=%s, decoder=coreml-split)\n",
+                voice.c_str(), language.c_str());
 
     KokoroService service;
     g_service = &service;

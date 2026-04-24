@@ -39,11 +39,14 @@
 #include <string>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <map>
+#include <memory>
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <queue>
 #include <cmath>
 #include <signal.h>
 #include <getopt.h>
@@ -83,13 +86,31 @@ public:
           interconnect_(whispertalk::ServiceType::WHISPER_SERVICE) {
         whisper_context_params cparams = whisper_context_default_params();
         cparams.use_gpu = true;
-        ctx_ = whisper_init_from_file_with_params(model_path.c_str(), cparams);
+        // Load weights only. Per-call whisper_state* is created on demand below
+        // (see get_or_create_call); weights are shared immutably across calls,
+        // so multiple transcriptions can run concurrently without a global mutex.
+        ctx_ = whisper_init_from_file_with_params_no_state(model_path.c_str(), cparams);
         if (!ctx_) {
             throw std::runtime_error("Failed to load Whisper model: " + model_path);
         }
     }
 
     ~WhisperService() {
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            for (auto& p : calls_) {
+                p.second->active = false;
+                p.second->cv.notify_all();
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            for (auto& p : calls_) {
+                if (p.second->worker.joinable()) p.second->worker.join();
+                if (p.second->state) whisper_free_state(p.second->state);
+            }
+            calls_.clear();
+        }
         if (ctx_) whisper_free(ctx_);
     }
 
@@ -210,8 +231,10 @@ private:
         return "ERROR:Unknown command\n";
     }
 
-    // Receives pre-segmented audio chunks from VAD and transcribes each immediately.
-    // Each packet from VAD is a complete speech segment ready for transcription.
+    // Receives pre-segmented audio chunks from VAD and dispatches each to the
+    // per-call worker thread. The worker owns a dedicated whisper_state* so
+    // transcription for different call_ids runs truly in parallel on the
+    // shared, immutable whisper_context* (the model weights).
     void receiver_loop() {
         while (running_ && g_running) {
             whispertalk::Packet pkt;
@@ -225,7 +248,20 @@ private:
 
             size_t sample_count = pkt.payload_size / sizeof(float);
             const float* samples = reinterpret_cast<const float*>(pkt.payload.data());
-            transcribe_and_send(pkt.call_id, samples, sample_count);
+
+            auto call = get_or_create_call(pkt.call_id);
+            if (!call) continue;
+
+            {
+                std::lock_guard<std::mutex> lock(call->queue_mutex);
+                if (call->queue.size() >= MAX_CALL_QUEUE) {
+                    call->queue.pop();
+                    log_fwd_.forward(whispertalk::LogLevel::WARN, pkt.call_id,
+                        "Per-call queue full, dropping oldest audio chunk");
+                }
+                call->queue.emplace(samples, samples + sample_count);
+            }
+            call->cv.notify_one();
         }
     }
 
@@ -338,8 +374,9 @@ private:
     // Transcribes a speech chunk and sends the text downstream to LLaMA.
     // Uses GREEDY decoding for speed — on short chunks the accuracy difference vs beam search
     // is negligible, but inference is 3-5x faster. audio_ctx=0 uses full encoder context
-    // matching whisper-cli default behavior.
-    void transcribe_and_send(uint32_t call_id, const float* audio, size_t audio_len) {
+    // matching whisper-cli default behavior. Runs on a per-call whisper_state*
+    // so multiple calls transcribe concurrently against the shared model.
+    void transcribe_and_send(uint32_t call_id, whisper_state* state, const float* audio, size_t audio_len) {
         if (audio_len < min_speech_samples_) {
             log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                 "Skipping chunk: %zu samples (%.0fms) below minimum %zu",
@@ -381,19 +418,25 @@ private:
         wparams.audio_ctx = 0;
 
         wparams.no_context = true;
-        wparams.initial_prompt = "Hallo, wie geht es Ihnen? Ich spreche Deutsch.";
+        const char* prompt = "Hallo, wie geht es Ihnen? Ich spreche Deutsch.";
+        if      (language_ == "en") prompt = "Hello, how are you? I am speaking English.";
+        else if (language_ == "es") prompt = "Hola, ¿cómo está? Hablo español.";
+        else if (language_ == "fr") prompt = "Bonjour, comment allez-vous ? Je parle français.";
+        else if (language_ == "it") prompt = "Ciao, come sta? Parlo italiano.";
+        else if (language_ == "zh") prompt = "你好，你好吗？我说中文。";
+        else if (language_ == "auto") prompt = "";
+        wparams.initial_prompt = prompt;
 
-        std::lock_guard<std::mutex> lock(whisper_mutex_);
         auto t0 = std::chrono::steady_clock::now();
-        int result = whisper_full(ctx_, wparams, audio, (int)audio_len);
+        int result = whisper_full_with_state(ctx_, state, wparams, audio, (int)audio_len);
 
         if (result == 0) {
             auto t1 = std::chrono::steady_clock::now();
             auto whisper_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-            int n_segments = whisper_full_n_segments(ctx_);
+            int n_segments = whisper_full_n_segments_from_state(state);
             std::string text;
             for (int i = 0; i < n_segments; ++i) {
-                text += whisper_full_get_segment_text(ctx_, i);
+                text += whisper_full_get_segment_text_from_state(state, i);
             }
             if (!text.empty()) {
                 if (hallucination_filter_enabled_.load(std::memory_order_relaxed)) {
@@ -471,6 +514,27 @@ private:
     }
 
     void handle_call_end(uint32_t call_id) {
+        std::shared_ptr<WhisperCall> to_destroy;
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            auto it = calls_.find(call_id);
+            if (it != calls_.end()) {
+                to_destroy = it->second;
+                calls_.erase(it);
+            }
+        }
+        if (to_destroy) {
+            {
+                std::lock_guard<std::mutex> qlock(to_destroy->queue_mutex);
+                to_destroy->active = false;
+            }
+            to_destroy->cv.notify_all();
+            if (to_destroy->worker.joinable()) to_destroy->worker.join();
+            if (to_destroy->state) {
+                whisper_free_state(to_destroy->state);
+                to_destroy->state = nullptr;
+            }
+        }
         {
             std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
             auto it = buffered_packets_.begin();
@@ -482,7 +546,55 @@ private:
                 }
             }
         }
-        log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleared buffered packets");
+        log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, freed whisper_state and cleared buffered packets");
+    }
+
+    // Per-call transcription context. The worker thread owns a dedicated
+    // whisper_state* so multiple calls can run whisper_full_with_state() in
+    // parallel against the shared whisper_context* (model weights).
+    struct WhisperCall {
+        uint32_t call_id;
+        whisper_state* state = nullptr;
+        std::queue<std::vector<float>> queue;
+        std::mutex queue_mutex;
+        std::condition_variable cv;
+        std::thread worker;
+        std::atomic<bool> active{true};
+    };
+    static constexpr size_t MAX_CALL_QUEUE = 32;
+
+    std::shared_ptr<WhisperCall> get_or_create_call(uint32_t call_id) {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        auto it = calls_.find(call_id);
+        if (it != calls_.end()) return it->second;
+        auto call = std::make_shared<WhisperCall>();
+        call->call_id = call_id;
+        call->state = whisper_init_state(ctx_);
+        if (!call->state) {
+            log_fwd_.forward(whispertalk::LogLevel::ERROR, call_id, "whisper_init_state() failed");
+            return nullptr;
+        }
+        call->worker = std::thread(&WhisperService::call_worker, this, call);
+        calls_.emplace(call_id, call);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
+            "Created per-call whisper_state and worker thread");
+        return call;
+    }
+
+    void call_worker(std::shared_ptr<WhisperCall> call) {
+        while (call->active && running_ && g_running) {
+            std::vector<float> audio;
+            {
+                std::unique_lock<std::mutex> lock(call->queue_mutex);
+                call->cv.wait_for(lock, std::chrono::milliseconds(200),
+                    [&]{ return !call->queue.empty() || !call->active || !running_; });
+                if (!call->active || !running_) break;
+                if (call->queue.empty()) continue;
+                audio = std::move(call->queue.front());
+                call->queue.pop();
+            }
+            transcribe_and_send(call->call_id, call->state, audio.data(), audio.size());
+        }
     }
 
     std::atomic<bool> running_;
@@ -490,10 +602,12 @@ private:
     std::string model_path_;
     std::string language_;
     struct whisper_context* ctx_ = nullptr;
-    std::mutex whisper_mutex_;
     whispertalk::InterconnectNode interconnect_;
     whispertalk::LogForwarder log_fwd_;
-    
+
+    std::mutex calls_mutex_;
+    std::map<uint32_t, std::shared_ptr<WhisperCall>> calls_;
+
     std::mutex buffer_mutex_;
     std::deque<whispertalk::Packet> buffered_packets_;
     std::atomic<bool> has_buffered_{false};

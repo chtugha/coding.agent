@@ -78,7 +78,10 @@ static constexpr long SPEECH_DISCARD_MIN_MS = 200;
 static constexpr size_t MIN_RESPONSE_CHARS  = 8;
 static constexpr int MIN_RESPONSE_WORDS     = 2;
 static constexpr float SIMILARITY_THRESHOLD = 0.75f;
-static const char* TOPIC_CHANGES[] = {
+// Per-language topic-change phrases used when the model produces a parroted
+// or fragmentary response. The language is chosen at service startup via
+// --language; the default is "de" for backward compatibility.
+static const char* TOPIC_CHANGES_DE[] = {
     "Lass uns über etwas anderes sprechen. Was machst du in deiner Freizeit?",
     "Hast du in letzter Zeit einen interessanten Film gesehen?",
     "Welches Buch hat dich zuletzt begeistert?",
@@ -88,17 +91,136 @@ static const char* TOPIC_CHANGES[] = {
     "Hast du ein Hobby, das dich besonders begeistert?",
     "Was denkst du über die neuesten Technologie-Trends?",
 };
-static constexpr size_t NUM_TOPIC_CHANGES = sizeof(TOPIC_CHANGES) / sizeof(TOPIC_CHANGES[0]);
-static const char* SYSTEM_PROMPT =
-    "Du bist ein gesprächiger deutscher Telefon-Assistent. "
-    "WICHTIG: Antworte IMMER auf Deutsch, NIEMALS auf Englisch. "
-    "Antworte in 1-2 Sätzen, maximal 25 Wörter. "
-    "Bringe IMMER neue Information oder stelle eine konkrete Frage zum Thema. "
-    "Vermeide leere Floskeln wie 'Gern geschehen', 'Kein Problem', 'Danke', 'Bis dann', "
-    "'Das ist eine gute Frage', 'Natürlich', 'Aber ja', 'Das stimmt'. "
-    "Beginne NIEMALS mit einer Bestätigung oder Bewertung des Gesagten. "
-    "Wiederhole NIEMALS den Satz des Anrufers. "
-    "Sei interessiert und wissend — teile Fakten, Meinungen oder Vorschläge.";
+static const char* TOPIC_CHANGES_EN[] = {
+    "Let's talk about something else. What do you do in your free time?",
+    "Have you seen any interesting films lately?",
+    "What book have you enjoyed most recently?",
+    "What do you think of the current weather?",
+    "Do you enjoy cooking? What is your favourite dish?",
+    "Have you travelled anywhere recently?",
+    "Do you have a hobby you are passionate about?",
+    "What do you think of the latest technology trends?",
+};
+static const char* TOPIC_CHANGES_ES[] = {
+    "Hablemos de otra cosa. ¿Qué haces en tu tiempo libre?",
+    "¿Has visto alguna película interesante últimamente?",
+    "¿Qué libro te ha gustado recientemente?",
+    "¿Qué opinas del tiempo de hoy?",
+    "¿Te gusta cocinar? ¿Cuál es tu plato favorito?",
+    "¿Has viajado a algún sitio últimamente?",
+    "¿Tienes algún hobby que te apasione?",
+    "¿Qué piensas de las últimas tendencias tecnológicas?",
+};
+static const char* TOPIC_CHANGES_FR[] = {
+    "Parlons d'autre chose. Que faites-vous pendant votre temps libre ?",
+    "Avez-vous vu un film intéressant récemment ?",
+    "Quel livre vous a récemment enthousiasmé ?",
+    "Que pensez-vous de la météo actuelle ?",
+    "Aimez-vous cuisiner ? Quel est votre plat préféré ?",
+    "Avez-vous voyagé récemment ?",
+    "Avez-vous un loisir qui vous passionne ?",
+    "Que pensez-vous des dernières tendances technologiques ?",
+};
+static const char* TOPIC_CHANGES_IT[] = {
+    "Parliamo di qualcos'altro. Cosa fai nel tempo libero?",
+    "Hai visto un film interessante di recente?",
+    "Quale libro ti è piaciuto di più ultimamente?",
+    "Che ne pensi del tempo di oggi?",
+    "Ti piace cucinare? Qual è il tuo piatto preferito?",
+    "Hai viaggiato di recente?",
+    "Hai un hobby che ti appassiona?",
+    "Cosa pensi delle ultime tendenze tecnologiche?",
+};
+static const char* TOPIC_CHANGES_ZH[] = {
+    "我们聊点别的吧。你空闲时喜欢做什么？",
+    "你最近看过什么有趣的电影吗？",
+    "最近有哪本书让你印象深刻？",
+    "你觉得今天的天气怎么样？",
+    "你喜欢做饭吗？你最喜欢的菜是什么？",
+    "你最近有没有去旅行？",
+    "你有什么特别喜欢的爱好吗？",
+    "你对最新的科技趋势怎么看？",
+};
+
+static const char* const* topic_changes_for(const std::string& lang, size_t& out_count) {
+    if (lang == "en")       { out_count = sizeof(TOPIC_CHANGES_EN)/sizeof(TOPIC_CHANGES_EN[0]); return TOPIC_CHANGES_EN; }
+    if (lang == "es")       { out_count = sizeof(TOPIC_CHANGES_ES)/sizeof(TOPIC_CHANGES_ES[0]); return TOPIC_CHANGES_ES; }
+    if (lang == "fr")       { out_count = sizeof(TOPIC_CHANGES_FR)/sizeof(TOPIC_CHANGES_FR[0]); return TOPIC_CHANGES_FR; }
+    if (lang == "it")       { out_count = sizeof(TOPIC_CHANGES_IT)/sizeof(TOPIC_CHANGES_IT[0]); return TOPIC_CHANGES_IT; }
+    if (lang == "zh")       { out_count = sizeof(TOPIC_CHANGES_ZH)/sizeof(TOPIC_CHANGES_ZH[0]); return TOPIC_CHANGES_ZH; }
+    out_count = sizeof(TOPIC_CHANGES_DE)/sizeof(TOPIC_CHANGES_DE[0]);
+    return TOPIC_CHANGES_DE;
+}
+
+// Per-language system prompt. For "auto", we fall back to the German prompt —
+// Whisper is responsible for actually detecting language from audio; llama
+// cannot easily produce a useful "auto-language" response on its own.
+static const char* system_prompt_for(const std::string& lang) {
+    if (lang == "en") {
+        return "You are a chatty English phone assistant. "
+               "IMPORTANT: Always reply in English. "
+               "Respond in 1-2 sentences, max 25 words. "
+               "Always add new information or ask a concrete question. "
+               "Avoid empty filler phrases like 'You're welcome', 'No problem', 'Thanks', "
+               "'Goodbye', 'That's a good question', 'Of course', 'Certainly', 'That's right'. "
+               "Never begin with a confirmation or evaluation of what was said. "
+               "Never repeat the caller's sentence. "
+               "Be curious and knowledgeable — share facts, opinions or suggestions.";
+    }
+    if (lang == "es") {
+        return "Eres un asistente telefónico español conversador. "
+               "IMPORTANTE: Responde SIEMPRE en español. "
+               "Responde en 1-2 frases, máximo 25 palabras. "
+               "Aporta SIEMPRE nueva información o haz una pregunta concreta. "
+               "Evita frases vacías como 'De nada', 'No hay problema', 'Gracias', "
+               "'Hasta luego', 'Buena pregunta', 'Claro', 'Por supuesto'. "
+               "NUNCA empieces con una confirmación o valoración de lo dicho. "
+               "NUNCA repitas la frase del interlocutor. "
+               "Sé curioso y culto: comparte hechos, opiniones o sugerencias.";
+    }
+    if (lang == "fr") {
+        return "Vous êtes un assistant téléphonique français bavard. "
+               "IMPORTANT: Répondez TOUJOURS en français. "
+               "Répondez en 1-2 phrases, 25 mots maximum. "
+               "Apportez TOUJOURS une nouvelle information ou posez une question concrète. "
+               "Évitez les formules vides comme 'De rien', 'Pas de problème', 'Merci', "
+               "'Au revoir', 'Bonne question', 'Bien sûr', 'Évidemment'. "
+               "Ne commencez JAMAIS par une confirmation ou une évaluation. "
+               "Ne répétez JAMAIS la phrase de l'interlocuteur. "
+               "Soyez curieux et cultivé — partagez faits, opinions ou suggestions.";
+    }
+    if (lang == "it") {
+        return "Sei un assistente telefonico italiano loquace. "
+               "IMPORTANTE: Rispondi SEMPRE in italiano. "
+               "Rispondi in 1-2 frasi, massimo 25 parole. "
+               "Aggiungi SEMPRE nuove informazioni o fai una domanda concreta. "
+               "Evita frasi vuote come 'Prego', 'Nessun problema', 'Grazie', "
+               "'Arrivederci', 'Bella domanda', 'Certamente', 'Ovviamente'. "
+               "Non iniziare MAI con una conferma o una valutazione. "
+               "Non ripetere MAI la frase dell'interlocutore. "
+               "Sii curioso e informato — condividi fatti, opinioni o suggerimenti.";
+    }
+    if (lang == "zh") {
+        return "你是一位健谈的中文电话助理。"
+               "重要：请始终用中文回答。"
+               "每次回答 1-2 句话，不超过 25 个字。"
+               "每次都要提供新信息或提出一个具体问题。"
+               "避免空洞的客套话，如\"不客气\"、\"没问题\"、\"谢谢\"、\"再见\"、\"好问题\"、\"当然\"。"
+               "绝不要以确认或评价对方的话开头。"
+               "绝不要重复对方说的话。"
+               "要好奇且有知识——分享事实、观点或建议。";
+    }
+    // Default: German
+    return "Du bist ein gesprächiger deutscher Telefon-Assistent. "
+           "WICHTIG: Antworte IMMER auf Deutsch, NIEMALS auf Englisch. "
+           "Antworte in 1-2 Sätzen, maximal 25 Wörter. "
+           "Bringe IMMER neue Information oder stelle eine konkrete Frage zum Thema. "
+           "Vermeide leere Floskeln wie 'Gern geschehen', 'Kein Problem', 'Danke', 'Bis dann', "
+           "'Das ist eine gute Frage', 'Natürlich', 'Aber ja', 'Das stimmt'. "
+           "Beginne NIEMALS mit einer Bestätigung oder Bewertung des Gesagten. "
+           "Wiederhole NIEMALS den Satz des Anrufers. "
+           "Sei interessiert und wissend — teile Fakten, Meinungen oder Vorschläge.";
+}
 
 struct LlamaChatMessage {
     std::string role;
@@ -128,8 +250,10 @@ class LlamaService {
 public:
     LlamaService(const std::string& model_path,
                  const std::string& rag_host = "127.0.0.1",
-                 int rag_port = 13181) 
+                 int rag_port = 13181,
+                 const std::string& language = "de")
         : running_(true),
+          language_(language),
           rag_host_(rag_host),
           rag_port_(rag_port),
           interconnect_(whispertalk::ServiceType::LLAMA_SERVICE) {
@@ -427,9 +551,7 @@ private:
         }
     }
 
-    int sentence_end_count_ = 0;
-
-    bool is_sentence_end(const std::string& s) {
+    bool is_sentence_end(const std::string& s, int& count) {
         if (s.empty()) return false;
         char last = s.back();
         if (last != '.' && last != '?' && last != '!') return false;
@@ -440,8 +562,8 @@ private:
                 (s[s.size() - 3] == ' ' || s[s.size() - 3] == '.'))
                 return false;
         }
-        sentence_end_count_++;
-        return sentence_end_count_ >= 2;
+        count++;
+        return count >= 2;
     }
 
     static int count_words(const std::string& s) {
@@ -798,14 +920,14 @@ private:
             if (rag_ok) rag_record_success();
         }
 
-        {
-            bool was_generating = call->generating.exchange(true);
-            if (was_generating) {
-                call->generating = false;
-                std::lock_guard<std::mutex> lock(llama_mutex_);
-            }
-        }
-
+        // Signal any in-flight generation for THIS call to stop. The previous
+        // implementation tried to synchronize by acquiring llama_mutex_ inside
+        // a scoped block — but the lock_guard was destroyed at the closing
+        // brace on the same line, making it a no-op. In practice process_call
+        // is invoked from a single worker thread so there is never a concurrent
+        // generation on the same call; llama_mutex_ (acquired below) still
+        // serializes against admin/cleanup paths that also take it.
+        call->generating = false;
         std::lock_guard<std::mutex> lock(llama_mutex_);
         call->generating = true;
 
@@ -816,7 +938,7 @@ private:
             call->messages.erase(call->messages.begin(), call->messages.begin() + 2);
         }
 
-        std::string sys_prompt = SYSTEM_PROMPT;
+        std::string sys_prompt = system_prompt_for(language_);
         if (!greeting_hint.empty()) sys_prompt += "\n\n" + greeting_hint;
         if (!rag_ctx.empty()) sys_prompt += "\n\nKontextinformation aus Praxissystem:\n" + rag_ctx;
 
@@ -879,7 +1001,7 @@ private:
         auto gen_start = std::chrono::steady_clock::now();
         std::string response;
         llama_token id;
-        sentence_end_count_ = 0;
+        int sentence_end_count = 0;
         llama_batch single_batch = llama_batch_init(1, 0, 1);
         for (int i = 0; i < MAX_RESPONSE_TOKENS; ++i) {
             if (!call->generating) {
@@ -894,7 +1016,7 @@ private:
             int n = llama_token_to_piece(vocab_, id, piece, sizeof(piece), 0, false);
             if (n > 0) {
                 response.append(piece, n);
-                if (is_sentence_end(response)) break;
+                if (is_sentence_end(response, sentence_end_count)) break;
             }
 
             single_batch.n_tokens = 1;
@@ -934,17 +1056,22 @@ private:
                 response.clear();
             } else {
                 float sim = text_similarity(text, response);
+                size_t tc_count = 0;
+                const char* const* tc_arr = topic_changes_for(language_, tc_count);
+                auto pick_topic_change = [&]() {
+                    return tc_arr[topic_change_idx_.fetch_add(1) % tc_count];
+                };
                 if (sim > SIMILARITY_THRESHOLD) {
                     log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
                         "Replacing parrot response (%.0f%% similar to input) with topic change: %s",
                         sim * 100.0f, response.c_str());
                     call->messages.pop_back();
-                    response = TOPIC_CHANGES[topic_change_idx_.fetch_add(1) % NUM_TOPIC_CHANGES];
+                    response = pick_topic_change();
                 } else if (is_empty_pleasantry(response)) {
                     log_fwd_.forward(whispertalk::LogLevel::WARN, cid,
                         "Replacing pleasantry with topic change: %s", response.c_str());
                     call->messages.pop_back();
-                    response = TOPIC_CHANGES[topic_change_idx_.fetch_add(1) % NUM_TOPIC_CHANGES];
+                    response = pick_topic_change();
                 } else {
                     for (auto rit = call->messages.rbegin(); rit != call->messages.rend(); ++rit) {
                         if (rit->role == "assistant") {
@@ -954,7 +1081,7 @@ private:
                                     "Replacing repetitive response (%.0f%% similar) with topic change: %s",
                                     hsim * 100.0f, response.c_str());
                                 call->messages.pop_back();
-                                response = TOPIC_CHANGES[topic_change_idx_.fetch_add(1) % NUM_TOPIC_CHANGES];
+                                response = pick_topic_change();
                                 break;
                             }
                         }
@@ -1243,6 +1370,7 @@ private:
     }
 
     std::atomic<bool> running_;
+    std::string language_;
     std::atomic<int> cmd_sock_{-1};
     const std::string rag_host_;
     const int rag_port_;
@@ -1290,26 +1418,29 @@ int main(int argc, char** argv) {
     std::string log_level = "INFO";
     std::string rag_host = "127.0.0.1";
     int rag_port = 13181;
+    std::string language = "de";
 
     static struct option long_opts[] = {
         {"log-level",  required_argument, 0, 'L'},
         {"rag-host",   required_argument, 0, 'H'},
         {"rag-port",   required_argument, 0, 'P'},
+        {"language",   required_argument, 0, 'l'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "L:H:P:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "L:H:P:l:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'L': log_level = optarg; break;
             case 'H': rag_host = optarg; break;
             case 'P': rag_port = std::atoi(optarg); break;
+            case 'l': language = optarg; break;
             default: break;
         }
     }
     if (optind < argc) model_path = argv[optind];
 
     try {
-        LlamaService service(model_path, rag_host, rag_port);
+        LlamaService service(model_path, rag_host, rag_port, language);
         if (!service.init()) {
             return 1;
         }

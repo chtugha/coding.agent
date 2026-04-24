@@ -754,7 +754,7 @@ private:
             std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
             {
-                std::lock_guard<std::mutex> lock(pipeline_mutex_);
+                std::lock_guard<std::mutex> lock(admin_pipeline_mutex_);
                 samples = pipeline_.synthesize(text);
             }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -792,7 +792,7 @@ private:
             std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
             {
-                std::lock_guard<std::mutex> lock(pipeline_mutex_);
+                std::lock_guard<std::mutex> lock(admin_pipeline_mutex_);
                 samples = pipeline_.synthesize(text);
             }
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -929,7 +929,8 @@ private:
             size_t chunks_produced = 0;
             auto start = std::chrono::steady_clock::now();
             {
-                std::lock_guard<std::mutex> lock(pipeline_mutex_);
+                // Per-call synthesis runs WITHOUT the admin mutex so multiple
+                // call_worker threads can drive the pipeline in parallel.
                 bool first_chunk = true;
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
                     [&](std::vector<float> chunk) {
@@ -1103,7 +1104,12 @@ private:
     EngineClient engine_;
     LogForwarder log_fwd_;
     NeuTTSPipeline pipeline_;
-    std::mutex pipeline_mutex_;
+    // admin_pipeline_mutex_ serializes ad-hoc debug/admin synthesis calls
+    // (TEST_SYNTH, SYNTH_WAV) issued over the CMD port. Per-call synthesis
+    // launched from call_worker() runs WITHOUT this lock so multiple calls
+    // can synthesize in parallel — NeuTTSPipeline::synthesize_streaming() is
+    // re-entrant (reads only the immutable model loaded at init + local state).
+    std::mutex admin_pipeline_mutex_;
     std::atomic<bool> running_{true};
     std::atomic<int> cmd_sock_{-1};
     std::map<uint32_t, std::shared_ptr<CallContext>> calls_;
@@ -1127,19 +1133,23 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
 
     std::string log_level = "INFO";
+    std::string language = "de";
 
     static struct option long_opts[] = {
         {"log-level", required_argument, 0, 'L'},
+        {"language",  required_argument, 0, 'l'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "L:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "L:l:h", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'L': log_level = optarg; break;
+            case 'l': language = optarg; break;
             case 'h':
                 std::printf("Usage: neutts-service [OPTIONS]\n");
                 std::printf("  --log-level LEVEL Log level: ERROR WARN INFO DEBUG TRACE (default: INFO)\n");
+                std::printf("  --language CODE   Global pipeline language (de/en/es/fr/it/zh/auto, default: de)\n");
                 std::printf("\nAlternative TTS engine using NeuTTS Nano German + NeuCodec\n");
                 std::printf("Connects to the TTS dock via EngineClient (last engine to dock wins)\n");
                 return 0;
@@ -1147,7 +1157,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::printf("Starting NeuTTS Service (NeuTTS Nano German, NeuCodec CoreML)\n");
+    std::printf("Starting NeuTTS Service (NeuTTS Nano German, NeuCodec CoreML, language=%s)\n",
+                language.c_str());
+    if (language != "de" && language != "auto") {
+        std::fprintf(stderr,
+            "[neutts-service] WARNING: NeuTTS bundled model is German-only; "
+            "language='%s' is accepted but the output voice will still be German. "
+            "Use kokoro-service for multilingual synthesis.\n", language.c_str());
+    }
 
     NeuTTSService service;
     g_service = &service;

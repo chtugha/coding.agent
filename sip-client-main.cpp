@@ -736,10 +736,15 @@ private:
 
         if (!phone.empty()) {
             log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid, "Caller phone extracted: %s", phone.c_str());
-            std::thread([cid, phone]() { notify_tomedo_crawl(cid, phone); }).detach();
         } else {
             log_fwd_.forward(whispertalk::LogLevel::DEBUG, cid, "Could not extract phone from From header: %s", from.c_str());
         }
+        // Always register the call_id with the RAG service, even when the phone
+        // number could not be extracted. Sending an empty phone lets the RAG
+        // service acknowledge the call exists (returning a minimal context) and
+        // lets LLaMA distinguish "anonymous caller" (registered, no data) from
+        // "RAG not connected" (no response at all).
+        std::thread([cid, phone]() { notify_tomedo_crawl(cid, phone); }).detach();
 
         session->rtp_thread = std::thread(&SipClient::rtp_receiver_loop, this, session);
 

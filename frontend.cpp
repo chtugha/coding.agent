@@ -818,6 +818,24 @@ private:
                 if (!ll.empty() && ll.find(' ') == std::string::npos) use_args += " --log-level " + ll;
             }
 
+            // Inject the global pipeline language into every service that
+            // supports it. The --language flag, when appended, wins over any
+            // earlier --language (or whisper's -l) in default_args because
+            // getopt_long takes the last occurrence. Services accepting the
+            // flag: WHISPER_SERVICE, LLAMA_SERVICE, KOKORO_SERVICE,
+            // NEUTTS_SERVICE. Default is "de".
+            if (args_override.empty() &&
+                (name == "WHISPER_SERVICE" || name == "LLAMA_SERVICE" ||
+                 name == "KOKORO_SERVICE"  || name == "NEUTTS_SERVICE")) {
+                std::string lang = get_setting("global_language", "de");
+                // Validate: only a small whitelist is allowed through.
+                static const char* kLangs[] = {"de","en","es","fr","it","zh","auto"};
+                bool ok = false;
+                for (auto* c2 : kLangs) { if (lang == c2) { ok = true; break; } }
+                if (!ok) lang = "de";
+                use_args += " --language " + lang;
+            }
+
             if (name == "TOMEDO_CRAWL_SERVICE" && args_override.empty()) {
                 rag_db_sync_all_config();
                 std::string db_args = rag_db_path_;
@@ -1161,6 +1179,8 @@ private:
                 handle_db_schema(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/settings")) == 0) {
                 handle_settings(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/settings/language")) == 0) {
+                handle_settings_language(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/status")) == 0) {
                 handle_status(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/whisper/models")) == 0) {
@@ -2165,6 +2185,71 @@ private:
         } else {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Cannot stop service (not managed by frontend)\"}");
         }
+    }
+
+    // POST /api/settings/language — Persist the global pipeline language and
+    // restart every language-aware service that is currently running so the
+    // new value takes effect immediately. Accepts: de, en, es, fr, it, zh, auto.
+    void handle_settings_language(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            std::string lang = get_setting("global_language", "de");
+            std::string body = "{\"language\":\"" + escape_json(lang) + "\"}";
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", body.c_str());
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string lang = extract_json_string(body, "language");
+        if (lang.empty()) lang = extract_json_string(body, "value");
+
+        static const char* kLangs[] = {"de","en","es","fr","it","zh","auto"};
+        bool ok = false;
+        for (auto* c2 : kLangs) { if (lang == c2) { ok = true; break; } }
+        if (!ok) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"Invalid language. Allowed: de,en,es,fr,it,zh,auto\"}");
+            return;
+        }
+
+        if (db_) {
+            sqlite3_stmt* stmt;
+            const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES ('global_language', ?)";
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, lang.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        // Determine which language-aware services are currently running and
+        // need to be restarted. We restart with args_override="" so the new
+        // --language value is injected by start_service().
+        std::vector<std::string> to_restart;
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            for (auto& svc : services_) {
+                if (svc.name != "WHISPER_SERVICE" && svc.name != "LLAMA_SERVICE" &&
+                    svc.name != "KOKORO_SERVICE"  && svc.name != "NEUTTS_SERVICE") continue;
+                if (svc.managed && svc.pid > 0) to_restart.push_back(svc.name);
+            }
+        }
+        std::stringstream restarted_json;
+        restarted_json << "[";
+        bool first = true;
+        for (const auto& n : to_restart) {
+            stop_service(n);
+            usleep(RESTART_WAIT_US);
+            bool started = start_service(n, "");
+            if (!first) restarted_json << ",";
+            restarted_json << "{\"service\":\"" << escape_json(n)
+                           << "\",\"restarted\":" << (started ? "true" : "false") << "}";
+            first = false;
+        }
+        restarted_json << "]";
+
+        std::stringstream resp;
+        resp << "{\"status\":\"saved\",\"language\":\"" << escape_json(lang)
+             << "\",\"restarted\":" << restarted_json.str() << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.str().c_str());
     }
 
     // POST /api/services/restart — Stop then start a service (500ms sleep between).

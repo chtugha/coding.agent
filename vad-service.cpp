@@ -462,6 +462,13 @@ private:
         }
     }
 
+    // processing_loop iterates all active calls sequentially in a single thread.
+    // This is round-robin, not strictly simultaneous — but each call's per-frame
+    // VAD work (energy sum, EMA noise floor, FSM transition) is a handful of
+    // microseconds on a 50ms frame period, so the cumulative latency added per
+    // iteration is negligible at realistic call volumes (<20 concurrent).
+    // If call volume exceeds that threshold, split this into per-call worker
+    // threads or a thread pool keyed by call_id.
     void processing_loop() {
         while (running_ && g_running) {
             {

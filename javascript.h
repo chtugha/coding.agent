@@ -968,6 +968,35 @@ function showServicesOverview(){
   if(svcLogSSE){svcLogSSE.close();svcLogSSE=null;}
   document.getElementById('services-overview').classList.remove('hidden');
   document.getElementById('services-detail').classList.add('hidden');
+  loadGlobalLanguage();
+}
+
+function loadGlobalLanguage(){
+  fetch('/api/settings/language').then(r=>r.json()).then(d=>{
+    const sel=document.getElementById('globalLanguage');
+    if(sel&&d&&d.language){sel.value=d.language;}
+  }).catch(()=>{});
+}
+
+function saveGlobalLanguage(lang){
+  const status=document.getElementById('globalLanguageStatus');
+  if(status){status.textContent='Saving & restarting services...';status.style.color='var(--wt-text-secondary)';}
+  fetch('/api/settings/language',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({language:lang})})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){
+        if(status){status.textContent='Error: '+d.error;status.style.color='var(--wt-error,#f66)';}
+      }else{
+        const n=(d.restarted||[]).length;
+        if(status){
+          status.textContent='Saved ('+lang+'). Restarted '+n+' service'+(n===1?'':'s')+'.';
+          status.style.color='var(--wt-accent-cyan)';
+        }
+        setTimeout(fetchServices,DELAY_SERVICE_REFRESH_MS);
+      }
+    }).catch(e=>{
+      if(status){status.textContent='Request failed';status.style.color='var(--wt-error,#f66)';}
+    });
 }
 
 function startSvcDetail(){

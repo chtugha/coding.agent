@@ -100,6 +100,22 @@ inline std::string FrontendServer::build_ui_pages() {
 <div class="wt-content">
 <div id="services-overview">
 <h2 class="wt-page-title">Pipeline Services</h2>
+<div class="wt-card" style="margin-bottom:12px;padding:10px 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<div style="display:flex;flex-direction:column">
+<div style="font-size:12px;font-weight:600">Pipeline Language</div>
+<div style="font-size:11px;color:var(--wt-text-secondary)">Global language applied to Whisper, LLaMA and all TTS engines. Changing this setting automatically restarts the affected running services.</div>
+</div>
+<select class="wt-select" id="globalLanguage" onchange="saveGlobalLanguage(this.value)" style="font-size:12px;min-width:160px" title="Sets the --language flag for WHISPER_SERVICE, LLAMA_SERVICE, KOKORO_SERVICE and NEUTTS_SERVICE. Default: German.">
+<option value="de">German (de)</option>
+<option value="en">English (en)</option>
+<option value="es">Spanish (es)</option>
+<option value="fr">French (fr)</option>
+<option value="it">Italian (it)</option>
+<option value="zh">Chinese (zh)</option>
+<option value="auto">Auto-detect</option>
+</select>
+<span id="globalLanguageStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
 <div id="servicesContainer"></div>
 </div>
 <div id="services-detail" class="hidden">
