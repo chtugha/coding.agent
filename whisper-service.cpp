@@ -518,12 +518,6 @@ const char* WhisperService::hallucination_patterns_[] = {
     "MwSt",
     "Ich spreche Deutsch",
     "Ich spreche die Frage",
-    "Vielen Dank",
-    "Danke",
-    "Tschüss",
-    "Guten Tag",
-    "Willkommen",
-    "Hallo",
     nullptr
 };
 
