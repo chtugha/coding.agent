@@ -1789,7 +1789,6 @@ function stopPipelineStressTest(){
 document.getElementById('pstressStatus').innerHTML='<span style="color:var(--wt-warning)">Stopping...</span>';
   });
 }
-const svcNames=['SIP','IAP','VAD','Whisper','LLaMA','TTS','OAP'];
 function pollPipelineStress(dur){
   fetch('/api/pipeline_stress/progress').then(r=>r.json()).then(d=>{
 if(d.error){return;}
