@@ -204,7 +204,17 @@ e.classList.toggle('active',e.dataset.page===p);
   if(p!=='beta-testing')stopTestResultsPoll();
   if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();}
   if(p==='services'){showServicesOverview();fetchServices();}
-  if(p==='beta-testing'){try{buildSipLinesGrid();}catch(e){console.error('buildSipLinesGrid:',e);}try{refreshTestFiles();}catch(e){console.error('refreshTestFiles:',e);}try{loadVadConfig();}catch(e){}try{loadLlamaPrompts();}catch(e){}try{refreshInjectLegs();}catch(e){}try{updateBetaSummaryDots();}catch(e){}startPrereqPoll();}else{stopPrereqPoll();}
+  if(p==='beta-testing'){
+    try{buildSipLinesGrid();}catch(e){console.error('buildSipLinesGrid:',e);}
+    try{refreshTestFiles();}catch(e){console.error('refreshTestFiles:',e);}
+    try{loadVadConfig();}catch(e){}
+    try{loadLlamaPrompts();}catch(e){}
+    try{refreshInjectLegs();}catch(e){}
+    try{updateBetaSummaryDots();}catch(e){}
+    const resTab=document.getElementById('tab-beta-results');
+    if(resTab&&resTab.classList.contains('active')){fetchTestResultsPage();startTestResultsPoll();}
+    startPrereqPoll();
+  }else{stopPrereqPoll();}
   if(p==='models'){loadModels();loadModelComparison();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
