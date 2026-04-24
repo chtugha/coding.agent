@@ -114,20 +114,233 @@ static std::string extract_sip_field(const std::string& header, const std::strin
 
 static constexpr int RTP_PORT_BASE = 10000;
 
-static std::string extract_phone_from_sip_from(const std::string& from) {
-    size_t start = from.find("<sip:");
-    size_t scheme_len = 5;
-    if (start == std::string::npos) {
-        start = from.find("<sips:");
-        scheme_len = 6;
+// Normalize a SIP user-part to an E.164-style phone number: keep an optional
+// leading '+' and digits only. Visual separators (space, dash, dot, parens)
+// are stripped. Returns "" if the result has fewer than MIN_PHONE_DIGITS
+// digits (treats placeholders like "anonymous", "unavailable", "restricted",
+// or alphanumeric SIP usernames as no-number).
+static std::string normalize_phone(const std::string& s) {
+    static constexpr size_t MIN_PHONE_DIGITS = 3;
+    std::string out;
+    out.reserve(s.size());
+    bool have_plus = false;
+    size_t digits = 0;
+    for (size_t i = 0; i < s.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c == '+' && out.empty() && !have_plus) {
+            out.push_back('+');
+            have_plus = true;
+        } else if (c >= '0' && c <= '9') {
+            out.push_back(static_cast<char>(c));
+            digits++;
+        } else if (c == ' ' || c == '-' || c == '.' || c == '(' || c == ')' ||
+                   c == '\t' || c == '/' || c == '~') {
+            // visual separator, ignore
+        } else {
+            // Any other char (letters, %-escapes, ;params, etc.) means this is
+            // not a pure phone number user-part. Stop scanning to avoid mixing
+            // numbers from different fields (e.g. "alice;tag=12345").
+            break;
+        }
     }
-    if (start == std::string::npos) return "";
-    start += scheme_len;
-    size_t at = from.find('@', start);
-    size_t gt = from.find('>', start);
-    size_t end = (at != std::string::npos && at < gt) ? at : gt;
-    if (end == std::string::npos) return "";
-    return from.substr(start, end - start);
+    if (digits < MIN_PHONE_DIGITS) return "";
+    return out;
+}
+
+// Parse one SIP header value (e.g. From / P-Asserted-Identity / Remote-Party-ID)
+// and return a normalized phone number, or "" if no usable number can be
+// extracted. Supports:
+//   • <sip:user@host>, <sips:user@host>, <tel:+4930…>
+//   • bracket-less addr-spec: sip:user@host;tag=…
+//   • bare tel-URI: tel:+4930…
+//   • multiple comma-separated values (PAI/RPID can carry several);
+//     the first value yielding a usable number wins.
+static std::string extract_phone_from_uri(const std::string& header_value) {
+    auto try_one = [](std::string val) -> std::string {
+        // Trim leading whitespace.
+        size_t b = 0;
+        while (b < val.size() && (val[b] == ' ' || val[b] == '\t')) b++;
+        val.erase(0, b);
+
+        // Strip any leading display-name (quoted or token) up to the URI.
+        // The URI begins at the first '<', or — if no angle brackets — at the
+        // first occurrence of one of the known schemes.
+        size_t lt = val.find('<');
+        std::string uri;
+        if (lt != std::string::npos) {
+            size_t gt = val.find('>', lt + 1);
+            if (gt == std::string::npos) return "";
+            uri = val.substr(lt + 1, gt - lt - 1);
+        } else {
+            // Bracket-less addr-spec. Find the scheme prefix.
+            size_t pos = std::string::npos;
+            for (const char* scheme : {"sip:", "sips:", "tel:"}) {
+                size_t p = val.find(scheme);
+                if (p != std::string::npos && (pos == std::string::npos || p < pos)) {
+                    pos = p;
+                }
+            }
+            if (pos == std::string::npos) return "";
+            // Take everything from the scheme up to the first ';' or whitespace
+            // that terminates the URI in addr-spec form.
+            size_t end = val.find_first_of(";, \t\r\n", pos);
+            if (end == std::string::npos) end = val.size();
+            uri = val.substr(pos, end - pos);
+        }
+
+        // Strip URI parameters after ';' (e.g. ;user=phone).
+        size_t semi = uri.find(';');
+        if (semi != std::string::npos) uri.erase(semi);
+
+        std::string user;
+        if (uri.rfind("tel:", 0) == 0) {
+            user = uri.substr(4);
+        } else if (uri.rfind("sip:", 0) == 0 || uri.rfind("sips:", 0) == 0) {
+            size_t scheme_len = (uri[3] == ':') ? 4 : 5;
+            std::string body = uri.substr(scheme_len);
+            // Drop any "user:password@" — keep only the user part before '@'.
+            size_t at = body.find('@');
+            if (at == std::string::npos) {
+                // No host part — entire body is the user (rare, but tolerated).
+                user = body;
+            } else {
+                user = body.substr(0, at);
+                size_t colon = user.find(':');
+                if (colon != std::string::npos) user.erase(colon);
+            }
+        } else {
+            return "";
+        }
+
+        // Reject explicit anonymous placeholders before normalizing.
+        std::string lower = user;
+        for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lower.empty() || lower == "anonymous" || lower == "unavailable" ||
+            lower == "restricted" || lower == "unknown" || lower == "private") {
+            return "";
+        }
+        return normalize_phone(user);
+    };
+
+    // PAI/RPID may be a comma-separated list of values; try each in order.
+    size_t start = 0;
+    while (start <= header_value.size()) {
+        // Walk to the next top-level comma, ignoring commas inside <…> or "…".
+        size_t end = start;
+        bool in_bracket = false, in_quote = false;
+        while (end < header_value.size()) {
+            char c = header_value[end];
+            if (c == '"' && !in_bracket) in_quote = !in_quote;
+            else if (c == '<' && !in_quote) in_bracket = true;
+            else if (c == '>' && !in_quote) in_bracket = false;
+            else if (c == ',' && !in_bracket && !in_quote) break;
+            end++;
+        }
+        std::string piece = header_value.substr(start, end - start);
+        std::string n = try_one(piece);
+        if (!n.empty()) return n;
+        if (end >= header_value.size()) break;
+        start = end + 1;
+    }
+    return "";
+}
+
+// Walk the SIP message and return the value of the named header
+// (case-insensitive, supports common compact forms). Multiple occurrences
+// are joined with ", " so the multi-value PAI/RPID parser can iterate them.
+static std::string sip_get_header_all(const std::string& msg, const std::string& name,
+                                      const char* compact = nullptr) {
+    auto eq_ci = [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) ==
+               std::tolower(static_cast<unsigned char>(b));
+    };
+    auto match_at = [&](size_t pos, const std::string& key) -> bool {
+        if (pos + key.size() + 1 > msg.size()) return false;
+        for (size_t i = 0; i < key.size(); ++i) {
+            if (!eq_ci(msg[pos + i], key[i])) return false;
+        }
+        // Allow optional whitespace before the ':' (RFC 3261 HCOLON).
+        size_t k = pos + key.size();
+        while (k < msg.size() && (msg[k] == ' ' || msg[k] == '\t')) k++;
+        return k < msg.size() && msg[k] == ':';
+    };
+
+    std::string out;
+    size_t p = 0;
+    while (p < msg.size()) {
+        // Header lines start at column 0 after a CRLF (or at offset 0).
+        bool at_line_start = (p == 0) || (p >= 2 && msg[p - 2] == '\r' && msg[p - 1] == '\n');
+        if (!at_line_start) {
+            size_t nl = msg.find("\r\n", p);
+            if (nl == std::string::npos) break;
+            p = nl + 2;
+            continue;
+        }
+        bool hit = match_at(p, name) || (compact && match_at(p, compact));
+        if (!hit) {
+            size_t nl = msg.find("\r\n", p);
+            if (nl == std::string::npos) break;
+            p = nl + 2;
+            continue;
+        }
+        // Find ':' and skip leading SP/HT after it.
+        size_t colon = msg.find(':', p);
+        if (colon == std::string::npos) break;
+        size_t vs = colon + 1;
+        while (vs < msg.size() && (msg[vs] == ' ' || msg[vs] == '\t')) vs++;
+        // Header values can be folded across lines (RFC 3261): a CRLF followed
+        // by SP/HT continues the same header. Collect until an unfolded CRLF.
+        std::string value;
+        while (vs < msg.size()) {
+            size_t nl = msg.find("\r\n", vs);
+            if (nl == std::string::npos) {
+                value.append(msg, vs, msg.size() - vs);
+                vs = msg.size();
+                break;
+            }
+            value.append(msg, vs, nl - vs);
+            // Folded continuation?
+            if (nl + 2 < msg.size() && (msg[nl + 2] == ' ' || msg[nl + 2] == '\t')) {
+                value.push_back(' ');
+                vs = nl + 2;
+                while (vs < msg.size() && (msg[vs] == ' ' || msg[vs] == '\t')) vs++;
+                continue;
+            }
+            vs = nl + 2;
+            break;
+        }
+        if (!out.empty()) out += ", ";
+        out += value;
+        p = vs;
+    }
+    return out;
+}
+
+// Hardened caller-number extractor. Tries (in priority order):
+//   1. P-Asserted-Identity (RFC 3325) — the carrier-trusted CLI.
+//   2. Remote-Party-ID (legacy pre-RFC 3325, still common on PSTN gateways).
+//   3. From: header (compact "f:") — used when no asserted identity is set
+//      and as the only source for non-anonymous calls.
+// Returns a normalized E.164-ish phone number, or "" only when every parse
+// path failed (true CLIR, malformed signaling, or alphanumeric SIP user-part).
+static std::string extract_caller_phone(const std::string& msg) {
+    std::string v;
+    v = sip_get_header_all(msg, "P-Asserted-Identity");
+    if (!v.empty()) {
+        std::string n = extract_phone_from_uri(v);
+        if (!n.empty()) return n;
+    }
+    v = sip_get_header_all(msg, "Remote-Party-ID");
+    if (!v.empty()) {
+        std::string n = extract_phone_from_uri(v);
+        if (!n.empty()) return n;
+    }
+    v = sip_get_header_all(msg, "From", "f");
+    if (!v.empty()) {
+        std::string n = extract_phone_from_uri(v);
+        if (!n.empty()) return n;
+    }
+    return "";
 }
 
 static const uint16_t TOMEDO_CRAWL_PORT = whispertalk::service_base_port(whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE) + 1;
@@ -723,7 +936,13 @@ private:
             raddr.sin_port = htons(session->local_rtp_port);
         }
 
-        std::string phone = extract_phone_from_sip_from(from);
+        // Hardened multi-header extractor: tries P-Asserted-Identity, then
+        // Remote-Party-ID, then From (with compact "f:"). Handles tel: URIs,
+        // bracket-less addr-spec, header folding, comma-separated PAI lists,
+        // and rejects anonymous/restricted/unknown placeholders. Empty result
+        // means true CLIR or unparsable signaling — the call still proceeds
+        // and RAG is notified with an empty phone.
+        std::string phone = extract_caller_phone(msg);
         if (!phone.empty()) {
             session->caller_number = phone;
         }
