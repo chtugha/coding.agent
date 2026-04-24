@@ -47,6 +47,7 @@
 #include "tts-engine-client.h"
 #include "tts-common.h"
 #include <atomic>
+#include <functional>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -691,6 +692,86 @@ public:
 #else
         (void)speed;
         return {};
+#endif
+    }
+
+    // Streaming synthesis — invokes `on_chunk(audio)` as soon as each decoder
+    // chunk is ready instead of accumulating the whole utterance. For texts
+    // that exceed the decoder's max ASR frames, multiple chunks are emitted
+    // (each ~3-10s of audio, dictated by the decoder bucket sizing). For
+    // shorter texts a single chunk is emitted. `interrupted` is checked
+    // between chunks to allow barge-in cancellation. Returns the total number
+    // of chunks emitted.
+    size_t synthesize_streaming(const std::string& text, float speed,
+                                 std::atomic<bool>* interrupted,
+                                 const std::function<void(std::vector<float>)>& on_chunk) {
+        std::string phonemes = phonemize(text);
+        if (phonemes.empty()) return 0;
+
+        auto ids = vocab_.encode(phonemes);
+        if (ids.size() <= 2) return 0;
+
+        int phoneme_count = static_cast<int>(ids.size()) - 2;
+        int voice_idx = std::min(phoneme_count - 1, voice_entries_ - 1);
+        voice_idx = std::max(0, voice_idx);
+
+        auto ref_s = KTensor::from_data(voice_pack_.ptr() + voice_idx * 256, {1, 256});
+
+#ifdef KOKORO_COREML
+        if (!coreml_available_ || !coreml_split_decoder_) return 0;
+
+        auto intermediates = run_duration_and_align(ids, ref_s, speed);
+        if (!intermediates.valid) return 0;
+
+        const int max_asr = coreml_split_decoder_->max_asr_frames();
+        size_t emitted = 0;
+
+        if (intermediates.total_frames > max_asr && intermediates.actual_len > 2) {
+            struct ChunkRange { int phon_start; int phon_end; int64_t frame_start; int64_t num_frames; };
+            std::vector<ChunkRange> chunks;
+            int64_t cum = 0;
+            int chunk_start = 0;
+            int64_t chunk_frame_start = 0;
+            for (int i = 0; i < intermediates.actual_len; i++) {
+                int64_t next = cum + intermediates.pred_dur[i];
+                if (next > max_asr && i > chunk_start) {
+                    chunks.push_back({chunk_start, i, chunk_frame_start, cum});
+                    chunk_frame_start += cum;
+                    chunk_start = i;
+                    cum = intermediates.pred_dur[i];
+                } else {
+                    cum = next;
+                }
+            }
+            if (chunk_start < intermediates.actual_len) {
+                chunks.push_back({chunk_start, intermediates.actual_len, chunk_frame_start, cum});
+            }
+
+            std::fprintf(stderr, "Streaming long synthesis (total_frames=%lld > max_asr=%d) into %zu chunks\n",
+                        (long long)intermediates.total_frames, max_asr, chunks.size());
+
+            for (auto& c : chunks) {
+                if (interrupted && interrupted->load()) return emitted;
+                auto part = decode_part(intermediates, c.phon_start, c.phon_end,
+                                         c.frame_start, c.num_frames);
+                if (!part.empty()) {
+                    on_chunk(std::move(part));
+                    emitted++;
+                }
+            }
+            return emitted;
+        }
+
+        // Short utterance — single chunk.
+        auto audio = synthesize_coreml(ids, ref_s, speed);
+        if (!audio.empty()) {
+            on_chunk(std::move(audio));
+            emitted++;
+        }
+        return emitted;
+#else
+        (void)speed; (void)interrupted; (void)on_chunk;
+        return 0;
 #endif
     }
 
@@ -1424,37 +1505,63 @@ private:
 
             std::printf("Synthesizing for call %u: %s\n", ctx->call_id, text.c_str());
 
-            std::vector<float> samples;
             auto start = std::chrono::steady_clock::now();
-            samples = pipeline_.synthesize(text, speed_.load());
+            size_t total_samples = 0;
+            size_t chunk_index = 0;
+            bool first_chunk_sent = false;
+            int64_t first_chunk_ms = 0;
+            size_t emitted = pipeline_.synthesize_streaming(text, speed_.load(), &ctx->interrupted,
+                [&](std::vector<float> chunk) {
+                    if (ctx->interrupted.load()) return;
+                    if (chunk.empty() || chunk.size() > MAX_AUDIO_SAMPLES) return;
+
+                    float raw_peak = 0.0f;
+                    for (float s : chunk) { float a = std::abs(s); if (a > raw_peak) raw_peak = a; }
+                    // Peak-limit only (no full normalization across chunks) to
+                    // avoid audible volume jumps between adjacent streamed
+                    // chunks. Scale down if and only if the chunk would clip.
+                    if (raw_peak > 0.95f) {
+                        float scale = 0.90f / raw_peak;
+                        for (float& s : chunk) s *= scale;
+                    }
+                    if (chunk_index == 0) {
+                        tts::apply_fade_in(chunk);
+                        first_chunk_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start).count();
+                        first_chunk_sent = true;
+                    }
+                    total_samples += chunk.size();
+                    log_fwd_.forward(LogLevel::DEBUG, ctx->call_id,
+                        "Streaming chunk %zu — %zu samples (raw_peak=%.3f)",
+                        chunk_index, chunk.size(), raw_peak);
+                    send_audio_to_downstream(ctx->call_id, chunk, &ctx->interrupted);
+                    chunk_index++;
+                });
+
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
             if (ctx->interrupted.load()) {
                 ctx->interrupted = false;
-                std::printf("Synthesis interrupted for call %u — discarding %zu samples\n",
-                           ctx->call_id, samples.size());
-                log_fwd_.forward(LogLevel::WARN, ctx->call_id, "Synthesis interrupted — discarding audio");
+                std::printf("Synthesis interrupted for call %u after %zu chunks (%zu samples)\n",
+                           ctx->call_id, chunk_index, total_samples);
+                log_fwd_.forward(LogLevel::WARN, ctx->call_id,
+                    "Synthesis interrupted after %zu chunks", chunk_index);
                 continue;
             }
 
-            if (samples.empty() || samples.size() > MAX_AUDIO_SAMPLES) {
-                std::fprintf(stderr, "Invalid audio output for call %u: %zu samples\n",
-                            ctx->call_id, samples.size());
+            if (emitted == 0 || total_samples == 0) {
+                std::fprintf(stderr, "No audio output for call %u\n", ctx->call_id);
                 continue;
             }
 
-            float raw_peak = tts::normalize_audio(samples);
-            tts::apply_fade_in(samples);
-
-            const char* norm_tag = (raw_peak > 0.01f && std::abs(raw_peak - 0.90f) > 0.001f)
-                                   ? " -> normalized" : "";
-            std::printf("Synthesized %zu samples in %lldms for call %u (raw_peak=%.3f%s)\n",
-                        samples.size(), (long long)elapsed, ctx->call_id, raw_peak, norm_tag);
-            log_fwd_.forward(LogLevel::INFO, ctx->call_id, "Synthesized %zu samples in %lldms (raw_peak=%.3f%s)",
-                             samples.size(), (long long)elapsed, raw_peak, norm_tag);
-
-            send_audio_to_downstream(ctx->call_id, samples, &ctx->interrupted);
+            std::printf("Streamed %zu samples in %lldms for call %u (%zu chunks, first=%lldms)\n",
+                        total_samples, (long long)elapsed, ctx->call_id, chunk_index,
+                        (long long)(first_chunk_sent ? first_chunk_ms : elapsed));
+            log_fwd_.forward(LogLevel::INFO, ctx->call_id,
+                "Streamed %zu samples in %lldms (%zu chunks, first=%lldms)",
+                total_samples, (long long)elapsed, chunk_index,
+                (long long)(first_chunk_sent ? first_chunk_ms : elapsed));
         }
     }
 

@@ -698,6 +698,11 @@ private:
                                 call->frame_energies.clear();
                                 call->energies_sample_origin = 0;
                                 // Don't broadcast IDLE — speech is still active.
+                                // Refresh speech_signal_time so the SPEECH_ACTIVE
+                                // timeout below does not fire mid-utterance for
+                                // long uninterrupted speech that triggers
+                                // multiple max-length smart splits.
+                                call->speech_signal_time = std::chrono::steady_clock::now();
                             } else {
                                 needs_idle_broadcast = reset_call_state(*call);
                             }

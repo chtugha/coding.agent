@@ -656,7 +656,13 @@ private:
         state->dc_x_prev = 0.0f;
         state->dc_y_prev = 0.0f;
         state->pres_x1 = state->pres_x2 = state->pres_y1 = state->pres_y2 = 0.0f;
-        log_fwd_.forward(whispertalk::LogLevel::WARN, call_id, "SPEECH_ACTIVE — flushed %zu bytes of audio buffer", flushed);
+        if (flushed > 0) {
+            log_fwd_.forward(whispertalk::LogLevel::INFO, call_id,
+                "SPEECH_ACTIVE — flushed %zu bytes of audio buffer (barge-in)", flushed);
+        } else {
+            log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
+                "SPEECH_ACTIVE — no buffered audio to flush");
+        }
     }
 
     void write_wav_file(uint32_t call_id, const std::vector<int16_t>& samples, const std::string& dir,
