@@ -96,20 +96,27 @@ public:
     }
 
     ~WhisperService() {
+        // Stop accepting new work first so receiver_loop cannot insert any
+        // additional WhisperCall while the destructor tears them down.
+        running_ = false;
+        // Single critical section: signal every worker to exit, then join and
+        // free state. Holding the lock across join() would deadlock with
+        // get_or_create_call(), but receiver_loop has already observed
+        // running_=false above and stopped calling it, so no new entries can
+        // appear while we are inside the locked region.
+        std::vector<std::shared_ptr<WhisperCall>> to_destroy;
         {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             for (auto& p : calls_) {
                 p.second->active = false;
                 p.second->cv.notify_all();
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(calls_mutex_);
-            for (auto& p : calls_) {
-                if (p.second->worker.joinable()) p.second->worker.join();
-                if (p.second->state) whisper_free_state(p.second->state);
+                to_destroy.push_back(p.second);
             }
             calls_.clear();
+        }
+        for (auto& call : to_destroy) {
+            if (call->worker.joinable()) call->worker.join();
+            if (call->state) whisper_free_state(call->state);
         }
         if (ctx_) whisper_free(ctx_);
     }

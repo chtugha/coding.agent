@@ -222,6 +222,18 @@ static const char* system_prompt_for(const std::string& lang) {
            "Sei interessiert und wissend — teile Fakten, Meinungen oder Vorschläge.";
 }
 
+// Per-language label for the RAG context block injected into the system prompt.
+// Keeping this aligned with system_prompt_for() avoids forcing the model to
+// language-switch when reading the caller-info prefetched from tomedo-crawl.
+static const char* rag_label_for(const std::string& lang) {
+    if (lang == "en") return "Context from practice system:";
+    if (lang == "es") return "Contexto del sistema de la consulta:";
+    if (lang == "fr") return "Contexte du système du cabinet :";
+    if (lang == "it") return "Contesto dal sistema dello studio:";
+    if (lang == "zh") return "来自诊所系统的背景信息：";
+    return "Kontextinformation aus Praxissystem:";
+}
+
 struct LlamaChatMessage {
     std::string role;
     std::string content;
@@ -940,7 +952,7 @@ private:
 
         std::string sys_prompt = system_prompt_for(language_);
         if (!greeting_hint.empty()) sys_prompt += "\n\n" + greeting_hint;
-        if (!rag_ctx.empty()) sys_prompt += "\n\nKontextinformation aus Praxissystem:\n" + rag_ctx;
+        if (!rag_ctx.empty()) sys_prompt += std::string("\n\n") + rag_label_for(language_) + "\n" + rag_ctx;
 
         std::vector<llama_chat_message> chat_msgs;
         chat_msgs.reserve(call->messages.size() + 1);

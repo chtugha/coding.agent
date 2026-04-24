@@ -929,8 +929,16 @@ private:
             size_t chunks_produced = 0;
             auto start = std::chrono::steady_clock::now();
             {
-                // Per-call synthesis runs WITHOUT the admin mutex so multiple
-                // call_worker threads can drive the pipeline in parallel.
+                // NeuTTSPipeline::synthesize_streaming() is NOT re-entrant: it
+                // mutates the shared llama_context* (KV-cache for hardcoded
+                // sequence 0), the shared sampler_ state, the shared CoreML
+                // codec decoder, and prefix_n_past_. Concurrent callers would
+                // race on all of these. Until the pipeline is refactored to be
+                // per-call (or use llama batched multi-seq decode), serialize
+                // calls via the admin mutex. NeuTTS therefore handles
+                // simultaneous calls strictly serially; for true multi-call
+                // parallelism use kokoro-service.
+                std::lock_guard<std::mutex> lock(admin_pipeline_mutex_);
                 bool first_chunk = true;
                 pipeline_.synthesize_streaming(text, &ctx->interrupted,
                     [&](std::vector<float> chunk) {
