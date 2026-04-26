@@ -3000,7 +3000,7 @@ renderNeuTTSStatus(data.neutts||{});
 populateBenchmarkModelSelect(data.whisper||[]);
 const llamaModelsWithType=(data.llama||[]).map(m=>{m.type='llama';return m;});
 populateLlamaBenchmarkSelect(llamaModelsWithType);
-  }).catch(()=>{});
+  }).catch(e=>console.warn('loadModels /api/models:',e));
 }
 
 function renderModelsTable(containerId, service, models){
@@ -3341,11 +3341,26 @@ fetch(`/api/models/download/progress?id=${dlId}`).then(r=>r.json()).then(data=>{
     } else {
       bar.style.width='100%';
       pctText.textContent=`${mbDl}MB - Complete!`;
-      if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-success)">Downloaded: ${escapeHtml(data.filename||'')} — triggering conversion...</span>`;
-      if(svcType==='kokoro'||svcType==='neutts'){
-        triggerModelConvert(svcType,data.path||data.filename||'');
+      if(svcType==='kokoro'){
+        if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-success)">Downloaded: ${escapeHtml(data.filename||'')} — ready to convert.</span>`;
+        const variantDir=window.prompt(
+          'Enter the target variant directory name under models/ for this Kokoro download.\n'
+          +'Example: kokoro-v1\n\n'
+          +'The conversion script will be run with --variant models/<name>.',
+          data.filename?data.filename.replace(/\.(tar\.gz|zip|tgz)$/i,''):'kokoro-v1'
+        );
+        if(variantDir&&variantDir.trim()){
+          triggerModelConvert('kokoro','models/'+variantDir.trim());
+        } else {
+          if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-warning)">Downloaded. Use the Convert CoreML button once the variant directory is ready.</span>`;
+          loadModels();
+        }
+      } else if(svcType==='neutts'){
+        if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-success)">Downloaded: ${escapeHtml(data.filename||'')} — triggering conversion...</span>`;
+        triggerModelConvert('neutts',data.path||data.filename||'');
       } else {
-        loadModels();
+        if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-success)">Downloaded: ${escapeHtml(data.filename||'')} — triggering CoreML conversion...</span>`;
+        triggerModelConvert('whisper',data.path||data.filename||'');
       }
     }
     delete activeDownloads[dlId];

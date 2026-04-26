@@ -7343,106 +7343,94 @@ private:
 
     // GET /api/models/local — Disk scan for all locally available model files.
     void handle_models_local(struct mg_connection *c) {
+        auto scan_models = [](auto callback) {
+            DIR* dir = opendir("models");
+            if (dir) {
+                struct dirent* entry;
+                while ((entry = readdir(dir)) != nullptr)
+                    callback(std::string(entry->d_name));
+                closedir(dir);
+            }
+        };
+
         std::stringstream json;
         json << "{";
 
         json << "\"whisper\":[";
         {
-            DIR* dir = opendir("models");
             bool first = true;
-            if (dir) {
-                struct dirent* entry;
-                while ((entry = readdir(dir)) != nullptr) {
-                    std::string name = entry->d_name;
-                    if (name.size() > 4 && name.substr(name.size() - 4) == ".bin") {
-                        std::string path = "models/" + name;
-                        struct stat st;
-                        int64_t size_mb = 0;
-                        if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
-                        std::string stem = name.substr(0, name.size() - 4);
-                        bool coreml = false;
-                        struct stat cst;
-                        if (stat(("models/" + stem + ".mlpackage").c_str(), &cst) == 0) coreml = true;
-                        if (!coreml && stat(("models/" + stem + "_coreml").c_str(), &cst) == 0) coreml = true;
-                        if (!first) json << ",";
-                        json << "{\"filename\":\"" << escape_json(name) << "\""
-                             << ",\"path\":\"" << escape_json(path) << "\""
-                             << ",\"size_mb\":" << size_mb
-                             << ",\"coreml\":" << (coreml ? "true" : "false") << "}";
-                        first = false;
-                    }
-                }
-                closedir(dir);
-            }
+            scan_models([&](const std::string& name) {
+                if (name.size() <= 4 || name.substr(name.size() - 4) != ".bin") return;
+                std::string path = "models/" + name;
+                struct stat st;
+                int64_t size_mb = 0;
+                if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
+                std::string stem = name.substr(0, name.size() - 4);
+                struct stat cst;
+                bool coreml = (stat(("models/" + stem + ".mlpackage").c_str(), &cst) == 0)
+                           || (stat(("models/" + stem + "_coreml").c_str(), &cst) == 0);
+                if (!first) json << ",";
+                json << "{\"filename\":\"" << escape_json(name) << "\""
+                     << ",\"path\":\"" << escape_json(path) << "\""
+                     << ",\"size_mb\":" << size_mb
+                     << ",\"coreml\":" << (coreml ? "true" : "false") << "}";
+                first = false;
+            });
         }
         json << "],";
 
         json << "\"llama\":[";
         {
-            DIR* dir = opendir("models");
             bool first = true;
-            if (dir) {
-                struct dirent* entry;
-                while ((entry = readdir(dir)) != nullptr) {
-                    std::string name = entry->d_name;
-                    if (name.size() > 5 && name.substr(name.size() - 5) == ".gguf") {
-                        std::string path = "models/" + name;
-                        struct stat st;
-                        int64_t size_mb = 0;
-                        if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
-                        if (!first) json << ",";
-                        json << "{\"filename\":\"" << escape_json(name) << "\""
-                             << ",\"path\":\"" << escape_json(path) << "\""
-                             << ",\"size_mb\":" << size_mb << "}";
-                        first = false;
-                    }
-                }
-                closedir(dir);
-            }
+            scan_models([&](const std::string& name) {
+                if (name.size() <= 5 || name.substr(name.size() - 5) != ".gguf") return;
+                std::string path = "models/" + name;
+                struct stat st;
+                int64_t size_mb = 0;
+                if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
+                if (!first) json << ",";
+                json << "{\"filename\":\"" << escape_json(name) << "\""
+                     << ",\"path\":\"" << escape_json(path) << "\""
+                     << ",\"size_mb\":" << size_mb << "}";
+                first = false;
+            });
         }
         json << "],";
 
         json << "\"kokoro\":[";
         {
-            DIR* dir = opendir("models");
             bool first = true;
-            if (dir) {
-                struct dirent* entry;
-                while ((entry = readdir(dir)) != nullptr) {
-                    std::string name = entry->d_name;
-                    if (name == "." || name == ".." || name == "neutts-nano-german") continue;
-                    std::string variant_path = "models/" + name;
-                    struct stat st;
-                    if (stat(variant_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-                    if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) continue;
-                    if (stat((variant_path + "/decoder_variants").c_str(), &st) != 0) continue;
-                    std::vector<std::string> voices;
-                    DIR* vdir = opendir((variant_path + "/decoder_variants").c_str());
-                    if (vdir) {
-                        struct dirent* ve;
-                        while ((ve = readdir(vdir)) != nullptr) {
-                            std::string vname = ve->d_name;
-                            if (vname.size() > 4 && vname.substr(vname.size() - 4) == ".bin") {
-                                voices.push_back(vname.substr(0, vname.size() - 4));
-                            }
-                        }
-                        closedir(vdir);
+            scan_models([&](const std::string& name) {
+                if (name == "." || name == ".." || name == "neutts-nano-german") return;
+                std::string variant_path = "models/" + name;
+                struct stat st;
+                if (stat(variant_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return;
+                if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) return;
+                if (stat((variant_path + "/decoder_variants").c_str(), &st) != 0) return;
+                std::vector<std::string> voices;
+                DIR* vdir = opendir((variant_path + "/decoder_variants").c_str());
+                if (vdir) {
+                    struct dirent* ve;
+                    while ((ve = readdir(vdir)) != nullptr) {
+                        std::string vname = ve->d_name;
+                        if (vname.size() > 4 && vname.substr(vname.size() - 4) == ".bin")
+                            voices.push_back(vname.substr(0, vname.size() - 4));
                     }
-                    if (!first) json << ",";
-                    json << "{\"variant\":\"" << escape_json(name) << "\""
-                         << ",\"path\":\"" << escape_json(variant_path) << "\""
-                         << ",\"voices\":[";
-                    bool fv = true;
-                    for (auto& v : voices) {
-                        if (!fv) json << ",";
-                        json << "\"" << escape_json(v) << "\"";
-                        fv = false;
-                    }
-                    json << "],\"coreml\":true,\"size_mb\":0}";
-                    first = false;
+                    closedir(vdir);
                 }
-                closedir(dir);
-            }
+                if (!first) json << ",";
+                json << "{\"variant\":\"" << escape_json(name) << "\""
+                     << ",\"path\":\"" << escape_json(variant_path) << "\""
+                     << ",\"voices\":[";
+                bool fv = true;
+                for (auto& v : voices) {
+                    if (!fv) json << ",";
+                    json << "\"" << escape_json(v) << "\"";
+                    fv = false;
+                }
+                json << "],\"coreml\":true,\"size_mb\":0}";
+                first = false;
+            });
         }
         json << "],";
 
