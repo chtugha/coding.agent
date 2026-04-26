@@ -2,7 +2,7 @@
 
 ## 1. Architecture Overview
 
-The frontend is a single-file C++ application (`frontend.cpp`, ~11,500 lines) that embeds all HTML, CSS, and JavaScript as raw string literals. It compiles to a single binary `bin/frontend`.
+The frontend is a single-file C++ application (`./frontend.cpp`, ~9,250 lines) that embeds all HTML, CSS, and JavaScript as raw string literals (via `./frontend-ui.h`, `./javascript.h`, `./css.h`). It compiles to a single binary `./bin/frontend`.
 
 ### Key Method Responsibilities
 
@@ -253,7 +253,7 @@ Results are stored in multiple DB tables depending on test type:
 
 The frontend communicates with tomedo-crawl (port 13181) via a set of `/api/rag/*` proxy endpoints.  It also maintains configuration in the tomedo-crawl encrypted SQLite database (`tomedo-crawl.db`) via `rag_db_set_config()` / `rag_db_sync_all_config()`.
 
-### New API Endpoints
+### RAG / tomedo-crawl Proxy Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -261,11 +261,22 @@ The frontend communicates with tomedo-crawl (port 13181) via a set of `/api/rag/
 | GET/POST | `/api/rag/config` | Read/write tomedo-crawl config in its SQLite DB |
 | POST | `/api/rag/cert_upload` | Receive PEM file upload, write to disk, update config |
 | POST | `/api/rag/trigger_crawl` | Proxy POST 13181/crawl/trigger |
-| GET | `/api/rag/ollama/models` | Proxy GET 13181/ollama/models |
-| POST | `/api/rag/ollama/start` | Proxy POST 13181/ollama/start |
-| POST | `/api/rag/ollama/stop` | Proxy POST 13181/ollama/stop |
-| POST | `/api/rag/ollama/pull` | Proxy POST 13181/ollama/pull |
-| POST | `/api/rag/wipe_vectors` | Proxy POST 13181/wipe |
+| POST | `/api/rag/wipe_vectors` | Proxy POST 13181/vectors/wipe |
+
+Note: Ollama lifecycle is controlled by tomedo-crawl directly (`GET /ollama/status`, `POST /ollama/install` on port 13181); the frontend does not expose dedicated `/api/rag/ollama/*` proxy endpoints.
+
+### Models Page Endpoints (disk-scan / HuggingFace / CoreML conversion)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/models/local` | Disk-scan all `models/*.bin`, `models/*.gguf`, Kokoro variant dirs, and NeuTTS model presence |
+| GET | `/api/models/llama` | List available `.gguf` files for the LLAMA service config dropdown |
+| GET | `/api/models/kokoro` | List Kokoro variant dirs (with their voices) for KOKORO engine config dropdowns |
+| GET | `/api/models/neutts` | NeuTTS model + CoreML package presence check |
+| POST | `/api/models/convert` | Trigger async CoreML conversion for `whisper`/`kokoro`/`neutts` (path must start with `models/`) |
+| POST | `/api/models/search` | HuggingFace Hub search proxy (uses optional `hf_token` setting) |
+| POST | `/api/models/download` | HF download with HTML-error-page detection; supports `whisper`/`llama`/`kokoro`/`neutts` |
+| GET | `/api/models/download/progress?id=N` | Poll a download's bytes/total/complete/failed/error |
 
 ### `rag_db_sync_all_config()`
 
@@ -279,7 +290,7 @@ Two additional pipeline nodes are rendered for tomedo-crawl:
 
 The `ragDashInfo` span shows real-time indexed document count and last crawl time.
 
-An overlay (`ollamaAlertOverlay`) appears when `/health` reports `ollama_installed: false`, giving the user **OK** (dismiss) and **Install** (trigger `ollama` download + install) options.
+An overlay (`ollamaAlertOverlay`) appears when `/health` reports `ollama_installed: false`, giving the user **OK** (dismiss) and **Install** (POST `/ollama/install` on port 13181) options.
 
 ### Service Arguments Builder
 

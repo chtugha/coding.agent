@@ -3747,15 +3747,25 @@ function selectLocalModelForService(serviceType,path){
   const svcMap={whisper:'WHISPER_SERVICE',llama:'LLAMA_SERVICE'};
   const svcName=svcMap[serviceType];
   if(!svcName) return;
+  fetch('/api/services').then(r=>r.json()).then(svcData=>{
+const svc=(svcData.services||[]).find(s=>s.name===svcName);
+const curArgs=(svc&&svc.default_args)||'';
+let args;
+if(serviceType==='whisper'){
   const lang=window._cachedWhisperLang||(document.getElementById('whisperLang')||{}).value||'de';
-  const argMap={
-whisper:`--language ${lang} --model ${path}`,
-llama:path
-  };
-  const args=argMap[serviceType]||path;
-  fetch('/api/services/config',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({service:svcName,args})})
-  .then(r=>r.json()).then(d=>{
+  args=`--language ${lang} --model ${path}`;
+} else if(serviceType==='llama'){
+  const stripped=curArgs
+    .replace(/--model\s+\S+\.gguf(\s|$)/g,'')
+    .replace(/\S+\.gguf(\s|$)/g,'')
+    .replace(/\s+/g,' ').trim();
+  args=(stripped+' '+path).trim();
+} else {
+  args=path;
+}
+return fetch('/api/services/config',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({service:svcName,args})}).then(r=>r.json());
+  }).then(d=>{
 if(d.success||d.status==='saved'){
   showToast(`Model set for ${svcName}. Restart service to apply.`,'success');
 } else {

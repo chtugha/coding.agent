@@ -7573,6 +7573,24 @@ private:
             return;
         }
 
+        if (!path.empty()) {
+            if (path.find("..") != std::string::npos ||
+                path.find('\0') != std::string::npos ||
+                path.find("models/") != 0 ||
+                path.size() > 512) {
+                mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                    "{\"error\":\"Invalid path. Must start with 'models/' and contain no '..'\"}");
+                return;
+            }
+            for (unsigned char ch : path) {
+                if (!(isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == '/')) {
+                    mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                        "{\"error\":\"Invalid path character\"}");
+                    return;
+                }
+            }
+        }
+
         int64_t task_id = create_async_task("model_convert");
 
         std::thread([this, task_id, service, path]() {
@@ -7782,8 +7800,9 @@ private:
             }
             dl_args.push_back(url);
 
-            std::thread size_tracker([&tmp_path, &progress](){
-                while (!progress->complete.load() && !progress->failed.load()) {
+            auto tracker_stop = std::make_shared<std::atomic<bool>>(false);
+            std::thread size_tracker([tmp_path, progress, tracker_stop](){
+                while (!tracker_stop->load()) {
                     struct stat st;
                     if (stat(tmp_path.c_str(), &st) == 0) {
                         progress->bytes_downloaded.store(st.st_size);
@@ -7794,32 +7813,33 @@ private:
 
             std::string curl_stderr;
             int ret = run_curl_to_file(dl_args, &curl_stderr);
-            progress->complete.store(true);
+            tracker_stop->store(true);
             size_tracker.join();
 
             if (!header_file.empty()) unlink(header_file.c_str());
 
-            struct stat fst;
-            if (ret != 0 || stat(tmp_path.c_str(), &fst) != 0 || fst.st_size < 1024) {
-                progress->failed.store(true);
+            auto fail = [&progress](const std::string& msg) {
                 {
                     std::lock_guard<std::mutex> lock(progress->mu);
-                    std::string detail = "Download failed (curl exit " + std::to_string(ret) + ")";
-                    if (!curl_stderr.empty()) {
-                        detail += ": " + curl_stderr.substr(0, 512);
-                    }
-                    progress->error = detail;
+                    progress->error = msg;
                 }
+                progress->failed.store(true);
+                progress->complete.store(true);
+            };
+
+            struct stat fst;
+            if (ret != 0 || stat(tmp_path.c_str(), &fst) != 0 || fst.st_size < 1024) {
+                std::string detail = "Download failed (curl exit " + std::to_string(ret) + ")";
+                if (!curl_stderr.empty()) {
+                    detail += ": " + curl_stderr.substr(0, 512);
+                }
+                fail(detail);
                 unlink(tmp_path.c_str());
                 return;
             }
 
             if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
-                progress->failed.store(true);
-                {
-                    std::lock_guard<std::mutex> lock(progress->mu);
-                    progress->error = "Failed to move file to final path";
-                }
+                fail("Failed to move file to final path");
                 unlink(tmp_path.c_str());
                 return;
             }
@@ -7827,11 +7847,7 @@ private:
             char abs_path[PATH_MAX];
             if (!realpath(local_path.c_str(), abs_path) ||
                 std::string(abs_path).find(abs_models_str) != 0) {
-                progress->failed.store(true);
-                {
-                    std::lock_guard<std::mutex> lock(progress->mu);
-                    progress->error = "Path traversal detected — file removed";
-                }
+                fail("Path traversal detected — file removed");
                 unlink(local_path.c_str());
                 return;
             }
@@ -7844,12 +7860,8 @@ private:
                 std::string magic_str(magic, magic_n);
                 if (magic_str.find("<!DOCTYPE") != std::string::npos ||
                     magic_str.find("<html") != std::string::npos) {
-                    progress->failed.store(true);
-                    {
-                        std::lock_guard<std::mutex> lock(progress->mu);
-                        progress->error = "Downloaded file appears to be an HTML error page "
-                                          "(HuggingFace auth error or 404). Check your HF token.";
-                    }
+                    fail("Downloaded file appears to be an HTML error page "
+                         "(HuggingFace auth error or 404). Check your HF token.");
                     unlink(local_path.c_str());
                     return;
                 }
@@ -7873,6 +7885,8 @@ private:
                     sqlite3_finalize(stmt);
                 }
             }
+
+            progress->complete.store(true);
         }).detach();
 
         mg_http_reply(c, 202, "Content-Type: application/json\r\n",

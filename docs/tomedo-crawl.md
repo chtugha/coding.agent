@@ -167,36 +167,32 @@ Requests an immediate crawl.  The crawl thread picks up the flag within 1 second
 
 ---
 
-### `POST /wipe`
+### `POST /vectors/wipe`
 
 Deletes all chunks from SQLite and wipes the hnswlib index.  Returns `200`.  A full crawl is required afterwards to repopulate.
 
 ---
 
-### `GET /ollama/models`
+### `GET /ollama/status`
 
-Lists models available in the local Ollama installation (from `/api/tags`).
+Reports whether Ollama is installed and whether `ollama serve` is currently running, plus the active embedding model.
 
 **Response:**
 ```json
-{"models": ["nomic-embed-text:latest", "embeddinggemma:300m"]}
+{"installed": true, "running": true, "model": "nomic-embed-text:latest"}
 ```
 
 ---
 
-### `POST /ollama/start` / `POST /ollama/stop` / `POST /ollama/restart`
+### `POST /ollama/install`
 
-Start, stop, or restart the `ollama serve` process managed by tomedo-crawl.
+Triggers a background install of the Ollama runtime via the platform installer (Homebrew on macOS).  Returns `202 Accepted`; progress is logged via the standard log forwarder.
 
 ---
 
-### `POST /ollama/pull`
+### `POST /ollama/start` / `POST /ollama/stop`
 
-Pull (download) an embedding model in the background.
-
-**Request body:** `{"model": "nomic-embed-text"}`
-
-**Response:** `202 Accepted` — progress is logged via the standard log forwarder.
+Start or stop the `ollama serve` process managed by tomedo-crawl.
 
 ---
 
@@ -378,7 +374,7 @@ The default embedding model is `embeddinggemma:300m`.  To use `nomic-embed-text`
 
 1. Pull the model: `ollama pull nomic-embed-text`
 2. Update the config: set `ollama_model = nomic-embed-text` via the frontend
-3. Click **Wipe Vectors** in the frontend (or `POST /wipe`) to clear the old embeddings
+3. Click **Wipe Vectors** in the frontend (or `POST /vectors/wipe`) to clear the old embeddings
 4. Trigger a fresh crawl
 
 > **Important:** Changing the embedding model **requires wiping the vector store** because the dimensions change.  tomedo-crawl detects a model change at startup and automatically wipes the store before the first crawl.

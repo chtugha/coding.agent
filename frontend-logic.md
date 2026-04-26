@@ -13,17 +13,17 @@ This file catalogues complex logic decisions and their resolution paths during t
 
 ## 1. Null Pointer Dereference in sqlite3_column_text Calls
 - **Problem**: Several handlers cast sqlite3_column_text return values directly to std::string without null checks, causing UB on NULL columns.
-- **Path**: frontend.cpp → load_services() lines 835-836, handle_models_get() line 6178+
+- **Path**: frontend.cpp → load_services() (line 677+), handle_models_get() (line 7024+)
 - **Resolution**: Added null checks for all sqlite3_column_text calls before dereferencing.
 
 ## 2. Missing JSON Escaping in HTTP Responses
 - **Problem**: handle_sip_lines() builds JSON with unescaped user/server/port fields from SIP protocol. handle_log_level_settings() injects service name directly into format string. handle_iap_quality_test() injects wav.error unescaped.
-- **Path**: frontend.cpp → handle_sip_lines() lines 2265-2270, handle_log_level_settings() line 5623, handle_iap_quality_test() line 2550
+- **Path**: frontend.cpp → handle_sip_lines() (line 2387+), handle_log_level_settings() (line 5827+), handle_iap_quality_test() (line 2689+)
 - **Resolution**: Wrapped all user-derived values in escape_json() before embedding in JSON responses.
 
 ## 3. Path Traversal in File-Based API Handlers
 - **Problem**: handle_iap_quality_test() constructs wav_path as "Testfiles/" + user-provided file name without validating for ".." or absolute paths.
-- **Path**: frontend.cpp → handle_iap_quality_test() line 2546
+- **Path**: frontend.cpp → handle_iap_quality_test() (line 2689+)
 - **Resolution**: Added path traversal validation (reject "..", leading "/", and non-whitelisted chars) before constructing file paths.
 
 ## 4. Extraction Pattern for log-server.h and database.h
@@ -37,7 +37,7 @@ This file catalogues complex logic decisions and their resolution paths during t
 - **Resolution**: The TTS-related detached threads that previously powered `handle_switch_tts` and the NEUTTS `handle_service_stop` dance have been removed alongside the 2026-04 TTS redesign — engine swaps are now handled by the TTS dock itself (last-connect-wins) with no frontend-side orchestration. The remaining stress-test and model-download threads are still tracked via shared progress objects. All acceptable for local-only server; documented as known limitation.
 
 ## 6. Additional Null Pointer Dereferences Found in Triple Audit
-- **Problem**: Two more locations with unchecked sqlite3_column_text: model lookup in handle_llama_benchmark (lines 3190-3192) and handle_models_get benchmark detail (lines 6412-6415) cast directly to std::string.
+- **Problem**: Two more locations with unchecked sqlite3_column_text: model lookup in handle_llama_benchmark (around line 3763+) and handle_models_get benchmark detail (around line 7024+) cast directly to std::string.
 - **Path**: frontend.cpp → handle_llama_benchmark() model lookup, handle_models_get() benchmark detail section
 - **Resolution**: Added null checks with fallback to empty string for all four column reads in both locations.
 

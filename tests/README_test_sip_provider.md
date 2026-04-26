@@ -40,8 +40,8 @@ Client A                  Provider                  Client B
 
 | File | Description |
 |------|-------------|
-| `test_sip_provider.cpp` | Standalone B2BUA binary (680 lines). Not a GTest — runs as a long-lived process. |
-| `test_sip_provider_unit.cpp` | GTest unit tests (249 lines, 25 tests) for parsing and encoding functions. |
+| `test_sip_provider.cpp` | Standalone B2BUA binary (~1370 lines). Not a GTest — runs as a long-lived process. |
+| `test_sip_provider_unit.cpp` | GTest unit tests (~248 lines, 25 tests) for parsing and encoding functions. |
 
 ## Usage
 
@@ -101,21 +101,19 @@ The provider prints a results summary when the call ends:
    Test SIP Provider — Call Results
 =========================================
   Duration:     60s
-  Leg A:        alice (RTP 127.0.0.1:10001)
-  Leg B:        bob (RTP 127.0.0.1:10002)
+  Leg 0:        alice (RTP 127.0.0.1:10001, answered=yes)
+  Leg 1:        bob (RTP 127.0.0.1:10002, answered=yes)
 -----------------------------------------
-  A -> B:       2500 packets  (430 KB)
-  B -> A:       2400 packets  (413 KB)
+  Total relay:  4900 packets  (843 KB)
 -----------------------------------------
-  Result:       PASS (bidirectional audio)
+  Result:       PASS
 =========================================
 ```
 
 | Result | Meaning |
 |--------|---------|
-| **PASS** | RTP packets flowed in both directions (A->B and B->A) |
-| **PARTIAL** | RTP packets flowed in only one direction |
-| **FAIL** | No RTP packets were relayed |
+| **PASS** | All registered legs answered the INVITE (200 OK received) |
+| **INCOMPLETE** | One or more legs failed to answer within the call duration |
 
 ## Limitations
 

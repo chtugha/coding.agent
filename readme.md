@@ -229,10 +229,12 @@ Energy-based Voice Activity Detection. Segments continuous 16kHz PCM into speech
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--vad-threshold <mult>` | `2.0` | Energy threshold multiplier over noise floor |
-| `--vad-silence-ms <ms>` | `400` | Silence duration to end speech segment |
-| `--vad-max-chunk-ms <ms>` | `8000` | Maximum speech chunk duration |
-| `--log-level <LEVEL>` | `INFO` | Log verbosity |
+| `--vad-window-ms <ms>` / `-w <ms>` | `50` | Frame analysis window length |
+| `--vad-threshold <mult>` / `-t <mult>` | `2.0` | Energy threshold multiplier over noise floor |
+| `--vad-silence-ms <ms>` / `-s <ms>` | `700` | Silence duration to end speech segment |
+| `--vad-max-chunk-ms <ms>` / `-c <ms>` | `12000` | Maximum speech chunk duration |
+| `--vad-onset-gap <ms>` / `-g <ms>` | `-1` (auto) | Minimum gap between consecutive onsets (negative = auto-derive from silence-ms) |
+| `--log-level <LEVEL>` / `-L <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (cmd port 13117):**
 
@@ -298,8 +300,10 @@ Generates a spoken German reply from transcribed text using Llama-3.2-1B-Instruc
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model <path>` / `-m <path>` | `models/Llama-3.2-1B-Instruct-Q8_0.gguf` | Path to GGUF model |
-| `--log-level <LEVEL>` | `INFO` | Log verbosity |
+| *(positional)* `<model_path>` | `models/Llama-3.2-1B-Instruct-Q8_0.gguf` | Path to GGUF model file (passed as the trailing positional argument; the directory can be overridden with the `WHISPERTALK_MODELS_DIR` env var) |
+| `--rag-host <host>` / `-H <host>` | `127.0.0.1` | tomedo-crawl host for RAG context lookups |
+| `--rag-port <port>` / `-P <port>` | `13181` | tomedo-crawl HTTP port |
+| `--log-level <LEVEL>` / `-L <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (cmd port 13132):**
 

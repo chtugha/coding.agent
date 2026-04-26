@@ -86,7 +86,14 @@ Each test panel is collapsible (click the header to expand/collapse).
 
 ### Configuration Section
 
-**Models**: Browse registered models, add new ones, run benchmarks, search/download from HuggingFace.
+**Models**: Inspect locally-available models per service (Whisper, LLaMA, Kokoro, NeuTTS), search and download new models from HuggingFace, and run benchmarks. Five tabs: **Whisper**, **LLaMA**, **Kokoro**, **NeuTTS**, and **Comparison**.
+
+- **HuggingFace token bar** (top of page): a coloured status dot indicates whether a HuggingFace API token is configured (green = authenticated, amber = no token / public-only). Use **Save** to set a token (`hf_...`) and **Remove** to clear it; private/gated models require a token.
+- **HTML error-page detection**: if HuggingFace returns an HTML auth/404 page instead of model bytes, the download is detected, the partial file is removed, and an error message hints at the auth issue.
+- **Auto-CoreML conversion**: after a successful Whisper, Kokoro, or NeuTTS download, the frontend triggers an asynchronous CoreML conversion (`POST /api/models/convert`) so the model is immediately runnable on Apple Silicon. For Kokoro the user is prompted for the target variant directory name before conversion.
+- **Locally Available** tables list every model currently on disk under `models/` (no DB registration required); each row offers a **Select for Service** action that updates the corresponding service's startup arguments.
+
+In a service's detail panel on the **Services** page, **WHISPER_SERVICE**, **LLAMA_SERVICE**, **KOKORO_ENGINE** and **NEUTTS_ENGINE** each surface a model-selection control populated from the disk scan. Selecting a model rewrites the service startup arguments (`--model …`, `--variant …/--voice …`, or positional `.gguf` path).
 
 **Database**: Execute SQL queries against the SQLite database. Read-only by default; toggle write mode for INSERT/UPDATE/DELETE. View schema.
 
@@ -94,13 +101,10 @@ Each test panel is collapsible (click the header to expand/collapse).
 
 ## Theme Switching
 
-Click the palette icon at the bottom of the sidebar to choose a theme:
+Click the palette icon at the bottom of the sidebar to switch themes:
 
 - **Default**: Light Apple-inspired design
 - **Dark**: Dark mode with adjusted surfaces and shadows
-- **Slate**: Bootstrap Slate theme
-- **Flatly**: Bootstrap Flatly theme
-- **Cyborg**: Bootstrap Cyborg theme
 
 The selected theme persists in the SQLite `settings` table.
 
