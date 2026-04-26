@@ -2837,11 +2837,11 @@ private:
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
-    // GET /api/whisper/models — Lists .bin GGML model files in models/ directory.
+    // GET /api/whisper/models — Lists .bin GGML model files in bin/models/ directory.
     void handle_whisper_models(struct mg_connection *c) {
         std::stringstream json;
         json << "{\"models\":[";
-        DIR* dir = opendir("models");
+        DIR* dir = opendir("bin/models");
         bool first = true;
         if (dir) {
             struct dirent* entry;
@@ -2849,7 +2849,7 @@ private:
                 std::string name = entry->d_name;
                 if (name.size() > 4 && name.substr(name.size() - 4) == ".bin") {
                     if (!first) json << ",";
-                    json << "\"models/" << escape_json(name) << "\"";
+                    json << "\"bin/models/" << escape_json(name) << "\"";
                     first = false;
                 }
             }
@@ -7375,7 +7375,7 @@ private:
     // GET /api/models/local — Disk scan for all locally available model files.
     void handle_models_local(struct mg_connection *c) {
         auto scan_models = [](auto callback) {
-            DIR* dir = opendir("models");
+            DIR* dir = opendir("bin/models");
             if (dir) {
                 struct dirent* entry;
                 while ((entry = readdir(dir)) != nullptr)
@@ -7392,7 +7392,7 @@ private:
             bool first = true;
             scan_models([&](const std::string& name) {
                 if (name.size() <= 4 || name.substr(name.size() - 4) != ".bin") return;
-                std::string path = "models/" + name;
+                std::string path = "bin/models/" + name;
                 struct stat st;
                 int64_t size_mb = 0;
                 if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
@@ -7408,10 +7408,10 @@ private:
                         if (ok) prefix = stem.substr(0, qp);
                     }
                 }
-                bool coreml = (stat(("models/" + stem + ".mlpackage").c_str(), &cst) == 0)
-                           || (stat(("models/" + stem + "_coreml").c_str(), &cst) == 0)
-                           || (stat(("models/" + prefix + "-encoder.mlmodelc").c_str(), &cst) == 0)
-                           || (stat(("models/" + prefix + "-encoder.mlpackage").c_str(), &cst) == 0);
+                bool coreml = (stat(("bin/models/" + stem + ".mlpackage").c_str(), &cst) == 0)
+                           || (stat(("bin/models/" + stem + "_coreml").c_str(), &cst) == 0)
+                           || (stat(("bin/models/" + prefix + "-encoder.mlmodelc").c_str(), &cst) == 0)
+                           || (stat(("bin/models/" + prefix + "-encoder.mlpackage").c_str(), &cst) == 0);
                 if (!first) json << ",";
                 json << "{\"filename\":\"" << escape_json(name) << "\""
                      << ",\"path\":\"" << escape_json(path) << "\""
@@ -7427,7 +7427,7 @@ private:
             bool first = true;
             scan_models([&](const std::string& name) {
                 if (name.size() <= 5 || name.substr(name.size() - 5) != ".gguf") return;
-                std::string path = "models/" + name;
+                std::string path = "bin/models/" + name;
                 struct stat st;
                 int64_t size_mb = 0;
                 if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
@@ -7445,7 +7445,7 @@ private:
             bool first = true;
             scan_models([&](const std::string& name) {
                 if (name == "." || name == ".." || name == "neutts-nano-german") return;
-                std::string variant_path = "models/" + name;
+                std::string variant_path = "bin/models/" + name;
                 struct stat st;
                 if (stat(variant_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return;
                 if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) return;
@@ -7482,7 +7482,7 @@ private:
         json << "],";
 
         {
-            std::string neutts_path = "models/neutts-nano-german";
+            std::string neutts_path = "bin/models/neutts-nano-german";
             std::string coreml_path = neutts_path + "/neucodec_decoder.mlpackage";
             struct stat st;
             bool exists = (stat(neutts_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
@@ -7497,18 +7497,18 @@ private:
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
-    // GET /api/models/llama — Scan models/*.gguf for LLaMA service config dropdown.
+    // GET /api/models/llama — Scan bin/models/*.gguf for LLaMA service config dropdown.
     void handle_models_llama(struct mg_connection *c) {
         std::stringstream json;
         json << "{\"models\":[";
-        DIR* dir = opendir("models");
+        DIR* dir = opendir("bin/models");
         bool first = true;
         if (dir) {
             struct dirent* entry;
             while ((entry = readdir(dir)) != nullptr) {
                 std::string name = entry->d_name;
                 if (name.size() > 5 && name.substr(name.size() - 5) == ".gguf") {
-                    std::string path = "models/" + name;
+                    std::string path = "bin/models/" + name;
                     struct stat st;
                     int64_t size_mb = 0;
                     if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
@@ -7532,18 +7532,18 @@ private:
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
 
-    // GET /api/models/kokoro — Scan models/*/ for Kokoro variants/voices for service config dropdown.
+    // GET /api/models/kokoro — Scan bin/models/*/ for Kokoro variants/voices for service config dropdown.
     void handle_models_kokoro(struct mg_connection *c) {
         std::stringstream json;
         json << "{\"variants\":[";
-        DIR* dir = opendir("models");
+        DIR* dir = opendir("bin/models");
         bool first = true;
         if (dir) {
             struct dirent* entry;
             while ((entry = readdir(dir)) != nullptr) {
                 std::string name = entry->d_name;
                 if (name == "." || name == ".." || name == "neutts-nano-german") continue;
-                std::string variant_path = "models/" + name;
+                std::string variant_path = "bin/models/" + name;
                 struct stat st;
                 if (stat(variant_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
                 if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) continue;
@@ -7591,7 +7591,7 @@ private:
 
     // GET /api/models/neutts — NeuTTS model presence check for service config info panel.
     void handle_models_neutts(struct mg_connection *c) {
-        std::string neutts_path = "models/neutts-nano-german";
+        std::string neutts_path = "bin/models/neutts-nano-german";
         std::string coreml_path = neutts_path + "/neucodec_decoder.mlpackage";
         struct stat st;
         bool exists = (stat(neutts_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
@@ -7675,9 +7675,9 @@ private:
             return;
         }
 
-        mkdir("models", 0755);
-        std::string temp_path  = "models/.upload_" + filename;
-        std::string final_path = "models/" + filename;
+        mkdir("bin/models", 0755);
+        std::string temp_path  = "bin/models/.upload_" + filename;
+        std::string final_path = "bin/models/" + filename;
 
         if (hm->body.len > 0) {
             int flags = (chunk_idx == 0) ? (O_WRONLY | O_CREAT | O_TRUNC) : (O_WRONLY | O_APPEND);
@@ -7754,10 +7754,10 @@ private:
         if (!path.empty()) {
             if (path.find("..") != std::string::npos ||
                 path.find('\0') != std::string::npos ||
-                path.find("models/") != 0 ||
+                path.find("bin/models/") != 0 ||
                 path.size() > 512) {
                 mg_http_reply(c, 400, "Content-Type: application/json\r\n",
-                    "{\"error\":\"Invalid path. Must start with 'models/' and contain no '..'\"}");
+                    "{\"error\":\"Invalid path. Must start with 'bin/models/' and contain no '..'\"}");
                 return;
             }
             for (unsigned char ch : path) {
@@ -7916,7 +7916,7 @@ private:
 
         std::string hf_token = get_setting("hf_token", "");
 
-        std::string models_dir = "models";
+        std::string models_dir = "bin/models";
         mkdir(models_dir.c_str(), 0755);
 
         std::string local_path = models_dir + "/" + filename;

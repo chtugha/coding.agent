@@ -602,7 +602,7 @@ function loadNeuTTSStatus(){
 const el=document.getElementById('neuttsModelStatus');
 if(!el)return;
 if(!d||!d.exists){
-  el.innerHTML='<span style="color:var(--wt-danger)">Model directory not found: models/neutts-nano-german/. Download and convert the model via the Models page.</span>';
+  el.innerHTML='<span style="color:var(--wt-danger)">Model directory not found: bin/models/neutts-nano-german/. Download and convert the model via the Models page.</span>';
 } else if(!d.coreml){
   el.innerHTML='<span style="color:var(--wt-warning)">Model found but CoreML package missing. <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="triggerNeuTTSConvert()">Convert to CoreML</button></span>';
 } else {
@@ -3344,13 +3344,13 @@ fetch(`/api/models/download/progress?id=${dlId}`).then(r=>r.json()).then(data=>{
       if(svcType==='kokoro'){
         if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-success)">Downloaded: ${escapeHtml(data.filename||'')} — ready to convert.</span>`;
         const variantDir=window.prompt(
-          'Enter the target variant directory name under models/ for this Kokoro download.\n'
+          'Enter the target variant directory name under bin/models/ for this Kokoro download.\n'
           +'Example: kokoro-v1\n\n'
-          +'The conversion script will be run with --variant models/<name>.',
+          +'The conversion script will be run with --variant bin/models/<name>.',
           data.filename?data.filename.replace(/(?:\.tar)?\.(gz|bz2|xz|zst|zip|tgz|7z|rar|lz4|lzma)$/i,''):'kokoro-v1'
         );
         if(variantDir&&variantDir.trim()){
-          triggerModelConvert('kokoro','models/'+variantDir.trim());
+          triggerModelConvert('kokoro','bin/models/'+variantDir.trim());
         } else {
           if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-warning)">Downloaded. Use the Convert CoreML button once the variant directory is ready.</span>`;
           loadModels();
@@ -3722,7 +3722,7 @@ statusEl.innerHTML=`<span style="color:var(--wt-danger)">Search failed: ${escape
 function renderLocalModelsTable(containerId, serviceType, models){
   const el=document.getElementById(containerId);
   if(!el) return;
-  if(!models.length){el.innerHTML=`<em>No ${serviceType} models found in models/ directory.</em>`;return;}
+  if(!models.length){el.innerHTML=`<em>No ${serviceType} models found in bin/models/ directory.</em>`;return;}
   const isWhisper=serviceType==='whisper';
   const rows=models.map(m=>{
 const name=m.filename||m.path||'';
@@ -3777,7 +3777,7 @@ if(d.success||d.status==='saved'){
 function renderKokoroLocalModels(variants){
   const el=document.getElementById('kokoroModelsContainer');
   if(!el) return;
-  if(!variants.length){el.innerHTML='<em>No Kokoro variant directories found in models/.</em>';return;}
+  if(!variants.length){el.innerHTML='<em>No Kokoro variant directories found in bin/models/.</em>';return;}
   const rows=variants.map(v=>{
 const name=v.variant||v.name||'';
 const path=v.path||'';
@@ -3817,7 +3817,7 @@ function renderNeuTTSStatus(status){
   const el=document.getElementById('neuttsStatusContainer');
   if(!el) return;
   if(!status||!status.exists){
-el.innerHTML='<span style="color:var(--wt-warning)">NeuTTS model directory not found (<code>models/neutts-nano-german/</code>). Download the model via the HuggingFace search below.</span>';
+el.innerHTML='<span style="color:var(--wt-warning)">NeuTTS model directory not found (<code>bin/models/neutts-nano-german/</code>). Download the model via the HuggingFace search below.</span>';
 return;
   }
   const coremlHtml=status.coreml
@@ -3828,7 +3828,7 @@ return;
 }
 
 function triggerNeuTTSConvert(){
-  triggerModelConvert('neutts','models/neutts-nano-german');
+  triggerModelConvert('neutts','bin/models/neutts-nano-german');
 }
 
 function loadHfAuthStatus(){
@@ -4068,8 +4068,8 @@ function uploadModelChunked(file,service,statusEl,progressDiv,barEl,pctEl){
         if(data.needs_convert){
           if(service==='kokoro'){
             const suggestion=file.name.replace(/(?:\.tar)?\.(gz|bz2|xz|zst|zip|tgz|7z|rar|lz4|lzma)$/i,'')||'kokoro-v1';
-            const variantName=prompt('Kokoro model uploaded.\nEnter the variant directory name to create/use under models/:\n(Will be used as --variant argument)',suggestion);
-            if(variantName&&variantName.trim()) triggerModelConvert('kokoro','models/'+variantName.trim());
+            const variantName=prompt('Kokoro model uploaded.\nEnter the variant directory name to create/use under bin/models/:\n(Will be used as --variant argument)',suggestion);
+            if(variantName&&variantName.trim()) triggerModelConvert('kokoro','bin/models/'+variantName.trim());
           } else {
             triggerModelConvert(service,data.path||data.filename||'');
           }
