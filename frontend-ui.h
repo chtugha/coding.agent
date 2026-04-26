@@ -1070,6 +1070,23 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Upload Whisper Model (.bin)</span></div>
+<div id="uploadZoneWhisper" class="model-upload-zone" onclick="document.getElementById('uploadInputWhisper').click()" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="this.classList.remove('drag-over');handleModelFileDrop(event,'whisper')">
+  <div style="font-size:28px;margin-bottom:8px">&#x1F4C2;</div>
+  <div style="font-size:13px;font-weight:600">Drag &amp; drop a .bin file here</div>
+  <div style="font-size:11px;color:var(--wt-text-muted);margin-top:4px">or click to browse &bull; CoreML conversion runs automatically</div>
+</div>
+<input type="file" id="uploadInputWhisper" accept=".bin" style="display:none" onchange="handleModelFileInput(this,'whisper')">
+<div id="uploadStatusWhisper" style="margin-top:8px;font-size:12px"></div>
+<div id="uploadProgressWhisper" style="display:none;margin-top:6px">
+  <div style="background:var(--wt-border);border-radius:4px;height:16px;overflow:hidden">
+    <div id="uploadBarWhisper" style="height:100%;background:var(--wt-accent);transition:width 0.3s;width:0%"></div>
+  </div>
+  <div id="uploadPctWhisper" style="font-size:11px;margin-top:2px">0%</div>
+</div>
+</div>
+
+<div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Add Whisper Model Manually</span></div>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
   <input class="wt-input" id="addModelName" placeholder="Name (e.g. large-v3-turbo-q5)">
@@ -1143,6 +1160,23 @@ Save outgoing audio as WAV</label>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
 </div>
 <div id="llamaModelsTable"><em>Loading...</em></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Upload LLaMA Model (.gguf)</span></div>
+<div id="uploadZoneLlama" class="model-upload-zone" onclick="document.getElementById('uploadInputLlama').click()" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="this.classList.remove('drag-over');handleModelFileDrop(event,'llama')">
+  <div style="font-size:28px;margin-bottom:8px">&#x1F4C2;</div>
+  <div style="font-size:13px;font-weight:600">Drag &amp; drop a .gguf file here</div>
+  <div style="font-size:11px;color:var(--wt-text-muted);margin-top:4px">or click to browse &bull; Supports any GGUF quantisation</div>
+</div>
+<input type="file" id="uploadInputLlama" accept=".gguf" style="display:none" onchange="handleModelFileInput(this,'llama')">
+<div id="uploadStatusLlama" style="margin-top:8px;font-size:12px"></div>
+<div id="uploadProgressLlama" style="display:none;margin-top:6px">
+  <div style="background:var(--wt-border);border-radius:4px;height:16px;overflow:hidden">
+    <div id="uploadBarLlama" style="height:100%;background:var(--wt-accent);transition:width 0.3s;width:0%"></div>
+  </div>
+  <div id="uploadPctLlama" style="font-size:11px;margin-top:2px">0%</div>
+</div>
 </div>
 
 <div class="wt-card">
@@ -1220,6 +1254,42 @@ Save outgoing audio as WAV</label>
 <div id="kokoroModelsContainer"><em>Loading...</em></div>
 </div>
 
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Upload Kokoro Model File</span></div>
+<div id="uploadZoneKokoro" class="model-upload-zone" onclick="document.getElementById('uploadInputKokoro').click()" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="this.classList.remove('drag-over');handleModelFileDrop(event,'kokoro')">
+  <div style="font-size:28px;margin-bottom:8px">&#x1F4C2;</div>
+  <div style="font-size:13px;font-weight:600">Drag &amp; drop a Kokoro model file here</div>
+  <div style="font-size:11px;color:var(--wt-text-muted);margin-top:4px">or click to browse &bull; Accepts .bin .pth .tar.gz .zip &bull; CoreML conversion runs automatically</div>
+</div>
+<input type="file" id="uploadInputKokoro" accept=".bin,.pth,.tar.gz,.tgz,.zip" style="display:none" onchange="handleModelFileInput(this,'kokoro')">
+<div id="uploadStatusKokoro" style="margin-top:8px;font-size:12px"></div>
+<div id="uploadProgressKokoro" style="display:none;margin-top:6px">
+  <div style="background:var(--wt-border);border-radius:4px;height:16px;overflow:hidden">
+    <div id="uploadBarKokoro" style="height:100%;background:var(--wt-accent);transition:width 0.3s;width:0%"></div>
+  </div>
+  <div id="uploadPctKokoro" style="font-size:11px;margin-top:2px">0%</div>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Register Kokoro Variant Directory</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:8px">
+  If you have already extracted a Kokoro variant to <code>bin/models/&lt;name&gt;/</code>, register it here to make it selectable as the active variant.
+</p>
+<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end">
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Variant name (directory under models/)</label>
+    <input class="wt-input" id="addKokoroVariantName" placeholder="e.g. kokoro-german">
+  </div>
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Default voice</label>
+    <input class="wt-input" id="addKokoroVoiceName" placeholder="e.g. df_eva">
+  </div>
+  <button class="wt-btn wt-btn-primary" onclick="registerKokoroVariant()">Register</button>
+</div>
+<div id="addKokoroStatus" style="margin-top:8px;font-size:12px"></div>
+</div>
+
 </div><!-- end modelTabKokoro -->
 
 <!-- NeuTTS Models Panel -->
@@ -1254,6 +1324,38 @@ Save outgoing audio as WAV</label>
 </div>
 <div id="hfNeuttsSearchStatus" style="font-size:12px;margin-bottom:8px"></div>
 <div id="hfNeuttsSearchResults"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Upload NeuTTS Model File</span></div>
+<div id="uploadZoneNeutts" class="model-upload-zone" onclick="document.getElementById('uploadInputNeutts').click()" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="this.classList.remove('drag-over');handleModelFileDrop(event,'neutts')">
+  <div style="font-size:28px;margin-bottom:8px">&#x1F4C2;</div>
+  <div style="font-size:13px;font-weight:600">Drag &amp; drop a NeuTTS model file here</div>
+  <div style="font-size:11px;color:var(--wt-text-muted);margin-top:4px">or click to browse &bull; Accepts .gguf .bin .tar.gz .zip &bull; CoreML conversion runs automatically</div>
+</div>
+<input type="file" id="uploadInputNeutts" accept=".gguf,.bin,.tar.gz,.tgz,.zip" style="display:none" onchange="handleModelFileInput(this,'neutts')">
+<div id="uploadStatusNeutts" style="margin-top:8px;font-size:12px"></div>
+<div id="uploadProgressNeutts" style="display:none;margin-top:6px">
+  <div style="background:var(--wt-border);border-radius:4px;height:16px;overflow:hidden">
+    <div id="uploadBarNeutts" style="height:100%;background:var(--wt-accent);transition:width 0.3s;width:0%"></div>
+  </div>
+  <div id="uploadPctNeutts" style="font-size:11px;margin-top:2px">0%</div>
+</div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header"><span class="wt-card-title">Register NeuTTS Model Directory</span></div>
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:8px">
+  NeuTTS expects its model at <code>bin/models/neutts-nano-german/</code>. If you have already placed the model there, click Refresh above. If the model is elsewhere on disk, enter a custom path below to copy it.
+</p>
+<div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end">
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Model directory path (absolute)</label>
+    <input class="wt-input" id="addNeuttsModelPath" placeholder="e.g. /Users/you/Downloads/neutts-nano-german">
+  </div>
+  <button class="wt-btn wt-btn-primary" onclick="registerNeuTTSModel()">Register</button>
+</div>
+<div id="addNeuttsStatus" style="margin-top:8px;font-size:12px"></div>
 </div>
 
 </div><!-- end modelTabNeutts -->

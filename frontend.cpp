@@ -1244,6 +1244,8 @@ private:
                 handle_models_kokoro(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/neutts")) == 0) {
                 handle_models_neutts(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/upload")) == 0) {
+                handle_models_upload(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/convert")) == 0) {
                 handle_models_convert(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/download")) == 0) {
@@ -7367,8 +7369,20 @@ private:
                 if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
                 std::string stem = name.substr(0, name.size() - 4);
                 struct stat cst;
+                std::string prefix = stem;
+                {
+                    auto qp = stem.rfind("-q");
+                    if (qp != std::string::npos) {
+                        bool ok = true;
+                        for (size_t i = qp + 2; i < stem.size() && ok; i++)
+                            if (!isdigit((unsigned char)stem[i]) && stem[i] != '_') ok = false;
+                        if (ok) prefix = stem.substr(0, qp);
+                    }
+                }
                 bool coreml = (stat(("models/" + stem + ".mlpackage").c_str(), &cst) == 0)
-                           || (stat(("models/" + stem + "_coreml").c_str(), &cst) == 0);
+                           || (stat(("models/" + stem + "_coreml").c_str(), &cst) == 0)
+                           || (stat(("models/" + prefix + "-encoder.mlmodelc").c_str(), &cst) == 0)
+                           || (stat(("models/" + prefix + "-encoder.mlpackage").c_str(), &cst) == 0);
                 if (!first) json << ",";
                 json << "{\"filename\":\"" << escape_json(name) << "\""
                      << ",\"path\":\"" << escape_json(path) << "\""
@@ -7408,13 +7422,15 @@ private:
                 if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) return;
                 if (stat((variant_path + "/decoder_variants").c_str(), &st) != 0) return;
                 std::vector<std::string> voices;
-                DIR* vdir = opendir((variant_path + "/decoder_variants").c_str());
+                DIR* vdir = opendir(variant_path.c_str());
                 if (vdir) {
                     struct dirent* ve;
                     while ((ve = readdir(vdir)) != nullptr) {
                         std::string vname = ve->d_name;
-                        if (vname.size() > 4 && vname.substr(vname.size() - 4) == ".bin")
-                            voices.push_back(vname.substr(0, vname.size() - 4));
+                        const std::string vsuf = "_voice.bin";
+                        if (vname.size() > vsuf.size() &&
+                            vname.substr(vname.size() - vsuf.size()) == vsuf)
+                            voices.push_back(vname.substr(0, vname.size() - vsuf.size()));
                     }
                     closedir(vdir);
                 }
@@ -7502,14 +7518,15 @@ private:
                 if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) continue;
                 if (stat((variant_path + "/decoder_variants").c_str(), &st) != 0) continue;
                 std::vector<std::string> voices;
-                DIR* vdir = opendir((variant_path + "/decoder_variants").c_str());
+                DIR* vdir = opendir(variant_path.c_str());
                 if (vdir) {
                     struct dirent* ve;
                     while ((ve = readdir(vdir)) != nullptr) {
                         std::string vname = ve->d_name;
-                        if (vname.size() > 4 && vname.substr(vname.size() - 4) == ".bin") {
-                            voices.push_back(vname.substr(0, vname.size() - 4));
-                        }
+                        const std::string vsuf = "_voice.bin";
+                        if (vname.size() > vsuf.size() &&
+                            vname.substr(vname.size() - vsuf.size()) == vsuf)
+                            voices.push_back(vname.substr(0, vname.size() - vsuf.size()));
                     }
                     closedir(vdir);
                 }
@@ -7552,6 +7569,123 @@ private:
              << ",\"path\":\"" << escape_json(neutts_path) << "\""
              << ",\"coreml_path\":\"" << escape_json(coreml_path) << "\"}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    // POST /api/models/upload — Chunked model file upload.
+    // Query params: service, filename, chunk_idx, total_chunks
+    // Body: raw binary chunk data (keep <= 512KB to stay within MG_MAX_RECV_SIZE)
+    void handle_models_upload(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+
+        char service_buf[32] = {0}, filename_buf[256] = {0};
+        char chunk_idx_buf[16] = {0}, total_chunks_buf[16] = {0};
+        mg_http_get_var(&hm->query, "service", service_buf, sizeof(service_buf));
+        mg_http_get_var(&hm->query, "filename", filename_buf, sizeof(filename_buf));
+        mg_http_get_var(&hm->query, "chunk_idx", chunk_idx_buf, sizeof(chunk_idx_buf));
+        mg_http_get_var(&hm->query, "total_chunks", total_chunks_buf, sizeof(total_chunks_buf));
+
+        std::string service(service_buf);
+        std::string filename(filename_buf);
+        int chunk_idx = atoi(chunk_idx_buf);
+        int total_chunks = atoi(total_chunks_buf);
+        if (total_chunks < 1) total_chunks = 1;
+
+        if (service != "whisper" && service != "llama" && service != "kokoro" && service != "neutts") {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid service\"}");
+            return;
+        }
+
+        if (filename.empty() || filename.find('/') != std::string::npos ||
+            filename.find('\\') != std::string::npos ||
+            filename.find("..") != std::string::npos ||
+            filename.size() > 200) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid filename\"}");
+            return;
+        }
+        for (unsigned char ch : filename) {
+            if (!(isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == '+')) {
+                mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                    "{\"error\":\"Invalid filename character\"}");
+                return;
+            }
+        }
+
+        auto has_suffix = [&](const std::string& suf) {
+            return filename.size() > suf.size() &&
+                   filename.substr(filename.size() - suf.size()) == suf;
+        };
+        bool valid_ext = false;
+        if (service == "whisper") valid_ext = has_suffix(".bin");
+        if (service == "llama")   valid_ext = has_suffix(".gguf");
+        if (service == "kokoro" || service == "neutts") {
+            valid_ext = has_suffix(".bin") || has_suffix(".gguf") || has_suffix(".pth") ||
+                        has_suffix(".tar.gz") || has_suffix(".tgz") || has_suffix(".zip") ||
+                        has_suffix(".tar.bz2") || has_suffix(".tar.xz");
+        }
+        if (!valid_ext) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"File extension not valid for this service type\"}");
+            return;
+        }
+
+        mkdir("models", 0755);
+        std::string temp_path  = "models/.upload_" + filename;
+        std::string final_path = "models/" + filename;
+
+        if (hm->body.len > 0) {
+            int flags = (chunk_idx == 0) ? (O_WRONLY | O_CREAT | O_TRUNC) : (O_WRONLY | O_APPEND);
+            int fd = open(temp_path.c_str(), flags, 0644);
+            if (fd < 0) {
+                mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                    "{\"error\":\"Cannot write to models directory\"}");
+                return;
+            }
+            ssize_t written = write(fd, hm->body.buf, hm->body.len);
+            close(fd);
+            if (written != (ssize_t)hm->body.len) {
+                unlink(temp_path.c_str());
+                mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"Write error\"}");
+                return;
+            }
+        }
+
+        bool is_last = (chunk_idx >= total_chunks - 1);
+        if (!is_last) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"received\":%d,\"total\":%d}", chunk_idx + 1, total_chunks);
+            return;
+        }
+
+        char magic[16] = {0};
+        FILE* mf = fopen(temp_path.c_str(), "rb");
+        if (mf) { fread(magic, 1, 15, mf); fclose(mf); }
+        std::string magic_str(magic);
+        if (magic_str.find("<!DOCTYPE") != std::string::npos ||
+            magic_str.find("<html") != std::string::npos) {
+            unlink(temp_path.c_str());
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"Uploaded file appears to be an HTML page, not a model file.\"}");
+            return;
+        }
+
+        if (rename(temp_path.c_str(), final_path.c_str()) != 0) {
+            unlink(temp_path.c_str());
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n",
+                "{\"error\":\"Failed to finalise uploaded file\"}");
+            return;
+        }
+
+        bool needs_convert = (service == "whisper" || service == "kokoro" || service == "neutts");
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"complete\":true,\"path\":\"%s\",\"filename\":\"%s\","
+            "\"service\":\"%s\",\"needs_convert\":%s}",
+            escape_json(final_path).c_str(),
+            escape_json(filename).c_str(),
+            escape_json(service).c_str(),
+            needs_convert ? "true" : "false");
     }
 
     // POST /api/models/convert — Trigger async CoreML conversion for a model.
