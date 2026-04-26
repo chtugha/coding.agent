@@ -180,7 +180,7 @@ Save incoming audio as WAV</label>
 <span id="sipProviderWavStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
-<input class="wt-input" id="sipProviderWavDir" placeholder="/tmp/wav_recordings" title="Directory where inbound WAV recordings are written. The directory must exist and be writable. Files are named by call_id and timestamp." style="font-size:12px" onchange="saveSipProviderWavConfig()"></div>
+<input class="wt-input" id="sipProviderWavDir" placeholder="wav_recordings (relative to bin/)" title="Relative directory under bin/ where inbound WAV recordings are written. Absolute paths and '..' are rejected. The directory is created if missing. Files are named by call_id and timestamp." style="font-size:12px" onchange="saveSipProviderWavConfig()"></div>
 </div>
 <div id="tomedoCrawlConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">Tomedo RAG Configuration</div>
@@ -276,7 +276,7 @@ Save outgoing audio as WAV</label>
 <span id="oapWavStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
-<input class="wt-input" id="oapWavDir" placeholder="/tmp/wav_recordings" title="Directory where outbound TTS WAV recordings are written. The directory must exist and be writable. Files are named by call_id and timestamp." style="font-size:12px" onchange="saveOapWavConfig()"></div>
+<input class="wt-input" id="oapWavDir" placeholder="wav_recordings (relative to bin/)" title="Relative directory under bin/ where outbound TTS WAV recordings are written. Absolute paths and '..' are rejected. The directory is created if missing. Files are named by call_id and timestamp." style="font-size:12px" onchange="saveOapWavConfig()"></div>
 </div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..." title="Command-line arguments passed to the service binary on start. For Tomedo RAG the arguments are built automatically by the buttons above. For other services refer to the service documentation."></div>

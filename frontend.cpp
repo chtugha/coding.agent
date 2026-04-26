@@ -2296,10 +2296,14 @@ private:
             return "";
         }
 
-        ssize_t sent = ::send(sock, cmd.c_str(), cmd.size(), 0);
-        if (sent <= 0) {
-            close(sock);
-            return "";
+        size_t total_sent = 0;
+        while (total_sent < cmd.size()) {
+            ssize_t sent = ::send(sock, cmd.c_str() + total_sent, cmd.size() - total_sent, 0);
+            if (sent <= 0) {
+                close(sock);
+                return "";
+            }
+            total_sent += static_cast<size_t>(sent);
         }
 
         char buf[4096];
@@ -2313,6 +2317,10 @@ private:
     // POST /api/sip/add-line — Register a new SIP account. Sends ADD_LINE command
     // to the SIP Client's cmd port (13102). Returns LINE_ADDED on success.
     void handle_sip_add_line(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
         std::string body(hm->body.buf, hm->body.len);
         std::string user = extract_json_string(body, "user");
         std::string server = extract_json_string(body, "server");
@@ -2358,6 +2366,10 @@ private:
 
     // POST /api/sip/remove-line — Remove a SIP registration via REMOVE_LINE command.
     void handle_sip_remove_line(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
         std::string body(hm->body.buf, hm->body.len);
         std::string idx_str = extract_json_string(body, "index");
         if (idx_str.empty()) {
@@ -5240,6 +5252,10 @@ private:
     // WAV files. Async: returns task_id immediately, test runs in background thread.
     // Each file is decoded, upsampled, and fed directly to whisper_full() for WER scoring.
     void handle_whisper_accuracy_test(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
         std::string body(hm->body.buf, hm->body.len);
 
         size_t files_start = body.find("\"files\":");
@@ -5525,14 +5541,27 @@ private:
             if (max_chunk_ms.empty()) max_chunk_ms = get_setting("vad_max_chunk_ms", "8000");
             if (onset_gap.empty()) onset_gap = get_setting("vad_onset_gap", "1");
 
+            auto safe_num = [](const std::string& s, const std::string& fallback) {
+                if (s.empty()) return fallback;
+                size_t i = 0;
+                if (s[0] == '-' || s[0] == '+') i = 1;
+                bool seen_digit = false, seen_dot = false;
+                for (; i < s.size(); i++) {
+                    if (isdigit((unsigned char)s[i])) { seen_digit = true; }
+                    else if (s[i] == '.' && !seen_dot) { seen_dot = true; }
+                    else return fallback;
+                }
+                return seen_digit ? s : fallback;
+            };
+
             std::stringstream json;
             json << "{"
                  << "\"live\":" << (live ? "true" : "false") << ","
-                 << "\"window_ms\":" << window_ms << ","
-                 << "\"threshold\":" << threshold << ","
-                 << "\"silence_ms\":" << silence_ms << ","
-                 << "\"max_chunk_ms\":" << max_chunk_ms << ","
-                 << "\"onset_gap\":" << onset_gap
+                 << "\"window_ms\":" << safe_num(window_ms, "50") << ","
+                 << "\"threshold\":" << safe_num(threshold, "2.0") << ","
+                 << "\"silence_ms\":" << safe_num(silence_ms, "400") << ","
+                 << "\"max_chunk_ms\":" << safe_num(max_chunk_ms, "8000") << ","
+                 << "\"onset_gap\":" << safe_num(onset_gap, "1")
                  << "}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
         }
@@ -7589,9 +7618,20 @@ private:
 
         std::string service(service_buf);
         std::string filename(filename_buf);
-        int chunk_idx = atoi(chunk_idx_buf);
-        int total_chunks = atoi(total_chunks_buf);
-        if (total_chunks < 1) total_chunks = 1;
+        auto parse_uint = [](const char* s, int def) {
+            if (!s || !*s) return def;
+            for (const char* p = s; *p; ++p) if (!isdigit((unsigned char)*p)) return -1;
+            long v = atol(s);
+            if (v < 0 || v > 1000000) return -1;
+            return static_cast<int>(v);
+        };
+        int chunk_idx = parse_uint(chunk_idx_buf, 0);
+        int total_chunks = parse_uint(total_chunks_buf, 1);
+        if (chunk_idx < 0 || total_chunks < 1 || chunk_idx >= total_chunks) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"Invalid chunk_idx/total_chunks\"}");
+            return;
+        }
 
         if (service != "whisper" && service != "llama" && service != "kokoro" && service != "neutts") {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid service\"}");
