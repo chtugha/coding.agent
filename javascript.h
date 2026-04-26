@@ -3347,7 +3347,7 @@ fetch(`/api/models/download/progress?id=${dlId}`).then(r=>r.json()).then(data=>{
           'Enter the target variant directory name under models/ for this Kokoro download.\n'
           +'Example: kokoro-v1\n\n'
           +'The conversion script will be run with --variant models/<name>.',
-          data.filename?data.filename.replace(/(?:\.tar)?\.\w+$/i,''):'kokoro-v1'
+          data.filename?data.filename.replace(/(?:\.tar)?\.(gz|bz2|xz|zst|zip|tgz|7z|rar|lz4|lzma)$/i,''):'kokoro-v1'
         );
         if(variantDir&&variantDir.trim()){
           triggerModelConvert('kokoro','models/'+variantDir.trim());
