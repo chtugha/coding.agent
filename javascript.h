@@ -4067,9 +4067,9 @@ function uploadModelChunked(file,service,statusEl,progressDiv,barEl,pctEl){
         setTimeout(()=>{if(progressDiv) progressDiv.style.display='none';},3000);
         if(data.needs_convert){
           if(service==='kokoro'){
-            const suggestion=file.name.replace(/(?:\.tar)?\.[^.]+$/,'')||'kokoro-v1';
+            const suggestion=file.name.replace(/(?:\.tar)?\.(gz|bz2|xz|zst|zip|tgz|7z|rar|lz4|lzma)$/i,'')||'kokoro-v1';
             const variantName=prompt('Kokoro model uploaded.\nEnter the variant directory name to create/use under models/:\n(Will be used as --variant argument)',suggestion);
-            if(variantName&&variantName.trim()) triggerModelConvert('kokoro',variantName.trim());
+            if(variantName&&variantName.trim()) triggerModelConvert('kokoro','models/'+variantName.trim());
           } else {
             triggerModelConvert(service,data.path||data.filename||'');
           }
