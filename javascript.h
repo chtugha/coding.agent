@@ -215,7 +215,7 @@ e.classList.toggle('active',e.dataset.page===p);
     if(resTab&&resTab.classList.contains('active')){fetchTestResultsPage();startTestResultsPoll();}
     startPrereqPoll();
   }else{stopPrereqPoll();}
-  if(p==='models'){loadModels();loadModelComparison();}
+  if(p==='models'){loadModels();loadModelComparison();loadHfAuthStatus();}
   if(p==='logs'){reconnectLogSSE();}
   if(p==='database'){}
   if(p==='credentials'){loadCredentials();}
@@ -492,6 +492,33 @@ setTimeout(parseRagArgsToControls,100);
   } else {
 tc.classList.add('hidden');
   }
+  const lc=document.getElementById('llamaConfig');
+  if(lc){
+if(s.name==='LLAMA_SERVICE'){
+  lc.classList.remove('hidden');
+  loadLlamaConfig(s.default_args||'');
+} else {
+  lc.classList.add('hidden');
+}
+  }
+  const kc=document.getElementById('kokoroConfig');
+  if(kc){
+if(s.name==='KOKORO_ENGINE'){
+  kc.classList.remove('hidden');
+  loadKokoroConfig(s.default_args||'');
+} else {
+  kc.classList.add('hidden');
+}
+  }
+  const nc=document.getElementById('neuttsConfig');
+  if(nc){
+if(s.name==='NEUTTS_ENGINE'){
+  nc.classList.remove('hidden');
+  loadNeuTTSStatus();
+} else {
+  nc.classList.add('hidden');
+}
+  }
 }
 function loadWhisperConfig(args){
   fetch('/api/whisper/models').then(r=>r.json()).then(d=>{
@@ -507,13 +534,84 @@ for(let i=0;i<parts.length;i++){
   else if(parts[i].indexOf('.bin')!==-1){curModel=parts[i];}
 }
 langSel.value=curLang;
+window._cachedWhisperLang=curLang;
 if(curModel)modelSel.value=curModel;
   });
 }
 function updateWhisperArgs(){
   const lang=document.getElementById('whisperLang').value;
   const model=document.getElementById('whisperModel').value;
-  document.getElementById('svcDetailArgs').value=`--language ${lang} ${model}`;
+  document.getElementById('svcDetailArgs').value=`--language ${lang} --model ${model}`;
+}
+function loadLlamaConfig(args){
+  fetch('/api/models/llama').then(r=>r.json()).then(d=>{
+const sel=document.getElementById('llamaModel');
+if(!sel)return;
+const models=(d&&d.models)||[];
+sel.innerHTML=models.map(m=>`<option value="${escapeHtml(m.path)}">${escapeHtml(m.filename)}</option>`).join('');
+const parts=(args||'').trim().split(/\s+/);
+const curModel=parts.find(p=>p.endsWith('.gguf'))||'';
+if(curModel)sel.value=curModel;
+  }).catch(()=>{});
+}
+function updateLlamaArgs(){
+  const sel=document.getElementById('llamaModel');
+  if(!sel)return;
+  const model=sel.value;
+  const cur=document.getElementById('svcDetailArgs').value;
+  const stripped=cur.replace(/--model\s+\S+\.gguf(\s|$)/g,'').replace(/\S+\.gguf(\s|$)/g,'').replace(/\s+/g,' ').trim();
+  document.getElementById('svcDetailArgs').value=(stripped+' '+model).trim();
+}
+function loadKokoroConfig(args){
+  fetch('/api/models/kokoro').then(r=>r.json()).then(d=>{
+const varSel=document.getElementById('kokoroVariant');
+if(!varSel)return;
+const variants=(d&&d.variants)||[];
+varSel.innerHTML=variants.map(v=>`<option value="${escapeHtml(v.name)}">${escapeHtml(v.name)}</option>`).join('');
+let curVariant='',curVoice='';
+const parts=(args||'').split(/\s+/);
+for(let i=0;i<parts.length;i++){
+  if(parts[i]==='--variant'&&i+1<parts.length){curVariant=parts[++i];}
+  else if(parts[i]==='--voice'&&i+1<parts.length){curVoice=parts[++i];}
+}
+if(curVariant)varSel.value=curVariant;
+window._kokoroData=variants;
+updateKokoroVoices(curVoice);
+  }).catch(()=>{});
+}
+function updateKokoroVoices(preselect){
+  const varSel=document.getElementById('kokoroVariant');
+  const voiceSel=document.getElementById('kokoroVoice');
+  if(!varSel||!voiceSel)return;
+  const varName=varSel.value;
+  const variant=(window._kokoroData||[]).find(v=>v.name===varName);
+  const voices=variant?(variant.voices||[]):[];
+  voiceSel.innerHTML=voices.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+  if(preselect&&typeof preselect==='string')voiceSel.value=preselect;
+}
+function updateKokoroArgs(){
+  const varSel=document.getElementById('kokoroVariant');
+  const voiceSel=document.getElementById('kokoroVoice');
+  if(!varSel||!voiceSel)return;
+  const variant=varSel.value;
+  const voice=voiceSel.value;
+  document.getElementById('svcDetailArgs').value=`--variant ${variant} --voice ${voice}`;
+}
+function loadNeuTTSStatus(){
+  fetch('/api/models/neutts').then(r=>r.json()).then(d=>{
+const el=document.getElementById('neuttsModelStatus');
+if(!el)return;
+if(!d||!d.exists){
+  el.innerHTML='<span style="color:var(--wt-danger)">Model directory not found: models/neutts-nano-german/. Download and convert the model via the Models page.</span>';
+} else if(!d.coreml){
+  el.innerHTML='<span style="color:var(--wt-warning)">Model found but CoreML package missing. <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="triggerNeuTTSConvert()">Convert to CoreML</button></span>';
+} else {
+  el.innerHTML='<span style="color:var(--wt-success)">Model ready (CoreML)</span>';
+}
+  }).catch(()=>{
+const el=document.getElementById('neuttsModelStatus');
+if(el)el.innerHTML='<span style="color:var(--wt-text-secondary)">(offline)</span>';
+  });
 }
 function toggleHallucinationFilter(enabled){
   const statusEl=document.getElementById('whisperHalluFilterStatus');
@@ -2879,7 +2977,7 @@ if(pane) observer.observe(pane,{childList:true,subtree:true,characterData:true})
 })();
 
 function switchModelTab(tab){
-  ['whisper','llama','compare'].forEach(t=>{
+  ['whisper','llama','kokoro','neutts','compare'].forEach(t=>{
 const pane=document.getElementById('modelTab'+t.charAt(0).toUpperCase()+t.slice(1));
 if(pane) pane.classList.toggle('active',t===tab);
 const btn=document.getElementById('tab'+t.charAt(0).toUpperCase()+t.slice(1));
@@ -2892,13 +2990,17 @@ if(btn){
 }
 
 function loadModels(){
+  fetch('/api/models/local').then(r=>r.json()).then(data=>{
+renderLocalModelsTable('whisperModelsTable','whisper',data.whisper||[]);
+renderLocalModelsTable('llamaModelsTable','llama',data.llama||[]);
+renderKokoroLocalModels(data.kokoro||[]);
+renderNeuTTSStatus(data.neutts||{});
+  }).catch(e=>{ console.error('loadModels error',e); });
   fetch('/api/models').then(r=>r.json()).then(data=>{
-renderModelsTable('whisperModelsTable','whisper',data.whisper||[]);
-renderModelsTable('llamaModelsTable','llama',data.llama||[]);
 populateBenchmarkModelSelect(data.whisper||[]);
 const llamaModelsWithType=(data.llama||[]).map(m=>{m.type='llama';return m;});
 populateLlamaBenchmarkSelect(llamaModelsWithType);
-  }).catch(e=>{ console.error('loadModels error',e); });
+  }).catch(()=>{});
 }
 
 function renderModelsTable(containerId, service, models){
@@ -3133,7 +3235,8 @@ function formatNumber(n){
 
 function showDownloadDialog(idx,serviceType){
   serviceType=serviceType||'whisper';
-  const models=serviceType==='llama'?(window._hfLlamaSearchModels||[]):(window._hfSearchModels||[]);
+  const modelMap={whisper:window._hfSearchModels,llama:window._hfLlamaSearchModels,kokoro:window._hfKokoroSearchModels,neutts:window._hfNeuTTSSearchModels};
+  const models=(modelMap[serviceType]||window._hfSearchModels||[]);
   const m=models[idx];
   if(!m) return;
   const repoId=m.modelId||m.id||'';
@@ -3184,9 +3287,15 @@ function submitDownload(){
 
 const activeDownloads={};
 
+function getDownloadStatusEl(serviceType){
+  const idMap={whisper:'hfSearchStatus',llama:'hfLlamaSearchStatus',kokoro:'hfKokoroSearchStatus',neutts:'hfNeuttsSearchStatus'};
+  return document.getElementById(idMap[serviceType]||'hfSearchStatus');
+}
+
 function startModelDownload(repoId,filename,modelName,backend,serviceType){
   serviceType=serviceType||'whisper';
-  const statusEl=document.getElementById(serviceType==='llama'?'hfLlamaSearchStatus':'hfSearchStatus');
+  const statusEl=getDownloadStatusEl(serviceType);
+  if(!statusEl){console.warn('No status element for serviceType',serviceType);return;}
   statusEl.innerHTML=`<span style="color:var(--wt-accent)">Starting download of ${escapeHtml(filename)}...</span>`;
   fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({repo_id:repoId,filename,model_name:modelName,backend,service:serviceType})})
@@ -3226,14 +3335,18 @@ fetch(`/api/models/download/progress?id=${dlId}`).then(r=>r.json()).then(data=>{
   if(data.complete||data.failed){
     clearInterval(iv);
     const svcType=(activeDownloads[dlId]||{}).serviceType||'whisper';
-    const statusEl=document.getElementById(svcType==='llama'?'hfLlamaSearchStatus':'hfSearchStatus');
+    const statusEl=getDownloadStatusEl(svcType);
     if(data.failed){
-      statusEl.innerHTML=`<span style="color:var(--wt-danger)">Download failed: ${escapeHtml(data.error||'Unknown error')}</span>`;
+      if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-danger)">Download failed: ${escapeHtml(data.error||'Unknown error')}</span>`;
     } else {
       bar.style.width='100%';
       pctText.textContent=`${mbDl}MB - Complete!`;
-      statusEl.innerHTML=`<span style="color:var(--wt-success)">Downloaded and registered: ${escapeHtml(data.filename)}</span>`;
-      loadModels();
+      if(statusEl) statusEl.innerHTML=`<span style="color:var(--wt-success)">Downloaded: ${escapeHtml(data.filename||'')} — triggering conversion...</span>`;
+      if(svcType==='kokoro'||svcType==='neutts'){
+        triggerModelConvert(svcType,data.path||data.filename||'');
+      } else {
+        loadModels();
+      }
     }
     delete activeDownloads[dlId];
   }
@@ -3589,6 +3702,276 @@ if(gen!==_hfLlamaSearchGen) return;
 btn.disabled=false;
 statusEl.innerHTML=`<span style="color:var(--wt-danger)">Search failed: ${escapeHtml(String(e))}</span>`;
   });
+}
+
+function renderLocalModelsTable(containerId, serviceType, models){
+  const el=document.getElementById(containerId);
+  if(!el) return;
+  if(!models.length){el.innerHTML=`<em>No ${serviceType} models found in models/ directory.</em>`;return;}
+  const isWhisper=serviceType==='whisper';
+  const rows=models.map(m=>{
+const name=m.filename||m.path||'';
+const path=m.path||'';
+const sizeMb=m.size_mb||0;
+const coremlBadge=isWhisper?(m.coreml?'<span style="color:var(--wt-success)">&#x2713; CoreML</span>':'<span style="color:var(--wt-text-muted)">&#x2717;</span>'):'';
+const convertBtn=isWhisper&&!m.coreml?`<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="triggerModelConvert('whisper','${escapeHtml(path)}')">Convert CoreML</button> `:'';
+const selectBtn=`<button class="wt-btn wt-btn-sm wt-btn-primary" onclick="selectLocalModelForService('${escapeHtml(serviceType)}','${escapeHtml(path)}')">Select for Service</button>`;
+return `<tr>`
+  +`<td><strong>${escapeHtml(name)}</strong></td>`
+  +`<td style="font-size:11px;word-break:break-all">${escapeHtml(path)}</td>`
+  +`<td>${sizeMb}</td>`
+  +(isWhisper?`<td>${coremlBadge}</td>`:'')
+  +`<td>${convertBtn}${selectBtn}</td>`
+  +`</tr>`;
+  });
+  const coremlHeader=isWhisper?'<th>CoreML</th>':'';
+  el.innerHTML=`<table class="wt-table"><thead><tr><th>Name</th><th>Path</th><th>Size (MB)</th>${coremlHeader}<th>Action</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+
+function selectLocalModelForService(serviceType,path){
+  const svcMap={whisper:'WHISPER_SERVICE',llama:'LLAMA_SERVICE'};
+  const svcName=svcMap[serviceType];
+  if(!svcName) return;
+  const lang=window._cachedWhisperLang||(document.getElementById('whisperLang')||{}).value||'de';
+  const argMap={
+whisper:`--language ${lang} --model ${path}`,
+llama:path
+  };
+  const args=argMap[serviceType]||path;
+  fetch('/api/services/config',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({service:svcName,args})})
+  .then(r=>r.json()).then(d=>{
+if(d.success||d.status==='saved'){
+  showToast(`Model set for ${svcName}. Restart service to apply.`,'success');
+} else {
+  showToast(`Failed to set model: ${d.error||'unknown error'}`,'error');
+}
+  }).catch(e=>showToast(`Request failed: ${String(e)}`,'error'));
+}
+
+function renderKokoroLocalModels(variants){
+  const el=document.getElementById('kokoroModelsContainer');
+  if(!el) return;
+  if(!variants.length){el.innerHTML='<em>No Kokoro variant directories found in models/.</em>';return;}
+  const rows=variants.map(v=>{
+const name=v.variant||v.name||'';
+const path=v.path||'';
+const voices=(v.voices||[]).join(', ')||'—';
+const sizeMb=v.size_mb||0;
+const coremlBadge=v.coreml?'<span style="color:var(--wt-success)">&#x2713; CoreML</span>':'<span style="color:var(--wt-text-muted)">&#x2717;</span>';
+const convertBtn=!v.coreml?`<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="triggerModelConvert('kokoro','${escapeHtml(path)}')">Convert CoreML</button> `:'';
+const selectBtn=`<button class="wt-btn wt-btn-sm wt-btn-primary" onclick="selectKokoroVariant('${escapeHtml(name)}')">Select for Service</button>`;
+return `<tr>`
+  +`<td><strong>${escapeHtml(name)}</strong></td>`
+  +`<td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(voices)}">${escapeHtml(voices.length>60?voices.slice(0,60)+'...':voices)}</td>`
+  +`<td>${sizeMb}</td>`
+  +`<td>${coremlBadge}</td>`
+  +`<td>${convertBtn}${selectBtn}</td>`
+  +`</tr>`;
+  });
+  el.innerHTML=`<table class="wt-table"><thead><tr><th>Variant</th><th>Voices</th><th>Size (MB)</th><th>CoreML</th><th>Action</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  window._kokoroData=variants.map(v=>({name:v.variant||v.name||'',voices:v.voices||[],path:v.path||'',coreml:v.coreml||false}));
+}
+
+function selectKokoroVariant(variantName){
+  const variant=(window._kokoroData||[]).find(v=>v.name===variantName);
+  const firstVoice=variant&&variant.voices&&variant.voices.length?variant.voices[0]:'';
+  const args=firstVoice?`--variant ${variantName} --voice ${firstVoice}`:`--variant ${variantName}`;
+  fetch('/api/services/config',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({service:'KOKORO_ENGINE',args})})
+  .then(r=>r.json()).then(d=>{
+if(d.success||d.status==='saved'){
+  showToast(`Kokoro variant set to ${variantName}${firstVoice?' voice '+firstVoice:''}. Restart engine to apply.`,'success');
+} else {
+  showToast(`Failed: ${d.error||'unknown error'}`,'error');
+}
+  }).catch(e=>showToast(`Request failed: ${String(e)}`,'error'));
+}
+
+function renderNeuTTSStatus(status){
+  const el=document.getElementById('neuttsStatusContainer');
+  if(!el) return;
+  if(!status||!status.exists){
+el.innerHTML='<span style="color:var(--wt-warning)">NeuTTS model directory not found (<code>models/neutts-nano-german/</code>). Download the model via the HuggingFace search below.</span>';
+return;
+  }
+  const coremlHtml=status.coreml
+?'<span style="color:var(--wt-success)">&#x2713; CoreML package present — model is ready.</span>'
+:'<span style="color:var(--wt-warning)">Model found but CoreML package missing. '
+  +'<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="triggerNeuTTSConvert()">Convert to CoreML</button></span>';
+  el.innerHTML=`<div style="font-size:12px;margin-bottom:4px"><strong>Path:</strong> ${escapeHtml(status.path||'')}</div><div style="font-size:12px">${coremlHtml}</div>`;
+}
+
+function triggerNeuTTSConvert(){
+  triggerModelConvert('neutts','models/neutts-nano-german');
+}
+
+function loadHfAuthStatus(){
+  fetch('/api/settings').then(r=>r.json()).then(d=>{
+const token=(d.settings||[]).find(s=>s.key==='hf_token');
+const hasToken=token&&token.value&&token.value!=='';
+const dot=document.getElementById('hfAuthDot');
+const text=document.getElementById('hfAuthText');
+const entry=document.getElementById('hfTokenEntry');
+const actions=document.getElementById('hfTokenActions');
+if(!dot||!text) return;
+if(hasToken){
+  dot.style.background='var(--wt-success)';
+  text.textContent='Authenticated';
+  if(entry) entry.style.display='none';
+  if(actions) actions.style.display='flex';
+} else {
+  dot.style.background='var(--wt-warning)';
+  text.textContent='No token \u2014 public models only';
+  if(entry) entry.style.display='flex';
+  if(actions) actions.style.display='none';
+}
+  }).catch(()=>{});
+}
+
+function saveHfToken(){
+  const token=document.getElementById('hfTokenInput').value.trim();
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({key:'hf_token',value:token})})
+  .then(()=>{document.getElementById('hfTokenInput').value='';loadHfAuthStatus();});
+}
+
+function removeHfToken(){
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({key:'hf_token',value:''})})
+  .then(()=>loadHfAuthStatus());
+}
+
+function toggleHfTokenEntry(){
+  const entry=document.getElementById('hfTokenEntry');
+  if(!entry) return;
+  entry.style.display=entry.style.display==='none'?'flex':'none';
+}
+
+let _hfKokoroSearchGen=0;
+function searchHuggingFaceKokoro(){
+  const btn=document.getElementById('hfKokoroSearchBtn');
+  const statusEl=document.getElementById('hfKokoroSearchStatus');
+  const resultsEl=document.getElementById('hfKokoroSearchResults');
+  if(!btn||!statusEl||!resultsEl) return;
+  btn.disabled=true;
+  statusEl.innerHTML='<span style="color:var(--wt-accent)">Searching HuggingFace for Kokoro models...</span>';
+  resultsEl.innerHTML='';
+  const query=(document.getElementById('hfKokoroSearchQuery')||{}).value||'kokoro';
+  const sort=(document.getElementById('hfKokoroSearchSort')||{}).value||'downloads';
+  const gen=++_hfKokoroSearchGen;
+  fetch('/api/models/search',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({query:query.trim()||'kokoro',task:'text-to-speech',sort,limit:20})})
+  .then(r=>r.json()).then(data=>{
+if(gen!==_hfKokoroSearchGen) return;
+btn.disabled=false;
+if(data.error){
+  statusEl.innerHTML=`<span style="color:var(--wt-danger)">${escapeHtml(data.error)}</span>`;
+  return;
+}
+const models=data.models||[];
+statusEl.innerHTML=`<span style="color:var(--wt-success)">Found ${models.length} models</span>`
+  +(data.has_token?'':' <em style="color:var(--wt-warning)">(No HF token)</em>');
+if(!models.length){resultsEl.innerHTML='<em>No models found.</em>';return;}
+window._hfKokoroSearchModels=models;
+const rows=models.map((m,idx)=>{
+  const id=m.modelId||m.id||'';
+  const dl=m.downloads||0;
+  const likes=m.likes||0;
+  const updated=m.lastModified?(new Date(m.lastModified)).toLocaleDateString():'';
+  return `<tr>`
+    +`<td><a href="https://huggingface.co/${escapeHtml(id)}" target="_blank" style="color:var(--wt-accent)"><strong>${escapeHtml(id)}</strong></a></td>`
+    +`<td>${formatNumber(dl)}</td>`
+    +`<td>${likes}</td>`
+    +`<td style="font-size:11px">${updated}</td>`
+    +`<td><button class="wt-btn wt-btn-sm wt-btn-primary" data-idx="${idx}" onclick="showDownloadDialog(parseInt(this.dataset.idx),'kokoro')">Download</button></td>`
+    +`</tr>`;
+});
+resultsEl.innerHTML=`<table class="wt-table"><thead><tr><th>Model</th><th>Downloads</th><th>Likes</th><th>Updated</th><th>Action</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  }).catch(e=>{
+if(gen!==_hfKokoroSearchGen) return;
+btn.disabled=false;
+statusEl.innerHTML=`<span style="color:var(--wt-danger)">Search failed: ${escapeHtml(String(e))}</span>`;
+  });
+}
+
+let _hfNeuTTSSearchGen=0;
+function searchHuggingFaceNeutts(){
+  const btn=document.getElementById('hfNeuttsSearchBtn');
+  const statusEl=document.getElementById('hfNeuttsSearchStatus');
+  const resultsEl=document.getElementById('hfNeuttsSearchResults');
+  if(!btn||!statusEl||!resultsEl) return;
+  btn.disabled=true;
+  statusEl.innerHTML='<span style="color:var(--wt-accent)">Searching HuggingFace for NeuTTS models...</span>';
+  resultsEl.innerHTML='';
+  const query=(document.getElementById('hfNeuttsSearchQuery')||{}).value||'neucodec';
+  const sort=(document.getElementById('hfNeuttsSearchSort')||{}).value||'downloads';
+  const gen=++_hfNeuTTSSearchGen;
+  fetch('/api/models/search',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({query:query.trim()||'neucodec',task:'text-to-speech',sort,limit:20})})
+  .then(r=>r.json()).then(data=>{
+if(gen!==_hfNeuTTSSearchGen) return;
+btn.disabled=false;
+if(data.error){
+  statusEl.innerHTML=`<span style="color:var(--wt-danger)">${escapeHtml(data.error)}</span>`;
+  return;
+}
+const models=data.models||[];
+statusEl.innerHTML=`<span style="color:var(--wt-success)">Found ${models.length} models</span>`
+  +(data.has_token?'':' <em style="color:var(--wt-warning)">(No HF token)</em>');
+if(!models.length){resultsEl.innerHTML='<em>No models found.</em>';return;}
+window._hfNeuTTSSearchModels=models;
+const rows=models.map((m,idx)=>{
+  const id=m.modelId||m.id||'';
+  const dl=m.downloads||0;
+  const likes=m.likes||0;
+  const updated=m.lastModified?(new Date(m.lastModified)).toLocaleDateString():'';
+  return `<tr>`
+    +`<td><a href="https://huggingface.co/${escapeHtml(id)}" target="_blank" style="color:var(--wt-accent)"><strong>${escapeHtml(id)}</strong></a></td>`
+    +`<td>${formatNumber(dl)}</td>`
+    +`<td>${likes}</td>`
+    +`<td style="font-size:11px">${updated}</td>`
+    +`<td><button class="wt-btn wt-btn-sm wt-btn-primary" data-idx="${idx}" onclick="showDownloadDialog(parseInt(this.dataset.idx),'neutts')">Download</button></td>`
+    +`</tr>`;
+});
+resultsEl.innerHTML=`<table class="wt-table"><thead><tr><th>Model</th><th>Downloads</th><th>Likes</th><th>Updated</th><th>Action</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  }).catch(e=>{
+if(gen!==_hfNeuTTSSearchGen) return;
+btn.disabled=false;
+statusEl.innerHTML=`<span style="color:var(--wt-danger)">Search failed: ${escapeHtml(String(e))}</span>`;
+  });
+}
+
+function triggerModelConvert(service,path){
+  fetch('/api/models/convert',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({service,path})})
+  .then(r=>r.json()).then(d=>{
+if(d.error){showToast('Conversion error: '+d.error,'error');return;}
+pollAsyncTask(d.task_id,msg=>showToast(msg,'info'),()=>{
+  showToast('Conversion complete!','success');
+  loadModels();
+});
+  }).catch(e=>showToast('Convert request failed: '+String(e),'error'));
+}
+
+function pollAsyncTask(taskId,onProgress,onComplete){
+  let retries=0;
+  const MAX_RETRIES=150;
+  const iv=setInterval(()=>{
+if(++retries>MAX_RETRIES){clearInterval(iv);showToast('Task timed out','error');return;}
+fetch(`/api/async/status?task_id=${taskId}`).then(r=>r.json()).then(d=>{
+  if(d.status==='running'){
+    if(d.message&&onProgress) onProgress(d.message);
+    return;
+  }
+  clearInterval(iv);
+  if(d.error){
+    showToast('Task error: '+d.error,'error');
+  } else {
+    if(onComplete) onComplete(d);
+  }
+}).catch(()=>{});
+  },2000);
 }
 
 // ===== END MODELS PAGE =====

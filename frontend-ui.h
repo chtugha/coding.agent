@@ -138,6 +138,22 @@ Hallucination Filter</label>
 <span id="whisperHalluFilterStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 </div>
+<div id="llamaConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">LLaMA Configuration</div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Model</label>
+<select class="wt-select" id="llamaModel" onchange="updateLlamaArgs()" title="GGUF model file from bin/models/. Selecting a model updates the positional .gguf argument in the service startup arguments." style="font-size:12px"></select></div>
+</div>
+<div id="kokoroConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">Kokoro Configuration</div>
+<div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">Variant</label>
+<select class="wt-select" id="kokoroVariant" onchange="updateKokoroVoices(); updateKokoroArgs()" title="Kokoro model variant directory under bin/models/. Each variant ships its own CoreML duration predictor and decoder voices." style="font-size:12px"></select></div>
+<div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Voice</label>
+<select class="wt-select" id="kokoroVoice" onchange="updateKokoroArgs()" title="Voice embedding from the selected variant's decoder_variants/ directory. The voice determines speaker identity and language." style="font-size:12px"></select></div>
+</div>
+<div id="neuttsConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">NeuTTS Configuration</div>
+<div id="neuttsModelStatus" style="font-size:12px;color:var(--wt-text-secondary)">Loading...</div>
+</div>
 <div id="sipClientConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">PBX Connection</div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
@@ -979,10 +995,33 @@ Save outgoing audio as WAV</label>
 <div class="wt-content">
 <h2 class="wt-page-title">Models & Benchmarking</h2>
 
+<!-- HuggingFace Auth Bar -->
+<div class="wt-card" id="hfAuthBar" style="margin-bottom:12px">
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+  <div style="display:flex;align-items:center;gap:8px">
+    <span id="hfAuthDot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#888"></span>
+    <span style="font-weight:600">HuggingFace Token:</span>
+    <span id="hfAuthText" style="font-size:13px;color:var(--wt-text-muted)">Checking...</span>
+  </div>
+  <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener" style="font-size:12px">Get token &#x2197;</a>
+  <div id="hfTokenEntry" style="display:none;flex:1;min-width:300px;gap:6px;align-items:center">
+    <input class="wt-input" id="hfTokenInput" type="password" placeholder="hf_..." style="flex:1">
+    <button class="wt-btn wt-btn-sm wt-btn-primary" onclick="saveHfToken()">Save</button>
+    <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="toggleHfTokenEntry()">Cancel</button>
+  </div>
+  <div id="hfTokenActions" style="display:none;gap:6px">
+    <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="toggleHfTokenEntry()">Change</button>
+    <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="removeHfToken()">Remove</button>
+  </div>
+</div>
+</div>
+
 <!-- Tab selector -->
 <div class="wt-tab-bar" id="modelTabs" role="tablist">
 <button class="wt-tab-btn active" role="tab" id="tabWhisper" aria-selected="true" aria-controls="modelTabWhisper" onclick="switchModelTab('whisper')">Whisper Models</button>
 <button class="wt-tab-btn" role="tab" id="tabLlama" aria-selected="false" aria-controls="modelTabLlama" onclick="switchModelTab('llama')">LLaMA Models</button>
+<button class="wt-tab-btn" role="tab" id="tabKokoro" aria-selected="false" aria-controls="modelTabKokoro" onclick="switchModelTab('kokoro')">Kokoro Models</button>
+<button class="wt-tab-btn" role="tab" id="tabNeutts" aria-selected="false" aria-controls="modelTabNeutts" onclick="switchModelTab('neutts')">NeuTTS Models</button>
 <button class="wt-tab-btn" role="tab" id="tabCompare" aria-selected="false" aria-controls="modelTabCompare" onclick="switchModelTab('compare')">Comparison</button>
 </div>
 
@@ -1024,7 +1063,7 @@ Save outgoing audio as WAV</label>
 
 <div class="wt-card">
 <div class="wt-card-header">
-<span class="wt-card-title">Registered Whisper Models</span>
+<span class="wt-card-title">Locally Available Whisper Models</span>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
 </div>
 <div id="whisperModelsTable"><em>Loading...</em></div>
@@ -1100,7 +1139,7 @@ Save outgoing audio as WAV</label>
 
 <div class="wt-card">
 <div class="wt-card-header">
-<span class="wt-card-title">Registered LLaMA Models</span>
+<span class="wt-card-title">Locally Available LLaMA Models</span>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
 </div>
 <div id="llamaModelsTable"><em>Loading...</em></div>
@@ -1146,6 +1185,78 @@ Save outgoing audio as WAV</label>
 </div>
 
 </div><!-- end modelTabLlama -->
+
+<!-- Kokoro Models Panel -->
+<div class="wt-tab-pane" id="modelTabKokoro" role="tabpanel" aria-labelledby="tabKokoro">
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Search HuggingFace Kokoro Models</span>
+</div>
+<div style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;margin-bottom:8px;align-items:end">
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Search Query</label>
+    <input class="wt-input" id="hfKokoroSearchQuery" placeholder="e.g. kokoro tts coreml" value="kokoro tts">
+  </div>
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Sort by</label>
+    <select class="wt-select" id="hfKokoroSearchSort">
+      <option value="downloads">Downloads</option>
+      <option value="likes">Likes</option>
+      <option value="lastModified">Recently Updated</option>
+    </select>
+  </div>
+  <button class="wt-btn wt-btn-primary" onclick="searchHuggingFaceKokoro()" id="hfKokoroSearchBtn">&#x1F50D; Search</button>
+</div>
+<div id="hfKokoroSearchStatus" style="font-size:12px;margin-bottom:8px"></div>
+<div id="hfKokoroSearchResults"></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Locally Available Kokoro Models</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
+</div>
+<div id="kokoroModelsContainer"><em>Loading...</em></div>
+</div>
+
+</div><!-- end modelTabKokoro -->
+
+<!-- NeuTTS Models Panel -->
+<div class="wt-tab-pane" id="modelTabNeutts" role="tabpanel" aria-labelledby="tabNeutts">
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">NeuTTS Model Status</span>
+<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
+</div>
+<div id="neuttsStatusContainer"><em>Loading...</em></div>
+</div>
+
+<div class="wt-card">
+<div class="wt-card-header">
+<span class="wt-card-title">Search HuggingFace NeuTTS Models</span>
+</div>
+<div style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;margin-bottom:8px;align-items:end">
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Search Query</label>
+    <input class="wt-input" id="hfNeuttsSearchQuery" placeholder="e.g. neutts neucodec german" value="neutts german">
+  </div>
+  <div>
+    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">Sort by</label>
+    <select class="wt-select" id="hfNeuttsSearchSort">
+      <option value="downloads">Downloads</option>
+      <option value="likes">Likes</option>
+      <option value="lastModified">Recently Updated</option>
+    </select>
+  </div>
+  <button class="wt-btn wt-btn-primary" onclick="searchHuggingFaceNeutts()" id="hfNeuttsSearchBtn">&#x1F50D; Search</button>
+</div>
+<div id="hfNeuttsSearchStatus" style="font-size:12px;margin-bottom:8px"></div>
+<div id="hfNeuttsSearchResults"></div>
+</div>
+
+</div><!-- end modelTabNeutts -->
 
 <!-- Comparison Panel -->
 <div class="wt-tab-pane" id="modelTabCompare" role="tabpanel" aria-labelledby="tabCompare">

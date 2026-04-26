@@ -532,6 +532,7 @@ private:
         std::string error;
         std::string filename;
         std::string local_path;
+        std::string service;
         std::mutex mu;
     };
     std::mutex downloads_mutex_;
@@ -1235,6 +1236,16 @@ private:
                 handle_models_add(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/search")) == 0) {
                 handle_models_search(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/local")) == 0) {
+                handle_models_local(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/llama")) == 0) {
+                handle_models_llama(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/kokoro")) == 0) {
+                handle_models_kokoro(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/neutts")) == 0) {
+                handle_models_neutts(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/convert")) == 0) {
+                handle_models_convert(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/download")) == 0) {
                 handle_models_download(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/download/progress")) == 0) {
@@ -7330,6 +7341,363 @@ private:
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
     }
 
+    // GET /api/models/local — Disk scan for all locally available model files.
+    void handle_models_local(struct mg_connection *c) {
+        std::stringstream json;
+        json << "{";
+
+        json << "\"whisper\":[";
+        {
+            DIR* dir = opendir("models");
+            bool first = true;
+            if (dir) {
+                struct dirent* entry;
+                while ((entry = readdir(dir)) != nullptr) {
+                    std::string name = entry->d_name;
+                    if (name.size() > 4 && name.substr(name.size() - 4) == ".bin") {
+                        std::string path = "models/" + name;
+                        struct stat st;
+                        int64_t size_mb = 0;
+                        if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
+                        std::string stem = name.substr(0, name.size() - 4);
+                        bool coreml = false;
+                        struct stat cst;
+                        if (stat(("models/" + stem + ".mlpackage").c_str(), &cst) == 0) coreml = true;
+                        if (!coreml && stat(("models/" + stem + "_coreml").c_str(), &cst) == 0) coreml = true;
+                        if (!first) json << ",";
+                        json << "{\"filename\":\"" << escape_json(name) << "\""
+                             << ",\"path\":\"" << escape_json(path) << "\""
+                             << ",\"size_mb\":" << size_mb
+                             << ",\"coreml\":" << (coreml ? "true" : "false") << "}";
+                        first = false;
+                    }
+                }
+                closedir(dir);
+            }
+        }
+        json << "],";
+
+        json << "\"llama\":[";
+        {
+            DIR* dir = opendir("models");
+            bool first = true;
+            if (dir) {
+                struct dirent* entry;
+                while ((entry = readdir(dir)) != nullptr) {
+                    std::string name = entry->d_name;
+                    if (name.size() > 5 && name.substr(name.size() - 5) == ".gguf") {
+                        std::string path = "models/" + name;
+                        struct stat st;
+                        int64_t size_mb = 0;
+                        if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
+                        if (!first) json << ",";
+                        json << "{\"filename\":\"" << escape_json(name) << "\""
+                             << ",\"path\":\"" << escape_json(path) << "\""
+                             << ",\"size_mb\":" << size_mb << "}";
+                        first = false;
+                    }
+                }
+                closedir(dir);
+            }
+        }
+        json << "],";
+
+        json << "\"kokoro\":[";
+        {
+            DIR* dir = opendir("models");
+            bool first = true;
+            if (dir) {
+                struct dirent* entry;
+                while ((entry = readdir(dir)) != nullptr) {
+                    std::string name = entry->d_name;
+                    if (name == "." || name == ".." || name == "neutts-nano-german") continue;
+                    std::string variant_path = "models/" + name;
+                    struct stat st;
+                    if (stat(variant_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+                    if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) continue;
+                    if (stat((variant_path + "/decoder_variants").c_str(), &st) != 0) continue;
+                    std::vector<std::string> voices;
+                    DIR* vdir = opendir((variant_path + "/decoder_variants").c_str());
+                    if (vdir) {
+                        struct dirent* ve;
+                        while ((ve = readdir(vdir)) != nullptr) {
+                            std::string vname = ve->d_name;
+                            if (vname.size() > 4 && vname.substr(vname.size() - 4) == ".bin") {
+                                voices.push_back(vname.substr(0, vname.size() - 4));
+                            }
+                        }
+                        closedir(vdir);
+                    }
+                    if (!first) json << ",";
+                    json << "{\"variant\":\"" << escape_json(name) << "\""
+                         << ",\"path\":\"" << escape_json(variant_path) << "\""
+                         << ",\"voices\":[";
+                    bool fv = true;
+                    for (auto& v : voices) {
+                        if (!fv) json << ",";
+                        json << "\"" << escape_json(v) << "\"";
+                        fv = false;
+                    }
+                    json << "],\"coreml\":true,\"size_mb\":0}";
+                    first = false;
+                }
+                closedir(dir);
+            }
+        }
+        json << "],";
+
+        {
+            std::string neutts_path = "models/neutts-nano-german";
+            std::string coreml_path = neutts_path + "/neucodec_decoder.mlpackage";
+            struct stat st;
+            bool exists = (stat(neutts_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+            bool coreml = exists && (stat(coreml_path.c_str(), &st) == 0);
+            json << "\"neutts\":{\"exists\":" << (exists ? "true" : "false")
+                 << ",\"coreml\":" << (coreml ? "true" : "false")
+                 << ",\"path\":\"" << escape_json(neutts_path) << "\""
+                 << ",\"coreml_path\":\"" << escape_json(coreml_path) << "\"}";
+        }
+
+        json << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    // GET /api/models/llama — Scan models/*.gguf for LLaMA service config dropdown.
+    void handle_models_llama(struct mg_connection *c) {
+        std::stringstream json;
+        json << "{\"models\":[";
+        DIR* dir = opendir("models");
+        bool first = true;
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr) {
+                std::string name = entry->d_name;
+                if (name.size() > 5 && name.substr(name.size() - 5) == ".gguf") {
+                    std::string path = "models/" + name;
+                    struct stat st;
+                    int64_t size_mb = 0;
+                    if (stat(path.c_str(), &st) == 0) size_mb = st.st_size / (1024 * 1024);
+                    if (!first) json << ",";
+                    json << "{\"filename\":\"" << escape_json(name) << "\""
+                         << ",\"path\":\"" << escape_json(path) << "\""
+                         << ",\"size_mb\":" << size_mb << "}";
+                    first = false;
+                }
+            }
+            closedir(dir);
+        }
+        std::string current_args;
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            for (auto& svc : services_) {
+                if (svc.name == "LLAMA_SERVICE") { current_args = svc.default_args; break; }
+            }
+        }
+        json << "],\"current_args\":\"" << escape_json(current_args) << "\"}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    // GET /api/models/kokoro — Scan models/*/ for Kokoro variants/voices for service config dropdown.
+    void handle_models_kokoro(struct mg_connection *c) {
+        std::stringstream json;
+        json << "{\"variants\":[";
+        DIR* dir = opendir("models");
+        bool first = true;
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr) {
+                std::string name = entry->d_name;
+                if (name == "." || name == ".." || name == "neutts-nano-german") continue;
+                std::string variant_path = "models/" + name;
+                struct stat st;
+                if (stat(variant_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+                if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) continue;
+                if (stat((variant_path + "/decoder_variants").c_str(), &st) != 0) continue;
+                std::vector<std::string> voices;
+                DIR* vdir = opendir((variant_path + "/decoder_variants").c_str());
+                if (vdir) {
+                    struct dirent* ve;
+                    while ((ve = readdir(vdir)) != nullptr) {
+                        std::string vname = ve->d_name;
+                        if (vname.size() > 4 && vname.substr(vname.size() - 4) == ".bin") {
+                            voices.push_back(vname.substr(0, vname.size() - 4));
+                        }
+                    }
+                    closedir(vdir);
+                }
+                if (!first) json << ",";
+                json << "{\"name\":\"" << escape_json(name) << "\""
+                     << ",\"path\":\"" << escape_json(variant_path) << "\""
+                     << ",\"voices\":[";
+                bool fv = true;
+                for (auto& v : voices) {
+                    if (!fv) json << ",";
+                    json << "\"" << escape_json(v) << "\"";
+                    fv = false;
+                }
+                json << "],\"coreml\":true}";
+                first = false;
+            }
+            closedir(dir);
+        }
+        std::string current_args;
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            for (auto& svc : services_) {
+                if (svc.name == "KOKORO_ENGINE") { current_args = svc.default_args; break; }
+            }
+        }
+        json << "],\"current_args\":\"" << escape_json(current_args) << "\"}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    // GET /api/models/neutts — NeuTTS model presence check for service config info panel.
+    void handle_models_neutts(struct mg_connection *c) {
+        std::string neutts_path = "models/neutts-nano-german";
+        std::string coreml_path = neutts_path + "/neucodec_decoder.mlpackage";
+        struct stat st;
+        bool exists = (stat(neutts_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+        bool coreml = exists && (stat(coreml_path.c_str(), &st) == 0);
+        std::stringstream json;
+        json << "{\"exists\":" << (exists ? "true" : "false")
+             << ",\"coreml\":" << (coreml ? "true" : "false")
+             << ",\"path\":\"" << escape_json(neutts_path) << "\""
+             << ",\"coreml_path\":\"" << escape_json(coreml_path) << "\"}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    // POST /api/models/convert — Trigger async CoreML conversion for a model.
+    void handle_models_convert(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string service = extract_json_string(body, "service");
+        std::string path = extract_json_string(body, "path");
+
+        if (service.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing service\"}");
+            return;
+        }
+        if (service != "whisper" && service != "kokoro" && service != "neutts") {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid service. Use whisper, kokoro, or neutts\"}");
+            return;
+        }
+
+        int64_t task_id = create_async_task("model_convert");
+
+        std::thread([this, task_id, service, path]() {
+            auto resolve_cmd = [](const std::string& cmd) -> std::string {
+                int pipefd[2];
+                if (pipe(pipefd) != 0) return "";
+                pid_t pid = fork();
+                if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return ""; }
+                if (pid == 0) {
+                    close(pipefd[0]);
+                    dup2(pipefd[1], STDOUT_FILENO);
+                    int dn = open("/dev/null", O_WRONLY);
+                    if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
+                    close(pipefd[1]);
+                    execlp("which", "which", cmd.c_str(), nullptr);
+                    _exit(127);
+                }
+                close(pipefd[1]);
+                char buf[512] = {0};
+                ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+                close(pipefd[0]);
+                int status = 0;
+                waitpid(pid, &status, 0);
+                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || n <= 0) return "";
+                std::string result(buf, n);
+                while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' '))
+                    result.pop_back();
+                return result;
+            };
+
+            std::string python_path = resolve_cmd("python3");
+            if (python_path.empty()) python_path = resolve_cmd("python");
+            if (python_path.empty()) {
+                finish_async_task(task_id, "{\"error\":\"Python not found. Install Python 3 and required dependencies.\"}");
+                return;
+            }
+
+            std::string script_path;
+            std::vector<std::string> extra_args;
+            if (service == "whisper") {
+                script_path = "scripts/export_coreml.py";
+                if (!path.empty()) extra_args.push_back(path);
+            } else if (service == "kokoro") {
+                script_path = "scripts/export_kokoro_models.py";
+                if (!path.empty()) {
+                    extra_args.push_back("--variant");
+                    extra_args.push_back(path);
+                }
+            } else if (service == "neutts") {
+                script_path = "scripts/convert_neucodec_to_coreml.py";
+            }
+
+            struct stat st;
+            if (stat(script_path.c_str(), &st) != 0) {
+                finish_async_task(task_id, "{\"error\":\"Conversion script not found: " + escape_json(script_path) + "\"}");
+                return;
+            }
+
+            update_async_task_progress(task_id, "{\"status\":\"running\",\"message\":\"Starting conversion...\"}");
+
+            std::vector<const char*> argv;
+            argv.push_back(python_path.c_str());
+            argv.push_back(script_path.c_str());
+            for (auto& a : extra_args) argv.push_back(a.c_str());
+            argv.push_back(nullptr);
+
+            int pipefd[2];
+            if (pipe(pipefd) != 0) {
+                finish_async_task(task_id, "{\"error\":\"Failed to create pipe\"}");
+                return;
+            }
+
+            pid_t pid = fork();
+            if (pid < 0) {
+                close(pipefd[0]); close(pipefd[1]);
+                finish_async_task(task_id, "{\"error\":\"Failed to fork process\"}");
+                return;
+            }
+
+            if (pid == 0) {
+                close(pipefd[0]);
+                dup2(pipefd[1], STDOUT_FILENO);
+                dup2(pipefd[1], STDERR_FILENO);
+                close(pipefd[1]);
+                execvp(python_path.c_str(), const_cast<char* const*>(argv.data()));
+                _exit(127);
+            }
+
+            close(pipefd[1]);
+            std::string output;
+            char buf[4096];
+            ssize_t n;
+            while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+                output.append(buf, n);
+                if (output.size() > 16384) output = output.substr(output.size() - 16384);
+            }
+            close(pipefd[0]);
+
+            int status = 0;
+            waitpid(pid, &status, 0);
+            int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+            if (exit_code == 0) {
+                finish_async_task(task_id, "{\"status\":\"done\",\"message\":\"Conversion completed successfully\"}");
+            } else {
+                std::string out_snippet = output.size() > 512 ? output.substr(output.size() - 512) : output;
+                finish_async_task(task_id, "{\"error\":\"Conversion failed (exit " + std::to_string(exit_code) + "): " + escape_json(out_snippet) + "\"}");
+            }
+        }).detach();
+
+        mg_http_reply(c, 202, "Content-Type: application/json\r\n", "{\"task_id\":%lld}", (long long)task_id);
+    }
+
     // POST /api/models/download — Async download of a model file from HuggingFace.
     // Spawns a background curl process; progress available via handle_models_download_progress.
     void handle_models_download(struct mg_connection *c, struct mg_http_message *hm) {
@@ -7339,7 +7707,7 @@ private:
         std::string model_name = extract_json_string(body, "model_name");
         std::string backend = extract_json_string(body, "backend");
         std::string service = extract_json_string(body, "service");
-        if (service != "whisper" && service != "llama") service = "whisper";
+        if (service != "whisper" && service != "llama" && service != "kokoro" && service != "neutts") service = "whisper";
 
         if (repo_id.empty() || filename.empty()) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n",
@@ -7387,6 +7755,7 @@ private:
         auto progress = std::make_shared<DownloadProgress>();
         progress->filename = filename;
         progress->local_path = local_path;
+        progress->service = service;
         {
             std::lock_guard<std::mutex> lock(downloads_mutex_);
             downloads_[dl_id] = progress;
@@ -7479,6 +7848,25 @@ private:
                 return;
             }
 
+            {
+                char magic[16] = {0};
+                size_t magic_n = 0;
+                FILE* mf = fopen(local_path.c_str(), "rb");
+                if (mf) { magic_n = fread(magic, 1, 15, mf); fclose(mf); }
+                std::string magic_str(magic, magic_n);
+                if (magic_str.find("<!DOCTYPE") != std::string::npos ||
+                    magic_str.find("<html") != std::string::npos) {
+                    progress->failed.store(true);
+                    {
+                        std::lock_guard<std::mutex> lock(progress->mu);
+                        progress->error = "Downloaded file appears to be an HTML error page "
+                                          "(HuggingFace auth error or 404). Check your HF token.";
+                    }
+                    unlink(local_path.c_str());
+                    return;
+                }
+            }
+
             progress->bytes_downloaded.store(fst.st_size);
 
             if (db_) {
@@ -7517,7 +7905,7 @@ private:
 
         int64_t snap_bytes = 0, snap_total = 0;
         bool snap_complete = false, snap_failed = false;
-        std::string snap_error, snap_filename, snap_local_path;
+        std::string snap_error, snap_filename, snap_local_path, snap_service;
         bool found = false, is_done = false;
 
         {
@@ -7536,6 +7924,7 @@ private:
                 }
                 snap_filename = p->filename;
                 snap_local_path = p->local_path;
+                snap_service = p->service;
                 is_done = snap_complete || snap_failed;
                 if (is_done) downloads_.erase(it);
             }
@@ -7548,14 +7937,15 @@ private:
 
         mg_http_reply(c, 200, "Content-Type: application/json\r\n",
             "{\"bytes_downloaded\":%lld,\"total_bytes\":%lld,\"complete\":%s,\"failed\":%s"
-            ",\"error\":\"%s\",\"filename\":\"%s\",\"path\":\"%s\"}",
+            ",\"error\":\"%s\",\"filename\":\"%s\",\"path\":\"%s\",\"service\":\"%s\"}",
             (long long)snap_bytes,
             (long long)snap_total,
             snap_complete ? "true" : "false",
             snap_failed ? "true" : "false",
             escape_json(snap_error).c_str(),
             escape_json(snap_filename).c_str(),
-            escape_json(snap_local_path).c_str());
+            escape_json(snap_local_path).c_str(),
+            escape_json(snap_service).c_str());
     }
 
     // POST /api/models/add — Register a locally-present model file in SQLite.
