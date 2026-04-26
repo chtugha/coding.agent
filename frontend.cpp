@@ -7451,6 +7451,8 @@ private:
                 if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) return;
                 if (stat((variant_path + "/decoder_variants").c_str(), &st) != 0) return;
                 std::vector<std::string> voices;
+                // Voices are stored as <name>_voice.bin in the variant ROOT directory
+                // (decoder_variants/ holds decoder mlmodelc files, not voice tensors).
                 DIR* vdir = opendir(variant_path.c_str());
                 if (vdir) {
                     struct dirent* ve;
@@ -7547,6 +7549,8 @@ private:
                 if (stat((variant_path + "/coreml/kokoro_duration.mlmodelc").c_str(), &st) != 0) continue;
                 if (stat((variant_path + "/decoder_variants").c_str(), &st) != 0) continue;
                 std::vector<std::string> voices;
+                // Voices are stored as <name>_voice.bin in the variant ROOT directory
+                // (decoder_variants/ holds decoder mlmodelc files, not voice tensors).
                 DIR* vdir = opendir(variant_path.c_str());
                 if (vdir) {
                     struct dirent* ve;

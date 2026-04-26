@@ -1346,7 +1346,7 @@ Save outgoing audio as WAV</label>
 <div class="wt-card">
 <div class="wt-card-header"><span class="wt-card-title">Register NeuTTS Model Directory</span></div>
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:8px">
-  NeuTTS expects its model at <code>bin/models/neutts-nano-german/</code>. If you have already placed the model there, click Refresh above. If the model is elsewhere on disk, enter a custom path below to copy it.
+  NeuTTS expects its model at <code>bin/models/neutts-nano-german/</code>. If you have already placed the model there, click Refresh above. If the model lives elsewhere on disk, enter the absolute path below to point the engine at it via <code>--model-path</code> (no files are copied).
 </p>
 <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end">
   <div>
