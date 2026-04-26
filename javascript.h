@@ -2994,7 +2994,7 @@ function loadModels(){
 renderLocalModelsTable('whisperModelsTable','whisper',data.whisper||[]);
 renderLocalModelsTable('llamaModelsTable','llama',data.llama||[]);
 renderKokoroLocalModels(data.kokoro||[]);
-renderNeuTTSStatus(data.neutts||{});
+renderNeuTTSLocalModels(data.neutts||{});
   }).catch(e=>{ console.error('loadModels error',e); });
   fetch('/api/models').then(r=>r.json()).then(data=>{
 populateBenchmarkModelSelect(data.whisper||[]);
@@ -3813,18 +3813,43 @@ if(d.success||d.status==='saved'){
   }).catch(e=>showToast(`Request failed: ${String(e)}`,'error'));
 }
 
-function renderNeuTTSStatus(status){
-  const el=document.getElementById('neuttsStatusContainer');
+function renderNeuTTSLocalModels(status){
+  const el=document.getElementById('neuttsLocalContainer');
   if(!el) return;
   if(!status||!status.exists){
-el.innerHTML='<span style="color:var(--wt-warning)">NeuTTS model directory not found (<code>bin/models/neutts-nano-german/</code>). Download the model via the HuggingFace search below.</span>';
-return;
+    el.innerHTML='<em>No NeuTTS model found in <code>bin/models/neutts-nano-german/</code>. Download the model via the HuggingFace search below.</em>';
+    return;
   }
-  const coremlHtml=status.coreml
-?'<span style="color:var(--wt-success)">&#x2713; CoreML package present — model is ready.</span>'
-:'<span style="color:var(--wt-warning)">Model found but CoreML package missing. '
-  +'<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="triggerNeuTTSConvert()">Convert to CoreML</button></span>';
-  el.innerHTML=`<div style="font-size:12px;margin-bottom:4px"><strong>Path:</strong> ${escapeHtml(status.path||'')}</div><div style="font-size:12px">${coremlHtml}</div>`;
+  const coremlBadge=status.coreml
+    ?'<span style="color:var(--wt-success)">&#x2713; CoreML</span>'
+    :'<span style="color:var(--wt-text-muted)">&#x2717;</span>';
+  const convertBtn=!status.coreml
+    ?`<button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="triggerNeuTTSConvert()">Convert CoreML</button> `
+    :'';
+  const selectBtn=`<button class="wt-btn wt-btn-sm wt-btn-primary" onclick="selectLocalNeuTTSModel()">Select for Service</button>`;
+  const row=`<tr>`
+    +`<td><strong>neutts-nano-german</strong></td>`
+    +`<td style="font-size:11px;word-break:break-all">${escapeHtml(status.path||'')}</td>`
+    +`<td>${coremlBadge}</td>`
+    +`<td>${convertBtn}${selectBtn}</td>`
+    +`</tr>`;
+  el.innerHTML=`<table class="wt-table"><thead><tr><th>Name</th><th>Path</th><th>CoreML</th><th>Action</th></tr></thead><tbody>${row}</tbody></table>`;
+}
+
+function selectLocalNeuTTSModel(){
+  fetch('/api/services').then(r=>r.json()).then(svcData=>{
+    const svc=(svcData.services||[]).find(s=>s.name==='NEUTTS_ENGINE');
+    const curArgs=(svc&&svc.default_args)||'';
+    const newArgs=(curArgs.replace(/--model-path\s+\S+/g,'').trim()+' --model-path bin/models/neutts-nano-german').trim();
+    return fetch('/api/services/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({service:'NEUTTS_ENGINE',args:newArgs})}).then(r=>r.json());
+  }).then(d=>{
+    if(d.success||d.status==='saved'){
+      showToast('NeuTTS model path set. Restart engine to apply.','success');
+    } else {
+      showToast('Failed to set NeuTTS model: '+(d.error||'unknown error'),'error');
+    }
+  }).catch(e=>showToast('Request failed: '+String(e),'error'));
 }
 
 function triggerNeuTTSConvert(){

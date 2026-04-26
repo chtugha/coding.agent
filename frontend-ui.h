@@ -1297,10 +1297,10 @@ Save outgoing audio as WAV</label>
 
 <div class="wt-card">
 <div class="wt-card-header">
-<span class="wt-card-title">NeuTTS Model Status</span>
+<span class="wt-card-title">Locally Available NeuTTS Models</span>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="loadModels()">&#x21BB; Refresh</button>
 </div>
-<div id="neuttsStatusContainer"><em>Loading...</em></div>
+<div id="neuttsLocalContainer"><em>Loading...</em></div>
 </div>
 
 <div class="wt-card">
