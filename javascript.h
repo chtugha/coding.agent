@@ -3999,6 +3999,136 @@ fetch(`/api/async/status?task_id=${taskId}`).then(r=>r.json()).then(d=>{
   },2000);
 }
 
+function handleModelFileDrop(event,service){
+  event.preventDefault();
+  const file=event.dataTransfer&&event.dataTransfer.files&&event.dataTransfer.files[0];
+  if(!file) return;
+  startModelUpload(file,service);
+}
+
+function handleModelFileInput(input,service){
+  const file=input.files&&input.files[0];
+  if(!file) return;
+  startModelUpload(file,service);
+  input.value='';
+}
+
+function startModelUpload(file,service){
+  const cap=service.charAt(0).toUpperCase()+service.slice(1);
+  const statusEl=document.getElementById('uploadStatus'+cap);
+  const progressDiv=document.getElementById('uploadProgress'+cap);
+  const barEl=document.getElementById('uploadBar'+cap);
+  const pctEl=document.getElementById('uploadPct'+cap);
+  if(statusEl) statusEl.innerHTML='<span style="color:var(--wt-info)">Preparing upload…</span>';
+  uploadModelChunked(file,service,statusEl,progressDiv,barEl,pctEl);
+}
+
+function uploadModelChunked(file,service,statusEl,progressDiv,barEl,pctEl){
+  const CHUNK_SIZE=512*1024;
+  const totalChunks=Math.max(1,Math.ceil(file.size/CHUNK_SIZE));
+  let chunkIdx=0;
+  if(progressDiv) progressDiv.style.display='block';
+  if(barEl) barEl.style.width='0%';
+  if(pctEl) pctEl.textContent='0%';
+
+  function sendChunk(){
+    const start=chunkIdx*CHUNK_SIZE;
+    const end=Math.min(start+CHUNK_SIZE,file.size);
+    const blob=file.slice(start,end);
+    const url='/api/models/upload?service='+encodeURIComponent(service)
+      +'&filename='+encodeURIComponent(file.name)
+      +'&chunk_idx='+chunkIdx
+      +'&total_chunks='+totalChunks;
+    const xhr=new XMLHttpRequest();
+    xhr.open('POST',url,true);
+    xhr.setRequestHeader('Content-Type','application/octet-stream');
+    xhr.upload.onprogress=function(e){
+      if(e.lengthComputable){
+        const pct=Math.min(100,Math.round((chunkIdx*CHUNK_SIZE+e.loaded)/file.size*100));
+        if(barEl) barEl.style.width=pct+'%';
+        if(pctEl) pctEl.textContent=pct+'%';
+        if(statusEl) statusEl.innerHTML='<span style="color:var(--wt-info)">Uploading… '+pct+'%</span>';
+      }
+    };
+    xhr.onload=function(){
+      if(xhr.status<200||xhr.status>=300){
+        let msg='Upload error (HTTP '+xhr.status+')';
+        try{msg=JSON.parse(xhr.responseText).error||msg;}catch(e){}
+        if(statusEl) statusEl.innerHTML='<span style="color:var(--wt-danger)">'+escapeHtml(msg)+'</span>';
+        if(progressDiv) progressDiv.style.display='none';
+        return;
+      }
+      let data={};
+      try{data=JSON.parse(xhr.responseText);}catch(e){}
+      if(data.complete){
+        if(barEl) barEl.style.width='100%';
+        if(pctEl) pctEl.textContent='100%';
+        if(statusEl) statusEl.innerHTML='<span style="color:var(--wt-success)">Upload complete: '+escapeHtml(file.name)+'</span>';
+        setTimeout(()=>{if(progressDiv) progressDiv.style.display='none';},3000);
+        if(data.needs_convert){
+          if(service==='kokoro'){
+            const suggestion=file.name.replace(/(?:\.tar)?\.[^.]+$/,'')||'kokoro-v1';
+            const variantName=prompt('Kokoro model uploaded.\nEnter the variant directory name to create/use under models/:\n(Will be used as --variant argument)',suggestion);
+            if(variantName&&variantName.trim()) triggerModelConvert('kokoro',variantName.trim());
+          } else {
+            triggerModelConvert(service,data.path||data.filename||'');
+          }
+        }
+        loadModels();
+      } else {
+        chunkIdx++;
+        sendChunk();
+      }
+    };
+    xhr.onerror=function(){
+      if(statusEl) statusEl.innerHTML='<span style="color:var(--wt-danger)">Network error during upload.</span>';
+      if(progressDiv) progressDiv.style.display='none';
+    };
+    xhr.send(blob);
+  }
+  sendChunk();
+}
+
+function registerKokoroVariant(){
+  const name=(document.getElementById('addKokoroVariantName')||{}).value||'';
+  const voice=(document.getElementById('addKokoroVoiceName')||{}).value||'';
+  const status=document.getElementById('addKokoroStatus');
+  if(!name.trim()){if(status) status.innerHTML='<span style="color:var(--wt-danger)">Variant name is required.</span>';return;}
+  const args=voice.trim()?`--variant ${name.trim()} --voice ${voice.trim()}`:`--variant ${name.trim()}`;
+  if(status) status.innerHTML='Registering…';
+  fetch('/api/services/config',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({service:'KOKORO_ENGINE',args})})
+  .then(r=>r.json()).then(d=>{
+    if(d.success||d.status==='saved'){
+      if(status) status.innerHTML=`<span style="color:var(--wt-success)">Variant "${escapeHtml(name.trim())}" registered and set active. Restart engine to apply.</span>`;
+      loadModels();
+    } else {
+      if(status) status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(d.error||'unknown')}</span>`;
+    }
+  }).catch(e=>{if(status) status.innerHTML=`<span style="color:var(--wt-danger)">Request failed: ${escapeHtml(String(e))}</span>`;});
+}
+
+function registerNeuTTSModel(){
+  const path=(document.getElementById('addNeuttsModelPath')||{}).value||'';
+  const status=document.getElementById('addNeuttsStatus');
+  if(!path.trim()){if(status) status.innerHTML='<span style="color:var(--wt-danger)">Path is required.</span>';return;}
+  if(status) status.innerHTML='Registering…';
+  fetch('/api/services').then(r=>r.json()).then(svcData=>{
+    const svc=(svcData.services||[]).find(s=>s.name==='NEUTTS_ENGINE');
+    const curArgs=(svc&&svc.default_args)||'';
+    const newArgs=(curArgs.replace(/--model-path\s+\S+/g,'').trim()+' --model-path '+path.trim()).trim();
+    return fetch('/api/services/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({service:'NEUTTS_ENGINE',args:newArgs})});
+  }).then(r=>r.json()).then(d=>{
+    if(d.success||d.status==='saved'){
+      if(status) status.innerHTML=`<span style="color:var(--wt-success)">NeuTTS path set to "${escapeHtml(path.trim())}". Restart engine to apply.</span>`;
+      loadModels();
+    } else {
+      if(status) status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(d.error||'unknown')}</span>`;
+    }
+  }).catch(e=>{if(status) status.innerHTML=`<span style="color:var(--wt-danger)">Request failed: ${escapeHtml(String(e))}</span>`;});
+}
+
 // ===== END MODELS PAGE =====
 
 function loadVadConfig(){
