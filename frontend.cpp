@@ -7971,7 +7971,7 @@ private:
                 }
             }
 
-            std::vector<std::string> dl_args = {"-s", "-S", "-L", "--max-time", "3600", "-o", tmp_path};
+            std::vector<std::string> dl_args = {"-s", "-S", "-L", "-f", "--max-time", "3600", "-o", tmp_path};
             if (!header_file.empty()) {
                 dl_args.push_back("-H");
                 dl_args.push_back("@" + header_file);
@@ -8006,10 +8006,44 @@ private:
             };
 
             struct stat fst;
-            if (ret != 0 || stat(tmp_path.c_str(), &fst) != 0 || fst.st_size < 1024) {
-                std::string detail = "Download failed (curl exit " + std::to_string(ret) + ")";
-                if (!curl_stderr.empty()) {
-                    detail += ": " + curl_stderr.substr(0, 512);
+            bool stat_ok = (stat(tmp_path.c_str(), &fst) == 0);
+            if (ret != 0 || !stat_ok || fst.st_size < 1024) {
+                std::string detail;
+                std::string body_snippet;
+                if (stat_ok && fst.st_size > 0) {
+                    FILE* ef = fopen(tmp_path.c_str(), "rb");
+                    if (ef) {
+                        char ebuf[1024] = {0};
+                        size_t en = fread(ebuf, 1, sizeof(ebuf) - 1, ef);
+                        fclose(ef);
+                        body_snippet.assign(ebuf, en);
+                    }
+                }
+                std::string body_lower;
+                for (char ch : body_snippet) body_lower += tolower(ch);
+                bool looks_html = body_lower.find("<!doctype") != std::string::npos ||
+                                  body_lower.find("<html") != std::string::npos ||
+                                  body_lower.find("error code") != std::string::npos ||
+                                  body_lower.find("invalid") != std::string::npos ||
+                                  body_lower.find("unauthor") != std::string::npos ||
+                                  body_lower.find("forbidden") != std::string::npos ||
+                                  body_lower.find("not found") != std::string::npos;
+                if (looks_html || (stat_ok && fst.st_size > 0 && fst.st_size < 1024)) {
+                    detail = "HuggingFace returned an error page instead of the model file. "
+                             "The repo may be gated/private, the filename may be wrong, "
+                             "or your HF token may be missing/invalid. ";
+                    if (!body_snippet.empty()) {
+                        std::string clipped = body_snippet.substr(0, 240);
+                        for (auto& ch : clipped) if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+                        detail += "Server response: " + clipped;
+                    }
+                } else {
+                    detail = "Download failed (curl exit " + std::to_string(ret) + ")";
+                    if (!curl_stderr.empty()) {
+                        detail += ": " + curl_stderr.substr(0, 512);
+                    } else if (!stat_ok) {
+                        detail += ": curl produced no output file";
+                    }
                 }
                 fail(detail);
                 unlink(tmp_path.c_str());

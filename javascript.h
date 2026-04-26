@@ -3858,8 +3858,9 @@ function triggerNeuTTSConvert(){
 
 function loadHfAuthStatus(){
   fetch('/api/settings').then(r=>r.json()).then(d=>{
-const token=(d.settings||[]).find(s=>s.key==='hf_token');
-const hasToken=token&&token.value&&token.value!=='';
+const s=(d&&d.settings)||{};
+const tokenVal=s.hf_token;
+const hasToken=tokenVal&&tokenVal!=='';
 const dot=document.getElementById('hfAuthDot');
 const text=document.getElementById('hfAuthText');
 const entry=document.getElementById('hfTokenEntry');
@@ -3876,7 +3877,13 @@ if(hasToken){
   if(entry) entry.style.display='flex';
   if(actions) actions.style.display='none';
 }
-  }).catch(()=>{});
+  }).catch(e=>{
+const dot=document.getElementById('hfAuthDot');
+const text=document.getElementById('hfAuthText');
+if(dot) dot.style.background='var(--wt-danger)';
+if(text) text.textContent='Status check failed';
+console.warn('loadHfAuthStatus failed:',e);
+  });
 }
 
 function saveHfToken(){
