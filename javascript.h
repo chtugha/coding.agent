@@ -3282,7 +3282,7 @@ if(data.error){
   sel.innerHTML=`<input class="wt-input" id="dlFilename" placeholder="e.g. model.bin" value=""><div style="font-size:11px;color:var(--wt-warning);margin-top:4px">Could not load file list: ${escapeHtml(data.error)}</div>`;
   return;
 }
-const files=(data.files||[]).filter(f=>exts.some(e=>f.toLowerCase().endsWith(e)||f.toLowerCase().endsWith(e.replace('.',''))));
+const files=(data.files||[]).filter(f=>exts.some(e=>f.toLowerCase().endsWith(e)));
 const allFiles=data.files||[];
 if(allFiles.length===0){
   sel.innerHTML='<input class="wt-input" id="dlFilename" placeholder="e.g. model.bin" value="">'

@@ -7211,6 +7211,24 @@ private:
     }
 
     std::string find_hf_cli() {
+        FILE* fp = popen("which huggingface-cli 2>/dev/null", "r");
+        if (fp) {
+            char buf[512] = {0};
+            if (fgets(buf, sizeof(buf), fp)) {
+                std::string path(buf);
+                while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' '))
+                    path.pop_back();
+                pclose(fp);
+                if (!path.empty()) {
+                    struct stat st;
+                    if (stat(path.c_str(), &st) == 0 && (st.st_mode & S_IXUSR))
+                        return path;
+                }
+            } else {
+                pclose(fp);
+            }
+        }
+
         static const char* candidates[] = {
             "/opt/homebrew/Caskroom/miniconda/base/bin/huggingface-cli",
             "/opt/homebrew/bin/huggingface-cli",
@@ -8046,7 +8064,7 @@ private:
             return;
         }
 
-        if (filename.find("..") != std::string::npos || filename.empty() || filename.size() > 512) {
+        if (filename.find("..") != std::string::npos || filename.empty() || filename.front() == '/' || filename.size() > 512) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n",
                 "{\"error\":\"Invalid filename.\"}");
             return;
@@ -8230,7 +8248,7 @@ private:
                         }
                     }
                     std::string body_lower;
-                    for (char ch : body_snippet) body_lower += tolower(ch);
+                    for (unsigned char ch : body_snippet) body_lower += tolower(ch);
                     bool looks_html = body_lower.find("<!doctype") != std::string::npos ||
                                       body_lower.find("<html") != std::string::npos ||
                                       body_lower.find("error code") != std::string::npos ||
