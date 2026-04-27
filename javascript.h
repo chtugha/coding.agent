@@ -3233,6 +3233,13 @@ function formatNumber(n){
   return String(n);
 }
 
+function _dlExtFilter(serviceType){
+  if(serviceType==='llama') return ['.gguf'];
+  if(serviceType==='kokoro') return ['.bin','.pt','.pth','.tar.gz','.tgz','.zip','.bz2'];
+  if(serviceType==='neutts') return ['.bin','.pt','.pth','.tar.gz','.tgz','.zip','.bz2'];
+  return ['.bin'];
+}
+
 function showDownloadDialog(idx,serviceType){
   serviceType=serviceType||'whisper';
   const modelMap={whisper:window._hfSearchModels,llama:window._hfLlamaSearchModels,kokoro:window._hfKokoroSearchModels,neutts:window._hfNeuTTSSearchModels};
@@ -3250,12 +3257,12 @@ function showDownloadDialog(idx,serviceType){
   const backendOpts=serviceType==='llama'
 ?'<option value="metal">Metal GPU</option><option value="cpu">CPU only</option>'
 :'<option value="coreml">CoreML (Apple Silicon)</option><option value="metal">Metal GPU</option><option value="cpu">CPU only</option>';
-  const fileHint=serviceType==='llama'?'e.g. model-q8_0.gguf':'e.g. ggml-model.bin';
-  modal.innerHTML=`<div style="background:var(--wt-card-bg);border-radius:var(--wt-radius);padding:24px;width:480px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.3)">`
-+`<h3 style="margin:0 0 16px">Download ${serviceType.toUpperCase()} model from ${escapeHtml(repoId)}</h3>`
-+`<div class="wt-field"><label>Filename</label>`
-+`<input class="wt-input" id="dlFilename" placeholder="${fileHint}" value=""></div>`
-+`<div class="wt-field"><label>Display Name</label>`
+  modal.innerHTML=`<div style="background:var(--wt-card-bg);border-radius:var(--wt-radius);padding:24px;width:520px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.3)">`
++`<h3 style="margin:0 0 16px">Download ${serviceType.toUpperCase()} model</h3>`
++`<div style="font-size:12px;color:var(--wt-text-muted);margin-bottom:12px">Repo: <strong>${escapeHtml(repoId)}</strong></div>`
++`<div class="wt-field"><label>File</label>`
++`<div id="dlFileSelector"><em style="color:var(--wt-text-muted)">Loading file list...</em></div></div>`
++`<div class="wt-field" style="margin-top:8px"><label>Display Name</label>`
 +`<input class="wt-input" id="dlModelName" placeholder="Model display name" value=""></div>`
 +`<div class="wt-field"><label>Backend</label>`
 +`<select class="wt-select" id="dlBackend">${backendOpts}</select></div>`
@@ -3266,7 +3273,31 @@ function showDownloadDialog(idx,serviceType){
 +`</div></div>`;
   document.body.appendChild(modal);
   modal.addEventListener('click',e=>{if(e.target===modal)modal.remove();});
-  document.getElementById('dlFilename').focus();
+
+  const exts=_dlExtFilter(serviceType);
+  fetch(`/api/models/hf-files?repo_id=${encodeURIComponent(repoId)}`).then(r=>r.json()).then(data=>{
+const sel=document.getElementById('dlFileSelector');
+if(!sel||!document.getElementById('dlModal')) return;
+if(data.error){
+  sel.innerHTML=`<input class="wt-input" id="dlFilename" placeholder="e.g. model.bin" value=""><div style="font-size:11px;color:var(--wt-warning);margin-top:4px">Could not load file list: ${escapeHtml(data.error)}</div>`;
+  return;
+}
+const files=(data.files||[]).filter(f=>exts.some(e=>f.toLowerCase().endsWith(e)||f.toLowerCase().endsWith(e.replace('.',''))));
+const allFiles=data.files||[];
+if(allFiles.length===0){
+  sel.innerHTML='<input class="wt-input" id="dlFilename" placeholder="e.g. model.bin" value="">'
+    +'<div style="font-size:11px;color:var(--wt-warning);margin-top:4px">No files found in repo. Enter filename manually.</div>';
+  return;
+}
+const opts=(files.length?files:allFiles).map(f=>`<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('');
+const note=files.length===0?`<div style="font-size:11px;color:var(--wt-warning);margin-top:4px">No matching files found — showing all ${allFiles.length} files</div>`:'';
+sel.innerHTML=`<select class="wt-select" id="dlFilename" onchange="document.getElementById('dlModelName').value=this.value.replace(/\\.bin$|\\.gguf$|\\.pt$|\\.pth$/,'').replace(/^.*\\//,'')">${opts}</select>${note}`;
+const firstVal=(files.length?files[0]:allFiles[0])||'';
+if(firstVal) document.getElementById('dlModelName').value=firstVal.replace(/\.bin$|\.gguf$|\.pt$|\.pth$/,'').replace(/^.*\//,'');
+  }).catch(()=>{
+const sel=document.getElementById('dlFileSelector');
+if(sel) sel.innerHTML='<input class="wt-input" id="dlFilename" placeholder="e.g. model.bin" value=""><div style="font-size:11px;color:var(--wt-warning);margin-top:4px">Could not load file list. Enter filename manually.</div>';
+  });
 }
 
 function submitDownload(){
@@ -3274,13 +3305,14 @@ function submitDownload(){
   if(!modal) return;
   const repoId=modal.dataset.repoId||'';
   const serviceType=modal.dataset.serviceType||'whisper';
-  const filename=(document.getElementById('dlFilename').value||'').trim();
+  const filenameEl=document.getElementById('dlFilename');
+  const filename=(filenameEl?filenameEl.value||'':'').trim();
   let modelName=(document.getElementById('dlModelName').value||'').trim();
   const backend=document.getElementById('dlBackend').value;
   const errEl=document.getElementById('dlModalError');
-  if(!filename){errEl.textContent='Filename is required.';return;}
-  if(/[^A-Za-z0-9._-]/.test(filename)){errEl.textContent='Filename must only contain alphanumeric, dash, underscore, dot.';return;}
-  if(!modelName) modelName=filename.replace(/\.bin$/,'').replace(/\.gguf$/,'');
+  if(!filename){errEl.textContent='Please select or enter a filename.';return;}
+  if(/[^A-Za-z0-9._\-/]/.test(filename)){errEl.textContent='Filename contains invalid characters.';return;}
+  if(!modelName) modelName=filename.replace(/\.bin$|\.gguf$/,'').replace(/^.*\//,'');
   modal.remove();
   startModelDownload(repoId,filename,modelName,backend,serviceType);
 }

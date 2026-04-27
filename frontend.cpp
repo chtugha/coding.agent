@@ -1236,6 +1236,8 @@ private:
                 handle_models_add(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/search")) == 0) {
                 handle_models_search(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/models/hf-files")) == 0) {
+                handle_models_hf_files(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/local")) == 0) {
                 handle_models_local(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/models/llama")) == 0) {
@@ -7208,6 +7210,82 @@ private:
         return result;
     }
 
+    std::string find_hf_cli() {
+        static const char* candidates[] = {
+            "/opt/homebrew/Caskroom/miniconda/base/bin/huggingface-cli",
+            "/opt/homebrew/bin/huggingface-cli",
+            "/usr/local/bin/huggingface-cli",
+            "/usr/bin/huggingface-cli",
+            nullptr
+        };
+        for (int i = 0; candidates[i]; i++) {
+            struct stat st;
+            if (stat(candidates[i], &st) == 0 && (st.st_mode & S_IXUSR))
+                return candidates[i];
+        }
+        return "";
+    }
+
+    int run_hf_cli_download(const std::string& hf_cli, const std::string& repo_id,
+                             const std::string& filename, const std::string& local_dir,
+                             const std::string& hf_token, std::string* err_out) {
+        int errpipe[2] = {-1, -1};
+        if (err_out && pipe(errpipe) != 0) err_out = nullptr;
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            if (errpipe[0] >= 0) { close(errpipe[0]); close(errpipe[1]); }
+            return -1;
+        }
+
+        if (pid == 0) {
+            if (!hf_token.empty()) {
+                setenv("HF_TOKEN", hf_token.c_str(), 1);
+                setenv("HUGGING_FACE_HUB_TOKEN", hf_token.c_str(), 1);
+            }
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                dup2(devnull, STDOUT_FILENO);
+                close(devnull);
+            }
+            if (err_out && errpipe[1] >= 0) {
+                close(errpipe[0]);
+                dup2(errpipe[1], STDERR_FILENO);
+                close(errpipe[1]);
+            } else {
+                int dn = open("/dev/null", O_WRONLY);
+                if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
+            }
+            const char* argv[] = {
+                hf_cli.c_str(), "download",
+                repo_id.c_str(), filename.c_str(),
+                "--local-dir", local_dir.c_str(),
+                "--local-dir-use-symlinks", "False",
+                nullptr
+            };
+            execvp(hf_cli.c_str(), const_cast<char* const*>(argv));
+            _exit(127);
+        }
+
+        if (err_out && errpipe[0] >= 0) {
+            close(errpipe[1]);
+            std::string captured;
+            char buf[1024];
+            ssize_t n;
+            while ((n = read(errpipe[0], buf, sizeof(buf))) > 0) {
+                if (captured.size() < 4096)
+                    captured.append(buf, std::min((size_t)n, 4096 - captured.size()));
+            }
+            close(errpipe[0]);
+            *err_out = captured;
+        }
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+
     std::string write_curl_header_file(const std::string& token) {
         if (token.empty()) return "";
         char tmpname[] = "/tmp/wt_hdr_XXXXXX";
@@ -7370,6 +7448,69 @@ private:
         std::string resp = "{\"models\":" + raw + ",\"has_token\":" +
             std::string(hf_token.empty() ? "false" : "true") + "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
+    }
+
+    // GET /api/models/hf-files?repo_id=owner/repo — List files in a HuggingFace repo.
+    // Returns { files: ["filename1", "filename2", ...] }
+    void handle_models_hf_files(struct mg_connection *c, struct mg_http_message *hm) {
+        char repo_id_buf[300] = {0};
+        mg_http_get_var(&hm->query, "repo_id", repo_id_buf, sizeof(repo_id_buf));
+        std::string repo_id(repo_id_buf);
+
+        if (repo_id.empty() || !is_safe_repo_id(repo_id)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid repo_id\"}");
+            return;
+        }
+
+        std::string hf_token = get_setting("hf_token", "");
+        std::string api_url = "https://huggingface.co/api/models/" + repo_id;
+
+        std::string header_file = write_curl_header_file(hf_token);
+        std::vector<std::string> args = {"-s", "-S", "--max-time", "20", "-L"};
+        if (!header_file.empty()) {
+            args.push_back("-H");
+            args.push_back("@" + header_file);
+        }
+        args.push_back(api_url);
+
+        std::string raw = run_curl_safe(args);
+        if (!header_file.empty()) unlink(header_file.c_str());
+
+        if (raw.empty() || raw[0] != '{') {
+            mg_http_reply(c, 502, "Content-Type: application/json\r\n",
+                "{\"error\":\"Failed to fetch repo info from HuggingFace\"}");
+            return;
+        }
+
+        std::stringstream result;
+        result << "{\"files\":[";
+        bool first_file = true;
+
+        size_t sib_pos = raw.find("\"siblings\":");
+        if (sib_pos != std::string::npos) {
+            size_t arr_start = raw.find('[', sib_pos + 11);
+            if (arr_start != std::string::npos) {
+                size_t pos = arr_start + 1;
+                while (pos < raw.size()) {
+                    size_t rf_pos = raw.find("\"rfilename\":", pos);
+                    if (rf_pos == std::string::npos) break;
+                    rf_pos += 12;
+                    while (rf_pos < raw.size() && (raw[rf_pos] == ' ' || raw[rf_pos] == '\t')) rf_pos++;
+                    if (rf_pos >= raw.size() || raw[rf_pos] != '"') { pos = rf_pos + 1; continue; }
+                    rf_pos++;
+                    size_t end_pos = raw.find('"', rf_pos);
+                    if (end_pos == std::string::npos) break;
+                    std::string fname = raw.substr(rf_pos, end_pos - rf_pos);
+                    if (!first_file) result << ",";
+                    result << "\"" << escape_json(fname) << "\"";
+                    first_file = false;
+                    pos = end_pos + 1;
+                }
+            }
+        }
+
+        result << "]}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", result.str().c_str());
     }
 
     // GET /api/models/local — Disk scan for all locally available model files.
@@ -7905,13 +8046,31 @@ private:
             return;
         }
 
-        if (!is_safe_filename(filename)) {
+        if (filename.find("..") != std::string::npos || filename.empty() || filename.size() > 512) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n",
-                "{\"error\":\"Invalid filename. Use alphanumeric, dash, underscore, dot only. No path separators.\"}");
+                "{\"error\":\"Invalid filename.\"}");
+            return;
+        }
+        for (unsigned char ch : filename) {
+            if (!isalnum(ch) && ch != '-' && ch != '_' && ch != '.' && ch != '/') {
+                mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                    "{\"error\":\"Invalid filename. Use alphanumeric, dash, underscore, dot, slash only.\"}");
+                return;
+            }
+        }
+
+        std::string local_filename = filename;
+        {
+            auto slash = filename.rfind('/');
+            if (slash != std::string::npos) local_filename = filename.substr(slash + 1);
+        }
+        if (local_filename.empty() || local_filename.front() == '.') {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"Invalid filename after path extraction.\"}");
             return;
         }
 
-        if (model_name.empty()) model_name = filename;
+        if (model_name.empty()) model_name = local_filename;
         if (backend.empty()) backend = "coreml";
 
         std::string hf_token = get_setting("hf_token", "");
@@ -7919,7 +8078,7 @@ private:
         std::string models_dir = "bin/models";
         mkdir(models_dir.c_str(), 0755);
 
-        std::string local_path = models_dir + "/" + filename;
+        std::string local_path = models_dir + "/" + local_filename;
 
         char abs_models_dir[PATH_MAX];
         if (!realpath(models_dir.c_str(), abs_models_dir)) {
@@ -7937,7 +8096,7 @@ private:
 
         int64_t dl_id = ++async_id_counter_;
         auto progress = std::make_shared<DownloadProgress>();
-        progress->filename = filename;
+        progress->filename = local_filename;
         progress->local_path = local_path;
         progress->service = service;
         {
@@ -7947,55 +8106,7 @@ private:
 
         std::string abs_models_str(abs_models_dir);
 
-        std::thread([this, repo_id, filename, local_path, hf_token, model_name, backend, service, progress, abs_models_str]() {
-            std::string url = "https://huggingface.co/" + repo_id + "/resolve/main/" + filename;
-            std::string tmp_path = local_path + ".downloading";
-
-            std::string header_file = write_curl_header_file(hf_token);
-
-            std::vector<std::string> head_args = {"-s", "-S", "-L", "-I", "--max-time", "10"};
-            if (!header_file.empty()) {
-                head_args.push_back("-H");
-                head_args.push_back("@" + header_file);
-            }
-            head_args.push_back(url);
-
-            std::string head_resp = run_curl_safe(head_args);
-            {
-                std::string lower_head;
-                for (char ch : head_resp) lower_head += tolower(ch);
-                size_t cl_pos = lower_head.find("content-length:");
-                if (cl_pos != std::string::npos) {
-                    int64_t cl = atoll(head_resp.c_str() + cl_pos + 15);
-                    if (cl > 0) progress->total_bytes.store(cl);
-                }
-            }
-
-            std::vector<std::string> dl_args = {"-s", "-S", "-L", "-f", "--max-time", "3600", "-o", tmp_path};
-            if (!header_file.empty()) {
-                dl_args.push_back("-H");
-                dl_args.push_back("@" + header_file);
-            }
-            dl_args.push_back(url);
-
-            auto tracker_stop = std::make_shared<std::atomic<bool>>(false);
-            std::thread size_tracker([tmp_path, progress, tracker_stop](){
-                while (!tracker_stop->load()) {
-                    struct stat st;
-                    if (stat(tmp_path.c_str(), &st) == 0) {
-                        progress->bytes_downloaded.store(st.st_size);
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(DOWNLOAD_PROGRESS_POLL_MS));
-                }
-            });
-
-            std::string curl_stderr;
-            int ret = run_curl_to_file(dl_args, &curl_stderr);
-            tracker_stop->store(true);
-            size_tracker.join();
-
-            if (!header_file.empty()) unlink(header_file.c_str());
-
+        std::thread([this, repo_id, filename, local_filename, local_path, hf_token, model_name, backend, service, progress, abs_models_str]() {
             auto fail = [&progress](const std::string& msg) {
                 {
                     std::lock_guard<std::mutex> lock(progress->mu);
@@ -8005,55 +8116,154 @@ private:
                 progress->complete.store(true);
             };
 
-            struct stat fst;
-            bool stat_ok = (stat(tmp_path.c_str(), &fst) == 0);
-            if (ret != 0 || !stat_ok || fst.st_size < 1024) {
-                std::string detail;
-                std::string body_snippet;
-                if (stat_ok && fst.st_size > 0) {
-                    FILE* ef = fopen(tmp_path.c_str(), "rb");
-                    if (ef) {
-                        char ebuf[1024] = {0};
-                        size_t en = fread(ebuf, 1, sizeof(ebuf) - 1, ef);
-                        fclose(ef);
-                        body_snippet.assign(ebuf, en);
-                    }
-                }
-                std::string body_lower;
-                for (char ch : body_snippet) body_lower += tolower(ch);
-                bool looks_html = body_lower.find("<!doctype") != std::string::npos ||
-                                  body_lower.find("<html") != std::string::npos ||
-                                  body_lower.find("error code") != std::string::npos ||
-                                  body_lower.find("invalid") != std::string::npos ||
-                                  body_lower.find("unauthor") != std::string::npos ||
-                                  body_lower.find("forbidden") != std::string::npos ||
-                                  body_lower.find("not found") != std::string::npos;
-                if (looks_html || (stat_ok && fst.st_size > 0 && fst.st_size < 1024)) {
-                    detail = "HuggingFace returned an error page instead of the model file. "
-                             "The repo may be gated/private, the filename may be wrong, "
-                             "or your HF token may be missing/invalid. ";
-                    if (!body_snippet.empty()) {
-                        std::string clipped = body_snippet.substr(0, 240);
-                        for (auto& ch : clipped) if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
-                        detail += "Server response: " + clipped;
-                    }
-                } else {
-                    detail = "Download failed (curl exit " + std::to_string(ret) + ")";
-                    if (!curl_stderr.empty()) {
-                        detail += ": " + curl_stderr.substr(0, 512);
-                    } else if (!stat_ok) {
-                        detail += ": curl produced no output file";
-                    }
-                }
-                fail(detail);
-                unlink(tmp_path.c_str());
-                return;
-            }
+            std::string hf_cli = find_hf_cli();
 
-            if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
-                fail("Failed to move file to final path");
-                unlink(tmp_path.c_str());
-                return;
+            if (!hf_cli.empty()) {
+                std::string tmp_dir = local_path + ".hf_tmp";
+                mkdir(tmp_dir.c_str(), 0755);
+                std::string tmp_file = tmp_dir + "/" + filename;
+
+                auto tracker_stop = std::make_shared<std::atomic<bool>>(false);
+                std::thread size_tracker([tmp_file, progress, tracker_stop](){
+                    while (!tracker_stop->load()) {
+                        struct stat st;
+                        if (stat(tmp_file.c_str(), &st) == 0)
+                            progress->bytes_downloaded.store(st.st_size);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(DOWNLOAD_PROGRESS_POLL_MS));
+                    }
+                });
+
+                std::string cli_stderr;
+                int ret = run_hf_cli_download(hf_cli, repo_id, filename, tmp_dir, hf_token, &cli_stderr);
+                tracker_stop->store(true);
+                size_tracker.join();
+
+                if (ret != 0) {
+                    unlink(tmp_file.c_str());
+                    rmdir(tmp_dir.c_str());
+                    std::string detail = "Download failed (huggingface-cli exit " + std::to_string(ret) + ")";
+                    if (!cli_stderr.empty()) {
+                        std::string clipped = cli_stderr.substr(0, 512);
+                        for (auto& ch : clipped) if (ch == '\n' || ch == '\r') ch = ' ';
+                        detail += ": " + clipped;
+                    }
+                    fail(detail);
+                    return;
+                }
+
+                struct stat fst;
+                if (stat(tmp_file.c_str(), &fst) != 0 || fst.st_size < 1024) {
+                    unlink(tmp_file.c_str());
+                    rmdir(tmp_dir.c_str());
+                    fail("Downloaded file is missing or too small. Check the filename and repo ID.");
+                    return;
+                }
+
+                if (rename(tmp_file.c_str(), local_path.c_str()) != 0) {
+                    fail("Failed to move downloaded file to final location");
+                    unlink(tmp_file.c_str());
+                    rmdir(tmp_dir.c_str());
+                    return;
+                }
+                rmdir(tmp_dir.c_str());
+
+            } else {
+                std::string url = "https://huggingface.co/" + repo_id + "/resolve/main/" + filename;
+                std::string tmp_path = local_path + ".downloading";
+
+                std::string header_file = write_curl_header_file(hf_token);
+
+                std::vector<std::string> head_args = {"-s", "-S", "-L", "-I", "--max-time", "10"};
+                if (!header_file.empty()) {
+                    head_args.push_back("-H");
+                    head_args.push_back("@" + header_file);
+                }
+                head_args.push_back(url);
+
+                std::string head_resp = run_curl_safe(head_args);
+                {
+                    std::string lower_head;
+                    for (char ch : head_resp) lower_head += tolower(ch);
+                    size_t cl_pos = lower_head.find("content-length:");
+                    if (cl_pos != std::string::npos) {
+                        int64_t cl = atoll(head_resp.c_str() + cl_pos + 15);
+                        if (cl > 0) progress->total_bytes.store(cl);
+                    }
+                }
+
+                std::vector<std::string> dl_args = {"-s", "-S", "-L", "-f", "--max-time", "3600", "-o", tmp_path};
+                if (!header_file.empty()) {
+                    dl_args.push_back("-H");
+                    dl_args.push_back("@" + header_file);
+                }
+                dl_args.push_back(url);
+
+                auto tracker_stop = std::make_shared<std::atomic<bool>>(false);
+                std::thread size_tracker([tmp_path, progress, tracker_stop](){
+                    while (!tracker_stop->load()) {
+                        struct stat st;
+                        if (stat(tmp_path.c_str(), &st) == 0)
+                            progress->bytes_downloaded.store(st.st_size);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(DOWNLOAD_PROGRESS_POLL_MS));
+                    }
+                });
+
+                std::string curl_stderr;
+                int ret = run_curl_to_file(dl_args, &curl_stderr);
+                tracker_stop->store(true);
+                size_tracker.join();
+
+                if (!header_file.empty()) unlink(header_file.c_str());
+
+                struct stat fst;
+                bool stat_ok = (stat(tmp_path.c_str(), &fst) == 0);
+                if (ret != 0 || !stat_ok || fst.st_size < 1024) {
+                    std::string detail;
+                    std::string body_snippet;
+                    if (stat_ok && fst.st_size > 0) {
+                        FILE* ef = fopen(tmp_path.c_str(), "rb");
+                        if (ef) {
+                            char ebuf[1024] = {0};
+                            size_t en = fread(ebuf, 1, sizeof(ebuf) - 1, ef);
+                            fclose(ef);
+                            body_snippet.assign(ebuf, en);
+                        }
+                    }
+                    std::string body_lower;
+                    for (char ch : body_snippet) body_lower += tolower(ch);
+                    bool looks_html = body_lower.find("<!doctype") != std::string::npos ||
+                                      body_lower.find("<html") != std::string::npos ||
+                                      body_lower.find("error code") != std::string::npos ||
+                                      body_lower.find("unauthor") != std::string::npos ||
+                                      body_lower.find("forbidden") != std::string::npos ||
+                                      body_lower.find("not found") != std::string::npos;
+                    if (looks_html || (stat_ok && fst.st_size > 0 && fst.st_size < 1024)) {
+                        detail = "HuggingFace returned an error page instead of the model file. "
+                                 "The repo may be gated/private, the filename may be wrong, "
+                                 "or your HF token may be missing/invalid. ";
+                        if (!body_snippet.empty()) {
+                            std::string clipped = body_snippet.substr(0, 240);
+                            for (auto& ch : clipped) if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+                            detail += "Server response: " + clipped;
+                        }
+                    } else {
+                        detail = "Download failed (curl exit " + std::to_string(ret) + ")";
+                        if (!curl_stderr.empty()) {
+                            detail += ": " + curl_stderr.substr(0, 512);
+                        } else if (!stat_ok) {
+                            detail += ": curl produced no output file";
+                        }
+                    }
+                    fail(detail);
+                    unlink(tmp_path.c_str());
+                    return;
+                }
+
+                if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
+                    fail("Failed to move file to final path");
+                    unlink(tmp_path.c_str());
+                    return;
+                }
             }
 
             char abs_path[PATH_MAX];
@@ -8079,10 +8289,12 @@ private:
                 }
             }
 
-            progress->bytes_downloaded.store(fst.st_size);
+            struct stat fst_final;
+            stat(local_path.c_str(), &fst_final);
+            progress->bytes_downloaded.store(fst_final.st_size);
 
             if (db_) {
-                int size_mb = static_cast<int>(fst.st_size / (1024 * 1024));
+                int size_mb = static_cast<int>(fst_final.st_size / (1024 * 1024));
 
                 sqlite3_stmt* stmt;
                 const char* sql = "INSERT INTO models (service, name, path, backend, size_mb, config_json, added_timestamp) VALUES (?, ?, ?, ?, ?, '{}', ?)";
