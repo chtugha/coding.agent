@@ -90,6 +90,7 @@ struct VadCall {
     // which are not represented in frame_energies).
     size_t energies_sample_origin = 0;
     std::chrono::steady_clock::time_point speech_signal_time;
+    std::chrono::steady_clock::time_point last_idle_time;
     size_t last_buffer_size = 0;
     std::chrono::steady_clock::time_point last_buffer_growth;
     std::vector<float> frame_energies;
@@ -131,6 +132,7 @@ class VadService {
     int vad_onset_frames_ = 2;
     std::atomic<int> vad_onset_gap_tolerance_{1};
     int speech_signal_timeout_s_ = 10;
+    std::atomic<int> post_idle_cooldown_ms_{1200};
     // vad_inactivity_flush_ms_: if no new audio arrives for 1000ms while speech is
     //   active, flush the buffer immediately (handles end-of-stream).
     int vad_inactivity_flush_ms_ = 1000;
@@ -175,11 +177,16 @@ public:
                   << " silence=" << silence_ms << "ms"
                   << " max_chunk=" << max_ms << "ms"
                   << " min_chunk=" << (vad_min_speech_samples_ * 1000 / VAD_SAMPLE_RATE) << "ms"
+                  << " post_idle_cooldown=" << post_idle_cooldown_ms_.load() << "ms"
                   << std::endl;
     }
 
     void set_onset_gap(int gap) {
         vad_onset_gap_tolerance_.store(gap);
+    }
+
+    void set_post_idle_cooldown(int ms) {
+        post_idle_cooldown_ms_.store(ms);
     }
 
     void set_log_level(const char* level) {
@@ -246,6 +253,9 @@ private:
         call.speech_signaled = false;
         call.speech_sum_sq = 0.0f;
         call.speech_sample_count = 0;
+        if (was_signaled) {
+            call.last_idle_time = std::chrono::steady_clock::now();
+        }
         return was_signaled;
     }
 
@@ -417,6 +427,17 @@ private:
                 return "ERROR:Value out of range (0-5)\n";
             } catch (...) { return "ERROR:Invalid value\n"; }
         }
+        if (cmd.rfind("SET_POST_IDLE_COOLDOWN_MS:", 0) == 0) {
+            try {
+                int val = std::stoi(cmd.substr(26));
+                if (val >= 0 && val <= 5000) {
+                    post_idle_cooldown_ms_.store(val);
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Post-idle cooldown set to %dms", val);
+                    return "OK\n";
+                }
+                return "ERROR:Value out of range (0-5000)\n";
+            } catch (...) { return "ERROR:Invalid value\n"; }
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             size_t speech_active = 0;
@@ -436,6 +457,7 @@ private:
                 + ":SILENCE_MS:" + std::to_string(silence_ms)
                 + ":MAX_CHUNK_MS:" + std::to_string(max_ms)
                 + ":ONSET_GAP:" + std::to_string(vad_onset_gap_tolerance_.load())
+                + ":POST_IDLE_COOLDOWN_MS:" + std::to_string(post_idle_cooldown_ms_.load())
                 + "\n";
         }
         return "ERROR:Unknown command\n";
@@ -555,7 +577,19 @@ private:
                                     if (!call->speech_signaled) {
                                         call->speech_signaled = true;
                                         call->speech_signal_time = std::chrono::steady_clock::now();
-                                        needs_active_broadcast = true;
+                                        int cooldown = post_idle_cooldown_ms_.load();
+                                        auto ms_since_idle = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            call->speech_signal_time - call->last_idle_time).count();
+                                        if (cooldown > 0 && call->last_idle_time.time_since_epoch().count() > 0
+                                            && ms_since_idle < cooldown) {
+                                            if (vad_logging_enabled_) {
+                                                log_fwd_.forward(whispertalk::LogLevel::DEBUG, call->id,
+                                                    "SPEECH_ACTIVE suppressed — post-idle cooldown (%lldms since IDLE, cooldown=%dms)",
+                                                    (long long)ms_since_idle, cooldown);
+                                            }
+                                        } else {
+                                            needs_active_broadcast = true;
+                                        }
                                     }
                                 }
                             }
@@ -909,26 +943,29 @@ int main(int argc, char** argv) {
     int vad_silence_ms = 700;
     int vad_max_chunk_ms = 12000;
     int vad_onset_gap = -1;
+    int post_idle_cooldown_ms = -1;
     std::string log_level = "INFO";
 
     static struct option long_opts[] = {
-        {"vad-window-ms",    required_argument, 0, 'w'},
-        {"vad-threshold",    required_argument, 0, 't'},
-        {"vad-silence-ms",   required_argument, 0, 's'},
-        {"vad-max-chunk-ms", required_argument, 0, 'c'},
-        {"vad-onset-gap",    required_argument, 0, 'g'},
-        {"log-level",        required_argument, 0, 'L'},
+        {"vad-window-ms",            required_argument, 0, 'w'},
+        {"vad-threshold",            required_argument, 0, 't'},
+        {"vad-silence-ms",           required_argument, 0, 's'},
+        {"vad-max-chunk-ms",         required_argument, 0, 'c'},
+        {"vad-onset-gap",            required_argument, 0, 'g'},
+        {"post-idle-cooldown-ms",    required_argument, 0, 'p'},
+        {"log-level",                required_argument, 0, 'L'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "w:t:s:c:g:L:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "w:t:s:c:g:p:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'w': vad_window_ms = atoi(optarg); break;
             case 't': vad_threshold = atof(optarg); break;
             case 's': vad_silence_ms = atoi(optarg); break;
             case 'c': vad_max_chunk_ms = atoi(optarg); break;
             case 'g': vad_onset_gap = atoi(optarg); break;
+            case 'p': post_idle_cooldown_ms = atoi(optarg); break;
             case 'L': log_level = optarg; break;
             default: break;
         }
@@ -940,6 +977,8 @@ int main(int argc, char** argv) {
     service.set_vad_params(vad_window_ms, vad_threshold, vad_silence_ms, vad_max_chunk_ms);
     if (vad_onset_gap >= 0 && vad_onset_gap <= 5)
         service.set_onset_gap(vad_onset_gap);
+    if (post_idle_cooldown_ms >= 0 && post_idle_cooldown_ms <= 5000)
+        service.set_post_idle_cooldown(post_idle_cooldown_ms);
     if (!service.init()) {
         return 1;
     }

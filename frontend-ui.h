@@ -531,6 +531,7 @@ Save outgoing audio as WAV</label>
 <div><strong>Silence:</strong> <span id="currentVadSilence" style="color:var(--wt-primary)">400</span> ms</div>
 <div><strong>Max Chunk:</strong> <span id="currentVadMaxChunk" style="color:var(--wt-primary)">8000</span> ms</div>
 <div><strong>Onset Gap:</strong> <span id="currentVadOnsetGap" style="color:var(--wt-primary)">1</span> frames</div>
+<div><strong>Post-Idle Cooldown:</strong> <span id="currentVadPostIdleCooldown" style="color:var(--wt-primary)">1200</span> ms</div>
 </div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
@@ -567,6 +568,13 @@ Save outgoing audio as WAV</label>
 <input type="range" id="vadOnsetGapSlider" min="0" max="5" value="1" step="1" style="width:100%" oninput="document.getElementById('vadOnsetGapValue').textContent=this.value">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
 <span>0</span><span>5</span>
+</div>
+</div>
+<div class="wt-field">
+<label>Post-Idle Cooldown: <span id="vadPostIdleCooldownValue">1200</span>ms</label>
+<input type="range" id="vadPostIdleCooldownSlider" min="0" max="3000" value="1200" step="100" style="width:100%" oninput="document.getElementById('vadPostIdleCooldownValue').textContent=this.value">
+<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
+<span>0ms</span><span>3000ms</span>
 </div>
 </div>
 </div>

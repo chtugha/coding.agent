@@ -838,11 +838,13 @@ private:
                 std::string vad_s = get_setting("vad_silence_ms", "");
                 std::string vad_c = get_setting("vad_max_chunk_ms", "");
                 std::string vad_g = get_setting("vad_onset_gap", "");
+                std::string vad_pic = get_setting("vad_post_idle_cooldown_ms", "");
                 if (!vad_w.empty() && is_numeric(vad_w)) use_args += " --vad-window-ms " + vad_w;
                 if (!vad_t.empty() && is_numeric(vad_t)) use_args += " --vad-threshold " + vad_t;
                 if (!vad_s.empty() && is_numeric(vad_s)) use_args += " --vad-silence-ms " + vad_s;
                 if (!vad_c.empty() && is_numeric(vad_c)) use_args += " --vad-max-chunk-ms " + vad_c;
                 if (!vad_g.empty() && is_numeric(vad_g)) use_args += " --vad-onset-gap " + vad_g;
+                if (!vad_pic.empty() && is_numeric(vad_pic)) use_args += " --post-idle-cooldown-ms " + vad_pic;
             }
 
             if (args_override.empty()) {
@@ -5460,12 +5462,14 @@ private:
             std::string silence_ms_str = extract_json_string(body, "silence_ms");
             std::string max_chunk_ms_str = extract_json_string(body, "max_chunk_ms");
             std::string onset_gap_str = extract_json_string(body, "onset_gap");
+            std::string post_idle_cooldown_str = extract_json_string(body, "post_idle_cooldown_ms");
 
             if (!window_ms_str.empty()) set_setting("vad_window_ms", window_ms_str);
             if (!threshold_str.empty()) set_setting("vad_threshold", threshold_str);
             if (!silence_ms_str.empty()) set_setting("vad_silence_ms", silence_ms_str);
             if (!max_chunk_ms_str.empty()) set_setting("vad_max_chunk_ms", max_chunk_ms_str);
             if (!onset_gap_str.empty()) set_setting("vad_onset_gap", onset_gap_str);
+            if (!post_idle_cooldown_str.empty()) set_setting("vad_post_idle_cooldown_ms", post_idle_cooldown_str);
 
             bool live = is_service_running("VAD_SERVICE");
             bool all_ok = true;
@@ -5495,6 +5499,10 @@ private:
                     resp = tcp_command(vad_cmd_port, "SET_VAD_ONSET_GAP:" + onset_gap_str + "\n", err, 3);
                     if (resp.find("OK") == std::string::npos) all_ok = false;
                 }
+                if (!post_idle_cooldown_str.empty()) {
+                    resp = tcp_command(vad_cmd_port, "SET_POST_IDLE_COOLDOWN_MS:" + post_idle_cooldown_str + "\n", err, 3);
+                    if (resp.find("OK") == std::string::npos) all_ok = false;
+                }
                 if (!all_ok) live = false;
             }
 
@@ -5504,14 +5512,15 @@ private:
             std::string m = max_chunk_ms_str.empty() ? get_setting("vad_max_chunk_ms", "8000") : max_chunk_ms_str;
             if (!actual_max_chunk.empty()) m = actual_max_chunk;
             std::string g = onset_gap_str.empty() ? get_setting("vad_onset_gap", "1") : onset_gap_str;
+            std::string pic = post_idle_cooldown_str.empty() ? get_setting("vad_post_idle_cooldown_ms", "1200") : post_idle_cooldown_str;
 
             auto safe_num = [](const std::string& v, const char* fallback) -> const char* {
                 for (char ch : v) if (!isdigit(ch) && ch != '.') return fallback;
                 return v.c_str();
             };
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                "{\"success\":true,\"live\":%s,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s,\"onset_gap\":%s}",
-                live ? "true" : "false", safe_num(w,"50"), safe_num(t,"2.0"), safe_num(s,"400"), safe_num(m,"8000"), safe_num(g,"1"));
+                "{\"success\":true,\"live\":%s,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s,\"onset_gap\":%s,\"post_idle_cooldown_ms\":%s}",
+                live ? "true" : "false", safe_num(w,"50"), safe_num(t,"2.0"), safe_num(s,"400"), safe_num(m,"8000"), safe_num(g,"1"), safe_num(pic,"1200"));
         } else {
             std::string err;
             std::string status = tcp_command(vad_cmd_port, "STATUS\n", err, 3);

@@ -413,23 +413,29 @@ private:
                 }
             }
 
-            std::string response = process_call(item.call_id, item.text);
+            bool tts_sent = false;
+            auto stream_cb = [this, &tts_sent](uint32_t cid, const std::string& sentence) {
+                send_to_tts(cid, sentence);
+                tts_sent = true;
+            };
+            std::string response = process_call(item.call_id, item.text, stream_cb);
             if (!response.empty()) {
-                {
-                    std::lock_guard<std::mutex> lock(calls_mutex_);
-                    auto it = calls_.find(item.call_id);
-                    if (it != calls_.end()) {
-                        it->second->last_response_sent = std::chrono::steady_clock::now();
-                    }
-                }
                 send_to_tts(item.call_id, response);
+                tts_sent = true;
+            }
+            if (tts_sent) {
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                auto it = calls_.find(item.call_id);
+                if (it != calls_.end()) {
+                    it->second->last_response_sent = std::chrono::steady_clock::now();
+                }
             }
         }
     }
 
     int sentence_end_count_ = 0;
 
-    bool is_sentence_end(const std::string& s) {
+    bool is_sentence_punctuation(const std::string& s) {
         if (s.empty()) return false;
         char last = s.back();
         if (last != '.' && last != '?' && last != '!') return false;
@@ -440,8 +446,20 @@ private:
                 (s[s.size() - 3] == ' ' || s[s.size() - 3] == '.'))
                 return false;
         }
+        return true;
+    }
+
+    bool is_sentence_end(const std::string& s) {
+        if (!is_sentence_punctuation(s)) return false;
         sentence_end_count_++;
         return sentence_end_count_ >= 2;
+    }
+
+    static std::string trim_whitespace(const std::string& s) {
+        size_t start = s.find_first_not_of(" \n\r\t");
+        if (start == std::string::npos) return "";
+        size_t end = s.find_last_not_of(" \n\r\t");
+        return s.substr(start, end - start + 1);
     }
 
     static int count_words(const std::string& s) {
@@ -752,7 +770,8 @@ private:
         return false;
     }
 
-    std::string process_call(uint32_t cid, const std::string& text) {
+    std::string process_call(uint32_t cid, const std::string& text,
+                             std::function<void(uint32_t, const std::string&)> on_sentence = nullptr) {
         auto call = get_or_create_call(cid);
         call->last_activity = std::chrono::steady_clock::now();
 
@@ -878,8 +897,10 @@ private:
 
         auto gen_start = std::chrono::steady_clock::now();
         std::string response;
+        std::string full_response;
         llama_token id;
         sentence_end_count_ = 0;
+        int sentences_streamed = 0;
         llama_batch single_batch = llama_batch_init(1, 0, 1);
         for (int i = 0; i < MAX_RESPONSE_TOKENS; ++i) {
             if (!call->generating) {
@@ -894,6 +915,20 @@ private:
             int n = llama_token_to_piece(vocab_, id, piece, sizeof(piece), 0, false);
             if (n > 0) {
                 response.append(piece, n);
+                if (on_sentence && sentences_streamed < 2 && is_sentence_punctuation(response)) {
+                    std::string trimmed = trim_whitespace(response);
+                    if (!trimmed.empty() && trimmed.size() >= MIN_RESPONSE_CHARS) {
+                        auto stream_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - gen_start).count();
+                        log_fwd_.forward(whispertalk::LogLevel::INFO, cid,
+                            "Streaming sentence %d to TTS (%lldms): %s",
+                            sentences_streamed + 1, stream_ms, trimmed.c_str());
+                        on_sentence(cid, trimmed);
+                        full_response += trimmed + " ";
+                        response.clear();
+                        sentences_streamed++;
+                    }
+                }
                 if (is_sentence_end(response)) break;
             }
 
@@ -915,12 +950,20 @@ private:
         auto gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - gen_start).count();
 
-        size_t start = response.find_first_not_of(" \n\r\t");
-        if (start == std::string::npos) {
-            response.clear();
-        } else {
-            size_t end = response.find_last_not_of(" \n\r\t");
-            response = response.substr(start, end - start + 1);
+        response = trim_whitespace(response);
+
+        if (sentences_streamed > 0) {
+            full_response += response;
+            std::string combined = trim_whitespace(full_response);
+
+            if (combined.empty()) {
+                call->messages.pop_back();
+            } else {
+                call->messages.push_back({"assistant", combined});
+            }
+            log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Response (%lldms, %d streamed): %s",
+                gen_ms, sentences_streamed, combined.c_str());
+            return response;
         }
 
         if (response.empty()) {
