@@ -8,6 +8,9 @@
 #include <random>
 #include <string>
 #include <sys/stat.h>
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h>
+#endif
 
 static constexpr int HAR_HARMONICS = 9;
 static constexpr int HAR_SAMPLE_RATE = 24000;
@@ -106,10 +109,17 @@ public:
             }
         }
 
-        std::vector<float> sine_waves(audio_frames * HAR_HARMONICS);
-        for (int i = 0; i < audio_frames * HAR_HARMONICS; i++) {
+        int total_phases = audio_frames * HAR_HARMONICS;
+        std::vector<float> sine_waves(total_phases);
+#ifdef __APPLE__
+        vvsinf(sine_waves.data(), phase_upsampled.data(), &total_phases);
+        float amp = HAR_SINE_AMP;
+        vDSP_vsmul(sine_waves.data(), 1, &amp, sine_waves.data(), 1, static_cast<vDSP_Length>(total_phases));
+#else
+        for (int i = 0; i < total_phases; i++) {
             sine_waves[i] = std::sin(phase_upsampled[i]) * HAR_SINE_AMP;
         }
+#endif
 
         std::vector<float> f0_up(audio_frames);
         for (int t = 0; t < audio_frames; t++) {
@@ -139,6 +149,23 @@ public:
         float* spec_out = output.data();
         float* phase_out = output.data() + HAR_STFT_BINS * stft_frames;
 
+#ifdef __APPLE__
+        for (int f = 0; f < stft_frames; f++) {
+            int offset = f * HAR_STFT_HOP;
+            for (int b = 0; b < HAR_STFT_BINS; b++) {
+                float re = 0.0f, im = 0.0f;
+                vDSP_dotpr(padded.data() + offset, 1,
+                           w_.stft_real + b * HAR_STFT_NFFT, 1, &re, HAR_STFT_NFFT);
+                vDSP_dotpr(padded.data() + offset, 1,
+                           w_.stft_imag + b * HAR_STFT_NFFT, 1, &im, HAR_STFT_NFFT);
+                float mag = std::sqrt(re * re + im * im + 1e-14f);
+                float ph = std::atan2(im, re);
+                if (im == 0.0f && re < 0.0f) ph = static_cast<float>(M_PI);
+                spec_out[b * stft_frames + f] = mag;
+                phase_out[b * stft_frames + f] = ph;
+            }
+        }
+#else
         for (int f = 0; f < stft_frames; f++) {
             int offset = f * HAR_STFT_HOP;
             for (int b = 0; b < HAR_STFT_BINS; b++) {
@@ -155,6 +182,7 @@ public:
                 phase_out[b * stft_frames + f] = ph;
             }
         }
+#endif
 
         return output;
     }

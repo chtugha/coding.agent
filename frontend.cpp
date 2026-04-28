@@ -839,12 +839,14 @@ private:
                 std::string vad_c = get_setting("vad_max_chunk_ms", "");
                 std::string vad_g = get_setting("vad_onset_gap", "");
                 std::string vad_pic = get_setting("vad_post_idle_cooldown_ms", "");
+                std::string vad_rg = get_setting("vad_rms_gate", "");
                 if (!vad_w.empty() && is_numeric(vad_w)) use_args += " --vad-window-ms " + vad_w;
                 if (!vad_t.empty() && is_numeric(vad_t)) use_args += " --vad-threshold " + vad_t;
                 if (!vad_s.empty() && is_numeric(vad_s)) use_args += " --vad-silence-ms " + vad_s;
                 if (!vad_c.empty() && is_numeric(vad_c)) use_args += " --vad-max-chunk-ms " + vad_c;
                 if (!vad_g.empty() && is_numeric(vad_g)) use_args += " --vad-onset-gap " + vad_g;
                 if (!vad_pic.empty() && is_numeric(vad_pic)) use_args += " --post-idle-cooldown-ms " + vad_pic;
+                if (!vad_rg.empty() && is_numeric(vad_rg)) use_args += " --rms-gate " + vad_rg;
             }
 
             if (args_override.empty()) {
@@ -5463,6 +5465,7 @@ private:
             std::string max_chunk_ms_str = extract_json_string(body, "max_chunk_ms");
             std::string onset_gap_str = extract_json_string(body, "onset_gap");
             std::string post_idle_cooldown_str = extract_json_string(body, "post_idle_cooldown_ms");
+            std::string rms_gate_str = extract_json_string(body, "rms_gate");
 
             if (!window_ms_str.empty()) set_setting("vad_window_ms", window_ms_str);
             if (!threshold_str.empty()) set_setting("vad_threshold", threshold_str);
@@ -5470,6 +5473,7 @@ private:
             if (!max_chunk_ms_str.empty()) set_setting("vad_max_chunk_ms", max_chunk_ms_str);
             if (!onset_gap_str.empty()) set_setting("vad_onset_gap", onset_gap_str);
             if (!post_idle_cooldown_str.empty()) set_setting("vad_post_idle_cooldown_ms", post_idle_cooldown_str);
+            if (!rms_gate_str.empty()) set_setting("vad_rms_gate", rms_gate_str);
 
             bool live = is_service_running("VAD_SERVICE");
             bool all_ok = true;
@@ -5503,6 +5507,10 @@ private:
                     resp = tcp_command(vad_cmd_port, "SET_POST_IDLE_COOLDOWN_MS:" + post_idle_cooldown_str + "\n", err, 3);
                     if (resp.find("OK") == std::string::npos) all_ok = false;
                 }
+                if (!rms_gate_str.empty()) {
+                    resp = tcp_command(vad_cmd_port, "SET_RMS_GATE:" + rms_gate_str + "\n", err, 3);
+                    if (resp.find("OK") == std::string::npos) all_ok = false;
+                }
                 if (!all_ok) live = false;
             }
 
@@ -5513,20 +5521,21 @@ private:
             if (!actual_max_chunk.empty()) m = actual_max_chunk;
             std::string g = onset_gap_str.empty() ? get_setting("vad_onset_gap", "1") : onset_gap_str;
             std::string pic = post_idle_cooldown_str.empty() ? get_setting("vad_post_idle_cooldown_ms", "1200") : post_idle_cooldown_str;
+            std::string rg = rms_gate_str.empty() ? get_setting("vad_rms_gate", "0.04") : rms_gate_str;
 
             auto safe_num = [](const std::string& v, const char* fallback) -> const char* {
                 for (char ch : v) if (!isdigit(ch) && ch != '.') return fallback;
                 return v.c_str();
             };
             mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                "{\"success\":true,\"live\":%s,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s,\"onset_gap\":%s,\"post_idle_cooldown_ms\":%s}",
-                live ? "true" : "false", safe_num(w,"50"), safe_num(t,"2.0"), safe_num(s,"400"), safe_num(m,"8000"), safe_num(g,"1"), safe_num(pic,"1200"));
+                "{\"success\":true,\"live\":%s,\"window_ms\":%s,\"threshold\":%s,\"silence_ms\":%s,\"max_chunk_ms\":%s,\"onset_gap\":%s,\"post_idle_cooldown_ms\":%s,\"rms_gate\":%s}",
+                live ? "true" : "false", safe_num(w,"50"), safe_num(t,"2.0"), safe_num(s,"400"), safe_num(m,"8000"), safe_num(g,"1"), safe_num(pic,"1200"), safe_num(rg,"0.04"));
         } else {
             std::string err;
             std::string status = tcp_command(vad_cmd_port, "STATUS\n", err, 3);
             bool live = err.empty() && !status.empty() && status.find("ACTIVE_CALLS:") != std::string::npos;
 
-            std::string window_ms, threshold, silence_ms, max_chunk_ms, onset_gap;
+            std::string window_ms, threshold, silence_ms, max_chunk_ms, onset_gap, post_idle_cooldown, rms_gate;
             if (live) {
                 auto extract_field = [&](const std::string& key) -> std::string {
                     size_t pos = status.find(key + ":");
@@ -5544,6 +5553,8 @@ private:
                 silence_ms = extract_field("SILENCE_MS");
                 max_chunk_ms = extract_field("MAX_CHUNK_MS");
                 onset_gap = extract_field("ONSET_GAP");
+                post_idle_cooldown = extract_field("POST_IDLE_COOLDOWN_MS");
+                rms_gate = extract_field("RMS_GATE");
             }
 
             if (window_ms.empty()) window_ms = get_setting("vad_window_ms", "50");
@@ -5551,6 +5562,8 @@ private:
             if (silence_ms.empty()) silence_ms = get_setting("vad_silence_ms", "400");
             if (max_chunk_ms.empty()) max_chunk_ms = get_setting("vad_max_chunk_ms", "8000");
             if (onset_gap.empty()) onset_gap = get_setting("vad_onset_gap", "1");
+            if (post_idle_cooldown.empty()) post_idle_cooldown = get_setting("vad_post_idle_cooldown_ms", "1200");
+            if (rms_gate.empty()) rms_gate = get_setting("vad_rms_gate", "0.04");
 
             auto safe_num = [](const std::string& s, const std::string& fallback) {
                 if (s.empty()) return fallback;
@@ -5572,7 +5585,9 @@ private:
                  << "\"threshold\":" << safe_num(threshold, "2.0") << ","
                  << "\"silence_ms\":" << safe_num(silence_ms, "400") << ","
                  << "\"max_chunk_ms\":" << safe_num(max_chunk_ms, "8000") << ","
-                 << "\"onset_gap\":" << safe_num(onset_gap, "1")
+                 << "\"onset_gap\":" << safe_num(onset_gap, "1") << ","
+                 << "\"post_idle_cooldown_ms\":" << safe_num(post_idle_cooldown, "1200") << ","
+                 << "\"rms_gate\":" << safe_num(rms_gate, "0.04")
                  << "}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
         }

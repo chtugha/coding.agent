@@ -532,6 +532,7 @@ Save outgoing audio as WAV</label>
 <div><strong>Max Chunk:</strong> <span id="currentVadMaxChunk" style="color:var(--wt-primary)">8000</span> ms</div>
 <div><strong>Onset Gap:</strong> <span id="currentVadOnsetGap" style="color:var(--wt-primary)">1</span> frames</div>
 <div><strong>Post-Idle Cooldown:</strong> <span id="currentVadPostIdleCooldown" style="color:var(--wt-primary)">1200</span> ms</div>
+<div><strong>RMS Gate:</strong> <span id="currentVadRmsGate" style="color:var(--wt-primary)">0.04</span></div>
 </div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
@@ -575,6 +576,13 @@ Save outgoing audio as WAV</label>
 <input type="range" id="vadPostIdleCooldownSlider" min="0" max="3000" value="1200" step="100" style="width:100%" oninput="document.getElementById('vadPostIdleCooldownValue').textContent=this.value">
 <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
 <span>0ms</span><span>3000ms</span>
+</div>
+</div>
+<div class="wt-field">
+<label>RMS Gate: <span id="vadRmsGateValue">0.04</span></label>
+<input type="range" id="vadRmsGateSlider" min="0" max="0.2" value="0.04" step="0.005" style="width:100%" oninput="document.getElementById('vadRmsGateValue').textContent=parseFloat(this.value).toFixed(3)">
+<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--wt-text-secondary);margin-top:2px">
+<span>0</span><span>0.2</span>
 </div>
 </div>
 </div>

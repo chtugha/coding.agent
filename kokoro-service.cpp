@@ -642,19 +642,78 @@ public:
         espeak_SetVoiceByName("de");
         std::printf("espeak-ng initialized (German)\n");
 
+        warmup();
+
         return true;
     }
 
+    void warmup() {
+        std::printf("Warming up CoreML models...\n");
+        auto t0 = std::chrono::steady_clock::now();
+        auto samples = synthesize("Hallo.", 1.0f);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        std::printf("CoreML warmup done: %lldms (%zu samples)\n", (long long)ms, samples.size());
+    }
+
+    static bool detect_german(const std::string& text) {
+        static const char* umlaut_markers[] = {
+            "ä", "ö", "ü", "Ä", "Ö", "Ü", "ß",
+            "möchte", "könnte", "würde", "für",
+            nullptr
+        };
+        for (int i = 0; umlaut_markers[i]; i++) {
+            if (text.find(umlaut_markers[i]) != std::string::npos) return true;
+        }
+        static const char* de_words[] = {
+            "ich", "und", "nicht", "haben", "werden",
+            "bitte", "danke", "gerne",
+            nullptr
+        };
+        for (int i = 0; de_words[i]; i++) {
+            std::string word = de_words[i];
+            size_t pos = 0;
+            while ((pos = text.find(word, pos)) != std::string::npos) {
+                bool left_ok = (pos == 0 || !std::isalpha(static_cast<unsigned char>(text[pos - 1])));
+                bool right_ok = (pos + word.size() >= text.size() ||
+                    !std::isalpha(static_cast<unsigned char>(text[pos + word.size()])));
+                if (left_ok && right_ok) return true;
+                pos += word.size();
+            }
+        }
+        int ascii_alpha = 0;
+        for (unsigned char c : text) {
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) ascii_alpha++;
+        }
+        return ascii_alpha < (int)text.size() / 2;
+    }
+
+    static std::string clean_phonemes(const std::string& ph) {
+        std::string out;
+        out.reserve(ph.size());
+        for (size_t i = 0; i < ph.size(); i++) {
+            unsigned char c = static_cast<unsigned char>(ph[i]);
+            if (c == '\n' || c == '\r') continue;
+            if (c == '(' || c == ')') continue;
+            out.push_back(ph[i]);
+        }
+        while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+        return out;
+    }
+
     std::string phonemize(const std::string& text) {
+        bool is_de = detect_german(text);
+        std::string cache_key = text + (is_de ? "|de" : "|en");
         {
             std::lock_guard<std::mutex> lock(cache_mutex_);
-            auto it = phoneme_cache_.find(text);
+            auto it = phoneme_cache_.find(cache_key);
             if (it != phoneme_cache_.end()) return it->second;
         }
 
         std::string result;
         {
             std::lock_guard<std::mutex> lock(espeak_mutex_);
+            espeak_SetVoiceByName(is_de ? "de" : "en-us");
             const char* ptr = text.c_str();
             while (ptr && *ptr) {
                 const char* ph = espeak_TextToPhonemes(
@@ -663,12 +722,14 @@ public:
             }
         }
 
+        result = clean_phonemes(result);
+
         {
             std::lock_guard<std::mutex> lock(cache_mutex_);
             if (phoneme_cache_.size() >= PHONEME_CACHE_MAX) {
                 phoneme_cache_.clear();
             }
-            phoneme_cache_[text] = result;
+            phoneme_cache_[cache_key] = result;
         }
 
         return result;

@@ -62,7 +62,7 @@ static constexpr int DISC_WARN_INTERVAL_S = 5;
 static constexpr float NOISE_FLOOR_INIT = 0.00005f;
 static constexpr float NOISE_FLOOR_HARD_MIN = 0.000005f;
 static constexpr float NOISE_FLOOR_EMA_ALPHA = 0.05f;
-static constexpr float RMS_SILENCE_GATE = 0.008f;
+static constexpr float RMS_SILENCE_GATE_DEFAULT = 0.04f;
 
 static std::atomic<bool> g_running{true};
 static void sig_handler(int) { g_running = false; }
@@ -133,6 +133,7 @@ class VadService {
     std::atomic<int> vad_onset_gap_tolerance_{1};
     int speech_signal_timeout_s_ = 10;
     std::atomic<int> post_idle_cooldown_ms_{1200};
+    std::atomic<float> rms_silence_gate_{RMS_SILENCE_GATE_DEFAULT};
     // vad_inactivity_flush_ms_: if no new audio arrives for 1000ms while speech is
     //   active, flush the buffer immediately (handles end-of-stream).
     int vad_inactivity_flush_ms_ = 1000;
@@ -178,6 +179,7 @@ public:
                   << " max_chunk=" << max_ms << "ms"
                   << " min_chunk=" << (vad_min_speech_samples_ * 1000 / VAD_SAMPLE_RATE) << "ms"
                   << " post_idle_cooldown=" << post_idle_cooldown_ms_.load() << "ms"
+                  << " rms_gate=" << rms_silence_gate_.load()
                   << std::endl;
     }
 
@@ -187,6 +189,10 @@ public:
 
     void set_post_idle_cooldown(int ms) {
         post_idle_cooldown_ms_.store(ms);
+    }
+
+    void set_rms_gate(float val) {
+        rms_silence_gate_.store(val);
     }
 
     void set_log_level(const char* level) {
@@ -438,6 +444,17 @@ private:
                 return "ERROR:Value out of range (0-5000)\n";
             } catch (...) { return "ERROR:Invalid value\n"; }
         }
+        if (cmd.rfind("SET_RMS_GATE:", 0) == 0) {
+            try {
+                float val = std::stof(cmd.substr(13));
+                if (val >= 0.0f && val <= 1.0f) {
+                    rms_silence_gate_.store(val);
+                    log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "RMS silence gate set to %.4f", val);
+                    return "OK\n";
+                }
+                return "ERROR:Value out of range (0.0-1.0)\n";
+            } catch (...) { return "ERROR:Invalid value\n"; }
+        }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
             size_t speech_active = 0;
@@ -458,6 +475,7 @@ private:
                 + ":MAX_CHUNK_MS:" + std::to_string(max_ms)
                 + ":ONSET_GAP:" + std::to_string(vad_onset_gap_tolerance_.load())
                 + ":POST_IDLE_COOLDOWN_MS:" + std::to_string(post_idle_cooldown_ms_.load())
+                + ":RMS_GATE:" + format_threshold(rms_silence_gate_.load())
                 + "\n";
         }
         return "ERROR:Unknown command\n";
@@ -860,7 +878,7 @@ private:
             rms = std::sqrt(sum_sq / static_cast<float>(audio.size()));
         }
 
-        if (rms < RMS_SILENCE_GATE) {
+        if (rms < rms_silence_gate_.load()) {
             if (vad_logging_enabled_) {
                 log_fwd_.forward(whispertalk::LogLevel::DEBUG, call_id,
                     "Skipping low-energy chunk: RMS=%.6f (%.0fms)", rms, audio.size() / (double)VAD_SAMPLES_PER_MS);
@@ -944,6 +962,7 @@ int main(int argc, char** argv) {
     int vad_max_chunk_ms = 12000;
     int vad_onset_gap = -1;
     int post_idle_cooldown_ms = -1;
+    float rms_gate = -1.0f;
     std::string log_level = "INFO";
 
     static struct option long_opts[] = {
@@ -953,12 +972,13 @@ int main(int argc, char** argv) {
         {"vad-max-chunk-ms",         required_argument, 0, 'c'},
         {"vad-onset-gap",            required_argument, 0, 'g'},
         {"post-idle-cooldown-ms",    required_argument, 0, 'p'},
+        {"rms-gate",                 required_argument, 0, 'r'},
         {"log-level",                required_argument, 0, 'L'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "w:t:s:c:g:p:L:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "w:t:s:c:g:p:r:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'w': vad_window_ms = atoi(optarg); break;
             case 't': vad_threshold = atof(optarg); break;
@@ -966,6 +986,7 @@ int main(int argc, char** argv) {
             case 'c': vad_max_chunk_ms = atoi(optarg); break;
             case 'g': vad_onset_gap = atoi(optarg); break;
             case 'p': post_idle_cooldown_ms = atoi(optarg); break;
+            case 'r': rms_gate = atof(optarg); break;
             case 'L': log_level = optarg; break;
             default: break;
         }
@@ -979,6 +1000,8 @@ int main(int argc, char** argv) {
         service.set_onset_gap(vad_onset_gap);
     if (post_idle_cooldown_ms >= 0 && post_idle_cooldown_ms <= 5000)
         service.set_post_idle_cooldown(post_idle_cooldown_ms);
+    if (rms_gate >= 0.0f && rms_gate <= 1.0f)
+        service.set_rms_gate(rms_gate);
     if (!service.init()) {
         return 1;
     }

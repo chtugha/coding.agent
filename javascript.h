@@ -4206,18 +4206,21 @@ document.getElementById('vadSilenceSlider').value=d.silence_ms||400;
 document.getElementById('vadMaxChunkSlider').value=d.max_chunk_ms||8000;
 document.getElementById('vadOnsetGapSlider').value=d.onset_gap!=null?d.onset_gap:1;
 document.getElementById('vadPostIdleCooldownSlider').value=d.post_idle_cooldown_ms!=null?d.post_idle_cooldown_ms:1200;
+document.getElementById('vadRmsGateSlider').value=d.rms_gate!=null?d.rms_gate:0.04;
 updateVadWindowDisplay(d.window_ms);
 updateVadThresholdDisplay(d.threshold);
 document.getElementById('vadSilenceValue').textContent=d.silence_ms||400;
 document.getElementById('vadMaxChunkValue').textContent=d.max_chunk_ms||8000;
 document.getElementById('vadOnsetGapValue').textContent=d.onset_gap!=null?d.onset_gap:1;
 document.getElementById('vadPostIdleCooldownValue').textContent=d.post_idle_cooldown_ms!=null?d.post_idle_cooldown_ms:1200;
+document.getElementById('vadRmsGateValue').textContent=d.rms_gate!=null?parseFloat(d.rms_gate).toFixed(3):'0.040';
 document.getElementById('currentVadWindow').textContent=d.window_ms;
 document.getElementById('currentVadThreshold').textContent=d.threshold;
 document.getElementById('currentVadSilence').textContent=d.silence_ms||400;
 document.getElementById('currentVadMaxChunk').textContent=d.max_chunk_ms||8000;
 document.getElementById('currentVadOnsetGap').textContent=d.onset_gap!=null?d.onset_gap:1;
 document.getElementById('currentVadPostIdleCooldown').textContent=d.post_idle_cooldown_ms!=null?d.post_idle_cooldown_ms:1200;
+document.getElementById('currentVadRmsGate').textContent=d.rms_gate!=null?parseFloat(d.rms_gate).toFixed(3):'0.040';
   }).catch(e=>console.error('Failed to load VAD config:',e));
 }
 
@@ -4228,11 +4231,12 @@ function saveVadConfig(){
   const max_chunk_ms=document.getElementById('vadMaxChunkSlider').value;
   const onset_gap=document.getElementById('vadOnsetGapSlider').value;
   const post_idle_cooldown_ms=document.getElementById('vadPostIdleCooldownSlider').value;
+  const rms_gate=document.getElementById('vadRmsGateSlider').value;
 
   fetch('/api/vad/config',{
 method:'POST',
 headers:{'Content-Type':'application/json'},
-body:JSON.stringify({window_ms,threshold,silence_ms,max_chunk_ms,onset_gap,post_idle_cooldown_ms})
+body:JSON.stringify({window_ms,threshold,silence_ms,max_chunk_ms,onset_gap,post_idle_cooldown_ms,rms_gate})
   }).then(r=>r.json()).then(d=>{
 if(d.success){
   document.getElementById('currentVadWindow').textContent=d.window_ms;
@@ -4241,6 +4245,7 @@ if(d.success){
   document.getElementById('currentVadMaxChunk').textContent=d.max_chunk_ms;
   document.getElementById('currentVadOnsetGap').textContent=d.onset_gap!=null?d.onset_gap:1;
   document.getElementById('currentVadPostIdleCooldown').textContent=d.post_idle_cooldown_ms!=null?d.post_idle_cooldown_ms:1200;
+  document.getElementById('currentVadRmsGate').textContent=d.rms_gate!=null?parseFloat(d.rms_gate).toFixed(3):'0.040';
   const li=document.getElementById('vadLiveIndicator');
   if(d.live){li.textContent='(applied live)';li.style.color='var(--wt-success)';}
   else{li.textContent='(saved \u2014 will apply on next restart)';li.style.color='var(--wt-warning)';}
