@@ -2289,7 +2289,7 @@ private:
             std::string mode = get_setting("pipeline_mode", "classic");
             std::string json = "{\"mode\":\"" + escape_json(mode) + "\"}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.c_str());
-        } else {
+        } else if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
             std::string body(hm->body.buf, hm->body.len);
             std::string mode = extract_json_string(body, "mode");
 
@@ -2300,43 +2300,38 @@ private:
 
             set_setting("pipeline_mode", mode);
 
+            std::string iap_args;
             {
                 std::lock_guard<std::mutex> lock(services_mutex_);
                 for (auto& svc : services_) {
                     if (svc.name == "INBOUND_AUDIO_PROCESSOR") {
                         std::string args = svc.default_args;
-                        const std::string flag = " --moshi-mode";
-                        size_t pos = args.find(flag);
+                        const std::string flag_sp = " --moshi-mode";
+                        const std::string flag_bare = "--moshi-mode";
                         if (mode == "moshi") {
-                            if (pos == std::string::npos) {
-                                args += flag;
+                            if (args.find(flag_bare) == std::string::npos) {
+                                args += flag_sp;
                             }
                         } else {
-                            while ((pos = args.find(flag)) != std::string::npos) {
-                                args.erase(pos, flag.size());
+                            size_t pos;
+                            while ((pos = args.find(flag_sp)) != std::string::npos) {
+                                args.erase(pos, flag_sp.size());
+                            }
+                            while ((pos = args.find(flag_bare)) != std::string::npos) {
+                                args.erase(pos, flag_bare.size());
                             }
                         }
                         svc.default_args = args;
+                        iap_args = args;
                         break;
                     }
                 }
             }
-
-            {
-                std::string iap_args;
-                {
-                    std::lock_guard<std::mutex> lock(services_mutex_);
-                    for (const auto& svc : services_) {
-                        if (svc.name == "INBOUND_AUDIO_PROCESSOR") {
-                            iap_args = svc.default_args;
-                            break;
-                        }
-                    }
-                }
-                save_service_config("INBOUND_AUDIO_PROCESSOR", iap_args);
-            }
+            save_service_config("INBOUND_AUDIO_PROCESSOR", iap_args);
 
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
+        } else {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"Method not allowed\"}");
         }
     }
 
