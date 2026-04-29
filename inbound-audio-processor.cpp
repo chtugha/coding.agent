@@ -79,7 +79,7 @@ public:
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR);
 
         if (!interconnect_.connect_to_downstream()) {
-            std::cout << "⚠️  Downstream (Whisper) not available yet - will auto-reconnect" << std::endl;
+            std::cout << "⚠️  Downstream (" << (moshi_mode_ ? "Moshi" : "Whisper") << ") not available yet - will auto-reconnect" << std::endl;
         }
 
         interconnect_.register_call_end_handler([this](uint32_t call_id) {

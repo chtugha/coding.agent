@@ -1424,3 +1424,65 @@ TEST(MoshiServiceTest, DownstreamOverrideConnectsMoshi) {
     moshi.shutdown();
     iap.shutdown();
 }
+
+TEST(MoshiServiceTest, DownstreamOverrideBeforeInitialize) {
+    InterconnectNode iap(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    iap.set_downstream_override(ServiceType::MOSHI_SERVICE);
+    EXPECT_TRUE(iap.initialize());
+
+    InterconnectNode moshi(ServiceType::MOSHI_SERVICE);
+    EXPECT_TRUE(moshi.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    EXPECT_TRUE(iap.connect_to_downstream());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(iap.downstream_state(), ConnectionState::CONNECTED);
+
+    moshi.shutdown();
+    iap.shutdown();
+}
+
+TEST(MoshiServiceTest, FIR24kDCPassthrough) {
+    constexpr size_t in_len = 160;
+    constexpr float DC = 0.75f;
+    float in[in_len];
+    for (size_t i = 0; i < in_len; i++) in[i] = DC;
+
+    float out[in_len * 3];
+    float history[IAP_FIR_24K_CENTER] = {};
+
+    iap_fir_upsample_frame_24k(in, in_len, out, history);
+    iap_fir_upsample_frame_24k(in, in_len, out, history);
+    size_t produced = iap_fir_upsample_frame_24k(in, in_len, out, history);
+
+    EXPECT_EQ(produced, in_len * 3);
+    for (size_t i = 0; i < produced; i++) {
+        EXPECT_NEAR(out[i], DC, 0.01f) << "DC mismatch at output index " << i;
+    }
+}
+
+TEST(MoshiServiceTest, FIR24kCrossFrameContinuity) {
+    constexpr size_t full_len = 160;
+    constexpr size_t half = full_len / 2;
+
+    float ramp[full_len];
+    for (size_t i = 0; i < full_len; i++) ramp[i] = static_cast<float>(i) / full_len;
+
+    float out_whole[full_len * 3];
+    float history_whole[IAP_FIR_24K_CENTER] = {};
+    size_t produced_whole = iap_fir_upsample_frame_24k(ramp, full_len, out_whole, history_whole);
+
+    float out_split[full_len * 3];
+    float history_split[IAP_FIR_24K_CENTER] = {};
+    size_t p1 = iap_fir_upsample_frame_24k(ramp, half, out_split, history_split);
+    size_t p2 = iap_fir_upsample_frame_24k(ramp + half, half, out_split + p1, history_split);
+
+    EXPECT_EQ(produced_whole, full_len * 3);
+    EXPECT_EQ(p1 + p2, full_len * 3);
+
+    for (size_t i = 0; i < produced_whole; i++) {
+        EXPECT_NEAR(out_split[i], out_whole[i], 1e-5f) << "continuity mismatch at output index " << i;
+    }
+}
