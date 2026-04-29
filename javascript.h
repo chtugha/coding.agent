@@ -202,7 +202,7 @@ e.classList.toggle('active',e.dataset.page===p);
   currentPage=p;
   if(p!=='dashboard')stopDashboardPoll();
   if(p!=='beta-testing')stopTestResultsPoll();
-  if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();dashLoadPipelineLanguage();}
+  if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();dashLoadPipelineLanguage();dashLoadPipelineMode();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){
     try{buildSipLinesGrid();}catch(e){console.error('buildSipLinesGrid:',e);}
@@ -336,11 +336,25 @@ if(d.recent_logs&&d.recent_logs.length>0){
 }
 
 function dashStartAll(){
-  fetch('/api/services').then(r=>r.json()).then(d=>{
-d.services.forEach(s=>{
-  if(!s.online)fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service:s.name})});
-});
-setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
+  const moshiServices=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','MOSHI_SERVICE','OUTBOUND_AUDIO_PROCESSOR','TOMEDO_CRAWL_SERVICE'];
+  fetch('/api/pipeline/mode').then(r=>r.json()).then(md=>{
+    const mode=md.mode||'classic';
+    fetch('/api/services').then(r=>r.json()).then(d=>{
+      d.services.forEach(s=>{
+        if(!s.online){
+          if(mode==='moshi'&&moshiServices.indexOf(s.name)===-1)return;
+          fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service:s.name})});
+        }
+      });
+      setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
+    });
+  }).catch(()=>{
+    fetch('/api/services').then(r=>r.json()).then(d=>{
+      d.services.forEach(s=>{
+        if(!s.online)fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service:s.name})});
+      });
+      setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
+    });
   });
 }
 
@@ -370,6 +384,34 @@ function dashSetPipelineLanguage(v){
     });
 }
 
+function dashLoadPipelineMode(){
+  fetch('/api/pipeline/mode').then(r=>r.json()).then(d=>{
+    const mode=d.mode||'classic';
+    const sel=document.getElementById('dashModeSelect');
+    if(sel)sel.value=mode;
+    applyPipelineModeUI(mode);
+  }).catch(()=>{});
+}
+
+function dashSetPipelineMode(v){
+  fetch('/api/pipeline/mode',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode:v})})
+    .then(r=>r.json()).then(()=>{
+      applyPipelineModeUI(v);
+      const h=document.getElementById('dashModeHint');
+      if(h)h.textContent='Saved. Restart services to apply ('+v+').';
+    }).catch(()=>{});
+}
+
+function applyPipelineModeUI(mode){
+  document.querySelectorAll('[data-classic-only]').forEach(el=>{
+    el.style.display=mode==='classic'?'':'none';
+  });
+  document.querySelectorAll('[data-moshi-only]').forEach(el=>{
+    el.style.display=mode==='moshi'?'':'none';
+  });
+}
+
 function dashRestartFailed(){
   fetch('/api/services').then(r=>r.json()).then(d=>{
 d.services.forEach(s=>{
@@ -392,7 +434,8 @@ c.innerHTML=d.services.map(s=>{
     'TTS_SERVICE':'TTS Stage (generic dock, hot-plug engines)',
     'KOKORO_ENGINE':'Kokoro TTS Engine','NEUTTS_ENGINE':'NeuTTS Nano German Engine',
     'OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP',
-    'TOMEDO_CRAWL_SERVICE':'Tomedo RAG — Patient Context','TEST_SIP_PROVIDER':'SIP B2BUA Test Provider'};
+    'TOMEDO_CRAWL_SERVICE':'Tomedo RAG — Patient Context','TEST_SIP_PROVIDER':'SIP B2BUA Test Provider',
+    'MOSHI_SERVICE':'Moshi Full-Duplex Neural Voice'};
   const eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
   const svcAttr=escapeHtml(s.name);
   let btns='<div style="margin-top:6px;display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">';
