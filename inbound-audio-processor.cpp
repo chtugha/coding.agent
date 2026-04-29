@@ -305,7 +305,7 @@ private:
 
     std::atomic<bool> running_;
     std::atomic<int> cmd_sock_{-1};
-    bool moshi_mode_ = false;
+    std::atomic<bool> moshi_mode_{false};
     float ulaw_table[256];
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<CallState>> calls_;

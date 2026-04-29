@@ -2301,6 +2301,7 @@ private:
             set_setting("pipeline_mode", mode);
 
             std::string iap_args;
+            bool iap_found = false;
             {
                 std::lock_guard<std::mutex> lock(services_mutex_);
                 for (auto& svc : services_) {
@@ -2317,17 +2318,20 @@ private:
                             while ((pos = args.find(flag_sp)) != std::string::npos) {
                                 args.erase(pos, flag_sp.size());
                             }
-                            while ((pos = args.find(flag_bare)) != std::string::npos) {
-                                args.erase(pos, flag_bare.size());
+                            if (args.find(flag_bare) == 0) {
+                                args.erase(0, flag_bare.size());
                             }
                         }
                         svc.default_args = args;
                         iap_args = args;
+                        iap_found = true;
                         break;
                     }
                 }
             }
-            save_service_config("INBOUND_AUDIO_PROCESSOR", iap_args);
+            if (iap_found) {
+                save_service_config("INBOUND_AUDIO_PROCESSOR", iap_args);
+            }
 
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
         } else {
