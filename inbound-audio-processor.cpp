@@ -47,9 +47,9 @@ static constexpr size_t RTP_HEADER_SIZE = 12;
 struct CallState {
     int id;
     std::chrono::steady_clock::time_point last_activity;
-    float fir_history[whispertalk::IAP_FIR_CENTER] = {};
+    float fir_history[whispertalk::IAP_FIR_24K_CENTER] = {};
     float decoded[whispertalk::IAP_ULAW_FRAME];
-    float pcm[whispertalk::IAP_ULAW_FRAME * 2];
+    float pcm[whispertalk::IAP_ULAW_OUT_24K];
     uint64_t clip_count = 0;
 };
 
@@ -59,6 +59,13 @@ class InboundAudioProcessor {
 public:
     InboundAudioProcessor() : running_(true), interconnect_(whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR) {
         init_g711_tables();
+    }
+
+    void set_moshi_mode(bool m) {
+        moshi_mode_ = m;
+        if (m) {
+            interconnect_.set_downstream_override(whispertalk::ServiceType::MOSHI_SERVICE);
+        }
     }
 
     bool init() {
@@ -152,10 +159,11 @@ private:
         }
         if (cmd == "STATUS") {
             std::lock_guard<std::mutex> lock(calls_mutex_);
-            char buf[256];
+            char buf[320];
             snprintf(buf, sizeof(buf),
-                "ACTIVE_CALLS:%zu:UPSTREAM:%s:DOWNSTREAM:%s:PKT_LATENCY_AVG_US:%.1f:PKT_LATENCY_MAX_US:%.1f:PKT_COUNT:%llu\n",
+                "ACTIVE_CALLS:%zu:MODE:%s:UPSTREAM:%s:DOWNSTREAM:%s:PKT_LATENCY_AVG_US:%.1f:PKT_LATENCY_MAX_US:%.1f:PKT_COUNT:%llu\n",
                 calls_.size(),
+                moshi_mode_ ? "moshi" : "classic",
                 interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected",
                 interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected",
                 pkt_count_.load() > 0 ? latency_sum_.load() / pkt_count_.load() : 0.0,
@@ -208,8 +216,9 @@ private:
                 if (a > dec_peak) dec_peak = a;
             }
 
-            size_t out_len = whispertalk::iap_fir_upsample_frame(
-                state->decoded, payload_len, state->pcm, state->fir_history);
+            size_t out_len = moshi_mode_
+                ? whispertalk::iap_fir_upsample_frame_24k(state->decoded, payload_len, state->pcm, state->fir_history)
+                : whispertalk::iap_fir_upsample_frame(state->decoded, payload_len, state->pcm, state->fir_history);
 
             float up_peak = 0;
             for (size_t i = 0; i < out_len; ++i) {
@@ -296,6 +305,7 @@ private:
 
     std::atomic<bool> running_;
     std::atomic<int> cmd_sock_{-1};
+    bool moshi_mode_ = false;
     float ulaw_table[256];
     std::mutex calls_mutex_;
     std::map<uint32_t, std::shared_ptr<CallState>> calls_;
@@ -313,20 +323,26 @@ int main(int argc, char** argv) {
     signal(SIGPIPE, SIG_IGN);
 
     std::string log_level = "INFO";
+    bool moshi_mode = false;
 
     static struct option long_opts[] = {
-        {"log-level", required_argument, 0, 'L'},
+        {"log-level",  required_argument, 0, 'L'},
+        {"moshi-mode", no_argument,       0, 'M'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "L:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "L:M", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'L': log_level = optarg; break;
+            case 'M': moshi_mode = true; break;
             default: break;
         }
     }
 
     InboundAudioProcessor proc;
+    if (moshi_mode) {
+        proc.set_moshi_mode(true);
+    }
     if (!proc.init()) {
         return 1;
     }
