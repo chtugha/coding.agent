@@ -53,6 +53,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <optional>
 #include <functional>
 #include <chrono>
 #include <set>
@@ -85,8 +86,8 @@ static constexpr int IAP_FIR_CENTER = 7;
 static constexpr int IAP_ULAW_FRAME = 160;
 
 // 3-phase polyphase FIR for 8kHz → 24kHz upsampling (3× interpolation).
-// 24-tap Hamming-windowed sinc, cutoff 4kHz, gain 3.
-// Decomposed into 3 polyphase sub-filters of 8 taps each.
+// 24-tap Hamming-windowed sinc, cutoff 4kHz, unity output gain.
+// Decomposed into 3 polyphase sub-filters of 8 taps each (each sums to ~1.0).
 // IAP_ULAW_OUT_24K: output samples per 160-sample input frame (160 * 3 = 480).
 static constexpr int IAP_FIR_24K_LEN    = 24;
 static constexpr int IAP_FIR_24K_CENTER = 12;
@@ -148,7 +149,7 @@ inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
 // 3-phase polyphase FIR upsample: 8kHz → 24kHz via 3× zero-stuff + 24-tap filter.
 // Each input sample produces 3 output samples via 3 polyphase sub-filters.
 // Sub-filter p selects coefficients h[p], h[p+3], h[p+6], ..., h[p+21] (8 taps each).
-// Gain of 3 is baked into the coefficients so the output level matches the input.
+// Each sub-filter sums to ~1.0 so output amplitude matches input (unity DC gain).
 // `history` must point to IAP_FIR_24K_CENTER floats that persist across calls.
 // Returns number of output samples written (= in_len * 3).
 inline size_t iap_fir_upsample_frame_24k(const float* in, size_t in_len,
@@ -156,20 +157,17 @@ inline size_t iap_fir_upsample_frame_24k(const float* in, size_t in_len,
     if (in_len > (size_t)IAP_ULAW_FRAME) in_len = IAP_ULAW_FRAME;
     if (in_len == 0) return 0;
 
-    // 24-tap Hamming-windowed sinc, cutoff 4kHz (Nyquist/2), gain 3.
-    // h[n] = 3 * sinc(2*4000/24000 * (n - 11.5)) * hamming(n, 24)
-    // Computed offline; polyphase phases: phase 0 = h[0,3,6,9,12,15,18,21],
-    //                                     phase 1 = h[1,4,7,10,13,16,19,22],
-    //                                     phase 2 = h[2,5,8,11,14,17,20,23].
+    // h[n] = sinc((n - 11.5) / 3) * (0.54 - 0.46 * cos(2πn/23)), n = 0..23
+    // Symmetric: h[n] == h[23-n]. Phase sums: p0 ≈ 0.997, p1 ≈ 0.996, p2 ≈ 0.997.
     static constexpr float H[IAP_FIR_24K_LEN] = {
-        -0.0014f, -0.0024f, -0.0038f,
-        -0.0065f, -0.0101f, -0.0141f,
-        -0.0168f, -0.0160f, -0.0085f,
-         0.0073f,  0.0347f,  0.0754f,
-         0.1289f,  0.1926f,  0.2614f,
-         0.3289f,  0.3879f,  0.4314f,
-         0.4547f,  0.4547f,  0.4314f,
-         0.3879f,  0.3289f,  0.2614f
+        -0.003321f, -0.008827f, -0.007386f,
+         0.012696f,  0.041809f,  0.032792f,
+        -0.049604f, -0.147281f, -0.109854f,
+         0.171281f,  0.612376f,  0.950838f,
+         0.950838f,  0.612376f,  0.171281f,
+        -0.109854f, -0.147281f, -0.049604f,
+         0.032792f,  0.041809f,  0.012696f,
+        -0.007386f, -0.008827f, -0.003321f
     };
 
     float ext[IAP_FIR_24K_CENTER + IAP_ULAW_FRAME];
@@ -590,7 +588,6 @@ public:
     void set_downstream_override(ServiceType override_type) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         downstream_override_ = override_type;
-        has_downstream_override_ = true;
     }
 
     ConnectionState upstream_state() const {
@@ -612,7 +609,7 @@ public:
         ServiceType ds;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            ds = has_downstream_override_ ? downstream_override_ : downstream_of(type_);
+            ds = downstream_override_.value_or(downstream_of(type_));
         }
         uint16_t ds_mgmt = service_mgmt_port(ds);
         uint16_t ds_data = service_data_port(ds);
@@ -855,8 +852,7 @@ public:
 private:
     ServiceType type_;
     std::atomic<bool> running_;
-    bool has_downstream_override_ = false;
-    ServiceType downstream_override_ = ServiceType::SIP_CLIENT;
+    std::optional<ServiceType> downstream_override_;
     static constexpr size_t SEND_BUF_SIZE = 65536;
     static constexpr int DOWNSTREAM_RECONNECT_MS = 200;
     static constexpr size_t MAX_ENDED_CALL_IDS = 1000;

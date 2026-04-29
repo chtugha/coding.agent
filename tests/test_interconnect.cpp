@@ -99,6 +99,7 @@ TEST(PortAssignmentTest, NoPortConflictsAcrossServices) {
         ServiceType::LLAMA_SERVICE,
         ServiceType::TTS_SERVICE,
         ServiceType::OUTBOUND_AUDIO_PROCESSOR,
+        ServiceType::MOSHI_SERVICE,
         ServiceType::FRONTEND
     };
     for (auto t : types) {
@@ -117,7 +118,7 @@ TEST(PortAssignmentTest, NoPortConflictsAcrossServices) {
             all_ports.insert(eng);
         }
     }
-    EXPECT_EQ(all_ports.size(), 25u);
+    EXPECT_EQ(all_ports.size(), 28u);
 }
 
 TEST(TopologyTest, UpstreamDownstreamMapping) {
