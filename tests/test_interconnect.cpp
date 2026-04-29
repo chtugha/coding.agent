@@ -1365,3 +1365,61 @@ TEST(EngineClientTest, MgmtFramesDispatchHandlers) {
     ::close(s1);
     client.shutdown();
 }
+
+TEST(MoshiServiceTest, BasePortAndTopology) {
+    EXPECT_EQ(service_base_port(ServiceType::MOSHI_SERVICE), 13155);
+    EXPECT_EQ(upstream_of(ServiceType::MOSHI_SERVICE), ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_EQ(downstream_of(ServiceType::MOSHI_SERVICE), ServiceType::OUTBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(is_pipeline_service(ServiceType::MOSHI_SERVICE));
+    EXPECT_STREQ(service_type_to_string(ServiceType::MOSHI_SERVICE), "MOSHI_SERVICE");
+}
+
+TEST(MoshiServiceTest, PacketTraceName) {
+    EXPECT_STREQ(PacketTrace::service_type_name(9), "MSH");
+}
+
+TEST(MoshiServiceTest, FIR24kOutputLength) {
+    constexpr size_t in_len = 160;
+    float in[in_len];
+    float out[in_len * 3];
+    float history[IAP_FIR_24K_CENTER] = {};
+
+    for (size_t i = 0; i < in_len; i++) in[i] = (i % 2 == 0) ? 1.0f : -1.0f;
+
+    size_t produced = iap_fir_upsample_frame_24k(in, in_len, out, history);
+    EXPECT_EQ(produced, in_len * 3);
+}
+
+TEST(MoshiServiceTest, FIR24kZeroInputProducesZeroOutput) {
+    constexpr size_t in_len = 160;
+    float in[in_len] = {};
+    float out[in_len * 3];
+    float history[IAP_FIR_24K_CENTER] = {};
+
+    size_t produced = iap_fir_upsample_frame_24k(in, in_len, out, history);
+    EXPECT_EQ(produced, in_len * 3);
+    for (size_t i = 0; i < produced; i++) {
+        EXPECT_FLOAT_EQ(out[i], 0.0f) << "non-zero at index " << i;
+    }
+}
+
+TEST(MoshiServiceTest, DownstreamOverrideConnectsMoshi) {
+    InterconnectNode iap(ServiceType::INBOUND_AUDIO_PROCESSOR);
+    EXPECT_TRUE(iap.initialize());
+
+    iap.set_downstream_override(ServiceType::MOSHI_SERVICE);
+
+    InterconnectNode moshi(ServiceType::MOSHI_SERVICE);
+    EXPECT_TRUE(moshi.initialize());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    bool connected = iap.connect_to_downstream();
+    EXPECT_TRUE(connected);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(iap.downstream_state(), ConnectionState::CONNECTED);
+
+    moshi.shutdown();
+    iap.shutdown();
+}

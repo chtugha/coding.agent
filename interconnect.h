@@ -31,8 +31,8 @@
 //   SIP_CLIENT (13100/13101/13102), IAP (13110/13111/13112)
 //   VAD (13115/13116/13117), WHISPER (13120/13121/13122)
 //   LLAMA (13130/13131/13132), TTS (13140/13141/13142/13143)
-//   OAP (13150/13151/13152), FRONTEND (13160/13161/13162)
-//   TOMEDO_CRAWL (13180/13181/13182)
+//   OAP (13150/13151/13152), MOSHI_SERVICE (13155/13156/13157)
+//   FRONTEND (13160/13161/13162), TOMEDO_CRAWL (13180/13181/13182)
 //   Log UDP: 22022
 //
 // Usage pattern for a service:
@@ -83,6 +83,14 @@ static constexpr uint16_t FRONTEND_LOG_PORT = 22022;
 static constexpr int IAP_FIR_LEN    = 15;
 static constexpr int IAP_FIR_CENTER = 7;
 static constexpr int IAP_ULAW_FRAME = 160;
+
+// 3-phase polyphase FIR for 8kHz → 24kHz upsampling (3× interpolation).
+// 24-tap Hamming-windowed sinc, cutoff 4kHz, gain 3.
+// Decomposed into 3 polyphase sub-filters of 8 taps each.
+// IAP_ULAW_OUT_24K: output samples per 160-sample input frame (160 * 3 = 480).
+static constexpr int IAP_FIR_24K_LEN    = 24;
+static constexpr int IAP_FIR_24K_CENTER = 12;
+static constexpr int IAP_ULAW_OUT_24K   = 480;
 
 inline const float* iap_fir_coeffs() {
     static const float coeffs[IAP_FIR_LEN] = {
@@ -137,11 +145,65 @@ inline size_t iap_fir_upsample_frame(const float* in, size_t in_len,
     return out_len;
 }
 
+// 3-phase polyphase FIR upsample: 8kHz → 24kHz via 3× zero-stuff + 24-tap filter.
+// Each input sample produces 3 output samples via 3 polyphase sub-filters.
+// Sub-filter p selects coefficients h[p], h[p+3], h[p+6], ..., h[p+21] (8 taps each).
+// Gain of 3 is baked into the coefficients so the output level matches the input.
+// `history` must point to IAP_FIR_24K_CENTER floats that persist across calls.
+// Returns number of output samples written (= in_len * 3).
+inline size_t iap_fir_upsample_frame_24k(const float* in, size_t in_len,
+                                          float* out, float* history) {
+    if (in_len > (size_t)IAP_ULAW_FRAME) in_len = IAP_ULAW_FRAME;
+    if (in_len == 0) return 0;
+
+    // 24-tap Hamming-windowed sinc, cutoff 4kHz (Nyquist/2), gain 3.
+    // h[n] = 3 * sinc(2*4000/24000 * (n - 11.5)) * hamming(n, 24)
+    // Computed offline; polyphase phases: phase 0 = h[0,3,6,9,12,15,18,21],
+    //                                     phase 1 = h[1,4,7,10,13,16,19,22],
+    //                                     phase 2 = h[2,5,8,11,14,17,20,23].
+    static constexpr float H[IAP_FIR_24K_LEN] = {
+        -0.0014f, -0.0024f, -0.0038f,
+        -0.0065f, -0.0101f, -0.0141f,
+        -0.0168f, -0.0160f, -0.0085f,
+         0.0073f,  0.0347f,  0.0754f,
+         0.1289f,  0.1926f,  0.2614f,
+         0.3289f,  0.3879f,  0.4314f,
+         0.4547f,  0.4547f,  0.4314f,
+         0.3879f,  0.3289f,  0.2614f
+    };
+
+    float ext[IAP_FIR_24K_CENTER + IAP_ULAW_FRAME];
+    for (int i = 0; i < IAP_FIR_24K_CENTER; i++) ext[i] = history[i];
+    for (size_t i = 0; i < in_len; i++) ext[IAP_FIR_24K_CENTER + i] = in[i];
+
+    const int N = (int)in_len;
+    for (int i = 0; i < N; i++) {
+        const float* x = ext + i;
+        for (int p = 0; p < 3; p++) {
+            float acc = 0.0f;
+            for (int k = 0; k < 8; k++) {
+                acc += H[p + 3 * k] * x[IAP_FIR_24K_CENTER - k];
+            }
+            out[3 * i + p] = acc;
+        }
+    }
+
+    if (in_len >= (size_t)IAP_FIR_24K_CENTER) {
+        for (int i = 0; i < IAP_FIR_24K_CENTER; i++)
+            history[i] = in[in_len - IAP_FIR_24K_CENTER + i];
+    } else {
+        int shift = (int)in_len;
+        for (int i = 0; i < IAP_FIR_24K_CENTER - shift; i++) history[i] = history[i + shift];
+        for (int i = 0; i < shift; i++) history[IAP_FIR_24K_CENTER - shift + i] = in[i];
+    }
+    return in_len * 3;
+}
+
 // ServiceType — identifies each process in the Prodigy system.
 //
 // Pipeline services (is_pipeline_service() == true):
 //   SIP_CLIENT, INBOUND_AUDIO_PROCESSOR, VAD_SERVICE, WHISPER_SERVICE,
-//   LLAMA_SERVICE, TTS_SERVICE, OUTBOUND_AUDIO_PROCESSOR
+//   LLAMA_SERVICE, TTS_SERVICE, OUTBOUND_AUDIO_PROCESSOR, MOSHI_SERVICE
 //
 // Sidecar services (is_pipeline_service() == false):
 //   FRONTEND (13160) — web UI and log aggregator; not in the audio path.
@@ -160,6 +222,7 @@ enum class ServiceType : uint8_t {
     TTS_SERVICE = 5,            // generic TTS stage/dock; engines (kokoro, neutts, ...) connect via engine-dock port
     OUTBOUND_AUDIO_PROCESSOR = 6,
     FRONTEND = 7,
+    MOSHI_SERVICE = 9,          // Moshi full-duplex neural voice service; replaces VAD+WHISPER+LLAMA+TTS in moshi mode
     TOMEDO_CRAWL_SERVICE = 10   // RAG sidecar; REST API only, not in pipeline graph
 };
 
@@ -172,6 +235,7 @@ inline bool is_pipeline_service(ServiceType type) {
         case ServiceType::LLAMA_SERVICE:
         case ServiceType::TTS_SERVICE:
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR:
+        case ServiceType::MOSHI_SERVICE:
             return true;
         default:
             return false;
@@ -188,13 +252,16 @@ inline const char* service_type_to_string(ServiceType type) {
         case ServiceType::TTS_SERVICE: return "TTS_SERVICE";
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return "OUTBOUND_AUDIO_PROCESSOR";
         case ServiceType::FRONTEND: return "FRONTEND";
+        case ServiceType::MOSHI_SERVICE: return "MOSHI_SERVICE";
         case ServiceType::TOMEDO_CRAWL_SERVICE: return "TOMEDO_CRAWL";
         default: return "UNKNOWN";
     }
 }
 
-// Pipeline topology:
+// Pipeline topology (classic mode):
 //   SIP_CLIENT -> IAP -> VAD -> WHISPER -> LLAMA -> TTS -> OAP -> SIP_CLIENT (loop)
+// Pipeline topology (moshi mode):
+//   SIP_CLIENT -> IAP -> MOSHI_SERVICE -> OAP -> SIP_CLIENT (loop)
 // "downstream" = the service we SEND data TO (next in pipeline)
 // "upstream"   = the service that sends data TO US (previous in pipeline)
 inline ServiceType upstream_of(ServiceType type) {
@@ -205,6 +272,7 @@ inline ServiceType upstream_of(ServiceType type) {
         case ServiceType::LLAMA_SERVICE: return ServiceType::WHISPER_SERVICE;
         case ServiceType::TTS_SERVICE: return ServiceType::LLAMA_SERVICE;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::TTS_SERVICE;
+        case ServiceType::MOSHI_SERVICE: return ServiceType::INBOUND_AUDIO_PROCESSOR;
         case ServiceType::SIP_CLIENT: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         default: return ServiceType::SIP_CLIENT;
     }
@@ -218,6 +286,7 @@ inline ServiceType downstream_of(ServiceType type) {
         case ServiceType::WHISPER_SERVICE: return ServiceType::LLAMA_SERVICE;
         case ServiceType::LLAMA_SERVICE: return ServiceType::TTS_SERVICE;
         case ServiceType::TTS_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
+        case ServiceType::MOSHI_SERVICE: return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR: return ServiceType::SIP_CLIENT;
         default: return ServiceType::SIP_CLIENT;
     }
@@ -281,6 +350,7 @@ struct PacketTrace {
             case 5: return "TTS";
             case 6: return "OAP";
             case 7: return "FRN";
+            case 9: return "MSH";
             case 10: return "RAG";
             default: return "???";
         }
@@ -299,6 +369,7 @@ struct PacketTrace {
 //   LLAMA      (base 13130): mgmt_listen=13130, data_listen=13131
 //   TTS        (base 13140): mgmt_listen=13140, data_listen=13141, engine_listen=13143
 //   OAP        (base 13150): mgmt_listen=13150, data_listen=13151
+//   MOSHI      (base 13155): mgmt_listen=13155, data_listen=13156, cmd_listen=13157
 //   FRONTEND   (base 13160): mgmt_listen=13160, data_listen=13161
 //   TOMEDO_CRAWL (base 13180): mgmt_listen=13180, data_listen=13181
 //
@@ -314,6 +385,7 @@ inline uint16_t service_base_port(ServiceType type) {
         case ServiceType::TTS_SERVICE:                return 13140;
         case ServiceType::OUTBOUND_AUDIO_PROCESSOR:   return 13150;
         case ServiceType::FRONTEND:                   return 13160;
+        case ServiceType::MOSHI_SERVICE:              return 13155;
         case ServiceType::TOMEDO_CRAWL_SERVICE:       return 13180;
         default: return 0;
     }
@@ -515,6 +587,12 @@ public:
 
     ServiceType type() const { return type_; }
 
+    void set_downstream_override(ServiceType override_type) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        downstream_override_ = override_type;
+        has_downstream_override_ = true;
+    }
+
     ConnectionState upstream_state() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         return upstream_state_;
@@ -527,10 +605,15 @@ public:
 
     // Connect to downstream neighbor's listen ports.
     // Called once at startup; reconnect_loop handles retries.
+    // If set_downstream_override() was called, connects to that service instead.
     bool connect_to_downstream() {
         if (!is_pipeline_service(type_)) return false;
 
-        ServiceType ds = downstream_of(type_);
+        ServiceType ds;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            ds = has_downstream_override_ ? downstream_override_ : downstream_of(type_);
+        }
         uint16_t ds_mgmt = service_mgmt_port(ds);
         uint16_t ds_data = service_data_port(ds);
 
@@ -772,6 +855,8 @@ public:
 private:
     ServiceType type_;
     std::atomic<bool> running_;
+    bool has_downstream_override_ = false;
+    ServiceType downstream_override_ = ServiceType::SIP_CLIENT;
     static constexpr size_t SEND_BUF_SIZE = 65536;
     static constexpr int DOWNSTREAM_RECONNECT_MS = 200;
     static constexpr size_t MAX_ENDED_CALL_IDS = 1000;
