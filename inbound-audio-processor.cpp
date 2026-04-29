@@ -1,6 +1,6 @@
-// inbound-audio-processor.cpp — G.711 μ-law decoder + 8kHz→16kHz upsampler.
+// inbound-audio-processor.cpp — G.711 μ-law decoder + 8kHz→16kHz (classic) / 8kHz→24kHz (Moshi) upsampler.
 //
-// Pipeline position: SIP_CLIENT → [IAP] → VAD
+// Pipeline position: SIP_CLIENT → [IAP] → VAD (classic) or MOSHI_SERVICE (moshi)
 //
 // Receives raw RTP packets (G.711 μ-law, 8kHz, 20ms frames = 160 bytes payload)
 // from the SIP_CLIENT via the interconnect data channel. For each packet:

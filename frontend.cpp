@@ -2287,6 +2287,16 @@ private:
     void handle_pipeline_mode(struct mg_connection *c, struct mg_http_message *hm) {
         if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
             std::string mode = get_setting("pipeline_mode", "classic");
+            {
+                std::lock_guard<std::mutex> lock(services_mutex_);
+                for (const auto& svc : services_) {
+                    if (svc.name == "INBOUND_AUDIO_PROCESSOR") {
+                        bool has_flag = svc.default_args.find("--moshi-mode") != std::string::npos;
+                        mode = has_flag ? "moshi" : "classic";
+                        break;
+                    }
+                }
+            }
             std::string json = "{\"mode\":\"" + escape_json(mode) + "\"}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.c_str());
         } else if (mg_strcmp(hm->method, mg_str("POST")) == 0) {

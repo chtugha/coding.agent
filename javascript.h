@@ -342,7 +342,7 @@ function dashStartAll(){
     fetch('/api/services').then(r=>r.json()).then(d=>{
       d.services.forEach(s=>{
         if(!s.online){
-          if(mode==='moshi'&&moshiServices.indexOf(s.name)===-1)return;
+          if(mode==='moshi'&&!moshiServices.includes(s.name))return;
           fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service:s.name})});
         }
       });
