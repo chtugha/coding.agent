@@ -234,10 +234,27 @@ private:
 
                 start_ws_client(state);
 
-                auto rag_state = state;
-                std::thread([this, rag_state]() {
-                    inject_rag_context(rag_state);
-                }).detach();
+                if (rag_addr_resolved_ && rag_ssl_ctx_) {
+                    SSL_CTX_up_ref(rag_ssl_ctx_);
+                    auto ssl_ctx_copy = rag_ssl_ctx_;
+                    auto addr_copy = rag_addr_;
+                    auto addrlen_copy = rag_addrlen_;
+                    auto rag_state = state;
+                    std::thread([rag_state, ssl_ctx_copy, addr_copy, addrlen_copy]() {
+                        rag_state->rag_injected = true;
+                        std::string path = "/caller/" + std::to_string(rag_state->call_id);
+                        std::string body = rag_http_get_static(path, addr_copy, addrlen_copy, ssl_ctx_copy);
+                        if (!body.empty()) {
+                            const uint8_t* p = reinterpret_cast<const uint8_t*>(body.c_str());
+                            std::lock_guard<std::mutex> lock(rag_state->ws_outbound_mutex);
+                            rag_state->ws_outbound_queue.push_back(
+                                {std::vector<uint8_t>(p, p + body.size()), WEBSOCKET_OP_TEXT});
+                        }
+                        SSL_CTX_free(ssl_ctx_copy);
+                    }).detach();
+                } else {
+                    state->rag_injected = true;
+                }
 
                 log_fwd_.forward(whispertalk::LogLevel::INFO, pkt.call_id,
                     "New Moshi call: backend pid=%d port=%d", state->backend_pid, state->backend_port);
@@ -422,6 +439,8 @@ private:
                               argv.data(), environ);
         posix_spawn_file_actions_destroy(&actions);
 
+        // Note: brief TOCTOU window between close(guard_sock) and child's bind().
+        // Accepted limitation — window is microseconds on localhost.
         if (guard_sock >= 0) ::close(guard_sock);
 
         if (ret != 0) {
@@ -469,21 +488,70 @@ private:
         return ntohs(bound.sin_port);
     }
 
-    void inject_rag_context(std::shared_ptr<MoshiCallState> state) {
-        state->rag_injected = true;
-        if (!rag_addr_resolved_) return;
+    static std::string rag_http_get_static(const std::string& path,
+                                              const struct sockaddr_storage& addr,
+                                              socklen_t addrlen,
+                                              SSL_CTX* ssl_ctx) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) return "";
+        int flags = fcntl(sock, F_GETFL, 0);
+        if (flags == -1) flags = 0;
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+        connect(sock, (const struct sockaddr*)&addr, addrlen);
+        struct pollfd pfd{sock, POLLOUT, 0};
+        if (poll(&pfd, 1, RAG_TIMEOUT_MS) <= 0 || !(pfd.revents & POLLOUT)) {
+            ::close(sock);
+            return "";
+        }
+        int conn_err = 0;
+        socklen_t conn_len = sizeof(conn_err);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &conn_err, &conn_len);
+        if (conn_err != 0) {
+            ::close(sock);
+            return "";
+        }
+        fcntl(sock, F_SETFL, flags);
 
-        std::string path = "/caller/" + std::to_string(state->call_id);
-        std::string body = rag_http_get(path);
-        if (body.empty()) {
-            log_fwd_.forward(whispertalk::LogLevel::DEBUG, state->call_id,
-                "No RAG context available for call");
-            return;
+        if (!ssl_ctx) { ::close(sock); return ""; }
+        SSL* ssl = SSL_new(ssl_ctx);
+        if (!ssl) { ::close(sock); return ""; }
+        SSL_set_fd(ssl, sock);
+        SSL_set_tlsext_host_name(ssl, "127.0.0.1");
+        if (SSL_connect(ssl) != 1) {
+            SSL_free(ssl); ::close(sock);
+            return "";
         }
 
-        enqueue_ws_frame(state, body.c_str(), body.size(), WEBSOCKET_OP_TEXT);
-        log_fwd_.forward(whispertalk::LogLevel::INFO, state->call_id,
-            "Enqueued RAG context (%zu bytes) as text frame", body.size());
+        std::string req = "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:13181\r\nConnection: close\r\n\r\n";
+        if (SSL_write(ssl, req.c_str(), static_cast<int>(req.size())) <= 0) {
+            SSL_shutdown(ssl); SSL_free(ssl); ::close(sock);
+            return "";
+        }
+        std::string response;
+        char buf[4096];
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(RAG_TIMEOUT_MS);
+        while (response.size() < RAG_MAX_RESPONSE) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) break;
+            struct pollfd rpfd{sock, POLLIN, 0};
+            if (poll(&rpfd, 1, (int)remaining) <= 0 || !(rpfd.revents & POLLIN)) break;
+            int n = SSL_read(ssl, buf, sizeof(buf));
+            if (n <= 0) break;
+            response.append(buf, n);
+        }
+        SSL_shutdown(ssl); SSL_free(ssl); ::close(sock);
+
+        size_t status_end = response.find("\r\n");
+        if (status_end == std::string::npos) return "";
+        std::string status_line = response.substr(0, status_end);
+        size_t sp1 = status_line.find(' ');
+        if (sp1 == std::string::npos) return "";
+        int http_status = std::atoi(status_line.c_str() + sp1 + 1);
+        if (http_status < 200 || http_status >= 300) return "";
+        size_t hdr_end = response.find("\r\n\r\n");
+        if (hdr_end == std::string::npos) return "";
+        return response.substr(hdr_end + 4);
     }
 
     void handle_call_end(uint32_t call_id) {
@@ -551,70 +619,6 @@ private:
         freeaddrinfo(res);
         rag_addr_resolved_ = true;
         return true;
-    }
-
-    std::string rag_http_get(const std::string& path) {
-        if (!rag_addr_resolved_) return "";
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) return "";
-        int flags = fcntl(sock, F_GETFL, 0);
-        if (flags == -1) flags = 0;
-        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-        connect(sock, (struct sockaddr*)&rag_addr_, rag_addrlen_);
-        struct pollfd pfd{sock, POLLOUT, 0};
-        if (poll(&pfd, 1, RAG_TIMEOUT_MS) <= 0 || !(pfd.revents & POLLOUT)) {
-            ::close(sock);
-            return "";
-        }
-        int conn_err = 0;
-        socklen_t conn_len = sizeof(conn_err);
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, &conn_err, &conn_len);
-        if (conn_err != 0) {
-            ::close(sock);
-            return "";
-        }
-        fcntl(sock, F_SETFL, flags);
-
-        if (!rag_ssl_ctx_) { ::close(sock); return ""; }
-        SSL* ssl = SSL_new(rag_ssl_ctx_);
-        if (!ssl) { ::close(sock); return ""; }
-        SSL_set_fd(ssl, sock);
-        SSL_set_tlsext_host_name(ssl, "127.0.0.1");
-        if (SSL_connect(ssl) != 1) {
-            SSL_free(ssl); ::close(sock);
-            return "";
-        }
-
-        std::string req = "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:13181\r\nConnection: close\r\n\r\n";
-        if (SSL_write(ssl, req.c_str(), static_cast<int>(req.size())) <= 0) {
-            SSL_shutdown(ssl); SSL_free(ssl); ::close(sock);
-            return "";
-        }
-        std::string response;
-        char buf[4096];
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(RAG_TIMEOUT_MS);  // fresh deadline after connect+TLS
-        while (response.size() < RAG_MAX_RESPONSE) {
-            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now()).count();
-            if (remaining <= 0) break;
-            struct pollfd rpfd{sock, POLLIN, 0};
-            if (poll(&rpfd, 1, (int)remaining) <= 0 || !(rpfd.revents & POLLIN)) break;
-            int n = SSL_read(ssl, buf, sizeof(buf));
-            if (n <= 0) break;
-            response.append(buf, n);
-        }
-        SSL_shutdown(ssl); SSL_free(ssl); ::close(sock);
-
-        size_t status_end = response.find("\r\n");
-        if (status_end == std::string::npos) return "";
-        std::string status_line = response.substr(0, status_end);
-        size_t sp1 = status_line.find(' ');
-        if (sp1 == std::string::npos) return "";
-        int http_status = std::atoi(status_line.c_str() + sp1 + 1);
-        if (http_status < 200 || http_status >= 300) return "";
-        size_t hdr_end = response.find("\r\n\r\n");
-        if (hdr_end == std::string::npos) return "";
-        return response.substr(hdr_end + 4);
     }
 
     void command_listener_loop() {
