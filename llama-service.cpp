@@ -455,6 +455,20 @@ private:
         return sentence_end_count_ >= 2;
     }
 
+    bool is_clause_boundary(const std::string& s) {
+        if (s.empty()) return false;
+        char last = s.back();
+        if (last == ',' || last == ';') return true;
+        if (s.size() >= 3) {
+            unsigned char a = static_cast<unsigned char>(s[s.size()-3]);
+            unsigned char b = static_cast<unsigned char>(s[s.size()-2]);
+            unsigned char c = static_cast<unsigned char>(s[s.size()-1]);
+            if (a == 0xE2 && b == 0x80 && (c == 0x94 || c == 0x93)) return true;
+            if (s[s.size()-3] == ' ' && s[s.size()-2] == '-' && s[s.size()-1] == ' ') return true;
+        }
+        return false;
+    }
+
     static std::string trim_whitespace(const std::string& s) {
         size_t start = s.find_first_not_of(" \n\r\t");
         if (start == std::string::npos) return "";
@@ -901,6 +915,7 @@ private:
         llama_token id;
         sentence_end_count_ = 0;
         int sentences_streamed = 0;
+        constexpr int MAX_EARLY_STREAM_CHUNKS = 4;
         llama_batch single_batch = llama_batch_init(1, 0, 1);
         for (int i = 0; i < MAX_RESPONSE_TOKENS; ++i) {
             if (!call->generating) {
@@ -915,8 +930,14 @@ private:
             int n = llama_token_to_piece(vocab_, id, piece, sizeof(piece), 0, false);
             if (n > 0) {
                 response.append(piece, n);
-                if (on_sentence && sentences_streamed < 2 && is_sentence_punctuation(response)) {
+                if (on_sentence && sentences_streamed < MAX_EARLY_STREAM_CHUNKS &&
+                    (is_sentence_punctuation(response) || is_clause_boundary(response))) {
+                    bool clause_triggered = is_clause_boundary(response);
                     std::string trimmed = trim_whitespace(response);
+                    if (clause_triggered && !trimmed.empty()) {
+                        char last = trimmed.back();
+                        if (last == ',' || last == ';') trimmed.pop_back();
+                    }
                     if (!trimmed.empty() && trimmed.size() >= MIN_RESPONSE_CHARS) {
                         auto stream_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - gen_start).count();
