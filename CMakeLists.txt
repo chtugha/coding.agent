@@ -91,6 +91,8 @@ endif()
 
 # Dependencies
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(OPUS REQUIRED opus)
 
 # OpenSSL — statically linked for all services.
 # Required for: mongoose TLS (frontend/tomedo-crawl), interconnect AES-256-GCM
@@ -449,6 +451,19 @@ else()
     message(WARNING "NeuTTS Service: DISABLED (espeak-ng not found)")
 endif()
 
+# 7b. Moshi Service (full-duplex neural voice, bridges IAP↔moshi-backend via WebSocket+Opus)
+add_executable(moshi-service moshi-service.cpp mongoose.c)
+target_include_directories(moshi-service PRIVATE ${OPENSSL_INCLUDE_DIR} ${OPUS_INCLUDE_DIRS})
+target_compile_definitions(moshi-service PRIVATE MG_ENABLE_PACKED_FS=0)
+target_link_libraries(moshi-service PRIVATE Threads::Threads
+    ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO}
+    ${OPUS_LIBRARIES})
+target_link_directories(moshi-service PRIVATE ${OPUS_LIBRARY_DIRS})
+if(APPLE)
+    target_link_libraries(moshi-service PRIVATE
+        "-framework CoreFoundation" "-framework Security")
+endif()
+
 # 8. Frontend (mongoose + SQLCipher)
 # Uses SQLCipher (${SQLCIPHER_DIR}/sqlite3.c) instead of the bundled sqlite3.c
 # so that frontend.db and the shared tomedo-crawl.db are both opened with
@@ -504,7 +519,7 @@ if(APPLE)
 endif()
 
 # Install
-set(INSTALL_TARGETS sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service tts-service frontend tomedo-crawl)
+set(INSTALL_TARGETS sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service tts-service moshi-service frontend tomedo-crawl)
 if(TARGET kokoro-service)
     list(APPEND INSTALL_TARGETS kokoro-service)
 endif()
