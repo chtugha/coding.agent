@@ -91,8 +91,10 @@ endif()
 
 # Dependencies
 find_package(Threads REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(OPUS opus)
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(OPUS opus)
+endif()
 
 # OpenSSL — statically linked for all services.
 # Required for: mongoose TLS (frontend/tomedo-crawl), interconnect AES-256-GCM
