@@ -88,6 +88,7 @@ struct MoshiCallState {
     OpusEncoder* opus_enc{nullptr};
     OpusDecoder* opus_dec{nullptr};
 
+    std::mutex audio_mutex;
     std::mutex output_mutex;
     std::deque<std::vector<float>> output_chunks;
 
@@ -162,12 +163,13 @@ public:
         int sock = cmd_sock_.exchange(-1);
         if (sock >= 0) ::close(sock);
 
+        std::map<uint32_t, std::shared_ptr<MoshiCallState>> to_cleanup;
         {
             std::lock_guard<std::mutex> lock(calls_mutex_);
-            for (auto& [cid, state] : calls_) {
-                cleanup_call(state);
-            }
-            calls_.clear();
+            to_cleanup.swap(calls_);
+        }
+        for (auto& [cid, state] : to_cleanup) {
+            cleanup_call(state);
         }
 
         receiver_thread.join();
@@ -279,13 +281,16 @@ private:
 
         while (state->input_accumulator.size() >= (size_t)MOSHI_FRAME_SAMPLES) {
             if (state->ws_connected.load()) {
-                unsigned char opus_buf[OPUS_MAX_PACKET];
-                int opus_len = opus_encode_float(state->opus_enc,
-                    state->input_accumulator.data(), MOSHI_FRAME_SAMPLES,
-                    opus_buf, OPUS_MAX_PACKET);
+                std::lock_guard<std::mutex> alock(state->audio_mutex);
+                if (state->opus_enc) {
+                    unsigned char opus_buf[OPUS_MAX_PACKET];
+                    int opus_len = opus_encode_float(state->opus_enc,
+                        state->input_accumulator.data(), MOSHI_FRAME_SAMPLES,
+                        opus_buf, OPUS_MAX_PACKET);
 
-                if (opus_len > 0) {
-                    enqueue_ws_frame(state, opus_buf, opus_len, WEBSOCKET_OP_BINARY);
+                    if (opus_len > 0) {
+                        enqueue_ws_frame(state, opus_buf, opus_len, WEBSOCKET_OP_BINARY);
+                    }
                 }
             }
 
@@ -461,13 +466,17 @@ private:
     }
 
     void handle_call_end(uint32_t call_id) {
-        std::lock_guard<std::mutex> lock(calls_mutex_);
-        auto it = calls_.find(call_id);
-        if (it == calls_.end()) return;
+        std::shared_ptr<MoshiCallState> state;
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            auto it = calls_.find(call_id);
+            if (it == calls_.end()) return;
+            state = std::move(it->second);
+            calls_.erase(it);
+        }
 
         log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleaning up");
-        cleanup_call(it->second);
-        calls_.erase(it);
+        cleanup_call(state);
     }
 
     void cleanup_call(std::shared_ptr<MoshiCallState>& state) {
@@ -502,8 +511,11 @@ private:
                 "Backend subprocess pid=%d terminated", state->backend_pid);
         }
 
-        if (state->opus_enc) { opus_encoder_destroy(state->opus_enc); state->opus_enc = nullptr; }
-        if (state->opus_dec) { opus_decoder_destroy(state->opus_dec); state->opus_dec = nullptr; }
+        {
+            std::lock_guard<std::mutex> alock(state->audio_mutex);
+            if (state->opus_enc) { opus_encoder_destroy(state->opus_enc); state->opus_enc = nullptr; }
+            if (state->opus_dec) { opus_decoder_destroy(state->opus_dec); state->opus_dec = nullptr; }
+        }
     }
 
     bool resolve_rag_addr() {
