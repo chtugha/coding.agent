@@ -2090,9 +2090,6 @@ function runMoshiConnectivityTest(){
   if(results)results.innerHTML='';
   const MOSHI_SERVICES=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','MOSHI_SERVICE','OUTBOUND_AUDIO_PROCESSOR','TOMEDO_CRAWL_SERVICE'];
   fetch('/api/pipeline/health').then(r=>r.json()).then(d=>{
-    const svcs=(d.services||[]).filter(s=>MOSHI_SERVICES.includes(s.name)||(s.name&&MOSHI_SERVICES.some(m=>s.name.toLowerCase().includes(m.toLowerCase().replace('_service','').replace('_','')))));
-    const all=(d.services||[]).filter(s=>MOSHI_SERVICES.some(m=>m===s.name||m.replace('_SERVICE','').replace('_','-').toLowerCase()===s.name));
-    const rows=(d.services||[]).filter(s=>MOSHI_SERVICES.includes(s.name)||MOSHI_SERVICES.map(m=>m.toLowerCase().replace('_service','').replace(/_/g,'-')).includes(s.name));
     let html='<table class="wt-table"><tr><th>Service</th><th>Status</th><th>Details</th></tr>';
     let onlineCount=0;
     (d.services||[]).forEach(s=>{
@@ -2108,11 +2105,14 @@ function runMoshiConnectivityTest(){
            +`<td style="font-size:11px;color:var(--wt-text-secondary)">${escapeHtml(s.details)}</td></tr>`;
     });
     html+='</table>';
+    const MOSHI_CORE=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','MOSHI_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
     const moshiSvcs=(d.services||[]).filter(s=>MOSHI_SERVICES.includes(s.name));
-    const moshiOnline=moshiSvcs.filter(s=>s.reachable).length;
-    const allOk=moshiOnline===MOSHI_SERVICES.length;
-    const hcolor=allOk?'var(--wt-success)':moshiOnline===0?'var(--wt-danger)':'var(--wt-warning)';
-    if(status)status.innerHTML=`<span style="color:${hcolor}">Moshi pipeline: ${moshiOnline}/${MOSHI_SERVICES.length} services reachable</span>`;
+    const coreOnline=moshiSvcs.filter(s=>s.reachable&&MOSHI_CORE.includes(s.name)).length;
+    const ragOnline=moshiSvcs.some(s=>s.name==='TOMEDO_CRAWL_SERVICE'&&s.reachable);
+    const coreOk=coreOnline===MOSHI_CORE.length;
+    const hcolor=coreOk?'var(--wt-success)':coreOnline===0?'var(--wt-danger)':'var(--wt-warning)';
+    const ragNote=ragOnline?', RAG online':' (RAG offline — optional)';
+    if(status)status.innerHTML=`<span style="color:${hcolor}">Moshi core: ${coreOnline}/${MOSHI_CORE.length} services${ragNote}</span>`;
     if(results)results.innerHTML=html;
     if(btn)btn.disabled=false;
   }).catch(e=>{

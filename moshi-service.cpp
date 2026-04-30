@@ -233,7 +233,11 @@ private:
                 }
 
                 start_ws_client(state);
-                inject_rag_context(state);
+
+                auto rag_state = state;
+                std::thread([this, rag_state]() {
+                    inject_rag_context(rag_state);
+                }).detach();
 
                 log_fwd_.forward(whispertalk::LogLevel::INFO, pkt.call_id,
                     "New Moshi call: backend pid=%d port=%d", state->backend_pid, state->backend_port);
@@ -245,28 +249,28 @@ private:
     }
 
     void sender_loop() {
+        struct PendingChunk {
+            uint32_t call_id;
+            std::vector<float> data;
+        };
         while (running_ && g_running) {
-            bool sent_any = false;
+            std::vector<PendingChunk> pending;
             {
                 std::lock_guard<std::mutex> lock(calls_mutex_);
                 for (auto& [cid, state] : calls_) {
-                    std::vector<float> chunk;
-                    {
-                        std::lock_guard<std::mutex> olock(state->output_mutex);
-                        if (!state->output_chunks.empty()) {
-                            chunk = std::move(state->output_chunks.front());
-                            state->output_chunks.pop_front();
-                        }
-                    }
-                    if (!chunk.empty()) {
-                        whispertalk::Packet out(cid, chunk.data(),
-                            static_cast<uint32_t>(chunk.size() * sizeof(float)));
-                        interconnect_.send_to_downstream(out);
-                        sent_any = true;
+                    std::lock_guard<std::mutex> olock(state->output_mutex);
+                    while (!state->output_chunks.empty()) {
+                        pending.push_back({cid, std::move(state->output_chunks.front())});
+                        state->output_chunks.pop_front();
                     }
                 }
             }
-            if (!sent_any) {
+            for (auto& p : pending) {
+                whispertalk::Packet out(p.call_id, p.data.data(),
+                    static_cast<uint32_t>(p.data.size() * sizeof(float)));
+                interconnect_.send_to_downstream(out);
+            }
+            if (pending.empty()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
         }
@@ -385,7 +389,8 @@ private:
     }
 
     bool spawn_backend(std::shared_ptr<MoshiCallState>& state) {
-        int port = allocate_ephemeral_port();
+        int guard_sock = -1;
+        int port = allocate_ephemeral_port(guard_sock);
         if (port <= 0) return false;
         state->backend_port = port;
 
@@ -417,6 +422,8 @@ private:
                               argv.data(), environ);
         posix_spawn_file_actions_destroy(&actions);
 
+        if (guard_sock >= 0) ::close(guard_sock);
+
         if (ret != 0) {
             log_fwd_.forward(whispertalk::LogLevel::ERROR, state->call_id,
                 "posix_spawn failed: %s", strerror(ret));
@@ -427,33 +434,42 @@ private:
         return true;
     }
 
-    int allocate_ephemeral_port() {
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) return -1;
+    int allocate_ephemeral_port(int& guard_sock) {
+        guard_sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (guard_sock < 0) return -1;
+
+        int opt = 1;
+        setsockopt(guard_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = 0;
 
-        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            ::close(sock);
+        if (bind(guard_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            ::close(guard_sock);
+            guard_sock = -1;
+            return -1;
+        }
+
+        if (listen(guard_sock, 1) < 0) {
+            ::close(guard_sock);
+            guard_sock = -1;
             return -1;
         }
 
         struct sockaddr_in bound{};
         socklen_t len = sizeof(bound);
-        if (getsockname(sock, (struct sockaddr*)&bound, &len) < 0) {
-            ::close(sock);
+        if (getsockname(guard_sock, (struct sockaddr*)&bound, &len) < 0) {
+            ::close(guard_sock);
+            guard_sock = -1;
             return -1;
         }
 
-        int port = ntohs(bound.sin_port);
-        ::close(sock);
-        return port;
+        return ntohs(bound.sin_port);
     }
 
-    void inject_rag_context(std::shared_ptr<MoshiCallState>& state) {
+    void inject_rag_context(std::shared_ptr<MoshiCallState> state) {
         state->rag_injected = true;
         if (!rag_addr_resolved_) return;
 

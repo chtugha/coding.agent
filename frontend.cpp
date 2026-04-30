@@ -1295,8 +1295,6 @@ private:
                 handle_kokoro_benchmark(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tts_roundtrip")) == 0) {
                 handle_tts_roundtrip(c, hm);
-            } else if (mg_strcmp(hm->uri, mg_str("/api/pipeline/mode")) == 0) {
-                handle_pipeline_mode(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/pipeline/health")) == 0) {
                 handle_pipeline_health(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/full_loop_test")) == 0) {
@@ -2297,71 +2295,6 @@ private:
             }
             save_service_config(name, args);
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
-        }
-    }
-
-    void handle_pipeline_mode(struct mg_connection *c, struct mg_http_message *hm) {
-        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
-            std::string mode = get_setting("pipeline_mode", "classic");
-            {
-                std::lock_guard<std::mutex> lock(services_mutex_);
-                for (const auto& svc : services_) {
-                    if (svc.name == "INBOUND_AUDIO_PROCESSOR") {
-                        bool has_flag = svc.default_args.find("--moshi-mode") != std::string::npos;
-                        mode = has_flag ? "moshi" : "classic";
-                        break;
-                    }
-                }
-            }
-            std::string json = "{\"mode\":\"" + escape_json(mode) + "\"}";
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.c_str());
-        } else if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
-            std::string body(hm->body.buf, hm->body.len);
-            std::string mode = extract_json_string(body, "mode");
-
-            if (mode != "classic" && mode != "moshi") {
-                mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid mode. Must be 'classic' or 'moshi'\"}");
-                return;
-            }
-
-            set_setting("pipeline_mode", mode);
-
-            std::string iap_args;
-            bool iap_found = false;
-            {
-                std::lock_guard<std::mutex> lock(services_mutex_);
-                for (auto& svc : services_) {
-                    if (svc.name == "INBOUND_AUDIO_PROCESSOR") {
-                        std::string args = svc.default_args;
-                        const std::string flag_sp = " --moshi-mode";
-                        const std::string flag_bare = "--moshi-mode";
-                        if (mode == "moshi") {
-                            if (args.find(flag_bare) == std::string::npos) {
-                                args += flag_sp;
-                            }
-                        } else {
-                            size_t pos;
-                            while ((pos = args.find(flag_sp)) != std::string::npos) {
-                                args.erase(pos, flag_sp.size());
-                            }
-                            if (args.find(flag_bare) == 0) {
-                                args.erase(0, flag_bare.size());
-                            }
-                        }
-                        svc.default_args = args;
-                        iap_args = args;
-                        iap_found = true;
-                        break;
-                    }
-                }
-            }
-            if (iap_found) {
-                save_service_config("INBOUND_AUDIO_PROCESSOR", iap_args);
-            }
-
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
-        } else {
-            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"Method not allowed\"}");
         }
     }
 
@@ -7115,9 +7048,6 @@ private:
              << ",\"ollama_running\":" << (ollama_running ? "true" : "false")
              << ",\"services\":" << svc_json.str()
              << ",\"recent_logs\":" << logs_json.str()
-             << ",\"pipeline\":" << (get_setting("pipeline_mode", "classic") == "moshi"
-                 ? "[\"SIP_CLIENT\",\"INBOUND_AUDIO_PROCESSOR\",\"MOSHI_SERVICE\",\"OUTBOUND_AUDIO_PROCESSOR\"]"
-                 : "[\"SIP_CLIENT\",\"INBOUND_AUDIO_PROCESSOR\",\"VAD_SERVICE\",\"WHISPER_SERVICE\",\"LLAMA_SERVICE\",\"TTS_SERVICE\",\"OUTBOUND_AUDIO_PROCESSOR\"]")
              << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
     }
