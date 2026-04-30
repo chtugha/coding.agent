@@ -146,5 +146,18 @@ body::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;point
 .wt-pipeline-connector-neural::after{color:var(--wt-accent-cyan)!important;text-shadow:0 0 6px rgba(0,255,245,0.8)}
 .wt-pipeline-mode-banner{padding:5px 14px;border-radius:var(--wt-radius);font-size:9px;font-family:var(--wt-font);letter-spacing:0.12em;font-weight:700;text-align:center;border:1px solid;transition:all 0.3s ease;position:relative;z-index:1}
 .wt-moshi-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:8px;font-family:var(--wt-font);letter-spacing:0.1em;font-weight:700;border:1px solid rgba(0,255,245,0.4);color:rgba(0,255,245,0.8);background:rgba(0,255,245,0.08)}
+.pfu-grid{display:grid;grid-template-columns:auto 20px 1fr 20px auto;grid-template-rows:auto auto;align-items:center;gap:0;position:relative;z-index:1}
+.pfu-left-stem{grid-column:1;grid-row:1/3;display:flex;flex-direction:column;align-items:center}
+.pfu-right-stem{grid-column:5;grid-row:1/3;display:flex;flex-direction:column;align-items:center}
+.pfu-fork-top{grid-column:2;grid-row:1;align-self:stretch;border-right:1px solid rgba(0,255,245,0.35);border-top:1px solid rgba(0,255,245,0.35);border-top-right-radius:6px}
+.pfu-fork-bot{grid-column:2;grid-row:2;align-self:stretch;border-right:1px solid rgba(255,45,149,0.3);border-bottom:1px solid rgba(255,45,149,0.3);border-bottom-right-radius:6px}
+.pfu-merge-top{grid-column:4;grid-row:1;align-self:stretch;border-left:1px solid rgba(0,255,245,0.35);border-top:1px solid rgba(0,255,245,0.35);border-top-left-radius:6px}
+.pfu-merge-bot{grid-column:4;grid-row:2;align-self:stretch;border-left:1px solid rgba(255,45,149,0.3);border-bottom:1px solid rgba(255,45,149,0.3);border-bottom-left-radius:6px}
+.pfu-path{display:flex;align-items:center;flex-wrap:nowrap;gap:0;padding:10px 0;position:relative}
+.pfu-path-neural{grid-column:3;grid-row:1}
+.pfu-path-classic{grid-column:3;grid-row:2}
+.pfu-path-label{font-size:9px;font-weight:700;letter-spacing:0.08em;font-family:var(--wt-font);margin-left:10px;white-space:nowrap;flex-shrink:0}
+.pfu-label-neural{color:var(--wt-accent-cyan);opacity:0.75}
+.pfu-label-classic{color:rgba(255,45,149,0.55)}
 )CSS";
 }

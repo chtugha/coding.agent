@@ -202,7 +202,7 @@ e.classList.toggle('active',e.dataset.page===p);
   currentPage=p;
   if(p!=='dashboard')stopDashboardPoll();
   if(p!=='beta-testing')stopTestResultsPoll();
-  if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();dashLoadPipelineLanguage();dashLoadPipelineMode();}
+  if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();dashLoadPipelineLanguage();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){
     try{buildSipLinesGrid();}catch(e){console.error('buildSipLinesGrid:',e);}
@@ -290,9 +290,9 @@ else{badge.textContent='Offline';badge.style.background='rgba(255,59,48,0.4)';}
 if(d.services){
   const svcMap={};
   d.services.forEach(s=>{svcMap[s.name]=s.online;});
-  (d.pipeline||[]).forEach(name=>{
-    const dot=document.getElementById(`pipeline-status-${name}`);
-    if(dot)dot.className=`node-status ${svcMap[name]?'online':'offline'}`;
+  d.services.forEach(s=>{
+    const dot=document.getElementById(`pipeline-status-${s.name}`);
+    if(dot)dot.className=`node-status ${s.online?'online':'offline'}`;
   });
 }
 fetch('/api/tts/status').then(r=>r.ok?r.json():null).then(ts=>{
@@ -336,25 +336,11 @@ if(d.recent_logs&&d.recent_logs.length>0){
 }
 
 function dashStartAll(){
-  const moshiServices=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','MOSHI_SERVICE','OUTBOUND_AUDIO_PROCESSOR','TOMEDO_CRAWL_SERVICE'];
-  fetch('/api/pipeline/mode').then(r=>r.json()).then(md=>{
-    const mode=md.mode||'classic';
-    fetch('/api/services').then(r=>r.json()).then(d=>{
-      d.services.forEach(s=>{
-        if(!s.online){
-          if(mode==='moshi'&&!moshiServices.includes(s.name))return;
-          fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service:s.name})});
-        }
-      });
-      setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
+  fetch('/api/services').then(r=>r.json()).then(d=>{
+    d.services.forEach(s=>{
+      if(!s.online)fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service:s.name})});
     });
-  }).catch(()=>{
-    fetch('/api/services').then(r=>r.json()).then(d=>{
-      d.services.forEach(s=>{
-        if(!s.online)fetch('/api/services/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service:s.name})});
-      });
-      setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
-    });
+    setTimeout(fetchDashboard,DELAY_SERVICE_REFRESH_MS);
   });
 }
 
@@ -384,40 +370,6 @@ function dashSetPipelineLanguage(v){
     });
 }
 
-function dashLoadPipelineMode(){
-  fetch('/api/pipeline/mode').then(r=>r.json()).then(d=>{
-    const mode=d.mode||'classic';
-    const sel=document.getElementById('dashModeSelect');
-    if(sel)sel.value=mode;
-    applyPipelineModeUI(mode);
-  }).catch(()=>{});
-}
-
-function dashSetPipelineMode(v){
-  fetch('/api/pipeline/mode',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({mode:v})})
-    .then(r=>r.json()).then(()=>{
-      applyPipelineModeUI(v);
-      const h=document.getElementById('dashModeHint');
-      if(h)h.textContent='Saved. Restart services to apply ('+v+').';
-    }).catch(()=>{});
-}
-
-function applyPipelineModeUI(mode){
-  document.querySelectorAll('[data-classic-only]').forEach(el=>{
-    el.style.display=mode==='classic'?'':'none';
-  });
-  document.querySelectorAll('[data-moshi-only]').forEach(el=>{
-    el.style.display=mode==='moshi'?'':'none';
-  });
-  const oapConn=document.getElementById('pipeline-connector-oap');
-  if(oapConn){
-    if(mode==='moshi'){oapConn.classList.add('wt-pipeline-connector-neural');}
-    else{oapConn.classList.remove('wt-pipeline-connector-neural');}
-  }
-  const sel=document.getElementById('dashModeSelect');
-  if(sel&&sel.value!==mode)sel.value=mode;
-}
 
 function dashRestartFailed(){
   fetch('/api/services').then(r=>r.json()).then(d=>{
@@ -3025,11 +2977,11 @@ pane.classList.toggle('active',pane.id===tabId);
 
 var _prereqInterval=null;
 function updatePrereqBadges(){
-  const _pipelineMode=(()=>{const s=document.getElementById('dashModeSelect');return s?s.value:'classic';})();
+  const classicFullLoop=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
+  const moshiFullLoop=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','MOSHI_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
   fetch('/api/services').then(r=>r.json()).then(d=>{
     const online=new Set(d.services.filter(s=>s.online).map(s=>s.name));
-    const classicFullLoop=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
-    const moshiFullLoop=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','MOSHI_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
+    const moshiOnline=online.has('MOSHI_SERVICE');
     const prereqs={
       'prereq-sip-rtp':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR'],
       'prereq-iap':[],
@@ -3038,10 +2990,10 @@ function updatePrereqBadges(){
       'prereq-kokoro':['TTS_SERVICE','KOKORO_ENGINE'],
       'prereq-shutup-pipeline':['LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
       'prereq-roundtrip':classicFullLoop,
-      'prereq-fullloop':_pipelineMode==='moshi'?moshiFullLoop:classicFullLoop,
+      'prereq-fullloop':moshiOnline?moshiFullLoop:classicFullLoop,
       'prereq-health':[],
-      'prereq-multiline':_pipelineMode==='moshi'?moshiFullLoop:classicFullLoop,
-      'prereq-stress':_pipelineMode==='moshi'?moshiFullLoop:classicFullLoop,
+      'prereq-multiline':moshiOnline?moshiFullLoop:classicFullLoop,
+      'prereq-stress':moshiOnline?moshiFullLoop:classicFullLoop,
     };
     for(const[id,reqs] of Object.entries(prereqs)){
       const el=document.getElementById(id);
