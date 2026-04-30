@@ -23,8 +23,12 @@ inline std::string FrontendServer::build_ui_pages() {
 <div class="wt-pipeline-node" id="pipeline-node-SIP_CLIENT"><span class="node-label">SIP</span><span class="node-status offline" id="pipeline-status-SIP_CLIENT"></span></div>
 <div class="wt-pipeline-connector"></div>
 <div class="wt-pipeline-node" id="pipeline-node-INBOUND_AUDIO_PROCESSOR"><span class="node-label">IAP</span><span class="node-status offline" id="pipeline-status-INBOUND_AUDIO_PROCESSOR"></span></div>
-<div class="wt-pipeline-connector" data-moshi-only="true" style="display:none"></div>
-<div class="wt-pipeline-node" id="pipeline-node-MOSHI_SERVICE" data-moshi-only="true" style="display:none;border-color:rgba(0,255,245,0.5)"><span class="node-label">Moshi</span><span class="node-status offline" id="pipeline-status-MOSHI_SERVICE"></span></div>
+<div class="wt-pipeline-connector wt-pipeline-connector-neural" data-moshi-only="true" style="display:none"></div>
+<div class="wt-pipeline-node wt-pipeline-node-neural" id="pipeline-node-MOSHI_SERVICE" data-moshi-only="true" style="display:none" title="Moshi Full-Duplex Neural Voice — End-to-end audio processing at ~80ms latency. Replaces VAD &#x2192; Whisper &#x2192; LLaMA &#x2192; TTS with a single neural model.">
+  <span class="node-label">MSH</span>
+  <span class="node-status offline" id="pipeline-status-MOSHI_SERVICE"></span>
+  <span class="node-sub">~80ms</span>
+</div>
 <div class="wt-pipeline-connector" data-classic-only="true"></div>
 <div class="wt-pipeline-node" id="pipeline-node-VAD_SERVICE" data-classic-only="true"><span class="node-label">VAD</span><span class="node-status offline" id="pipeline-status-VAD_SERVICE"></span></div>
 <div class="wt-pipeline-connector" data-classic-only="true"></div>
@@ -33,8 +37,12 @@ inline std::string FrontendServer::build_ui_pages() {
 <div class="wt-pipeline-node" id="pipeline-node-LLAMA_SERVICE" data-classic-only="true"><span class="node-label">LLM</span><span class="node-status offline" id="pipeline-status-LLAMA_SERVICE"></span></div>
 <div class="wt-pipeline-connector" data-classic-only="true"></div>
 <div class="wt-pipeline-node" id="pipeline-node-TTS_SERVICE" data-classic-only="true"><span class="node-label">TTS</span><span class="node-status offline" id="pipeline-status-TTS_SERVICE"></span><span class="node-status-sub" id="pipeline-tts-engine" style="display:block;font-size:9px;margin-top:2px;color:rgba(255,255,255,0.7);letter-spacing:0.05em">no engine</span></div>
-<div class="wt-pipeline-connector"></div>
+<div class="wt-pipeline-connector" id="pipeline-connector-oap"></div>
 <div class="wt-pipeline-node" id="pipeline-node-OUTBOUND_AUDIO_PROCESSOR"><span class="node-label">OAP</span><span class="node-status offline" id="pipeline-status-OUTBOUND_AUDIO_PROCESSOR"></span></div>
+</div>
+<div style="display:flex;gap:8px;margin-top:10px;justify-content:center;flex-wrap:wrap">
+<div class="wt-pipeline-mode-banner" data-classic-only="true" style="background:rgba(255,45,149,0.06);border-color:rgba(255,45,149,0.25);color:rgba(255,255,255,0.4)">&#x25BA; CLASSIC MODE &mdash; HALF-DUPLEX &mdash; WHISPER &#x2192; LLaMA &#x2192; TTS</div>
+<div class="wt-pipeline-mode-banner" data-moshi-only="true" style="display:none;background:rgba(0,255,245,0.06);border-color:rgba(0,255,245,0.35);color:rgba(0,255,245,0.7)">&#x26A1; MOSHI MODE &mdash; FULL-DUPLEX NEURAL VOICE &mdash; ~80ms END-TO-END LATENCY</div>
 </div>
 <div style="display:flex;align-items:center;gap:8px;margin-top:8px;justify-content:center">
 <div class="wt-pipeline-node" id="pipeline-node-TOMEDO_CRAWL_SERVICE" style="border-color:rgba(176,38,255,0.5)"><span class="node-label">RAG</span><span class="node-status offline" id="pipeline-status-TOMEDO_CRAWL_SERVICE"></span></div>
@@ -748,6 +756,7 @@ Save outgoing audio as WAV</label>
 <div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 3: Full Loop File Test (WER)</span><span id="prereq-fullloop" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
+<div data-classic-only="true">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
   Injects test audio files through full pipeline with 2 SIP lines. Measures Word Error Rate (WER)
   between LLaMA response text and Whisper Line 2 re-transcription of Kokoro/OAP output.
@@ -764,6 +773,25 @@ Save outgoing audio as WAV</label>
 </div>
 <div id="fullLoopStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="fullLoopResults" style="margin-top:12px"></div>
+</div>
+<div data-moshi-only="true" style="display:none">
+<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:12px">
+  In <span class="wt-moshi-badge">&#x26A1; MOSHI MODE</span> traditional WER measurement is not applicable &#x2014;
+  Moshi processes audio end-to-end as a single neural model with no separate ASR/LLM/TTS stages.
+  Use the connectivity test below to verify the Moshi pipeline is healthy.
+  Flow: SIP &#x2192; IAP (24kHz) &#x2192; <strong>MOSHI_SERVICE</strong> (neural, ~80ms) &#x2192; OAP &#x2192; SIP.
+</p>
+<div style="background:rgba(0,255,245,0.04);border:1px solid rgba(0,255,245,0.2);border-radius:var(--wt-radius);padding:14px;margin-bottom:12px">
+<div style="font-size:11px;font-family:var(--wt-font);color:rgba(0,255,245,0.7);letter-spacing:0.08em;margin-bottom:8px">&#x26A1; MOSHI PIPELINE CONNECTIVITY TEST</div>
+<p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Pings SIP, IAP, MOSHI_SERVICE, OAP and RAG cmd ports. Verifies the 4-service Moshi pipeline
+  is fully operational. No audio injection required.
+</p>
+<button class="wt-btn wt-btn-primary" id="moshiConnTestBtn" onclick="runMoshiConnectivityTest()" style="background:rgba(0,255,245,0.15);border-color:rgba(0,255,245,0.5);color:var(--wt-accent-cyan)">&#x25B6; Run Moshi Connectivity Test</button>
+</div>
+<div id="moshiConnTestStatus" style="margin-top:8px;font-size:12px"></div>
+<div id="moshiConnTestResults" style="margin-top:10px"></div>
+</div>
 </div>
 </div>
 </div>

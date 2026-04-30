@@ -374,19 +374,35 @@ public:
 
         log_port_ = whispertalk::FRONTEND_LOG_PORT;
 
-        int probe = socket(AF_INET, SOCK_DGRAM, 0);
-        if (probe >= 0) {
-            struct sockaddr_in pa{};
-            pa.sin_family = AF_INET;
-            pa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-            pa.sin_port = htons(log_port_);
-            if (bind(probe, (struct sockaddr*)&pa, sizeof(pa)) < 0) {
-                std::cerr << "FATAL: Log port " << log_port_ << " is already in use (another frontend running?)\n";
-                close(probe);
+        {
+            constexpr int MAX_RETRIES = 8;
+            constexpr int RETRY_SLEEP_MS = 500;
+            bool port_free = false;
+            for (int attempt = 0; attempt < MAX_RETRIES && !port_free; ++attempt) {
+                int probe = socket(AF_INET, SOCK_DGRAM, 0);
+                if (probe >= 0) {
+                    struct sockaddr_in pa{};
+                    pa.sin_family = AF_INET;
+                    pa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                    pa.sin_port = htons(log_port_);
+                    if (bind(probe, (struct sockaddr*)&pa, sizeof(pa)) == 0) {
+                        port_free = true;
+                    } else if (attempt == 0) {
+                        std::cerr << "[startup] Log port " << log_port_ << " in use; waiting for previous instance to exit...\n";
+                    }
+                    close(probe);
+                } else {
+                    port_free = true;
+                }
+                if (!port_free && attempt + 1 < MAX_RETRIES) {
+                    usleep(RETRY_SLEEP_MS * 1000);
+                }
+            }
+            if (!port_free) {
+                std::cerr << "FATAL: Log port " << log_port_ << " is still in use after retries (another frontend running?)\n";
                 interconnect_.shutdown();
                 return false;
             }
-            close(probe);
         }
 
         std::cout << "Frontend logging port: " << log_port_ << "\n";
@@ -4346,6 +4362,7 @@ private:
         const ServiceDef defs[] = {
             {"sip-client",                whispertalk::ServiceType::SIP_CLIENT},
             {"inbound-audio-processor",   whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR},
+            {"MOSHI_SERVICE",             whispertalk::ServiceType::MOSHI_SERVICE},
             {"vad-service",               whispertalk::ServiceType::VAD_SERVICE},
             {"whisper-service",           whispertalk::ServiceType::WHISPER_SERVICE},
             {"llama-service",             whispertalk::ServiceType::LLAMA_SERVICE},
@@ -4353,7 +4370,7 @@ private:
             {"outbound-audio-processor",  whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR},
             {"tomedo-crawl",              whispertalk::ServiceType::TOMEDO_CRAWL_SERVICE},
         };
-        constexpr int N = 8;
+        constexpr int N = 9;
 
         struct Result { bool reachable; std::string details; };
         std::vector<Result> results(N);

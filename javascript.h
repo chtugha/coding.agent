@@ -410,6 +410,13 @@ function applyPipelineModeUI(mode){
   document.querySelectorAll('[data-moshi-only]').forEach(el=>{
     el.style.display=mode==='moshi'?'':'none';
   });
+  const oapConn=document.getElementById('pipeline-connector-oap');
+  if(oapConn){
+    if(mode==='moshi'){oapConn.classList.add('wt-pipeline-connector-neural');}
+    else{oapConn.classList.remove('wt-pipeline-connector-neural');}
+  }
+  const sel=document.getElementById('dashModeSelect');
+  if(sel&&sel.value!==mode)sel.value=mode;
 }
 
 function dashRestartFailed(){
@@ -2122,6 +2129,46 @@ function renderFullLoopMultiEngine(perEngine){
   results.innerHTML=html;
 }
 
+function runMoshiConnectivityTest(){
+  const status=document.getElementById('moshiConnTestStatus');
+  const results=document.getElementById('moshiConnTestResults');
+  const btn=document.getElementById('moshiConnTestBtn');
+  if(btn)btn.disabled=true;
+  if(status)status.innerHTML='<span style="color:var(--wt-accent-cyan)">Pinging Moshi pipeline services...</span>';
+  if(results)results.innerHTML='';
+  const MOSHI_SERVICES=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','MOSHI_SERVICE','OUTBOUND_AUDIO_PROCESSOR','TOMEDO_CRAWL_SERVICE'];
+  fetch('/api/pipeline/health').then(r=>r.json()).then(d=>{
+    const svcs=(d.services||[]).filter(s=>MOSHI_SERVICES.includes(s.name)||(s.name&&MOSHI_SERVICES.some(m=>s.name.toLowerCase().includes(m.toLowerCase().replace('_service','').replace('_','')))));
+    const all=(d.services||[]).filter(s=>MOSHI_SERVICES.some(m=>m===s.name||m.replace('_SERVICE','').replace('_','-').toLowerCase()===s.name));
+    const rows=(d.services||[]).filter(s=>MOSHI_SERVICES.includes(s.name)||MOSHI_SERVICES.map(m=>m.toLowerCase().replace('_service','').replace(/_/g,'-')).includes(s.name));
+    let html='<table class="wt-table"><tr><th>Service</th><th>Status</th><th>Details</th></tr>';
+    let onlineCount=0;
+    (d.services||[]).forEach(s=>{
+      const relevant=MOSHI_SERVICES.includes(s.name);
+      if(!relevant)return;
+      const c=s.reachable?'var(--wt-success)':'var(--wt-danger)';
+      const dot=s.reachable?'&#x25CF;':'&#x25CB;';
+      const isMoshi=s.name==='MOSHI_SERVICE';
+      const rowStyle=isMoshi?'background:rgba(0,255,245,0.04)':'';
+      if(s.reachable)onlineCount++;
+      html+=`<tr style="${rowStyle}"><td>${isMoshi?'<span class="wt-moshi-badge">&#x26A1; '+escapeHtml(s.name)+'</span>':escapeHtml(s.name)}</td>`
+           +`<td style="color:${c};font-weight:bold">${dot} ${s.reachable?'online':'offline'}</td>`
+           +`<td style="font-size:11px;color:var(--wt-text-secondary)">${escapeHtml(s.details)}</td></tr>`;
+    });
+    html+='</table>';
+    const moshiSvcs=(d.services||[]).filter(s=>MOSHI_SERVICES.includes(s.name));
+    const moshiOnline=moshiSvcs.filter(s=>s.reachable).length;
+    const allOk=moshiOnline===MOSHI_SERVICES.length;
+    const hcolor=allOk?'var(--wt-success)':moshiOnline===0?'var(--wt-danger)':'var(--wt-warning)';
+    if(status)status.innerHTML=`<span style="color:${hcolor}">Moshi pipeline: ${moshiOnline}/${MOSHI_SERVICES.length} services reachable</span>`;
+    if(results)results.innerHTML=html;
+    if(btn)btn.disabled=false;
+  }).catch(e=>{
+    if(status)status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e))}</span>`;
+    if(btn)btn.disabled=false;
+  });
+}
+
 function checkSipProvider(){
   const status=document.getElementById('sipProviderStatus');
   status.innerHTML='<p style="color:var(--wt-accent)">Checking...</p>';
@@ -2978,8 +3025,11 @@ pane.classList.toggle('active',pane.id===tabId);
 
 var _prereqInterval=null;
 function updatePrereqBadges(){
+  const _pipelineMode=(()=>{const s=document.getElementById('dashModeSelect');return s?s.value:'classic';})();
   fetch('/api/services').then(r=>r.json()).then(d=>{
     const online=new Set(d.services.filter(s=>s.online).map(s=>s.name));
+    const classicFullLoop=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
+    const moshiFullLoop=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','MOSHI_SERVICE','OUTBOUND_AUDIO_PROCESSOR'];
     const prereqs={
       'prereq-sip-rtp':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR'],
       'prereq-iap':[],
@@ -2987,11 +3037,11 @@ function updatePrereqBadges(){
       'prereq-llama':['LLAMA_SERVICE'],
       'prereq-kokoro':['TTS_SERVICE','KOKORO_ENGINE'],
       'prereq-shutup-pipeline':['LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
-      'prereq-roundtrip':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
-      'prereq-fullloop':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-roundtrip':classicFullLoop,
+      'prereq-fullloop':_pipelineMode==='moshi'?moshiFullLoop:classicFullLoop,
       'prereq-health':[],
-      'prereq-multiline':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
-      'prereq-stress':['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','OUTBOUND_AUDIO_PROCESSOR'],
+      'prereq-multiline':_pipelineMode==='moshi'?moshiFullLoop:classicFullLoop,
+      'prereq-stress':_pipelineMode==='moshi'?moshiFullLoop:classicFullLoop,
     };
     for(const[id,reqs] of Object.entries(prereqs)){
       const el=document.getElementById(id);

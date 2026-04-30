@@ -136,5 +136,15 @@ body::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;point
 @media (max-width:768px){.wt-sidebar{width:48px;min-width:48px}.wt-sidebar:hover{width:48px;min-width:48px}.wt-sidebar .nav-text,.wt-sidebar-section-title,.wt-sidebar-header .header-text{display:none !important}.wt-nav-item{justify-content:center;padding:12px 0;border-left:none}.wt-nav-item .nav-badge{display:none}.wt-metric-card .metric-value{font-size:28px}}
 .model-upload-zone{border:2px dashed var(--wt-border);border-radius:var(--wt-radius);padding:24px;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s;color:var(--wt-text-secondary);user-select:none}
 .model-upload-zone:hover,.model-upload-zone.drag-over{border-color:var(--wt-accent);background:rgba(255,45,149,0.05);color:var(--wt-text)}
+@keyframes cyanPulse{0%,100%{box-shadow:0 0 8px rgba(0,255,245,0.35),0 0 16px rgba(0,255,245,0.15)}50%{box-shadow:0 0 20px rgba(0,255,245,0.7),0 0 40px rgba(0,255,245,0.3)}}
+@keyframes neuralScan{0%{background-position:0% 0%}100%{background-position:0% 200%}}
+.wt-pipeline-node-neural{border-color:rgba(0,255,245,0.6)!important;background:linear-gradient(160deg,rgba(0,255,245,0.08) 0%,rgba(0,0,0,0.6) 60%)!important;animation:cyanPulse 2.8s ease-in-out infinite}
+.wt-pipeline-node-neural:hover{box-shadow:0 0 28px rgba(0,255,245,0.55)!important;border-color:rgba(0,255,245,1)!important;transform:scale(1.1)}
+.wt-pipeline-node-neural .node-label{color:var(--wt-accent-cyan)!important;text-shadow:0 0 12px rgba(0,255,245,0.8)}
+.wt-pipeline-node-neural .node-sub{display:block;font-size:7px;margin-top:2px;color:rgba(0,255,245,0.55);letter-spacing:0.06em;font-family:var(--wt-mono);text-align:center}
+.wt-pipeline-connector-neural{background:linear-gradient(90deg,rgba(0,255,245,0.8),rgba(0,255,245,0.3))!important;animation:flowPulse 1.2s ease-in-out infinite!important;opacity:1!important}
+.wt-pipeline-connector-neural::after{color:var(--wt-accent-cyan)!important;text-shadow:0 0 6px rgba(0,255,245,0.8)}
+.wt-pipeline-mode-banner{padding:5px 14px;border-radius:var(--wt-radius);font-size:9px;font-family:var(--wt-font);letter-spacing:0.12em;font-weight:700;text-align:center;border:1px solid;transition:all 0.3s ease;position:relative;z-index:1}
+.wt-moshi-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:8px;font-family:var(--wt-font);letter-spacing:0.1em;font-weight:700;border:1px solid rgba(0,255,245,0.4);color:rgba(0,255,245,0.8);background:rgba(0,255,245,0.08)}
 )CSS";
 }
