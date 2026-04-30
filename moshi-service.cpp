@@ -87,8 +87,6 @@ struct MoshiCallState {
     std::thread ws_thread;
     std::atomic<bool> ws_running{false};
 
-    bool rag_injected{false};
-
     std::vector<float> input_accumulator;
     OpusEncoder* opus_enc{nullptr};
     OpusDecoder* opus_dec{nullptr};
@@ -241,7 +239,6 @@ private:
                     auto addrlen_copy = rag_addrlen_;
                     auto rag_state = state;
                     std::thread([rag_state, ssl_ctx_copy, addr_copy, addrlen_copy]() {
-                        rag_state->rag_injected = true;
                         std::string path = "/caller/" + std::to_string(rag_state->call_id);
                         std::string body = rag_http_get_static(path, addr_copy, addrlen_copy, ssl_ctx_copy);
                         if (!body.empty()) {
@@ -252,8 +249,6 @@ private:
                         }
                         SSL_CTX_free(ssl_ctx_copy);
                     }).detach();
-                } else {
-                    state->rag_injected = true;
                 }
 
                 log_fwd_.forward(whispertalk::LogLevel::INFO, pkt.call_id,
