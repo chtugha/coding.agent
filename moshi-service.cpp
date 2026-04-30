@@ -72,6 +72,11 @@ static constexpr int CMD_RECV_TIMEOUT_S    = 10;
 static constexpr int CMD_BUF_SIZE          = 4096;
 
 struct MoshiCallState {
+    ~MoshiCallState() {
+        if (opus_enc) { opus_encoder_destroy(opus_enc); opus_enc = nullptr; }
+        if (opus_dec) { opus_decoder_destroy(opus_dec); opus_dec = nullptr; }
+    }
+
     uint32_t call_id{0};
     pid_t backend_pid{-1};
     int backend_port{0};
@@ -307,7 +312,7 @@ private:
             state->ws_connected.store(true);
         } else if (ev == MG_EV_WS_MSG) {
             auto* msg = static_cast<struct mg_ws_message*>(ev_data);
-            if (msg->flags & WEBSOCKET_OP_BINARY) {
+            if ((msg->flags & WEBSOCKET_OP_BINARY) && state->opus_dec) {
                 float pcm[MOSHI_FRAME_SAMPLES];
                 int decoded = opus_decode_float(state->opus_dec,
                     reinterpret_cast<const unsigned char*>(msg->data.buf),
