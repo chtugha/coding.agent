@@ -65,6 +65,8 @@ public:
         moshi_mode_ = m;
         if (m) {
             interconnect_.set_downstream_override(whispertalk::ServiceType::MOSHI_SERVICE);
+        } else {
+            interconnect_.clear_downstream_override();
         }
     }
 

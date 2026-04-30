@@ -31,6 +31,7 @@
 #include <cstring>
 #include <cmath>
 #include <deque>
+#include <sstream>
 #include <signal.h>
 #include <getopt.h>
 #include <poll.h>
@@ -89,6 +90,13 @@ struct MoshiCallState {
 
     std::mutex output_mutex;
     std::deque<std::vector<float>> output_chunks;
+
+    struct WsFrame {
+        std::vector<uint8_t> data;
+        int op;
+    };
+    std::mutex ws_outbound_mutex;
+    std::deque<WsFrame> ws_outbound_queue;
 
     std::chrono::steady_clock::time_point last_activity;
 };
@@ -183,40 +191,47 @@ private:
             size_t sample_count = pkt.payload_size / sizeof(float);
             const float* samples = reinterpret_cast<const float*>(pkt.payload.data());
 
-            std::lock_guard<std::mutex> lock(calls_mutex_);
-            auto it = calls_.find(pkt.call_id);
-            if (it == calls_.end()) {
-                auto state = std::make_shared<MoshiCallState>();
-                state->call_id = pkt.call_id;
-                state->last_activity = std::chrono::steady_clock::now();
-                state->input_accumulator.reserve(MOSHI_FRAME_SAMPLES);
+            std::shared_ptr<MoshiCallState> state;
+            bool new_call = false;
+            {
+                std::lock_guard<std::mutex> lock(calls_mutex_);
+                auto it = calls_.find(pkt.call_id);
+                if (it == calls_.end()) {
+                    state = std::make_shared<MoshiCallState>();
+                    state->call_id = pkt.call_id;
+                    state->last_activity = std::chrono::steady_clock::now();
+                    state->input_accumulator.reserve(MOSHI_FRAME_SAMPLES);
 
-                int err;
-                state->opus_enc = opus_encoder_create(MOSHI_SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP, &err);
-                if (state->opus_enc) {
-                    opus_encoder_ctl(state->opus_enc, OPUS_SET_BITRATE(OPUS_BITRATE));
+                    int err;
+                    state->opus_enc = opus_encoder_create(MOSHI_SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP, &err);
+                    if (state->opus_enc) {
+                        opus_encoder_ctl(state->opus_enc, OPUS_SET_BITRATE(OPUS_BITRATE));
+                    }
+                    state->opus_dec = opus_decoder_create(MOSHI_SAMPLE_RATE, 1, &err);
+
+                    calls_[pkt.call_id] = state;
+                    new_call = true;
+                } else {
+                    state = it->second;
                 }
-                state->opus_dec = opus_decoder_create(MOSHI_SAMPLE_RATE, 1, &err);
+            }
 
+            if (new_call) {
                 if (!spawn_backend(state)) {
                     log_fwd_.forward(whispertalk::LogLevel::ERROR, pkt.call_id,
                         "Failed to spawn moshi-backend subprocess");
+                    std::lock_guard<std::mutex> lock(calls_mutex_);
+                    calls_.erase(pkt.call_id);
                     continue;
                 }
 
                 start_ws_client(state);
+                inject_rag_context(state);
 
-                if (!state->rag_injected) {
-                    inject_rag_context(state);
-                }
-
-                calls_[pkt.call_id] = state;
-                it = calls_.find(pkt.call_id);
                 log_fwd_.forward(whispertalk::LogLevel::INFO, pkt.call_id,
                     "New Moshi call: backend pid=%d port=%d", state->backend_pid, state->backend_port);
             }
 
-            auto& state = it->second;
             state->last_activity = std::chrono::steady_clock::now();
             process_audio_input(state, samples, sample_count);
         }
@@ -250,20 +265,27 @@ private:
         }
     }
 
+    void enqueue_ws_frame(std::shared_ptr<MoshiCallState>& state,
+                          const void* data, size_t len, int op) {
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        std::lock_guard<std::mutex> lock(state->ws_outbound_mutex);
+        state->ws_outbound_queue.push_back({std::vector<uint8_t>(p, p + len), op});
+    }
+
     void process_audio_input(std::shared_ptr<MoshiCallState>& state,
                              const float* samples, size_t count) {
         state->input_accumulator.insert(state->input_accumulator.end(),
                                         samples, samples + count);
 
         while (state->input_accumulator.size() >= (size_t)MOSHI_FRAME_SAMPLES) {
-            if (state->ws_connected.load() && state->ws_conn) {
+            if (state->ws_connected.load()) {
                 unsigned char opus_buf[OPUS_MAX_PACKET];
                 int opus_len = opus_encode_float(state->opus_enc,
                     state->input_accumulator.data(), MOSHI_FRAME_SAMPLES,
                     opus_buf, OPUS_MAX_PACKET);
 
                 if (opus_len > 0) {
-                    mg_ws_send(state->ws_conn, opus_buf, opus_len, WEBSOCKET_OP_BINARY);
+                    enqueue_ws_frame(state, opus_buf, opus_len, WEBSOCKET_OP_BINARY);
                 }
             }
 
@@ -335,6 +357,17 @@ private:
 
             while (state->ws_running.load()) {
                 mg_mgr_poll(&state->mgr, 10);
+
+                if (state->ws_connected.load() && state->ws_conn) {
+                    std::deque<MoshiCallState::WsFrame> frames;
+                    {
+                        std::lock_guard<std::mutex> lock(state->ws_outbound_mutex);
+                        frames.swap(state->ws_outbound_queue);
+                    }
+                    for (auto& f : frames) {
+                        mg_ws_send(state->ws_conn, f.data.data(), f.data.size(), f.op);
+                    }
+                }
             }
 
             mg_mgr_free(&state->mgr);
@@ -422,19 +455,9 @@ private:
             return;
         }
 
-        auto start = std::chrono::steady_clock::now();
-        while (!state->ws_connected.load()) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
-            if (elapsed > WS_CONNECT_TIMEOUT_MS) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-
-        if (state->ws_connected.load() && state->ws_conn) {
-            mg_ws_send(state->ws_conn, body.c_str(), body.size(), WEBSOCKET_OP_TEXT);
-            log_fwd_.forward(whispertalk::LogLevel::INFO, state->call_id,
-                "Injected RAG context (%zu bytes) as text frame", body.size());
-        }
+        enqueue_ws_frame(state, body.c_str(), body.size(), WEBSOCKET_OP_TEXT);
+        log_fwd_.forward(whispertalk::LogLevel::INFO, state->call_id,
+            "Enqueued RAG context (%zu bytes) as text frame", body.size());
     }
 
     void handle_call_end(uint32_t call_id) {
@@ -448,11 +471,13 @@ private:
     }
 
     void cleanup_call(std::shared_ptr<MoshiCallState>& state) {
-        state->ws_running.store(false);
-
-        if (state->ws_connected.load() && state->ws_conn) {
-            mg_ws_send(state->ws_conn, "", 0, WEBSOCKET_OP_CLOSE);
+        if (state->ws_connected.load()) {
+            uint8_t empty = 0;
+            enqueue_ws_frame(state, &empty, 0, WEBSOCKET_OP_CLOSE);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
+
+        state->ws_running.store(false);
 
         if (state->ws_thread.joinable()) {
             state->ws_thread.join();
@@ -534,7 +559,7 @@ private:
         }
         std::string response;
         char buf[4096];
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(RAG_TIMEOUT_MS);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(RAG_TIMEOUT_MS);  // fresh deadline after connect+TLS
         while (response.size() < RAG_MAX_RESPONSE) {
             auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();

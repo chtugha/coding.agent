@@ -590,6 +590,11 @@ public:
         downstream_override_ = override_type;
     }
 
+    void clear_downstream_override() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        downstream_override_.reset();
+    }
+
     ConnectionState upstream_state() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
         return upstream_state_;
