@@ -108,7 +108,7 @@ def length_plan(total: int) -> list[str]:
     return plan
 
 
-def _validate_dialogue(d: dict, expected_id: str, domain: str, scenario_key: str, length: str) -> bool:
+def _validate_dialogue(d: dict) -> bool:
     if not isinstance(d, dict):
         return False
     turns = d.get("turns")
@@ -152,7 +152,7 @@ def call_api(domain: str, scenario_key: str, scenario_desc: str, length: str, id
                 d["domain"]   = domain
                 d["scenario"] = scenario_key
                 d["length"]   = length
-                if _validate_dialogue(d, eid, domain, scenario_key, length):
+                if _validate_dialogue(d):
                     valid.append(d)
                 else:
                     print(f"      ⚠ invalid dialogue {eid} — skipped")

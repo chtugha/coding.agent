@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # synthesize_stereo.py — Step 2 of German Moshi fine-tune pipeline.
 #
-# Reads scripts/dialogues.json, synthesizes each turn with OpenAI TTS,
+# Reads scripts/dialogues.json, synthesizes each turn with TTS,
 # and assembles two-channel stereo WAVs:
-#   Ch0 (left)  = MOSHI voice — "nova"   (clear, female)
-#   Ch1 (right) = USER  voice — "onyx"   (deep,  male)
+#   Ch0 (left)  = MOSHI voice (receptionist)
+#   Ch1 (right) = USER  voice (caller)
+#
+# TTS provider (env TTS_PROVIDER, default "google"):
+#   google — de-DE-Neural2-F / de-DE-Neural2-D  (native German, recommended)
+#   openai — nova / onyx  (English-optimized, non-native accent on German)
 #
 # Output:
 #   data/moshi_german/stereo/*.wav      — 24kHz 16-bit stereo WAVs
@@ -16,20 +20,23 @@
 #   • Rate-limit throttle (1 req/s sustained)
 #   • Progress bar
 #
-# Requirements: pip install openai numpy scipy tqdm
-# Env:          OPENAI_API_KEY
+# Requirements: pip install numpy scipy tqdm
+#               pip install google-cloud-texttospeech  (for google provider)
+#               pip install openai                     (for openai provider)
+# Env:          TTS_PROVIDER=google|openai  (default: google)
+#               GOOGLE_APPLICATION_CREDENTIALS  (for google)
+#               OPENAI_API_KEY                  (for openai)
 
 import io
 import json
+import os
 import time
 import wave
+from math import gcd
 from pathlib import Path
 
 import numpy as np
-from openai import OpenAI
 from tqdm import tqdm
-
-client = OpenAI()
 
 DIALOGUES_PATH = Path(__file__).parent / "dialogues.json"
 DATA_DIR       = Path(__file__).parent.parent / "data" / "moshi_german"
@@ -38,10 +45,30 @@ STEREO_DIR     = DATA_DIR / "stereo"
 MANIFEST_PATH  = DATA_DIR / "train_local.jsonl"
 
 SAMPLE_RATE   = 24000          # Moshi's native rate
-MOSHI_VOICE   = "nova"         # Ch0 — Moshi / receptionist
-USER_VOICE    = "onyx"         # Ch1 — caller / patient / customer
 GAP_SECONDS   = 0.12           # silence between turns (120 ms)
 MIN_REQ_GAP   = 1.05           # seconds between TTS API calls (rate-limit safety)
+
+TTS_PROVIDER  = os.environ.get("TTS_PROVIDER", "google").lower()
+
+if TTS_PROVIDER == "openai":
+    from openai import OpenAI
+    _openai_client = OpenAI()
+    MOSHI_VOICE = "nova"
+    USER_VOICE  = "onyx"
+elif TTS_PROVIDER == "google":
+    try:
+        from google.cloud import texttospeech as gtts
+        _google_client = gtts.TextToSpeechClient()
+    except ImportError:
+        raise SystemExit(
+            "Google Cloud TTS selected but google-cloud-texttospeech not installed.\n"
+            "  pip install google-cloud-texttospeech\n"
+            "Or set TTS_PROVIDER=openai to use OpenAI TTS instead."
+        )
+    MOSHI_VOICE = "de-DE-Neural2-F"
+    USER_VOICE  = "de-DE-Neural2-D"
+else:
+    raise SystemExit(f"Unknown TTS_PROVIDER={TTS_PROVIDER!r}. Use 'google' or 'openai'.")
 
 _last_request_at: float = 0.0
 
@@ -62,23 +89,62 @@ def _is_valid_wav(path: Path) -> bool:
         return False
 
 
+def _synthesize_openai(text: str, voice: str, cache_path: Path) -> bytes:
+    response = _openai_client.audio.speech.create(
+        model="tts-1",
+        voice=voice,
+        input=text,
+        response_format="wav",
+        speed=0.95,
+    )
+    return response.content
+
+
+def _synthesize_google(text: str, voice: str, cache_path: Path) -> bytes:
+    synthesis_input = gtts.SynthesisInput(text=text)
+    voice_params = gtts.VoiceSelectionParams(
+        language_code="de-DE",
+        name=voice,
+    )
+    audio_config = gtts.AudioConfig(
+        audio_encoding=gtts.AudioEncoding.LINEAR16,
+        sample_rate_hertz=SAMPLE_RATE,
+        speaking_rate=0.95,
+    )
+    response = _google_client.synthesize_speech(
+        input=synthesis_input, voice=voice_params, audio_config=audio_config,
+    )
+    return response.audio_content
+
+
+def _is_valid_cache(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size < 100:
+        return False
+    if TTS_PROVIDER == "google":
+        return True
+    return _is_valid_wav(path)
+
+
+def _read_cache(path: Path) -> np.ndarray:
+    if TTS_PROVIDER == "google":
+        return _pcm_to_float(path.read_bytes())
+    return _read_wav_float(path)
+
+
 def synthesize(text: str, voice: str, cache_path: Path) -> np.ndarray:
     """Return float32 mono audio at SAMPLE_RATE. Uses cache if available."""
-    if cache_path.exists() and _is_valid_wav(cache_path):
-        return _read_wav_float(cache_path)
+    if _is_valid_cache(cache_path):
+        return _read_cache(cache_path)
+
+    synth_fn = _synthesize_openai if TTS_PROVIDER == "openai" else _synthesize_google
 
     for attempt in range(5):
         try:
             _throttle()
-            response = client.audio.speech.create(
-                model="tts-1",
-                voice=voice,
-                input=text,
-                response_format="wav",
-                speed=0.95,
-            )
-            raw = response.content
+            raw = synth_fn(text, voice, cache_path)
             cache_path.write_bytes(raw)
+            if TTS_PROVIDER == "google":
+                return _pcm_to_float(raw)
             return _read_wav_float_bytes(raw)
         except Exception as exc:
             wait = 2 ** attempt
@@ -104,6 +170,10 @@ def _read_wav_float_bytes(data: bytes) -> np.ndarray:
     return _raw_to_float(raw, sr, sw)
 
 
+def _pcm_to_float(raw: bytes) -> np.ndarray:
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def _raw_to_float(raw: bytes, sr: int, sw: int) -> np.ndarray:
     if sw == 2:
         audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
@@ -120,7 +190,6 @@ def _resample(audio: np.ndarray, from_sr: int, to_sr: int) -> np.ndarray:
     if from_sr == to_sr:
         return audio
     from scipy.signal import resample_poly
-    from math import gcd
     g = gcd(to_sr, from_sr)
     return resample_poly(audio, to_sr // g, from_sr // g).astype(np.float32)
 
@@ -134,19 +203,25 @@ def assemble_stereo(dialogue: dict) -> tuple[np.ndarray, float]:
     moshi_ch: list[np.ndarray] = []
     user_ch:  list[np.ndarray] = []
 
-    for turn_idx, turn in enumerate(dialogue["turns"]):
+    turns = dialogue["turns"]
+    for turn_idx, turn in enumerate(turns):
         speaker = turn["speaker"]
         voice   = MOSHI_VOICE if speaker == "moshi" else USER_VOICE
         cache_name = f"{dialogue['id']}_t{turn_idx:03d}_{speaker}.wav"
         audio = synthesize(turn["text"], voice, CACHE_DIR / cache_name)
         n     = len(audio)
+        is_last = turn_idx == len(turns) - 1
 
         if speaker == "moshi":
-            moshi_ch.extend([audio, gap])
-            user_ch.extend( [np.zeros(n, dtype=np.float32), gap])
+            moshi_ch.append(audio)
+            user_ch.append(np.zeros(n, dtype=np.float32))
         else:
-            user_ch.extend( [audio, gap])
-            moshi_ch.extend([np.zeros(n, dtype=np.float32), gap])
+            user_ch.append(audio)
+            moshi_ch.append(np.zeros(n, dtype=np.float32))
+
+        if not is_last:
+            moshi_ch.append(gap)
+            user_ch.append(gap)
 
     left  = np.concatenate(moshi_ch) if moshi_ch else np.zeros(SAMPLE_RATE, dtype=np.float32)
     right = np.concatenate(user_ch)  if user_ch  else np.zeros(SAMPLE_RATE, dtype=np.float32)

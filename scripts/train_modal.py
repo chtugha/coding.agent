@@ -156,6 +156,7 @@ def do_upload():
     gpu="A10G",
     volumes={"/data": data_vol},
     image=gpu_image,
+    secrets=[modal.Secret.from_name("huggingface-token")],
     timeout=4 * 3600,
 )
 def do_annotate():
@@ -228,7 +229,7 @@ def main():
     parser.add_argument("--upload-only",   action="store_true")
     parser.add_argument("--annotate-only", action="store_true")
     parser.add_argument("--train-only",    action="store_true")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     only = args.upload_only or args.annotate_only or args.train_only
 
