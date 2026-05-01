@@ -208,13 +208,16 @@ def do_train():
 
     os.makedirs(f"{VOL_CHECKPOINTS}/run_001", exist_ok=True)
 
+    env = os.environ.copy()
+    env.setdefault("CUDA_VISIBLE_DEVICES", "0")
+
     cmd = [
         "torchrun", "--nproc-per-node", "1",
         "-m", "train",
         config_path,
     ]
     print("Starting training:", " ".join(cmd))
-    result = subprocess.run(cmd, cwd="/moshi-finetune", capture_output=False)
+    result = subprocess.run(cmd, cwd="/moshi-finetune", env=env, capture_output=False)
     if result.returncode != 0:
         raise RuntimeError(f"Training exited with code {result.returncode}")
 
