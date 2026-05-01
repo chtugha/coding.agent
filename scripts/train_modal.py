@@ -46,8 +46,8 @@ gpu_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install(["git", "ffmpeg", "wget"])
     .pip_install(
-        "torch==2.5.1",
-        "torchaudio==2.5.1",
+        "torch==2.6.0",
+        "torchaudio==2.6.0",
         extra_index_url="https://download.pytorch.org/whl/cu124",
     )
     .pip_install(
@@ -198,6 +198,7 @@ def do_annotate():
 )
 def do_train():
     """Run moshi-finetune LoRA training on H100."""
+    import os
     import subprocess
     import yaml
 
@@ -205,8 +206,10 @@ def do_train():
     with open(config_path, "w") as f:
         yaml.dump(TRAIN_CONFIG, f, default_flow_style=False)
 
-    import os
     os.makedirs(f"{VOL_CHECKPOINTS}/run_001", exist_ok=True)
+
+    env = os.environ.copy()
+    env.setdefault("CUDA_VISIBLE_DEVICES", ",".join(str(i) for i in range(__import__("torch").cuda.device_count())))
 
     cmd = [
         "torchrun", "--nproc-per-node", "1",
@@ -214,7 +217,7 @@ def do_train():
         config_path,
     ]
     print("Starting training:", " ".join(cmd))
-    result = subprocess.run(cmd, cwd="/moshi-finetune", capture_output=False)
+    result = subprocess.run(cmd, cwd="/moshi-finetune", env=env, capture_output=False)
     if result.returncode != 0:
         raise RuntimeError(f"Training exited with code {result.returncode}")
 
