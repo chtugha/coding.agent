@@ -61,6 +61,8 @@ gpu_image = (
         "pyyaml",
         "tqdm",
         "fire",
+        "simple-parsing",
+        "tensorboard",
     )
     .run_commands(
         "git clone --depth 1 https://github.com/kyutai-labs/moshi-finetune /moshi-finetune",
