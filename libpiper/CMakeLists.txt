@@ -130,7 +130,7 @@ endif()
 
 # ---- libpiper ---
 
-add_library(piper SHARED
+add_library(piper STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/piper.cpp
 )
 

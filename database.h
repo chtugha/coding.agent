@@ -385,7 +385,9 @@ inline bool FrontendServer::init_database() {
             ('OUTBOUND_AUDIO_PROCESSOR', 'bin/outbound-audio-processor', '', 'TTS audio to G.711 encode + RTP'),
             ('TEST_SIP_PROVIDER', 'bin/test_sip_provider', '--port 5060 --http-port 22011 --testfiles-dir Testfiles', 'SIP B2BUA test provider for audio injection'),
             ('TOMEDO_CRAWL_SERVICE', 'bin/tomedo-crawl', '', 'Tomedo RAG — patient context & caller ID'),
-            ('MOSHI_SERVICE', 'bin/moshi-service', '--log-level INFO', 'Moshi full-duplex neural voice service');
+            ('MOSHI_SERVICE', 'bin/moshi-service', '', 'Moshi full-duplex neural voice service (--log-level INFO/DEBUG)'),
+            ('VITS2_ENGINE', 'bin/vits2-service', '', 'VITS2 TTS engine (ONNX/libpiper) — docks into TTS_SERVICE'),
+            ('MATCHA_ENGINE', 'bin/matcha-service', '', 'Matcha-TTS engine (CoreML) — docks into TTS_SERVICE');
         UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
         UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args='--lines 1 alice 127.0.0.1 5060' OR default_args='--lines 2 alice 127.0.0.1 5060');
     )";

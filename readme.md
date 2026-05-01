@@ -1,6 +1,6 @@
 # Prodigy
 
-A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. Prodigy integrates **Whisper** (ASR), **LLaMA** (LLM), and a generic **TTS stage** (with hot-pluggable **Kokoro** or **NeuTTS** engines) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal) with no PyTorch runtime dependency.
+A high-performance, real-time speech-to-speech system designed for low-latency telephony communication. Prodigy integrates **Whisper** (ASR), **LLaMA** (LLM), and a generic **TTS stage** (with hot-pluggable **Kokoro**, **NeuTTS**, **VITS2**, or **Matcha-TTS** engines) into a linear microservice pipeline, using a standalone SIP client as an RTP gateway. Optimized for Apple Silicon (CoreML/Metal) with no PyTorch runtime dependency.
 
 An optional **RAG sidecar** (`tomedo-crawl`) connects to a [Tomedo](https://www.tomedo.de/) electronic medical records (EMR) server, crawls patient data, and feeds LLaMA with per-caller context so the AI can greet patients by name and give medically-informed responses.
 
@@ -18,7 +18,7 @@ An optional **RAG sidecar** (`tomedo-crawl`) connects to a [Tomedo](https://www.
                        VAD            TTS stage                    [Ollama embed]
                         |              ^  ▲                        [Vector store ]
                         |              |  │ (engine dock, port 13143)
-                        |              |  └─ Kokoro engine OR NeuTTS engine
+                        |              |  └─ Kokoro / NeuTTS / VITS2 / Matcha engine
                      Whisper ────► LLaMA ◄──────────────────────────────┘
                                                     RAG context injection
 
@@ -128,6 +128,44 @@ Located in `bin/models/neutts-nano-german/`:
 | `ref_codes.bin` | - | Pre-computed reference voice codec codes |
 | `ref_text.txt` | - | Reference voice phoneme transcript |
 
+### VITS2 / Piper (alternative TTS)
+
+Located in `bin/models/vits2-german/`:
+
+| File | Purpose |
+|------|---------|
+| `de_DE-thorsten-high.onnx` | Piper VITS2 German voice model (ONNX) |
+| `de_DE-thorsten-high.onnx.json` | Model config — sample rate, phoneme set, speaker info |
+
+Download with `python3 scripts/setup_vits2_models.py --output-dir bin/models/vits2-german`.
+
+### Matcha-TTS (alternative TTS)
+
+Located in `bin/models/matcha-german/coreml/`:
+
+| File | Purpose |
+|------|---------|
+| `matcha_encoder.mlmodelc/` | Text encoder (CoreML ANE, 512-token input) |
+| `matcha_flow_3s.mlmodelc/` | Baked ODE flow — 3-second bucket (CoreML ANE) |
+| `matcha_flow_5s.mlmodelc/` | Baked ODE flow — 5-second bucket (CoreML ANE) |
+| `matcha_flow_10s.mlmodelc/` | Baked ODE flow — 10-second bucket (CoreML ANE) |
+| `matcha_vocoder.mlmodelc/` | HiFi-GAN mel-to-waveform vocoder (CoreML ANE) |
+| `vocab.json` | Phoneme-to-token mapping |
+
+Export with `python3 scripts/export_matcha_models.py --checkpoint <path> --output-dir bin/models/matcha-german/coreml`.
+
+### Neural G2P (German grapheme-to-phoneme)
+
+Located in `bin/models/g2p/`:
+
+| File | Purpose |
+|------|---------|
+| `de_g2p.mlmodelc/` | DeepPhonemizer German G2P model (CoreML, ~5M params) |
+| `char_vocab.json` | Input character vocabulary |
+| `phoneme_vocab.json` | Output IPA phoneme vocabulary |
+
+Export with `python3 scripts/export_g2p_model.py --output-dir bin/models/g2p`. Used by Kokoro and Matcha when `--g2p neural` is set; falls back to espeak-ng for non-German input.
+
 ## Port Map
 
 All services bind to `127.0.0.1`:
@@ -142,6 +180,8 @@ All services bind to `127.0.0.1`:
 | TTS stage (dock) | 13140 | 13141 | 13142 | Engine dock listens on 13143 |
 | Kokoro engine | — | — | 13144 | Docks into TTS stage on 13143 |
 | NeuTTS engine | — | — | 13174 | Docks into TTS stage on 13143 |
+| VITS2 engine | — | — | 13175 | Docks into TTS stage on 13143 |
+| Matcha-TTS engine | — | — | 13176 | Docks into TTS stage on 13143 |
 | OAP | 13150 | 13151 | 13152 | |
 | Frontend | - | - | - | HTTP 8080, Log UDP 22022 |
 | tomedo-crawl | 13180 | **13181** | 13182 | REST API on 13181; 13180/13182 reserved |
@@ -289,9 +329,10 @@ Generates a spoken German reply from transcribed text using Llama-3.2-1B-Instruc
 **Inference details:**
 - **Model**: Llama-3.2-1B-Instruct Q8_0 GGUF, all layers on Metal GPU (`n_gpu_layers=-1`)
 - **Template**: `llama_chat_apply_template()` — uses the model's built-in chat template for correct role tagging; no manual prompt formatting
-- **Sampling**: Greedy (`llama_sampler_init_greedy`). Max 64 tokens per response. Stops at sentence-ending punctuation (`.`, `?`, `!`) or EOS.
+- **Sampling**: Greedy (`llama_sampler_init_greedy`). Max 96 tokens per response. Stops at sentence-ending punctuation (`.`, `?`, `!`) or EOS.
 - **Context**: 2048 tokens, 4 threads
 - **German system prompt**: enforces always-German, max 1 sentence / 15 words, polite and natural tone. ~320ms average latency on Apple M-series.
+- **Clause-boundary streaming**: triggers TTS synthesis at clause boundaries (`,`, `;`, em-dash, en-dash, ` - `) as well as sentence-end punctuation. Reduces perceived latency by ~100–200 ms by starting synthesis before the full sentence is generated. Up to 4 early-streaming chunks per response (`MAX_EARLY_STREAM_CHUNKS = 4`).
 - **Session isolation**: each call gets its own `LlamaCall` struct with independent message history and KV cache sequence ID. Context cleared on `CALL_END`.
 - **Shut-up mechanism**: `SPEECH_ACTIVE` from VAD aborts active generation immediately (~5–13ms interrupt latency). Worker loop defers new responses while speech is active.
 - **Tokenizer resilience**: retries with progressively larger buffer (up to 4×) if `llama_tokenize()` returns a negative value
@@ -320,9 +361,9 @@ Generates a spoken German reply from transcribed text using Llama-3.2-1B-Instruc
 The TTS stage is a generic pipeline node that sits between LLaMA and OAP. It
 owns the interconnect sockets (mgmt 13140, data 13141, cmd 13142) and a
 dedicated **engine dock** on port **13143**. Concrete TTS engines
-(`bin/kokoro-service`, `bin/neutts-service`) are **not** pipeline nodes any
-more — they are client processes that connect to the dock, authenticate via
-a one-line JSON HELLO, and stream audio back through it.
+(`bin/kokoro-service`, `bin/neutts-service`, `bin/vits2-service`, `bin/matcha-service`)
+are **not** pipeline nodes — they are client processes that connect to the dock,
+authenticate via a one-line JSON HELLO, and stream audio back through it.
 
 **Engine slot model (last-connect-wins).** The dock holds at most one active
 engine. State transitions:
@@ -382,11 +423,14 @@ Text-to-speech using the Kokoro model. Receives text from the dock and streams 2
 
 **SPEECH_ACTIVE handling:** Abandoned synthesis immediately if VAD signals caller speech. Per-call synthesis threads, so multi-line calls synthesize in parallel.
 
+**Prosody state carryover:** Each call's `ref_s_out` (256-dim style tensor) from chunk N is fed as `ref_s` input to chunk N+1's duration model. This preserves intonation continuity across synthesized chunks without any model re-export.
+
 **Command-Line Parameters:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--voice <NAME>` | `df_eva` | Voice to use (`df_eva`, `dm_bernd`) |
+| `--g2p <auto\|neural\|espeak>` | `auto` | G2P backend: `neural` uses DeepPhonemizer CoreML (German), `espeak` forces espeak-ng, `auto` uses neural when available for German |
 | `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
 **Runtime Commands (Kokoro engine cmd port 13144):**
@@ -439,6 +483,71 @@ Alternative TTS engine using the NeuTTS Nano German model. Like Kokoro it is a d
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
 On a `CUSTOM SHUTDOWN` frame from the dock the engine joins its synthesis workers and exits.
+
+---
+
+#### 6c. VITS2 engine (`bin/vits2-service`)
+
+Alternative TTS engine built on [Piper TTS](https://github.com/rhasspy/piper) via the `libpiper` C API. Uses ONNX Runtime internally — no CoreML required. Suitable for high-quality German synthesis with fast ISTFT-based vocoding.
+
+**Inference pipeline:**
+1. `piper_create()` loads a Piper `.onnx` model + `.onnx.json` config from `$WHISPERTALK_MODELS_DIR/vits2-german/`
+2. `piper_synthesize_start()` / `piper_synthesize_next()` loop produces float32 PCM chunks
+3. PCM resampled to 24kHz if model sample rate differs; normalized and chunked to `kTTSMaxFrameSamples`
+4. Audio sent to the dock via `EngineClient::send_audio()` with 12-byte header per `tts-common.h`
+
+**Phonemization:** Piper handles phonemization internally via its bundled espeak-ng. Optional neural G2P pre-phonemization for German when `--g2p neural` is set.
+
+**Command-Line Parameters:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model-dir <DIR>` | `$WHISPERTALK_MODELS_DIR/vits2-german` | Directory containing `.onnx` + `.onnx.json` |
+| `--voice <NAME>` | `default` | Voice filename base (e.g. `de_DE-thorsten-high`) |
+| `--g2p <auto\|neural\|espeak>` | `auto` | G2P backend |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
+
+**Runtime Commands (VITS2 engine cmd port 13175):**
+
+| Command | Description |
+|---------|-------------|
+| `PING` | Health check → `PONG` |
+| `STATUS` | Active calls, dock connection state, model path |
+| `TEST_SYNTH:<text>` | Synthesize and return timing stats |
+| `SYNTH_WAV:<path>\|<text>` | Synthesize text to a WAV file at the given path |
+| `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
+
+---
+
+#### 6d. Matcha-TTS engine (`bin/matcha-service`)
+
+Alternative TTS engine based on [Matcha-TTS](https://github.com/shivammehta25/Matcha-TTS) (flow-matching acoustic model) + HiFi-GAN vocoder, both exported to CoreML. The ODE flow is baked into a static CoreML graph (10 Euler steps unrolled at export time) — no iterative solver at runtime.
+
+**Inference pipeline (5 stages):**
+1. **Phonemize**: espeak-ng or neural G2P → IPA; phoneme cache (LRU)
+2. **Encoder** (`matcha_encoder.mlmodelc`): text → latent acoustic sequence (512-token fixed input, ANE)
+3. **Noise sample**: Gaussian noise via per-call `std::mt19937` (deterministic, seeded per `call_id`)
+4. **Baked ODE flow** (`matcha_flow_{3s,5s,10s}.mlmodelc`): noise + latent → mel-spectrogram (bucket selected by utterance length, ANE)
+5. **HiFi-GAN vocoder** (`matcha_vocoder.mlmodelc`): mel → 24kHz float32 PCM (ANE)
+
+**Command-Line Parameters:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model-dir <DIR>` | `$WHISPERTALK_MODELS_DIR/matcha-german/coreml` | CoreML model bundle directory |
+| `--voice <NAME>` | `default` | Voice preset |
+| `--g2p <auto\|neural\|espeak>` | `auto` | G2P backend |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
+
+**Runtime Commands (Matcha-TTS engine cmd port 13176):**
+
+| Command | Description |
+|---------|-------------|
+| `PING` | Health check → `PONG` |
+| `STATUS` | Active calls, dock connection state, model path |
+| `TEST_SYNTH:<text>` | Synthesize and return timing stats |
+| `SYNTH_WAV:<path>\|<text>` | Synthesize text to a WAV file at the given path |
+| `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
 
 ---
 
@@ -509,6 +618,10 @@ Central control plane. Serves the web UI, manages service lifecycles, aggregates
 | POST | `/api/whisper/accuracy_test` | Run offline Whisper accuracy test on a WAV file |
 | POST | `/api/whisper/hallucination_filter` | Enable/disable Whisper hallucination filter |
 | GET | `/api/tts/status` | TTS-dock engine slot: `{"engine":"kokoro"}`, `{"engine":"neutts"}`, or `{"engine":null}` when no engine is docked |
+| GET | `/api/tts/engine_config?engine=<name>` | Per-engine config: `{engine, voice, g2p_backend, language, disabled_reason}` |
+| POST | `/api/tts/engine_config` | Persist engine config `{engine, voice, g2p_backend, language}`; restarts active engine asynchronously |
+| GET | `/api/tts/available_voices?engine=<name>` | Voice list from `$WHISPERTALK_MODELS_DIR/<engine>-<lang>/` |
+| GET | `/api/tts/available_g2p` | Available G2P backends: always `espeak`; adds `neural` if `de_g2p.mlmodelc` is present |
 | GET/POST | `/api/vad/config` | Read/write VAD parameters (propagated to running service) |
 | GET/POST | `/api/oap/wav_recording` | Read/write OAP WAV recording settings |
 | POST | `/api/sip/add-line` | Register a new SIP account |
@@ -531,7 +644,8 @@ Central control plane. Serves the web UI, manages service lifecycles, aggregates
 - Log level control: checkboxes (ERROR/WARN/INFO/DEBUG/TRACE) applied immediately and persisted
 - VAD configuration: threshold, silence duration, max chunk length — runtime update without restart
 - Whisper configuration: model selection, hallucination filter toggle
-- Kokoro configuration: synthesis speed slider, SYNTH_WAV test
+- Kokoro configuration: synthesis speed slider, SYNTH_WAV test, neural G2P and language selection
+- VITS2 / Matcha configuration: voice, G2P backend, language dropdowns with Save; engines are greyed out when no compatible model is installed for the selected language
 - OAP configuration: WAV recording toggle + directory, presence boost toggle
 - SIP management: add/remove SIP lines, view RTP statistics
 - Beta testing page: audio injection into live calls via Test SIP Provider

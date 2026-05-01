@@ -60,20 +60,22 @@ async function runWithTestSetup(testFn,opts){
   const ttsOverride=opts.ttsOverride||null;
   function setStatus(html){if(statusEl)statusEl.innerHTML=html;}
   if(_testSetupActive){
-    try{return await testFn({tts:_ttsPreference==='neutts'?'neutts':'kokoro',runIndex:0});}finally{}
+    const _activeTts=['neutts','vits2','matcha'].includes(_ttsPreference)?_ttsPreference:'kokoro';
+    try{return await testFn({tts:_activeTts,runIndex:0});}finally{}
   }
   if(btnEl){btnEl.disabled=true;btnEl._origText=btnEl.textContent;btnEl.textContent='Setting up...';}
 
   const ttsOrder=ttsOverride?[ttsOverride]:
-    (_ttsPreference==='kokoro'?['kokoro']:
-    _ttsPreference==='neutts'?['neutts']:
+    (['kokoro','neutts','vits2','matcha'].includes(_ttsPreference)?[_ttsPreference]:
     ['kokoro','neutts']);
 
   const runResults=[];
   try{
     for(let ri=0;ri<ttsOrder.length;ri++){
       const tts=ttsOrder[ri];
-      const runLabel=ttsOrder.length>1?(ri===0?'Run 1/2 (Kokoro)':'Run 2/2 (NeuTTS)'):'';
+      const _engineLabels={kokoro:'Kokoro',neutts:'NeuTTS',vits2:'VITS2',matcha:'Matcha'};
+      const runLabel=ttsOrder.length>1?`Run ${ri+1}/${ttsOrder.length} (${_engineLabels[tts]||tts})`:'';
+
 
       // --- Setup ---
       setStatus(`<span style="color:var(--wt-accent)">&#x23F3; ${runLabel?runLabel+' — ':''}Setting up pipeline...</span>`);
@@ -521,6 +523,24 @@ if(s.name==='NEUTTS_ENGINE'){
   nc.classList.add('hidden');
 }
   }
+  const v2c=document.getElementById('vits2Config');
+  if(v2c){
+if(s.name==='VITS2_ENGINE'){
+  v2c.classList.remove('hidden');
+  loadVITS2Config();
+} else {
+  v2c.classList.add('hidden');
+}
+  }
+  const mc=document.getElementById('matchaConfig');
+  if(mc){
+if(s.name==='MATCHA_ENGINE'){
+  mc.classList.remove('hidden');
+  loadMatchaConfig();
+} else {
+  mc.classList.add('hidden');
+}
+  }
 }
 function loadWhisperConfig(args){
   fetch('/api/whisper/models').then(r=>r.json()).then(d=>{
@@ -614,6 +634,74 @@ if(!d||!d.exists){
 const el=document.getElementById('neuttsModelStatus');
 if(el)el.innerHTML='<span style="color:var(--wt-text-secondary)">(offline)</span>';
   });
+}
+function loadVITS2Config(){
+  fetch('/api/tts/engine_config?engine=vits2').then(r=>r.json()).then(d=>{
+const langSel=document.getElementById('vits2Lang');
+const g2pSel=document.getElementById('vits2G2P');
+if(langSel&&d.language)langSel.value=d.language;
+if(g2pSel&&d.g2p_backend)g2pSel.value=d.g2p_backend;
+fetch('/api/tts/available_voices?engine=vits2').then(r=>r.json()).then(vd=>{
+  const voiceSel=document.getElementById('vits2Voice');
+  if(!voiceSel)return;
+  const voices=(vd&&vd.voices)||[];
+  voiceSel.innerHTML=voices.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')||'<option value="default">default</option>';
+  if(d.voice)voiceSel.value=d.voice;
+}).catch(()=>{});
+  }).catch(()=>{});
+}
+function updateVITS2Args(){
+  const voice=(document.getElementById('vits2Voice')||{}).value||'';
+  const g2p=(document.getElementById('vits2G2P')||{}).value||'';
+  const argsEl=document.getElementById('svcDetailArgs');
+  if(argsEl)argsEl.value=[voice?`--voice ${voice}`:'',g2p?`--g2p ${g2p}`:''].filter(Boolean).join(' ');
+}
+function saveVITS2Config(){
+  const voice=(document.getElementById('vits2Voice')||{}).value||'';
+  const g2p=(document.getElementById('vits2G2P')||{}).value||'';
+  const lang=(document.getElementById('vits2Lang')||{}).value||'de';
+  const statusEl=document.getElementById('vits2SaveStatus');
+  if(statusEl)statusEl.textContent='Saving...';
+  fetch('/api/tts/engine_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({engine:'vits2',voice,g2p_backend:g2p,language:lang})})
+  .then(r=>r.json()).then(d=>{
+    if(statusEl)statusEl.textContent='Saved';
+    setTimeout(()=>{if(statusEl)statusEl.textContent='';},2000);
+  }).catch(()=>{if(statusEl)statusEl.textContent='Error';setTimeout(()=>{if(statusEl)statusEl.textContent='';},3000);});
+  updateVITS2Args();
+}
+function loadMatchaConfig(){
+  fetch('/api/tts/engine_config?engine=matcha').then(r=>r.json()).then(d=>{
+const langSel=document.getElementById('matchaLang');
+const g2pSel=document.getElementById('matchaG2P');
+if(langSel&&d.language)langSel.value=d.language;
+if(g2pSel&&d.g2p_backend)g2pSel.value=d.g2p_backend;
+fetch('/api/tts/available_voices?engine=matcha').then(r=>r.json()).then(vd=>{
+  const voiceSel=document.getElementById('matchaVoice');
+  if(!voiceSel)return;
+  const voices=(vd&&vd.voices)||[];
+  voiceSel.innerHTML=voices.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')||'<option value="default">default</option>';
+  if(d.voice)voiceSel.value=d.voice;
+}).catch(()=>{});
+  }).catch(()=>{});
+}
+function updateMatchaArgs(){
+  const voice=(document.getElementById('matchaVoice')||{}).value||'';
+  const g2p=(document.getElementById('matchaG2P')||{}).value||'';
+  const argsEl=document.getElementById('svcDetailArgs');
+  if(argsEl)argsEl.value=[voice?`--voice ${voice}`:'',g2p?`--g2p ${g2p}`:''].filter(Boolean).join(' ');
+}
+function saveMatchaConfig(){
+  const voice=(document.getElementById('matchaVoice')||{}).value||'';
+  const g2p=(document.getElementById('matchaG2P')||{}).value||'';
+  const lang=(document.getElementById('matchaLang')||{}).value||'de';
+  const statusEl=document.getElementById('matchaSaveStatus');
+  if(statusEl)statusEl.textContent='Saving...';
+  fetch('/api/tts/engine_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({engine:'matcha',voice,g2p_backend:g2p,language:lang})})
+  .then(r=>r.json()).then(d=>{
+    if(statusEl)statusEl.textContent='Saved';
+    setTimeout(()=>{if(statusEl)statusEl.textContent='';},2000);
+  }).catch(()=>{if(statusEl)statusEl.textContent='Error';setTimeout(()=>{if(statusEl)statusEl.textContent='';},3000);});
+  updateMatchaArgs();
 }
 function toggleHallucinationFilter(enabled){
   const statusEl=document.getElementById('whisperHalluFilterStatus');
@@ -1464,8 +1552,8 @@ if(sel4)sel4.innerHTML=opts;
 function loadLogLevels(){
   fetch('/api/settings/log_level').then(r=>r.json()).then(d=>{
 const c=document.getElementById('logLevelControls');
-const services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','NEUTTS_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
-const names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','VAD_SERVICE':'VAD','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','TTS_SERVICE':'TTS Stage','KOKORO_ENGINE':'Kokoro Engine','NEUTTS_ENGINE':'NeuTTS Engine','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
+const services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','NEUTTS_ENGINE','VITS2_ENGINE','MATCHA_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
+const names={'SIP_CLIENT':'SIP Client','INBOUND_AUDIO_PROCESSOR':'Inbound Audio','VAD_SERVICE':'VAD','WHISPER_SERVICE':'Whisper','LLAMA_SERVICE':'LLaMA','TTS_SERVICE':'TTS Stage','KOKORO_ENGINE':'Kokoro Engine','NEUTTS_ENGINE':'NeuTTS Engine','VITS2_ENGINE':'VITS2 Engine','MATCHA_ENGINE':'Matcha Engine','OUTBOUND_AUDIO_PROCESSOR':'Outbound Audio'};
 const levels=['ERROR','WARN','INFO','DEBUG','TRACE'];
 c.innerHTML=services.map(s=>{
   const current=d.log_levels&&d.log_levels[s]?d.log_levels[s]:'INFO';
@@ -1476,7 +1564,7 @@ c.innerHTML=services.map(s=>{
 }
 
 function saveAllLogLevels(){
-  const services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','NEUTTS_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
+  const services=['SIP_CLIENT','INBOUND_AUDIO_PROCESSOR','VAD_SERVICE','WHISPER_SERVICE','LLAMA_SERVICE','TTS_SERVICE','KOKORO_ENGINE','NEUTTS_ENGINE','VITS2_ENGINE','MATCHA_ENGINE','OUTBOUND_AUDIO_PROCESSOR'];
   const promises=services.map(s=>{
 const level=document.getElementById(`loglevel_${s}`).value;
 return fetch('/api/settings/log_level',{method:'POST',headers:{'Content-Type':'application/json'},

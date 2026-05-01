@@ -172,6 +172,40 @@ Hallucination Filter</label>
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">NeuTTS Configuration</div>
 <div id="neuttsModelStatus" style="font-size:12px;color:var(--wt-text-secondary)">Loading...</div>
 </div>
+<div id="vits2Config" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">VITS2 Configuration</div>
+<div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">Voice</label>
+<select class="wt-select" id="vits2Voice" onchange="updateVITS2Args()" title="Voice model from bin/models/vits2-de/ or vits2-en/ directory." style="font-size:12px"></select></div>
+<div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">G2P Backend</label>
+<select class="wt-select" id="vits2G2P" onchange="updateVITS2Args()" style="font-size:12px">
+<option value="auto">Auto</option><option value="neural">Neural (de)</option><option value="espeak">espeak-ng</option>
+</select></div>
+<div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">Language</label>
+<select class="wt-select" id="vits2Lang" onchange="updateVITS2Args()" style="font-size:12px">
+<option value="de">German (de)</option><option value="en">English (en)</option><option value="auto">Auto</option>
+</select></div>
+<div style="display:flex;gap:6px;align-items:center">
+<button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="saveVITS2Config()">Save</button>
+<span id="vits2SaveStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+</div>
+<div id="matchaConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">Matcha-TTS Configuration</div>
+<div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">Voice</label>
+<select class="wt-select" id="matchaVoice" onchange="updateMatchaArgs()" title="Voice model from bin/models/matcha-de/ or matcha-en/ directory." style="font-size:12px"></select></div>
+<div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">G2P Backend</label>
+<select class="wt-select" id="matchaG2P" onchange="updateMatchaArgs()" style="font-size:12px">
+<option value="auto">Auto</option><option value="neural">Neural (de)</option><option value="espeak">espeak-ng</option>
+</select></div>
+<div class="wt-field" style="margin-bottom:6px"><label style="font-size:12px">Language</label>
+<select class="wt-select" id="matchaLang" onchange="updateMatchaArgs()" style="font-size:12px">
+<option value="de">German (de)</option><option value="en">English (en)</option><option value="auto">Auto</option>
+</select></div>
+<div style="display:flex;gap:6px;align-items:center">
+<button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="saveMatchaConfig()">Save</button>
+<span id="matchaSaveStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+</div>
 <div id="sipClientConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">PBX Connection</div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
@@ -426,6 +460,8 @@ Save outgoing audio as WAV</label>
 <option value="auto">Auto (Kokoro + NeuTTS)</option>
 <option value="kokoro">Kokoro only</option>
 <option value="neutts">NeuTTS only</option>
+<option value="vits2">VITS2 only</option>
+<option value="matcha">Matcha-TTS only</option>
 </select>
 </label>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="toggleAllCollapsibles(true)">Expand All</button>
@@ -962,6 +998,8 @@ Save outgoing audio as WAV</label>
 <option value="whisper">Whisper</option>
 <option value="llama">LLaMA</option>
 <option value="kokoro">Kokoro</option>
+<option value="vits2">VITS2</option>
+<option value="matcha">Matcha-TTS</option>
 </select>
 <select class="wt-select" id="testResultsStatus" onchange="filterTestResults()">
 <option value="">All Status</option>

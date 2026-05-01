@@ -156,6 +156,8 @@ static constexpr int DOWNLOAD_PROGRESS_POLL_MS = 500;    // poll interval for do
 // processes so these values cannot drift.
 static constexpr uint16_t KOKORO_ENGINE_CMD_PORT = whispertalk::tts::kKokoroEngineCmdPort;
 static constexpr uint16_t NEUTTS_ENGINE_CMD_PORT = whispertalk::tts::kNeuTTSEngineCmdPort;
+static constexpr uint16_t VITS2_ENGINE_CMD_PORT  = whispertalk::tts::kVITS2EngineCmdPort;
+static constexpr uint16_t MATCHA_ENGINE_CMD_PORT = whispertalk::tts::kMatchaEngineCmdPort;
 
 using namespace whispertalk;
 
@@ -878,6 +880,22 @@ private:
                 use_args = db_args;
             }
 
+            if (args_override.empty() &&
+                (name == "KOKORO_ENGINE" || name == "NEUTTS_ENGINE" ||
+                 name == "VITS2_ENGINE"  || name == "MATCHA_ENGINE")) {
+                std::string eng;
+                if (name == "KOKORO_ENGINE")  eng = "kokoro";
+                else if (name == "NEUTTS_ENGINE") eng = "neutts";
+                else if (name == "VITS2_ENGINE")  eng = "vits2";
+                else                              eng = "matcha";
+                std::string voice = get_setting("tts_engine_config_" + eng + "_voice", "");
+                std::string g2p   = get_setting("tts_engine_config_" + eng + "_g2p",   "");
+                if (!voice.empty() && voice.find(' ') == std::string::npos)
+                    use_args += " --voice " + voice;
+                if (!g2p.empty() && g2p.find(' ') == std::string::npos)
+                    use_args += " --g2p " + g2p;
+            }
+
             auto argv_strings = split_args(use_args);
 
             mkdir("logs", 0755);
@@ -1199,6 +1217,15 @@ private:
                 handle_service_restart(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tts/status")) == 0) {
                 handle_tts_status(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/tts/engine_config")) == 0) {
+                if (mg_strcmp(hm->method, mg_str("GET")) == 0)
+                    handle_tts_engine_config_get(c, hm);
+                else
+                    handle_tts_engine_config_post(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/tts/available_voices")) == 0) {
+                handle_tts_available_voices(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/tts/available_g2p")) == 0) {
+                handle_tts_available_g2p(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/services/config")) == 0) {
                 handle_service_config(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/logs")) == 0) {
@@ -1894,6 +1921,8 @@ private:
     static uint16_t tts_engine_cmd_port_for(const std::string& engine_name) {
         if (engine_name == "kokoro") return KOKORO_ENGINE_CMD_PORT;
         if (engine_name == "neutts") return NEUTTS_ENGINE_CMD_PORT;
+        if (engine_name == "vits2")  return VITS2_ENGINE_CMD_PORT;
+        if (engine_name == "matcha") return MATCHA_ENGINE_CMD_PORT;
         // Unknown engine name: return 0 so the caller can surface a
         // diagnostic error instead of silently misrouting to kokoro.
         return 0;
@@ -1931,6 +1960,230 @@ private:
     }
 
     // -------------------------------------------------------------------------
+    // TTS Engine Config API
+    // -------------------------------------------------------------------------
+
+    static bool is_valid_engine(const std::string& e) {
+        return e == "kokoro" || e == "neutts" || e == "vits2" || e == "matcha";
+    }
+
+    static std::string engine_service_name(const std::string& e) {
+        if (e == "kokoro") return "KOKORO_ENGINE";
+        if (e == "neutts") return "NEUTTS_ENGINE";
+        if (e == "vits2")  return "VITS2_ENGINE";
+        if (e == "matcha") return "MATCHA_ENGINE";
+        return "";
+    }
+
+    static bool is_valid_lang(const std::string& lang) {
+        static const char* kAllowed[] = {"de","en","fr","es","it","ja","zh","auto",nullptr};
+        for (int i = 0; kAllowed[i]; i++) {
+            if (lang == kAllowed[i]) return true;
+        }
+        return false;
+    }
+
+    static bool is_valid_voice_or_g2p(const std::string& val) {
+        if (val.empty()) return true;
+        for (char ch : val) {
+            if (!isalnum((unsigned char)ch) && ch != '-' && ch != '_' && ch != '.') return false;
+        }
+        return true;
+    }
+
+    std::string tts_engine_disabled_reason(const std::string& engine, const std::string& lang) {
+        if (engine == "kokoro" || engine == "neutts") return "";
+        if (lang == "auto" || lang.empty()) return "";
+        if (!is_valid_lang(lang)) return "Invalid language";
+        std::string dir = "bin/models/" + engine + "-" + lang;
+        struct stat st;
+        if (stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+            return "No " + lang + " voice model installed";
+        }
+        return "";
+    }
+
+    // GET /api/tts/engine_config?engine=<name>
+    void handle_tts_engine_config_get(struct mg_connection *c, struct mg_http_message *hm) {
+        char eng_buf[32] = {};
+        mg_http_get_var(&hm->query, "engine", eng_buf, sizeof(eng_buf));
+        std::string engine(eng_buf);
+        if (!is_valid_engine(engine)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid engine\"}");
+            return;
+        }
+        std::string voice   = get_setting("tts_engine_config_" + engine + "_voice", "default");
+        std::string g2p     = get_setting("tts_engine_config_" + engine + "_g2p",   "auto");
+        std::string lang    = get_setting("tts_engine_config_" + engine + "_lang",   "de");
+        if (engine == "kokoro" && voice == "default") voice = "df_eva";
+        if (engine == "neutts" && g2p == "auto")      g2p   = "espeak";
+        std::string reason  = tts_engine_disabled_reason(engine, lang);
+        std::string reason_json = reason.empty() ? "null" : "\"" + escape_json(reason) + "\"";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"engine\":\"%s\",\"voice\":\"%s\",\"g2p_backend\":\"%s\",\"language\":\"%s\",\"disabled_reason\":%s}",
+            escape_json(engine).c_str(), escape_json(voice).c_str(),
+            escape_json(g2p).c_str(), escape_json(lang).c_str(), reason_json.c_str());
+    }
+
+    static const std::string& default_voice_for(const std::string& engine, const std::string& lang) {
+        static const std::string kokoro_de_voice = "df_eva";
+        static const std::string kokoro_en_voice = "af_heart";
+        static const std::string other_voice     = "default";
+        static const std::string thorsten_voice  = "thorsten-high";
+        if (engine == "kokoro") return (lang == "en") ? kokoro_en_voice : kokoro_de_voice;
+        if (engine == "vits2" && lang == "de") return thorsten_voice;
+        return other_voice;
+    }
+
+    static std::string default_g2p_for(const std::string& engine, const std::string& lang) {
+        if (engine == "neutts") return "espeak";
+        if (engine == "kokoro") return (lang == "en") ? "espeak" : "neural";
+        return "auto";
+    }
+
+    // POST /api/tts/engine_config — persist config, optionally restart active engine
+    void handle_tts_engine_config_post(struct mg_connection *c, struct mg_http_message *hm) {
+        std::string body(hm->body.buf, hm->body.len);
+        std::string engine = extract_json_string(body, "engine");
+        std::string voice  = extract_json_string(body, "voice");
+        std::string g2p    = extract_json_string(body, "g2p_backend");
+        std::string lang   = extract_json_string(body, "language");
+        if (!is_valid_engine(engine)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid engine\"}");
+            return;
+        }
+        if (!lang.empty() && !is_valid_lang(lang)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid language\"}");
+            return;
+        }
+        if (!is_valid_voice_or_g2p(voice)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid voice\"}");
+            return;
+        }
+        if (!is_valid_voice_or_g2p(g2p)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid g2p_backend\"}");
+            return;
+        }
+
+        bool is_lang_change = !lang.empty() &&
+            lang != get_setting("tts_engine_config_" + engine + "_lang", "de");
+
+        if (!voice.empty()) set_setting("tts_engine_config_" + engine + "_voice", voice);
+        if (!g2p.empty())   set_setting("tts_engine_config_" + engine + "_g2p",   g2p);
+        if (!lang.empty())  set_setting("tts_engine_config_" + engine + "_lang",   lang);
+
+        std::vector<std::string> incompatible_svcs;
+        if (is_lang_change) {
+            static const char* all_engines[] = {"kokoro","neutts","vits2","matcha",nullptr};
+            for (int i = 0; all_engines[i]; i++) {
+                std::string e = all_engines[i];
+                std::string dv = default_voice_for(e, lang);
+                std::string dg = default_g2p_for(e, lang);
+                if (e != engine || voice.empty()) set_setting("tts_engine_config_" + e + "_voice", dv);
+                if (e != engine || g2p.empty())   set_setting("tts_engine_config_" + e + "_g2p",   dg);
+                set_setting("tts_engine_config_" + e + "_lang", lang);
+                std::string reason = tts_engine_disabled_reason(e, lang);
+                if (!reason.empty()) {
+                    std::string svc = engine_service_name(e);
+                    if (!svc.empty() && is_service_running(svc)) incompatible_svcs.push_back(svc);
+                }
+            }
+        }
+
+        std::string effective_lang = lang.empty() ?
+            get_setting("tts_engine_config_" + engine + "_lang", "de") : lang;
+        std::string restart_engine = engine;
+
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+
+        std::thread([this, incompatible_svcs, is_lang_change, restart_engine, effective_lang]() {
+            for (const auto& svc : incompatible_svcs) stop_service(svc);
+            std::string active_engine = query_tts_active_engine();
+            std::string target = is_lang_change ? active_engine : restart_engine;
+            if (target.empty() || !is_valid_engine(target)) return;
+            bool compatible = tts_engine_disabled_reason(target, effective_lang).empty();
+            bool is_active  = (active_engine == target);
+            if (is_active && compatible) {
+                std::string svc = engine_service_name(target);
+                if (!svc.empty()) {
+                    stop_service(svc);
+                    usleep(300000);
+                    start_service(svc, "");
+                }
+            }
+        }).detach();
+    }
+
+    // GET /api/tts/available_voices?engine=<name>
+    void handle_tts_available_voices(struct mg_connection *c, struct mg_http_message *hm) {
+        char eng_buf[32] = {};
+        mg_http_get_var(&hm->query, "engine", eng_buf, sizeof(eng_buf));
+        std::string engine(eng_buf);
+        if (!is_valid_engine(engine)) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Invalid engine\"}");
+            return;
+        }
+        std::string lang = get_setting("tts_engine_config_" + engine + "_lang", "de");
+        if (!is_valid_lang(lang)) lang = "de";
+        std::vector<std::string> voices;
+        auto scan_dir = [&](const std::string& dir_path) {
+            DIR* d = opendir(dir_path.c_str());
+            if (!d) return;
+            struct dirent* ent;
+            while ((ent = readdir(d)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                std::string n(ent->d_name);
+                if (n == "." || n == "..") continue;
+                bool is_dir = (ent->d_type == DT_DIR);
+                bool is_reg = (ent->d_type == DT_REG);
+                if (ent->d_type == DT_UNKNOWN) {
+                    struct stat st;
+                    std::string full = dir_path + "/" + n;
+                    if (stat(full.c_str(), &st) == 0) {
+                        is_dir = S_ISDIR(st.st_mode);
+                        is_reg = S_ISREG(st.st_mode);
+                    }
+                }
+                if (is_dir) {
+                    voices.push_back(n);
+                } else if (is_reg && n.size() > 5 && n.substr(n.size() - 5) == ".onnx") {
+                    voices.push_back(n.substr(0, n.size() - 5));
+                }
+            }
+            closedir(d);
+        };
+        if (lang == "auto") {
+            scan_dir("bin/models/" + engine + "-de");
+            scan_dir("bin/models/" + engine + "-en");
+        } else {
+            scan_dir("bin/models/" + engine + "-" + lang);
+        }
+        std::sort(voices.begin(), voices.end());
+        voices.erase(std::unique(voices.begin(), voices.end()), voices.end());
+        std::stringstream json;
+        json << "{\"voices\":[";
+        for (size_t i = 0; i < voices.size(); i++) {
+            if (i > 0) json << ",";
+            json << "\"" << escape_json(voices[i]) << "\"";
+        }
+        json << "]}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    // GET /api/tts/available_g2p
+    void handle_tts_available_g2p(struct mg_connection *c, struct mg_http_message *hm) {
+        (void)hm;
+        std::stringstream json;
+        json << "{\"backends\":[\"espeak\"";
+        struct stat st;
+        if (stat("bin/models/g2p/de_g2p.mlmodelc", &st) == 0) {
+            json << ",\"neural\"";
+        }
+        json << "]}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", json.str().c_str());
+    }
+
+    // -------------------------------------------------------------------------
     // Test Setup / Teardown
     // -------------------------------------------------------------------------
 
@@ -1940,7 +2193,7 @@ private:
     void handle_test_setup_start(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string tts = extract_json_string(body, "tts");
-        if (tts != "kokoro" && tts != "neutts") tts = "auto";
+        if (tts != "kokoro" && tts != "neutts" && tts != "vits2" && tts != "matcha") tts = "auto";
 
         int64_t task_id = create_async_task("test_setup");
         std::thread([this, task_id, tts]() {
@@ -1965,14 +2218,14 @@ private:
         const std::vector<std::string> all_svcs = {
             "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE",
             "WHISPER_SERVICE", "LLAMA_SERVICE", "TTS_SERVICE",
-            "KOKORO_ENGINE", "NEUTTS_ENGINE",
+            "KOKORO_ENGINE", "NEUTTS_ENGINE", "VITS2_ENGINE", "MATCHA_ENGINE",
             "OUTBOUND_AUDIO_PROCESSOR", "TOMEDO_CRAWL_SERVICE"
         };
         const std::vector<std::string> core_svcs = {
             "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE",
             "WHISPER_SERVICE", "LLAMA_SERVICE", "OUTBOUND_AUDIO_PROCESSOR"
         };
-        const std::vector<std::string> tts_svcs  = {"TTS_SERVICE", "KOKORO_ENGINE", "NEUTTS_ENGINE"};
+        const std::vector<std::string> tts_svcs  = {"TTS_SERVICE", "KOKORO_ENGINE", "NEUTTS_ENGINE", "VITS2_ENGINE", "MATCHA_ENGINE"};
         const std::vector<std::string> rag_svcs   = {"TOMEDO_CRAWL_SERVICE"};
 
         int running_count = 0;
@@ -1993,13 +2246,15 @@ private:
             send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "REMOVE_ALL_LINES");
             stop_service("KOKORO_ENGINE");
             stop_service("NEUTTS_ENGINE");
+            stop_service("VITS2_ENGINE");
+            stop_service("MATCHA_ENGINE");
             stop_service("TTS_SERVICE");
             stop_service("TOMEDO_CRAWL_SERVICE");
             usleep(1000000); // 1s settling
         } else {
             // Case 2: stop everything, start core pipeline in order
             static const std::vector<std::string> stop_order = {
-                "TOMEDO_CRAWL_SERVICE", "NEUTTS_ENGINE", "KOKORO_ENGINE", "TTS_SERVICE",
+                "TOMEDO_CRAWL_SERVICE", "MATCHA_ENGINE", "VITS2_ENGINE", "NEUTTS_ENGINE", "KOKORO_ENGINE", "TTS_SERVICE",
                 "OUTBOUND_AUDIO_PROCESSOR", "LLAMA_SERVICE", "WHISPER_SERVICE",
                 "VAD_SERVICE", "INBOUND_AUDIO_PROCESSOR", "SIP_CLIENT"
             };
@@ -2039,9 +2294,16 @@ private:
         }
 
         // ---- Step C: ensure TTS dock is up, then start the chosen engine ----
-        std::string engine_to_start = (tts_choice == "neutts") ? "NEUTTS_ENGINE" : "KOKORO_ENGINE";
-        std::string engine_label    = (tts_choice == "neutts") ? "NeuTTS" : "Kokoro";
-        std::string engine_name     = (tts_choice == "neutts") ? "neutts" : "kokoro";
+        std::string engine_to_start, engine_label, engine_name;
+        if (tts_choice == "neutts") {
+            engine_to_start = "NEUTTS_ENGINE"; engine_label = "NeuTTS"; engine_name = "neutts";
+        } else if (tts_choice == "vits2") {
+            engine_to_start = "VITS2_ENGINE";  engine_label = "VITS2";  engine_name = "vits2";
+        } else if (tts_choice == "matcha") {
+            engine_to_start = "MATCHA_ENGINE"; engine_label = "Matcha"; engine_name = "matcha";
+        } else {
+            engine_to_start = "KOKORO_ENGINE"; engine_label = "Kokoro"; engine_name = "kokoro";
+        }
 
         // Make sure the generic TTS dock is running (it may have been skipped in Case 1 above).
         if (!is_service_running("TTS_SERVICE")) {
@@ -2069,6 +2331,8 @@ private:
         set_setup_progress(task_id, "C", "Starting " + engine_label + " engine...");
         stop_service("KOKORO_ENGINE");
         stop_service("NEUTTS_ENGINE");
+        stop_service("VITS2_ENGINE");
+        stop_service("MATCHA_ENGINE");
         usleep(500000);
 
         if (!start_service(engine_to_start, "")) {
@@ -2174,7 +2438,7 @@ private:
             return;
         }
 
-        std::string active_tts = (tts_choice == "neutts") ? "neutts" : "kokoro";
+        std::string active_tts = engine_name;
         finish_async_task(task_id,
             "{\"status\":\"done\",\"tts\":\"" + active_tts + "\"}");
     }
@@ -2195,6 +2459,10 @@ private:
             stop_service("NEUTTS_ENGINE");
         } else if (active_tts == "kokoro") {
             stop_service("KOKORO_ENGINE");
+        } else if (active_tts == "vits2") {
+            stop_service("VITS2_ENGINE");
+        } else if (active_tts == "matcha") {
+            stop_service("MATCHA_ENGINE");
         }
         set_setting("test_active_tts", "");
 
@@ -2212,7 +2480,7 @@ private:
         } else {
             std::string body(hm->body.buf, hm->body.len);
             std::string pref = extract_json_string(body, "preference");
-            if (pref != "kokoro" && pref != "neutts") pref = "auto";
+            if (pref != "kokoro" && pref != "neutts" && pref != "vits2" && pref != "matcha") pref = "auto";
             set_setting("test_tts_preference", pref);
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
         }
@@ -5909,6 +6177,7 @@ private:
             const char* services[] = {
                 "SIP_CLIENT", "INBOUND_AUDIO_PROCESSOR", "VAD_SERVICE", "WHISPER_SERVICE",
                 "LLAMA_SERVICE", "TTS_SERVICE", "KOKORO_ENGINE", "NEUTTS_ENGINE",
+                "VITS2_ENGINE", "MATCHA_ENGINE",
                 "OUTBOUND_AUDIO_PROCESSOR", "TOMEDO_CRAWL_SERVICE", nullptr
             };
 
@@ -5986,10 +6255,13 @@ private:
                         break;
                     }
                 }
-                if (!handled && (service == "KOKORO_ENGINE" || service == "NEUTTS_ENGINE")) {
-                    uint16_t port = (service == "NEUTTS_ENGINE")
-                        ? NEUTTS_ENGINE_CMD_PORT
-                        : KOKORO_ENGINE_CMD_PORT;
+                if (!handled && (service == "KOKORO_ENGINE" || service == "NEUTTS_ENGINE"
+                                 || service == "VITS2_ENGINE" || service == "MATCHA_ENGINE")) {
+                    uint16_t port = 0;
+                    if (service == "NEUTTS_ENGINE")  port = NEUTTS_ENGINE_CMD_PORT;
+                    else if (service == "VITS2_ENGINE")  port = VITS2_ENGINE_CMD_PORT;
+                    else if (service == "MATCHA_ENGINE") port = MATCHA_ENGINE_CMD_PORT;
+                    else                                 port = KOKORO_ENGINE_CMD_PORT;
                     std::string err;
                     std::string resp = tcp_command(port, "SET_LOG_LEVEL:" + level, err, 2);
                     live_update = (resp.find("OK") != std::string::npos);

@@ -39,9 +39,10 @@
 //   This prevents stale TTS audio from playing over the caller's speech.
 //
 // CMD port (Kokoro diagnostic port 13144): PING, STATUS, SET_LOG_LEVEL commands.
-//   STATUS returns: model path, engine-dock connection state, active call count.
+//   STATUS returns: active call count, dock connection state, speed, G2P backend.
 #include "ktensor.h"
 #include "har_source.h"
+#include "neural-g2p.h"
 #include <espeak-ng/speak_lib.h>
 #include "interconnect.h"
 #include "tts-engine-client.h"
@@ -559,6 +560,7 @@ struct AlignedIntermediates {
     KTensor f0_pred;
     KTensor n_pred;
     KTensor ref_s_dec;
+    KTensor ref_s_full;
     bool valid = false;
     std::vector<int64_t> pred_dur;
     int actual_len = 0;
@@ -642,6 +644,21 @@ public:
         espeak_SetVoiceByName("de");
         std::printf("espeak-ng initialized (German)\n");
 
+#ifdef __APPLE__
+        if (g2p_backend_ != G2PBackend::ESPEAK) {
+            std::string g2p_path = models_dir + "/g2p/de_g2p.mlmodelc";
+            neural_g2p_ = std::make_unique<NeuralG2P>();
+            if (!neural_g2p_->load(g2p_path)) {
+                neural_g2p_.reset();
+                std::printf("Neural G2P not available — using espeak-ng for German\n");
+            } else {
+                std::printf("Neural G2P loaded (German)\n");
+            }
+        } else {
+            std::printf("Neural G2P skipped (--g2p espeak)\n");
+        }
+#endif
+
         warmup();
 
         return true;
@@ -711,6 +728,14 @@ public:
         }
 
         std::string result;
+#ifdef __APPLE__
+        bool use_neural_g2p = is_de &&
+            neural_g2p_ && neural_g2p_->is_available() &&
+            g2p_backend_ != G2PBackend::ESPEAK;
+        if (use_neural_g2p) {
+            result = neural_g2p_->phonemize(text);
+        } else {
+#endif
         {
             std::lock_guard<std::mutex> lock(espeak_mutex_);
             espeak_SetVoiceByName(is_de ? "de" : "en-us");
@@ -721,6 +746,9 @@ public:
                 if (ph) result += ph;
             }
         }
+#ifdef __APPLE__
+        }
+#endif
 
         result = clean_phonemes(result);
 
@@ -735,23 +763,30 @@ public:
         return result;
     }
 
-    std::vector<float> synthesize(const std::string& text, float speed = 1.0f) {
+    std::vector<float> synthesize(const std::string& text, float speed = 1.0f,
+                                   const KTensor* prev_ref_s = nullptr,
+                                   KTensor* ref_s_out = nullptr) {
         std::string phonemes = phonemize(text);
         if (phonemes.empty()) return {};
 
         auto ids = vocab_.encode(phonemes);
         if (ids.size() <= 2) return {};
 
-        int phoneme_count = static_cast<int>(ids.size()) - 2;
-        int voice_idx = std::min(phoneme_count - 1, voice_entries_ - 1);
-        voice_idx = std::max(0, voice_idx);
-
-        auto ref_s = KTensor::from_data(voice_pack_.ptr() + voice_idx * 256, {1, 256});
+        KTensor ref_s;
+        if (prev_ref_s && prev_ref_s->defined() && prev_ref_s->numel() == 256) {
+            ref_s = KTensor::from_data(prev_ref_s->ptr(), {1, 256});
+        } else {
+            int phoneme_count = static_cast<int>(ids.size()) - 2;
+            int voice_idx = std::min(phoneme_count - 1, voice_entries_ - 1);
+            voice_idx = std::max(0, voice_idx);
+            ref_s = KTensor::from_data(voice_pack_.ptr() + voice_idx * 256, {1, 256});
+        }
 
 #ifdef KOKORO_COREML
-        return synthesize_coreml(ids, ref_s, speed);
+        return synthesize_coreml(ids, ref_s, speed, ref_s_out);
 #else
         (void)speed;
+        (void)ref_s_out;
         return {};
 #endif
     }
@@ -862,11 +897,16 @@ public:
 
     std::vector<float> synthesize_coreml(const std::vector<int64_t>& ids,
                                           const KTensor& ref_s,
-                                          float speed) {
+                                          float speed,
+                                          KTensor* ref_s_out = nullptr) {
         if (!coreml_available_ || !coreml_split_decoder_) return {};
 
         auto intermediates = run_duration_and_align(ids, ref_s, speed);
         if (!intermediates.valid) return {};
+
+        if (ref_s_out && intermediates.ref_s_full.defined() && intermediates.ref_s_full.numel() == 256) {
+            *ref_s_out = intermediates.ref_s_full;
+        }
 
         const int max_asr = coreml_split_decoder_->max_asr_frames();
         if (intermediates.total_frames > max_asr && intermediates.actual_len > 2) {
@@ -1082,12 +1122,20 @@ public:
         if (!result.ref_s_dec.defined() || result.ref_s_dec.size(1) < 128) {
             result.ref_s_dec = KTensor::from_data(ref_s.ptr(), {1, 128});
         }
+        if (dur_out.ref_s_out.defined() && dur_out.ref_s_out.numel() == 256) {
+            result.ref_s_full = dur_out.ref_s_out;
+        }
         result.valid = true;
         return result;
     }
 #endif
 
     bool has_coreml() const { return coreml_available_; }
+
+#ifdef __APPLE__
+    void set_g2p_backend(G2PBackend backend) { g2p_backend_ = backend; }
+    bool has_neural_g2p() const { return neural_g2p_ && neural_g2p_->is_available(); }
+#endif
 
 private:
     bool load_voice_pack(const std::string& bin_path, const std::string& voice_name) {
@@ -1123,6 +1171,10 @@ private:
     std::unique_ptr<CoreMLSplitDecoder> coreml_split_decoder_;
     std::unique_ptr<CoreMLF0NPredictor> coreml_f0n_;
 #endif
+#ifdef __APPLE__
+    std::unique_ptr<NeuralG2P> neural_g2p_;
+    G2PBackend g2p_backend_ = G2PBackend::AUTO;
+#endif
 };
 
 struct CallContext {
@@ -1133,6 +1185,7 @@ struct CallContext {
     std::thread worker;
     std::atomic<bool> active{true};
     std::atomic<bool> interrupted{false};
+    KTensor last_ref_s;
 };
 
 class KokoroService {
@@ -1227,6 +1280,15 @@ public:
     void set_log_level(const char* level) {
         log_fwd_.set_level(level);
     }
+
+#ifdef __APPLE__
+    void set_g2p_backend(G2PBackend backend) {
+        pipeline_.set_g2p_backend(backend);
+    }
+    bool has_neural_g2p() const {
+        return pipeline_.has_neural_g2p();
+    }
+#endif
 
 private:
     void command_listener_loop() {
@@ -1448,10 +1510,13 @@ private:
             std::lock_guard<std::mutex> lock(calls_mutex_);
             char spd[16];
             std::snprintf(spd, sizeof(spd), "%.2f", speed_.load());
-            return "ACTIVE_CALLS:" + std::to_string(calls_.size())
+            std::string status = "ACTIVE_CALLS:" + std::to_string(calls_.size())
                 + ":DOCK:" + (engine_.is_connected() ? "connected" : "disconnected")
-                + ":SPEED:" + spd
-                + "\n";
+                + ":SPEED:" + spd;
+#ifdef __APPLE__
+            status += ":G2P:" + std::string(pipeline_.has_neural_g2p() ? "neural" : "espeak");
+#endif
+            return status + "\n";
         }
         return "ERROR:Unknown command\n";
     }
@@ -1513,8 +1578,9 @@ private:
             std::printf("Synthesizing for call %u: %s\n", ctx->call_id, text.c_str());
 
             std::vector<float> samples;
+            KTensor ref_s_result;
             auto start = std::chrono::steady_clock::now();
-            samples = pipeline_.synthesize(text, speed_.load());
+            samples = pipeline_.synthesize(text, speed_.load(), &ctx->last_ref_s, &ref_s_result);
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
@@ -1530,6 +1596,10 @@ private:
                 std::fprintf(stderr, "Invalid audio output for call %u: %zu samples\n",
                             ctx->call_id, samples.size());
                 continue;
+            }
+
+            if (ref_s_result.defined() && ref_s_result.numel() == 256) {
+                ctx->last_ref_s = std::move(ref_s_result);
             }
 
             float raw_peak = tts::normalize_audio(samples);
@@ -1669,6 +1739,7 @@ int main(int argc, char* argv[]) {
     std::string variant = "kokoro-german";
     std::string voice = "df_eva";
     std::string log_level = "INFO";
+    std::string g2p_str = "auto";
 
     if (const char* env_variant = std::getenv("KOKORO_VARIANT")) {
         if (env_variant[0] != '\0') variant = env_variant;
@@ -1681,15 +1752,17 @@ int main(int argc, char* argv[]) {
         {"voice",     required_argument, 0, 'v'},
         {"variant",   required_argument, 0, 'V'},
         {"log-level", required_argument, 0, 'L'},
+        {"g2p",       required_argument, 0, 'g'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "v:V:L:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "v:V:L:g:h", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'v': voice = optarg; break;
             case 'V': variant = optarg; break;
             case 'L': log_level = optarg; break;
+            case 'g': g2p_str = optarg; break;
             case 'h':
                 std::printf("Usage: kokoro-service [OPTIONS]\n");
                 std::printf("  --variant NAME    Model variant subdir under models/ (default: kokoro-german = v1_1-de;\n");
@@ -1697,20 +1770,37 @@ int main(int argc, char* argv[]) {
                 std::printf("  --voice NAME      Voice to use (default: df_eva; for kokoro-german also dm_bernd;\n");
                 std::printf("                    for kokoro-german-martin: martin). Env: KOKORO_VOICE\n");
                 std::printf("  --log-level LEVEL Log level: ERROR WARN INFO DEBUG TRACE (default: INFO)\n");
+                std::printf("  --g2p BACKEND     G2P backend: auto|neural|espeak (default: auto)\n");
                 return 0;
             default: break;
         }
     }
 
-    std::printf("Starting Kokoro TTS Service (variant=%s, voice=%s, decoder=coreml-split)\n",
-                variant.c_str(), voice.c_str());
+    std::printf("Starting Kokoro TTS Service (variant=%s, voice=%s, decoder=coreml-split, g2p=%s)\n",
+                variant.c_str(), voice.c_str(), g2p_str.c_str());
 
     KokoroService service;
     g_service = &service;
 
+#ifdef __APPLE__
+    {
+        G2PBackend g2p_backend = G2PBackend::AUTO;
+        if (g2p_str == "neural") g2p_backend = G2PBackend::NEURAL;
+        else if (g2p_str == "espeak") g2p_backend = G2PBackend::ESPEAK;
+        service.set_g2p_backend(g2p_backend);
+    }
+#endif
+
     if (!service.initialize(voice, variant)) {
         return 1;
     }
+
+#ifdef __APPLE__
+    if (g2p_str == "neural" && !service.has_neural_g2p()) {
+        std::fprintf(stderr, "[WARN] --g2p neural requested but neural G2P model failed to load;"
+                             " falling back to espeak-ng\n");
+    }
+#endif
 
     service.set_log_level(log_level.c_str());
     service.run();

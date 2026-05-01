@@ -31,6 +31,8 @@ constexpr size_t   kTTSMaxFrameSamples = 4800;
 // frontend and tests share a single source of truth with the engines.
 constexpr uint16_t kKokoroEngineCmdPort = 13144;
 constexpr uint16_t kNeuTTSEngineCmdPort = 13174;
+constexpr uint16_t kVITS2EngineCmdPort  = 13175;
+constexpr uint16_t kMatchaEngineCmdPort = 13176;
 
 // Audio payload header emitted by every TTS engine and parsed by OAP.
 // Wire layout:

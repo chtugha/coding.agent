@@ -1,5 +1,40 @@
 # Changelog
 
+## TTS Speed & Naturalness Optimizations (2026-05)
+
+### Added
+
+- **Clause-boundary streaming in `llama-service`** (`llama-service.cpp`): LLaMA now triggers TTS synthesis at commas, semicolons, and German dash patterns (em-dash, en-dash, ` - `) in addition to sentence-end punctuation. Reduces perceived time-to-first-audio by ~100–200 ms. Early-streaming guard raised to `MAX_EARLY_STREAM_CHUNKS = 4` (was 2) to accommodate multi-chunk sentences.
+
+- **Neural G2P for German** (`neural-g2p.h`, `neural-g2p.mm`): New `NeuralG2P` class loads a DeepPhonemizer German checkpoint exported to CoreML (`de_g2p.mlmodelc`). Kokoro and Matcha engines use it when `--g2p neural` is set; espeak-ng remains the fallback for other languages and when the model is absent. The `G2PBackend` enum (`AUTO`, `NEURAL`, `ESPEAK`) is defined in the shared `neural-g2p.h` header consumed by all engine services.
+  - Export script: `scripts/export_g2p_model.py` — downloads DeepPhonemizer German checkpoint, converts to CoreML, saves `de_g2p.mlmodelc` + vocab files to `bin/models/g2p/`.
+
+- **Prosody state carryover in Kokoro** (`kokoro-service.cpp`): `KokoroPipeline::synthesize()` now accepts `prev_ref_s` / `ref_s_out` parameters. The `ref_s_out` tensor (256-dim style vector) from chunk N is stored in `CallContext::last_ref_s` and fed as `ref_s` input to chunk N+1's duration model. Intonation continuity across synthesized chunks is preserved without any CoreML model re-export. Thread-safe: each call worker owns its own `ref_s` copy.
+
+- **VITS2 engine** (`vits2-service.cpp`, `libpiper/`): New TTS engine using [Piper TTS](https://github.com/rhasspy/piper) via the `libpiper` C API (ONNX Runtime 1.22). Docks into `tts-service` on cmd port **13175**. Supports German Piper voice models (`.onnx` + `.onnx.json`). `libpiper` is compiled as a static library; ONNX Runtime dylib is bundled at `@executable_path`.
+  - Model setup script: `scripts/setup_vits2_models.py` — downloads `de_DE-thorsten-high.onnx` and config to `bin/models/vits2-german/`.
+
+- **Matcha-TTS engine** (`matcha-service.cpp`): New TTS engine based on Matcha-TTS (flow-matching) + HiFi-GAN, both exported to CoreML. ODE flow is baked into a static CoreML graph (10 Euler steps unrolled at export time). Docks into `tts-service` on cmd port **13176**. Three bucketed flow models (3s/5s/10s). Supports neural G2P for German via `neural-g2p.h`.
+  - Export script: `scripts/export_matcha_models.py` — exports text encoder, baked ODE flow, HiFi-GAN vocoder, and vocabulary to `bin/models/matcha-german/coreml/`.
+
+- **Port constants** (`tts-common.h`): `kVITS2EngineCmdPort = 13175`, `kMatchaEngineCmdPort = 13176`.
+
+- **Dashboard: per-engine TTS config** (`frontend.cpp`, `frontend-ui.h`, `javascript.h`, `database.h`):
+  - Four new REST endpoints: `GET/POST /api/tts/engine_config`, `GET /api/tts/available_voices`, `GET /api/tts/available_g2p`.
+  - VITS2 and Matcha config panels in the service detail view (Voice, G2P, Language dropdowns + Save button with async status feedback).
+  - Language-switch lifecycle: changing language triggers per-engine preset computation, stops incompatible engines, and restarts the active engine — all in a detached thread so the HTTP response is returned immediately.
+  - Engine `disabled_reason` field: greyed-out UI when no compatible model directory is installed for the selected language.
+  - Settings persisted in SQLite: `tts_engine_config_{engine}_{voice|g2p|lang}`. Defaults: kokoro=`df_eva/auto/de`, neutts=`default/espeak/de`, vits2=`default/auto/de`, matcha=`default/auto/de`.
+  - Input validation: `lang` allowlisted against known codes; `voice`/`g2p_backend` restricted to `[A-Za-z0-9._-]`.
+
+### Changed
+
+- `libpiper/CMakeLists.txt`: `add_library(piper SHARED …)` → `add_library(piper STATIC …)` to satisfy the project's static-linking policy.
+- `database.h` seed: Added `VITS2_ENGINE` (`bin/vits2-service`) and `MATCHA_ENGINE` (`bin/matcha-service`) rows alongside existing engine entries.
+- `frontend.cpp` service vectors: `all_svcs` and `tts_svcs` now include `VITS2_ENGINE` and `MATCHA_ENGINE`. Engine dispatch in `run_test_setup_async()` and `SET_LOG_LEVEL` handler extended from 2-way to 4-way.
+
+---
+
 ## TTS pipeline redesign (2026-04)
 
 ### Added

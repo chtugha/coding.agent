@@ -30,7 +30,8 @@ Engine-local diagnostics live on **cmd port 13144** (moved from 13142, which now
 
 | Component | Technology | Device | Latency |
 |-----------|-----------|--------|---------|
-| Phonemization | espeak-ng (cached) | CPU | ~5ms |
+| Phonemization (espeak-ng) | libespeak-ng (cached) | CPU | ~5ms |
+| Phonemization (neural G2P) | DeepPhonemizer CoreML | ANE | ~8ms |
 | Duration model | CoreML (BERT + prosody) | ANE | ~65ms |
 | Alignment | repeat_interleave (C++) | CPU | <1ms |
 | HAR source | TorchScript (SineGen+STFT) | CPU | ~5ms |
@@ -103,7 +104,7 @@ The build auto-detects:
 ## Running
 
 ```bash
-./bin/kokoro-service [--voice=df_eva|dm_bernd]
+./bin/kokoro-service [--voice df_eva|dm_bernd] [--g2p auto|neural|espeak]
 ```
 
 The service:
@@ -169,7 +170,17 @@ The `repeat_interleave` operation (mapping token durations to frame-level featur
 
 ### Phonemization
 
-Uses espeak-ng C API with German voice (`de`). Thread-safe via mutex. Results cached (up to 10,000 entries with clear-all eviction).
+Two backends are available, selected by `--g2p`:
+
+- **`espeak` (default fallback)**: espeak-ng C API with German voice (`de`). Thread-safe via mutex. Results cached (up to 10,000 entries with clear-all eviction).
+- **`neural`**: DeepPhonemizer German G2P model (`de_g2p.mlmodelc`) loaded from `$WHISPERTALK_MODELS_DIR/g2p/`. Produces more accurate IPA for German compound words, medical terms, and loanwords. Falls back to espeak-ng for non-German text.
+- **`auto`**: uses neural G2P for German text (detected via `detect_german()`), espeak-ng otherwise. If the neural G2P model is absent, silently falls back to espeak-ng.
+
+The `G2PBackend` enum is defined in `neural-g2p.h` and shared across all engine services.
+
+### Prosody State Carryover
+
+For multi-chunk responses, the `ref_s_out` tensor (256-dim float32 style vector) emitted by the duration model for chunk N is stored in `CallContext::last_ref_s` and injected as `ref_s` input to the duration model for chunk N+1. This ensures that the prosody context of a synthesized clause carries over to the next one, avoiding the "flat intonation reset" that occurred when each chunk was synthesized independently with a fresh voice-pack embedding lookup. No CoreML model re-export is required — the duration model already accepts `ref_s` as an external input tensor.
 
 ## Multi-Call Support
 
