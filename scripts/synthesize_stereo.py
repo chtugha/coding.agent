@@ -6,9 +6,9 @@
 #   Ch0 (left)  = MOSHI voice (receptionist)
 #   Ch1 (right) = USER  voice (caller)
 #
-# TTS provider (env TTS_PROVIDER, default "google"):
-#   google — de-DE-Neural2-F / de-DE-Neural2-D  (native German, recommended)
-#   openai — nova / onyx  (English-optimized, non-native accent on German)
+# TTS provider (env TTS_PROVIDER, default "openai"):
+#   openai — tts-1-hd with nova / onyx  (preferred, natural German prosody)
+#   google — de-DE-Neural2-F / de-DE-Neural2-D  (alternative native German)
 #
 # Output:
 #   data/moshi_german/stereo/*.wav      — 24kHz 16-bit stereo WAVs
@@ -23,9 +23,9 @@
 # Requirements: pip install numpy scipy tqdm
 #               pip install google-cloud-texttospeech  (for google provider)
 #               pip install openai                     (for openai provider)
-# Env:          TTS_PROVIDER=google|openai  (default: google)
-#               GOOGLE_APPLICATION_CREDENTIALS  (for google)
+# Env:          TTS_PROVIDER=openai|google  (default: openai)
 #               OPENAI_API_KEY                  (for openai)
+#               GOOGLE_APPLICATION_CREDENTIALS  (for google)
 
 import io
 import json
@@ -48,7 +48,7 @@ SAMPLE_RATE   = 24000          # Moshi's native rate
 GAP_SECONDS   = 0.12           # silence between turns (120 ms)
 MIN_REQ_GAP   = 1.05           # seconds between TTS API calls (rate-limit safety)
 
-TTS_PROVIDER  = os.environ.get("TTS_PROVIDER", "google").lower()
+TTS_PROVIDER  = os.environ.get("TTS_PROVIDER", "openai").lower()
 
 if TTS_PROVIDER == "openai":
     from openai import OpenAI
@@ -91,7 +91,7 @@ def _is_valid_wav(path: Path) -> bool:
 
 def _synthesize_openai(text: str, voice: str, cache_path: Path) -> bytes:
     response = _openai_client.audio.speech.create(
-        model="tts-1",
+        model="tts-1-hd",
         voice=voice,
         input=text,
         response_format="wav",
@@ -114,27 +114,22 @@ def _synthesize_google(text: str, voice: str, cache_path: Path) -> bytes:
     response = _google_client.synthesize_speech(
         input=synthesis_input, voice=voice_params, audio_config=audio_config,
     )
-    return response.audio_content
-
-
-def _is_valid_cache(path: Path) -> bool:
-    if not path.exists() or path.stat().st_size < 100:
-        return False
-    if TTS_PROVIDER == "google":
-        return True
-    return _is_valid_wav(path)
-
-
-def _read_cache(path: Path) -> np.ndarray:
-    if TTS_PROVIDER == "google":
-        return _pcm_to_float(path.read_bytes())
-    return _read_wav_float(path)
+    pcm_data = response.audio_content
+    if len(pcm_data) == 0:
+        raise ValueError("Google TTS returned empty audio")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(pcm_data)
+    return buf.getvalue()
 
 
 def synthesize(text: str, voice: str, cache_path: Path) -> np.ndarray:
     """Return float32 mono audio at SAMPLE_RATE. Uses cache if available."""
-    if _is_valid_cache(cache_path):
-        return _read_cache(cache_path)
+    if cache_path.exists() and _is_valid_wav(cache_path):
+        return _read_wav_float(cache_path)
 
     synth_fn = _synthesize_openai if TTS_PROVIDER == "openai" else _synthesize_google
 
@@ -143,8 +138,6 @@ def synthesize(text: str, voice: str, cache_path: Path) -> np.ndarray:
             _throttle()
             raw = synth_fn(text, voice, cache_path)
             cache_path.write_bytes(raw)
-            if TTS_PROVIDER == "google":
-                return _pcm_to_float(raw)
             return _read_wav_float_bytes(raw)
         except Exception as exc:
             wait = 2 ** attempt
@@ -168,10 +161,6 @@ def _read_wav_float_bytes(data: bytes) -> np.ndarray:
         sr  = wf.getframerate()
         sw  = wf.getsampwidth()
     return _raw_to_float(raw, sr, sw)
-
-
-def _pcm_to_float(raw: bytes) -> np.ndarray:
-    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def _raw_to_float(raw: bytes, sr: int, sw: int) -> np.ndarray:
