@@ -16,7 +16,7 @@
 #   • Rate-limit throttle (1 req/s sustained)
 #   • Progress bar
 #
-# Requirements: pip install openai numpy tqdm
+# Requirements: pip install openai numpy scipy tqdm
 # Env:          OPENAI_API_KEY
 
 import io
@@ -54,9 +54,17 @@ def _throttle():
     _last_request_at = time.monotonic()
 
 
+def _is_valid_wav(path: Path) -> bool:
+    try:
+        with wave.open(str(path), "rb") as wf:
+            return wf.getnframes() > 0
+    except Exception:
+        return False
+
+
 def synthesize(text: str, voice: str, cache_path: Path) -> np.ndarray:
     """Return float32 mono audio at SAMPLE_RATE. Uses cache if available."""
-    if cache_path.exists() and cache_path.stat().st_size > 100:
+    if cache_path.exists() and _is_valid_wav(cache_path):
         return _read_wav_float(cache_path)
 
     for attempt in range(5):
@@ -111,10 +119,10 @@ def _raw_to_float(raw: bytes, sr: int, sw: int) -> np.ndarray:
 def _resample(audio: np.ndarray, from_sr: int, to_sr: int) -> np.ndarray:
     if from_sr == to_sr:
         return audio
-    ratio   = to_sr / from_sr
-    new_len = int(len(audio) * ratio)
-    indices = np.linspace(0, len(audio) - 1, new_len)
-    return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
+    from scipy.signal import resample_poly
+    from math import gcd
+    g = gcd(to_sr, from_sr)
+    return resample_poly(audio, to_sr // g, from_sr // g).astype(np.float32)
 
 
 def assemble_stereo(dialogue: dict) -> tuple[np.ndarray, float]:
@@ -186,7 +194,7 @@ def main():
             wav_path = STEREO_DIR / f"{did}.wav"
             pbar.set_description(f"{did} ({dialogue.get('scenario','?')[:20]})")
 
-            if wav_path.exists() and wav_path.stat().st_size > 1000:
+            if wav_path.exists() and _is_valid_wav(wav_path):
                 duration = get_wav_duration(wav_path)
                 manifest.append({"path": str(wav_path.resolve()), "duration": duration})
                 continue

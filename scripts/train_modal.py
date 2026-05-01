@@ -104,6 +104,7 @@ TRAIN_CONFIG = {
         "eval_data": "",
     },
     "run_dir": f"{VOL_CHECKPOINTS}/run_001",
+    "overwrite_run_dir": True,
 }
 
 # ── Step 1: upload ────────────────────────────────────────────────────────────
@@ -146,7 +147,6 @@ def do_upload():
         manifest_bytes = "\n".join(json.dumps(e) for e in modal_entries).encode()
         batch.put_bytes(manifest_bytes, "train.jsonl")
 
-    data_vol.commit()
     total_h = sum(e["duration"] for e in modal_entries) / 3600
     print(f"✓ Uploaded {len(wav_files)} WAVs ({total_h:.2f} h audio) + manifest")
 
@@ -180,7 +180,7 @@ def do_annotate():
 # ── Step 3: train ─────────────────────────────────────────────────────────────
 
 @app.function(
-    gpu="H100",
+    gpu=["h100", "a100:80GB"],
     volumes={
         "/data":        data_vol,
         "/checkpoints": ckpt_vol,

@@ -108,6 +108,24 @@ def length_plan(total: int) -> list[str]:
     return plan
 
 
+def _validate_dialogue(d: dict, expected_id: str, domain: str, scenario_key: str, length: str) -> bool:
+    if not isinstance(d, dict):
+        return False
+    turns = d.get("turns")
+    if not isinstance(turns, list) or len(turns) == 0:
+        return False
+    for t in turns:
+        if not isinstance(t, dict):
+            return False
+        if "speaker" not in t or "text" not in t:
+            return False
+        if t["speaker"] not in ("moshi", "user"):
+            return False
+        if not isinstance(t["text"], str) or len(t["text"].strip()) == 0:
+            return False
+    return True
+
+
 def call_api(domain: str, scenario_key: str, scenario_desc: str, length: str, ids: list[str]) -> list[dict]:
     prompt = make_user_prompt(domain, scenario_desc, LENGTH_SPECS[length], ids)
     for attempt in range(4):
@@ -119,7 +137,7 @@ def call_api(domain: str, scenario_key: str, scenario_desc: str, length: str, id
                     {"role": "user",   "content": prompt},
                 ],
                 temperature=0.92,
-                max_tokens=4096,
+                max_tokens=16384,
             )
             raw = resp.choices[0].message.content.strip()
             start = raw.find("[")
@@ -127,12 +145,18 @@ def call_api(domain: str, scenario_key: str, scenario_desc: str, length: str, id
             if start == -1 or end == 0:
                 raise ValueError("No JSON array found in response")
             dialogues = json.loads(raw[start:end])
+            valid = []
             for i, d in enumerate(dialogues):
-                d.setdefault("id",       ids[i] if i < len(ids) else f"{domain[:3]}_{i:04d}")
-                d.setdefault("domain",   domain)
-                d.setdefault("scenario", scenario_key)
-                d.setdefault("length",   length)
-            return dialogues
+                eid = ids[i] if i < len(ids) else f"{domain[:3]}_{i:04d}"
+                d["id"]       = eid
+                d["domain"]   = domain
+                d["scenario"] = scenario_key
+                d["length"]   = length
+                if _validate_dialogue(d, eid, domain, scenario_key, length):
+                    valid.append(d)
+                else:
+                    print(f"      ⚠ invalid dialogue {eid} — skipped")
+            return valid
         except Exception as exc:
             wait = 2 ** attempt
             print(f"      ⚠ attempt {attempt+1} failed ({exc}) — retry in {wait}s")
@@ -160,10 +184,9 @@ def main():
             idx = 0
             while idx < target:
                 batch_lengths = lengths[idx : idx + batch_size]
-                # Group consecutive same-length entries into one API call
                 groups: dict[str, list[str]] = {"short": [], "medium": [], "long": []}
-                for length in batch_lengths:
-                    global_id = counter[domain] + idx + len(groups[length])
+                for offset, length in enumerate(batch_lengths):
+                    global_id = counter[domain] + idx + offset
                     groups[length].append(f"{prefix}_{global_id:04d}")
 
                 for length, ids in groups.items():
