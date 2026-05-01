@@ -63,7 +63,7 @@ gpu_image = (
     )
     .run_commands(
         "git clone --depth 1 https://github.com/kyutai-labs/moshi-finetune /moshi-finetune",
-        "cd /moshi-finetune && pip install -e . --quiet",
+        "cd /moshi-finetune && pip install -e . --no-deps --quiet",
     )
 )
 
