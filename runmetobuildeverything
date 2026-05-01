@@ -318,10 +318,17 @@ verify_binaries() {
         "bin/outbound-audio-processor"
         "bin/whisper-service"
         "bin/llama-service"
+        "bin/tts-service"
         "bin/kokoro-service"
         "bin/neutts-service"
         "bin/frontend"
         "bin/tomedo-crawl"
+    )
+
+    OPTIONAL_SERVICES=(
+        "bin/vits2-service"
+        "bin/matcha-service"
+        "bin/moshi-service"
     )
 
     ALL_OK=true
@@ -331,6 +338,14 @@ verify_binaries() {
         else
             warn "  MISSING: $svc"
             ALL_OK=false
+        fi
+    done
+
+    for svc in "${OPTIONAL_SERVICES[@]}"; do
+        if [ -f "$svc" ]; then
+            info "  $svc ($(du -h "$svc" | cut -f1)) [optional]"
+        else
+            warn "  not built: $svc (optional — check CMake output for missing dependencies)"
         fi
     done
 

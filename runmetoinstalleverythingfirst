@@ -27,9 +27,16 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  14. Prepare NeuTTS reference voice (encode audio + phonemize text)"
     echo "  15. Check Ollama installation (optional, for tomedo-crawl RAG embeddings)"
     echo ""
+    echo "Optional TTS engines (called automatically, non-fatal if unavailable):"
+    echo "  16. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
+    echo "  17. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
+    echo "  18. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
+    echo "      Note: step 18 requires a German Matcha-TTS checkpoint (--checkpoint flag"
+    echo "      or fine-tuned from shivammehta25/Matcha-TTS). Falls back to English."
+    echo ""
     echo "Requirements:"
     echo "  - macOS (Apple Silicon M1/M2/M3/M4)"
-    echo "  - ~15 GB free disk space"
+    echo "  - ~15 GB free disk space (+ ~1 GB for optional VITS2/Matcha models)"
     echo "  - Internet connection"
     echo ""
     echo "After installation, run: ./runmetobuildeverything"
@@ -192,6 +199,8 @@ setup_python_env() {
     "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
     "$WHISPERTALK_PYTHON" -m pip install --quiet --no-deps ane-transformers
     "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
+    "$WHISPERTALK_PYTHON" -m pip install --quiet deep-phonemizer || \
+        warn "deep-phonemizer install failed — neural G2P export (step 16) will not be available"
     info "Python environment ready"
 }
 
@@ -598,6 +607,81 @@ PYEOF
     fi
 }
 
+export_g2p_models() {
+    step "Exporting Neural G2P model (optional — step 16)"
+
+    local g2p_dir="bin/models/g2p"
+    if [ -d "${g2p_dir}/de_g2p.mlmodelc" ]; then
+        info "Neural G2P model already exists at ${g2p_dir}/de_g2p.mlmodelc"
+        return
+    fi
+
+    if ! "$WHISPERTALK_PYTHON" -c "import dp" 2>/dev/null; then
+        warn "deep-phonemizer not installed — skipping Neural G2P export"
+        warn "  To export manually: python3 scripts/export_g2p_model.py --output-dir ${g2p_dir}"
+        return
+    fi
+
+    info "Running Neural G2P export script..."
+    "$WHISPERTALK_PYTHON" scripts/export_g2p_model.py --output-dir "$g2p_dir" \
+        || warn "Neural G2P export failed — Kokoro and Matcha will fall back to espeak-ng"
+
+    if [ -d "${g2p_dir}/de_g2p.mlmodelc" ]; then
+        info "Neural G2P model exported to ${g2p_dir}"
+    else
+        warn "Neural G2P export may have failed. Run manually:"
+        warn "  python3 scripts/export_g2p_model.py --output-dir ${g2p_dir}"
+    fi
+}
+
+setup_vits2_models() {
+    step "Downloading VITS2/Piper German voice model (optional — step 17)"
+
+    local vits2_dir="bin/models/vits2-german"
+    if ls "${vits2_dir}"/*.onnx 2>/dev/null | grep -q .; then
+        info "VITS2 voice model already present in ${vits2_dir}/"
+        return
+    fi
+
+    info "Downloading Piper German voice (de_DE-thorsten-high)..."
+    if ! "$WHISPERTALK_PYTHON" scripts/setup_vits2_models.py --output-dir "$vits2_dir"; then
+        warn "VITS2 model download failed. Run manually:"
+        warn "  python3 scripts/setup_vits2_models.py --output-dir ${vits2_dir}"
+    fi
+
+    if ls "${vits2_dir}"/*.onnx 2>/dev/null | grep -q .; then
+        info "VITS2 voice model ready at ${vits2_dir}/"
+    fi
+}
+
+export_matcha_models() {
+    step "Exporting Matcha-TTS models (optional — step 18)"
+
+    local matcha_dir="bin/models/matcha-german/coreml"
+    if [ -d "${matcha_dir}/matcha_encoder.mlmodelc" ]; then
+        info "Matcha-TTS CoreML models already exist at ${matcha_dir}/"
+        return
+    fi
+
+    if ! "$WHISPERTALK_PYTHON" -c "import matcha" 2>/dev/null; then
+        warn "matcha-tts package not installed — skipping Matcha-TTS export"
+        warn "  Install: pip install matcha-tts"
+        warn "  Then export: python3 scripts/export_matcha_models.py --output-dir ${matcha_dir}"
+        return
+    fi
+
+    info "Running Matcha-TTS export script (English fallback — no German checkpoint)..."
+    info "For a German voice, provide a fine-tuned checkpoint via --checkpoint."
+    if ! "$WHISPERTALK_PYTHON" scripts/export_matcha_models.py --output-dir "$matcha_dir"; then
+        warn "Matcha-TTS export failed. Run manually:"
+        warn "  python3 scripts/export_matcha_models.py --output-dir ${matcha_dir}"
+    fi
+
+    if [ -d "${matcha_dir}/matcha_encoder.mlmodelc" ]; then
+        info "Matcha-TTS CoreML models exported to ${matcha_dir}/"
+    fi
+}
+
 verify_installation() {
     step "Verifying installation"
 
@@ -648,6 +732,21 @@ verify_installation() {
         else
             warn "  MISSING: $name"
             ALL_OK=false
+        fi
+    done
+
+    echo ""
+    echo "Optional TTS engine models:"
+    for item in \
+        "bin/models/g2p/de_g2p.mlmodelc:Neural G2P model (de_g2p.mlmodelc)" \
+        "bin/models/vits2-german:VITS2/Piper German voice directory" \
+        "bin/models/matcha-german/coreml/matcha_encoder.mlmodelc:Matcha-TTS CoreML models"; do
+        path="${item%%:*}"
+        name="${item##*:}"
+        if [ -e "$path" ]; then
+            info "  [OK] $name"
+        else
+            warn "  [--] $name not present (run step 16/17/18 manually if needed)"
         fi
     done
 
@@ -759,6 +858,10 @@ main() {
     download_neutts_models
     convert_neucodec_to_coreml
     prepare_neutts_reference
+
+    export_g2p_models
+    setup_vits2_models
+    export_matcha_models
 
     check_ollama
     install_git_hooks
