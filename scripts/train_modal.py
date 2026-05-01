@@ -20,6 +20,7 @@
 
 import argparse
 import json
+import tempfile
 from pathlib import Path
 
 import modal
@@ -140,12 +141,15 @@ def do_upload():
                 "duration": entry["duration"],
             })
 
+    manifest_bytes = "\n".join(json.dumps(e) for e in modal_entries).encode()
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tmp:
+        tmp.write(manifest_bytes)
+        tmp_path = tmp.name
+
     with data_vol.batch_upload(force=True) as batch:
         for wav_path in tqdm(wav_files, unit="file", desc="WAVs"):
             batch.put_file(str(wav_path), f"stereo/{wav_path.name}")
-
-        manifest_bytes = "\n".join(json.dumps(e) for e in modal_entries).encode()
-        batch.put_bytes(manifest_bytes, "train.jsonl")
+        batch.put_file(tmp_path, "train.jsonl")
 
     total_h = sum(e["duration"] for e in modal_entries) / 3600
     print(f"✓ Uploaded {len(wav_files)} WAVs ({total_h:.2f} h audio) + manifest")
