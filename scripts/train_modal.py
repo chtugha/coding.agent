@@ -181,7 +181,7 @@ def do_annotate():
 # ── Step 3: train ─────────────────────────────────────────────────────────────
 
 @app.function(
-    gpu=["h100", "a100:80GB"],
+    gpu=["H100", "A100-80GB"],
     volumes={
         "/data":        data_vol,
         "/checkpoints": ckpt_vol,
