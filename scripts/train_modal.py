@@ -18,7 +18,6 @@
 # HF token:     modal secret create huggingface-token HF_TOKEN=hf_...
 #               (needed to download kyutai/moshiko-pytorch-bf16)
 
-import argparse
 import json
 import tempfile
 from pathlib import Path
@@ -229,24 +228,22 @@ def do_train():
 # ── local entrypoint ──────────────────────────────────────────────────────────
 
 @app.local_entrypoint()
-def main():
-    parser = argparse.ArgumentParser(description="German Moshi fine-tune pipeline on Modal")
-    parser.add_argument("--upload-only",   action="store_true")
-    parser.add_argument("--annotate-only", action="store_true")
-    parser.add_argument("--train-only",    action="store_true")
-    args, _ = parser.parse_known_args()
+def main(
+    upload_only: bool = False,
+    annotate_only: bool = False,
+    train_only: bool = False,
+):
+    only = upload_only or annotate_only or train_only
 
-    only = args.upload_only or args.annotate_only or args.train_only
-
-    if not only or args.upload_only:
+    if not only or upload_only:
         print("\n── Step 1 / 3: Upload data ───────────────────────────────")
         do_upload()
 
-    if not only or args.annotate_only:
+    if not only or annotate_only:
         print("\n── Step 2 / 3: Annotate with Whisper (A10G) ─────────────")
         do_annotate.remote()
 
-    if not only or args.train_only:
+    if not only or train_only:
         print("\n── Step 3 / 3: LoRA training (H100) ─────────────────────")
         do_train.remote()
 
