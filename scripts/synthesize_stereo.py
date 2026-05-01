@@ -36,7 +36,10 @@ from math import gcd
 from pathlib import Path
 
 import numpy as np
+from dotenv import load_dotenv
 from tqdm import tqdm
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 DIALOGUES_PATH = Path(__file__).parent / "dialogues.json"
 DATA_DIR       = Path(__file__).parent.parent / "data" / "moshi_german"

@@ -130,3 +130,6 @@ third_party/onnxruntime/
 third_party/onnxruntime
 logs/
 .zenflow/
+
+# Environment secrets
+.env

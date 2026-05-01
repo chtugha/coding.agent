@@ -7,8 +7,8 @@
 #
 # Output: scripts/dialogues.json
 #
-# Requirements: pip install openai
-# Env:          OPENAI_API_KEY
+# Requirements: pip install openai python-dotenv
+# Env:          OPENAI_API_KEY  (or .env file in project root)
 
 import json
 import os
@@ -16,8 +16,10 @@ import random
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
+load_dotenv(Path(__file__).parent.parent / ".env")
 client = OpenAI()
 
 OUTPUT_PATH = Path(__file__).parent / "dialogues.json"
