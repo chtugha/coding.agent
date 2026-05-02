@@ -435,7 +435,13 @@ public:
         struct mg_connection *c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
         if (c) c->fn_data = this;
 
+        uint16_t http_plain_port = http_port_ + 1;
+        std::string http_plain_addr = "http://127.0.0.1:" + std::to_string(http_plain_port);
+        struct mg_connection *cp = mg_http_listen(&mgr_, http_plain_addr.c_str(), http_handler_plain_static, this);
+        if (cp) cp->fn_data = this;
+
         std::cout << "Frontend web server started on " << listen_addr << "\n";
+        std::cout << "Frontend plain HTTP on " << http_plain_addr << "\n";
         std::cout << "Open http://localhost:" << http_port_ << " in your browser\n";
 
         start_emb_pool();

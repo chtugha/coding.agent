@@ -285,11 +285,13 @@ public:
 
     void close() {
         std::lock_guard<std::mutex> lk(mutex_);
+        if (base_path_.empty()) return;
         save_locked();
         hnsw_.reset();
         space_.reset();
         meta_.clear();
         source_index_.clear();
+        base_path_.clear();
     }
 
     ~EmbeddingDB() {
