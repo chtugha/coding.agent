@@ -7,6 +7,7 @@
 #include <fstream>
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
 #include <algorithm>
 #include <memory>
 #include <cmath>
@@ -25,10 +26,6 @@ struct QueryResult {
     int         patient_id;
 };
 
-static constexpr int HNSW_M        = 16;
-static constexpr int HNSW_EF_BUILD = 200;
-static constexpr int HNSW_EF_QUERY = 50;
-
 struct ChunkMeta {
     std::string source;
     int         patient_id = 0;
@@ -36,9 +33,15 @@ struct ChunkMeta {
 };
 
 class EmbeddingDB {
+    static inline constexpr int HNSW_M        = 16;
+    static inline constexpr int HNSW_EF_BUILD = 200;
+    static inline constexpr int HNSW_EF_QUERY = 50;
+    static inline constexpr uint32_t META_VERSION = 1;
+
     std::unique_ptr<hnswlib::L2Space>                space_;
     std::unique_ptr<hnswlib::HierarchicalNSW<float>> hnsw_;
     std::unordered_map<size_t, ChunkMeta>            meta_;
+    std::unordered_map<std::string, size_t>          source_index_;
     int                                              dim_          = 0;
     size_t                                           max_elements_ = 500000;
     size_t                                           next_id_      = 1;
@@ -73,10 +76,63 @@ class EmbeddingDB {
         return s;
     }
 
+    static std::string make_source_key(const std::string& source, int patient_id) {
+        return source + "\0" + std::to_string(patient_id);
+    }
+
+    void rebuild_source_index() {
+        source_index_.clear();
+        source_index_.reserve(meta_.size());
+        for (const auto& [id, cm] : meta_)
+            source_index_[make_source_key(cm.source, cm.patient_id)] = id;
+    }
+
+    bool save_locked() {
+        if (base_path_.empty()) return false;
+
+        std::string meta_path = base_path_ + ".meta";
+        std::string hnsw_path = base_path_ + ".hnsw";
+        std::string meta_tmp  = meta_path + ".tmp";
+
+        if (hnsw_) {
+            try { hnsw_->saveIndex(hnsw_path); } catch (...) { return false; }
+        }
+
+        std::ofstream mf(meta_tmp, std::ios::binary | std::ios::trunc);
+        if (!mf.good()) return false;
+
+        uint32_t version = META_VERSION;
+        mf.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+        int32_t dim = static_cast<int32_t>(dim_);
+        mf.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
+
+        uint64_t count = static_cast<uint64_t>(meta_.size());
+        mf.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+        uint64_t next = static_cast<uint64_t>(next_id_);
+        mf.write(reinterpret_cast<const char*>(&next), sizeof(next));
+
+        for (const auto& [id, cm] : meta_) {
+            uint64_t uid = static_cast<uint64_t>(id);
+            mf.write(reinterpret_cast<const char*>(&uid), sizeof(uid));
+            write_string(mf, cm.source);
+            int32_t pid = static_cast<int32_t>(cm.patient_id);
+            mf.write(reinterpret_cast<const char*>(&pid), sizeof(pid));
+            write_string(mf, cm.text);
+        }
+        mf.flush();
+        if (!mf.good()) return false;
+        mf.close();
+
+        return std::rename(meta_tmp.c_str(), meta_path.c_str()) == 0;
+    }
+
 public:
     void set_max_elements(size_t n) { max_elements_ = n; }
 
     bool open(const std::string& base_path) {
+        std::lock_guard<std::mutex> lk(mutex_);
         base_path_ = base_path;
         std::string meta_path = base_path_ + ".meta";
         std::string hnsw_path = base_path_ + ".hnsw";
@@ -85,7 +141,7 @@ public:
         if (mf.good()) {
             uint32_t version = 0;
             mf.read(reinterpret_cast<char*>(&version), sizeof(version));
-            if (version != 1) return true;
+            if (version != META_VERSION) return false;
 
             int32_t dim = 0;
             mf.read(reinterpret_cast<char*>(&dim), sizeof(dim));
@@ -110,6 +166,8 @@ public:
             }
             mf.close();
 
+            rebuild_source_index();
+
             if (dim > 0) {
                 dim_ = dim;
                 space_ = std::make_unique<hnswlib::L2Space>(static_cast<size_t>(dim));
@@ -122,6 +180,7 @@ public:
                     space_.reset();
                     dim_ = 0;
                     meta_.clear();
+                    source_index_.clear();
                     next_id_ = 1;
                 }
             }
@@ -130,40 +189,8 @@ public:
     }
 
     bool save() {
-        if (base_path_.empty()) return false;
         std::lock_guard<std::mutex> lk(mutex_);
-
-        std::string meta_path = base_path_ + ".meta";
-        std::string hnsw_path = base_path_ + ".hnsw";
-
-        if (hnsw_) {
-            try { hnsw_->saveIndex(hnsw_path); } catch (...) { return false; }
-        }
-
-        std::ofstream mf(meta_path, std::ios::binary | std::ios::trunc);
-        if (!mf.good()) return false;
-
-        uint32_t version = 1;
-        mf.write(reinterpret_cast<const char*>(&version), sizeof(version));
-
-        int32_t dim = static_cast<int32_t>(dim_);
-        mf.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
-
-        uint64_t count = static_cast<uint64_t>(meta_.size());
-        mf.write(reinterpret_cast<const char*>(&count), sizeof(count));
-
-        uint64_t next = static_cast<uint64_t>(next_id_);
-        mf.write(reinterpret_cast<const char*>(&next), sizeof(next));
-
-        for (const auto& [id, cm] : meta_) {
-            uint64_t uid = static_cast<uint64_t>(id);
-            mf.write(reinterpret_cast<const char*>(&uid), sizeof(uid));
-            write_string(mf, cm.source);
-            int32_t pid = static_cast<int32_t>(cm.patient_id);
-            mf.write(reinterpret_cast<const char*>(&pid), sizeof(pid));
-            write_string(mf, cm.text);
-        }
-        return mf.good();
+        return save_locked();
     }
 
     void upsert(const std::string& source, int patient_id,
@@ -174,17 +201,11 @@ public:
         std::lock_guard<std::mutex> lk(mutex_);
         if (!ensure_index(emb_dim)) return;
 
-        size_t existing_id = 0;
-        bool found = false;
-        for (const auto& [id, cm] : meta_) {
-            if (cm.source == source && cm.patient_id == patient_id) {
-                existing_id = id;
-                found = true;
-                break;
-            }
-        }
+        std::string key = make_source_key(source, patient_id);
+        auto sit = source_index_.find(key);
 
-        if (found) {
+        if (sit != source_index_.end()) {
+            size_t existing_id = sit->second;
             meta_[existing_id].text = text;
             try {
                 hnsw_->addPoint(embedding.data(), existing_id);
@@ -195,10 +216,15 @@ public:
             cm.source     = source;
             cm.patient_id = patient_id;
             cm.text       = text;
+            meta_[new_id] = std::move(cm);
+            source_index_[key] = new_id;
             try {
                 hnsw_->addPoint(embedding.data(), new_id);
-                meta_[new_id] = std::move(cm);
-            } catch (...) {}
+            } catch (...) {
+                meta_.erase(new_id);
+                source_index_.erase(key);
+                --next_id_;
+            }
         }
     }
 
@@ -208,27 +234,20 @@ public:
 
         int fetch_k = (patient_id_filter >= 0) ? top_k * 4 : top_k;
 
-        std::vector<std::pair<float, size_t>> candidates;
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            if (!hnsw_ || hnsw_->getCurrentElementCount() == 0) return {};
-            if (static_cast<int>(query_vec.size()) != dim_) return {};
-            int actual_k = std::min(fetch_k,
-                static_cast<int>(hnsw_->getCurrentElementCount()));
-            if (actual_k <= 0) return {};
-            auto knn = hnsw_->searchKnn(query_vec.data(), static_cast<size_t>(actual_k));
-            candidates.reserve(knn.size());
-            while (!knn.empty()) {
-                candidates.push_back(knn.top());
-                knn.pop();
-            }
-        }
-
         std::lock_guard<std::mutex> lk(mutex_);
+        if (!hnsw_ || hnsw_->getCurrentElementCount() == 0) return {};
+        if (static_cast<int>(query_vec.size()) != dim_) return {};
+        int actual_k = std::min(fetch_k,
+            static_cast<int>(hnsw_->getCurrentElementCount()));
+        if (actual_k <= 0) return {};
+        auto knn = hnsw_->searchKnn(query_vec.data(), static_cast<size_t>(actual_k));
+
         std::vector<QueryResult> results;
         results.reserve(static_cast<size_t>(top_k));
-        for (auto& [dist, label] : candidates) {
-            if (static_cast<int>(results.size()) >= top_k) break;
+        while (!knn.empty()) {
+            auto [dist, label] = knn.top();
+            knn.pop();
+            if (static_cast<int>(results.size()) >= top_k) continue;
             auto it = meta_.find(label);
             if (it == meta_.end()) continue;
             if (patient_id_filter >= 0 && it->second.patient_id != patient_id_filter)
@@ -251,6 +270,7 @@ public:
     void wipe() {
         std::lock_guard<std::mutex> lk(mutex_);
         meta_.clear();
+        source_index_.clear();
         hnsw_.reset();
         space_.reset();
         dim_ = 0;
@@ -264,11 +284,12 @@ public:
     }
 
     void close() {
-        save();
         std::lock_guard<std::mutex> lk(mutex_);
+        save_locked();
         hnsw_.reset();
         space_.reset();
         meta_.clear();
+        source_index_.clear();
     }
 
     ~EmbeddingDB() {

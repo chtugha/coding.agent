@@ -1728,7 +1728,37 @@ struct PatientPhones {
     std::string telefon2;
     std::string handy;
     std::string telefon3;
+    std::vector<std::string> weitere;
 };
+
+static std::vector<std::string> extract_string_array(const std::string& body, const std::string& key) {
+    std::vector<std::string> result;
+    std::string needle = "\"" + key + "\"";
+    auto kp = body.find(needle);
+    if (kp == std::string::npos) return result;
+    kp += needle.size();
+    while (kp < body.size() && body[kp] != '[') {
+        if (body[kp] == ']' || body[kp] == '}') return result;
+        ++kp;
+    }
+    if (kp >= body.size()) return result;
+    ++kp;
+    while (kp < body.size()) {
+        while (kp < body.size() && (body[kp] == ' ' || body[kp] == ',' ||
+               body[kp] == '\t' || body[kp] == '\n' || body[kp] == '\r')) ++kp;
+        if (kp >= body.size() || body[kp] == ']') break;
+        if (body[kp] != '"') { ++kp; continue; }
+        ++kp;
+        std::string val;
+        while (kp < body.size() && body[kp] != '"') {
+            if (body[kp] == '\\' && kp + 1 < body.size()) { val += body[kp + 1]; kp += 2; }
+            else { val += body[kp]; ++kp; }
+        }
+        if (kp < body.size()) ++kp;
+        if (!val.empty()) result.push_back(std::move(val));
+    }
+    return result;
+}
 
 static PatientPhones fetch_patient_phones(const std::string& body) {
     PatientPhones ph;
@@ -1736,6 +1766,28 @@ static PatientPhones fetch_patient_phones(const std::string& body) {
     ph.telefon2 = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "telefon2");
     ph.handy    = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "handyNummer");
     ph.telefon3 = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "telefon3");
+    auto kontakt_pos = body.find("\"kontaktdaten\"");
+    if (kontakt_pos != std::string::npos) {
+        auto brace = body.find('{', kontakt_pos);
+        if (brace != std::string::npos) {
+            int depth = 1;
+            size_t end = brace + 1;
+            while (end < body.size() && depth > 0) {
+                if (body[end] == '{') ++depth;
+                else if (body[end] == '}') --depth;
+                else if (body[end] == '"') {
+                    ++end;
+                    while (end < body.size() && body[end] != '"') {
+                        if (body[end] == '\\') ++end;
+                        ++end;
+                    }
+                }
+                ++end;
+            }
+            std::string kontakt = body.substr(brace, end - brace);
+            ph.weitere = extract_string_array(kontakt, "weitereTelefonummern");
+        }
+    }
     return ph;
 }
 
@@ -1969,6 +2021,8 @@ static void index_patient_phones(sqlite3* db, int patient_id,
     store_phone(ph.telefon2);
     store_phone(ph.handy);
     store_phone(ph.telefon3);
+    for (const auto& w : ph.weitere)
+        store_phone(w);
 }
 
 struct CrawlStats {
@@ -2746,10 +2800,14 @@ int main(int argc, char** argv) {
                 [](const PatientRef& a, const PatientRef& b) {
                     return a.zuletzt_aufgerufen > b.zuletzt_aufgerufen;
                 });
-            if (patients.size() > static_cast<size_t>(MAX_ACTIVE_PATIENTS))
+            int total_patients = static_cast<int>(patients.size());
+            if (patients.size() > static_cast<size_t>(MAX_ACTIVE_PATIENTS)) {
                 patients.resize(static_cast<size_t>(MAX_ACTIVE_PATIENTS));
-            LOG_INFO("Crawl: selected top %d most recently active patients",
-                     (int)patients.size());
+                LOG_WARN("Crawl: %d patients beyond top-%d will not be indexed",
+                         total_patients - MAX_ACTIVE_PATIENTS, MAX_ACTIVE_PATIENTS);
+            }
+            LOG_INFO("Crawl: selected top %d most recently active patients (of %d total)",
+                     (int)patients.size(), total_patients);
             auto stats = run_full_crawl(patients, cfg, g_vector_store, phone_db, ts);
             g_vector_store.save();
             g_last_crawl_time.store(static_cast<long>(
