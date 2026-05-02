@@ -222,6 +222,8 @@ struct TomedoConfig {
     std::string api_host         = "127.0.0.1";
     int         api_port         = 13181;
     int         log_port         = 22022;
+    std::string frontend_host   = "127.0.0.1";
+    int         frontend_port   = 8081;
     std::string db_path          = "tomedo-crawl.db";
     size_t      hnsw_max_elements = 500000;
 };
@@ -281,19 +283,6 @@ static std::string config_db_get(sqlite3* db, const std::string& key,
     return result;
 }
 
-static bool config_db_set(sqlite3* db, const std::string& key, const std::string& value) {
-    if (!db) return false;
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db,
-        "INSERT OR REPLACE INTO config(key,value) VALUES(?,?)", -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) return false;
-    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return rc == SQLITE_DONE;
-}
-
 static TomedoConfig load_config_from_db(const std::string& db_path) {
     TomedoConfig cfg;
     cfg.db_path = db_path;
@@ -326,6 +315,9 @@ static TomedoConfig load_config_from_db(const std::string& db_path) {
                                 std::to_string(cfg.api_port)), cfg.api_port);
     cfg.log_port          = parse_port(config_db_get(db, "log_port",
                                 std::to_string(cfg.log_port)), cfg.log_port);
+    cfg.frontend_host     = config_db_get(db, "frontend_host",    cfg.frontend_host);
+    cfg.frontend_port     = parse_port(config_db_get(db, "frontend_port",
+                                std::to_string(cfg.frontend_port)), cfg.frontend_port);
     std::string hnsw_str = config_db_get(db, "hnsw_max_elements",
                                 std::to_string(cfg.hnsw_max_elements));
     try {
@@ -374,8 +366,7 @@ constexpr int RESOLVE_QUEUE_MAX_DEPTH  = 200;
 constexpr int TOMEDO_API_TIMEOUT_MS   = 15000;
 constexpr int TOMEDO_LIST_TIMEOUT_MS  = 60000;
 
-static std::string frontend_api_host = "127.0.0.1";
-static int frontend_api_port = 8081;
+
 
 // ============================================================
 // CallerStore — thread-safe in-memory caller identity tracking
@@ -1111,11 +1102,12 @@ static HttpResponse http_post_plain(const std::string& url, const std::string& b
 }
 
 static bool frontend_upsert(const std::string& source, int patient_id,
-                            const std::string& text) {
+                            const std::string& text,
+                            const std::string& host, int port) {
     std::string body = "{\"source\":\"" + json_escape(source)
                      + "\",\"patient_id\":" + std::to_string(patient_id)
                      + ",\"text\":\"" + json_escape(text) + "\"}";
-    std::string url = "https://" + frontend_api_host + ":" + std::to_string(frontend_api_port)
+    std::string url = "http://" + host + ":" + std::to_string(port)
                     + "/api/embeddings/upsert";
     auto resp = http_post_plain(url, body, 60000);
     return resp.status == 200;
@@ -1840,8 +1832,9 @@ static CrawlStats run_full_crawl(const std::vector<PatientRef>& patients,
         for (size_t ci = 0; ci < chunks.size(); ++ci) {
             if (s_quit.load()) { stats.interrupted = true; break; }
             std::string chunk_source = source + "/chunk" + std::to_string(ci);
-            if (!frontend_upsert(chunk_source, pid, chunks[ci])) {
-                LOG_DEBUG("Crawl: frontend_upsert failed for patient=%d chunk=%d", pid, (int)ci);
+            if (!frontend_upsert(chunk_source, pid, chunks[ci],
+                                cfg.frontend_host, cfg.frontend_port)) {
+                LOG_WARN("Crawl: frontend_upsert failed for patient=%d chunk=%d", pid, (int)ci);
                 continue;
             }
             ++stats.chunks;
