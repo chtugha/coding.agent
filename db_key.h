@@ -50,9 +50,12 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <fcntl.h>
+#include <unistd.h>
 
 #ifdef __APPLE__
 #  include <Security/Security.h>
+#  include <mach-o/dyld.h>
 #  include <stdlib.h>   // arc4random_buf
 #endif
 
@@ -215,36 +218,67 @@ static bool keychain_store(const std::string& key)
 #endif
 }
 
+static std::string db_key_file_path()
+{
+#ifdef __APPLE__
+    char path[4096];
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) == 0) {
+        char* last_slash = strrchr(path, '/');
+        if (last_slash) { *last_slash = '\0'; }
+        return std::string(path) + "/db_key.hex";
+    }
+#endif
+    return "./db_key.hex";
+}
+
+static std::string file_key_load()
+{
+    std::string path = db_key_file_path();
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return {};
+    char buf[128] = {0};
+    size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' '))
+        buf[--n] = '\0';
+    if (n != 64) return {};
+    return std::string(buf, 64);
+}
+
+static bool file_key_store(const std::string& key)
+{
+    std::string path = db_key_file_path();
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return false;
+    ssize_t w = write(fd, key.c_str(), key.size());
+    if (w != (ssize_t)key.size()) { close(fd); return false; }
+    fsync(fd);
+    close(fd);
+    return true;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-// Returns the process-lifetime encryption key (64 hex chars = 256-bit AES).
-// Loads from Keychain on first call; generates + stores if not found.
-// Thread-safe — initialised exactly once via std::once_flag.
 static const std::string& get_db_key()
 {
     std::call_once(g_key_once, []() {
-        g_cached_key = keychain_load();
+        g_cached_key = file_key_load();
         if (!g_cached_key.empty()) {
             std::fprintf(stderr,
-                "[db_key] Loaded AES-256 database key from macOS Keychain "
-                "(Secure Enclave backed on Apple Silicon)\n");
+                "[db_key] Loaded AES-256 database key from file (%s)\n",
+                db_key_file_path().c_str());
             return;
         }
-        // First run — generate and persist
         g_cached_key = generate_hex_key();
         if (g_cached_key.empty()) {
             std::fprintf(stderr, "[db_key] FATAL: key generation failed\n");
             return;
         }
-        if (keychain_store(g_cached_key)) {
-            std::fprintf(stderr,
-                "[db_key] Generated new 256-bit AES database key and stored "
-                "in macOS Keychain (kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)\n");
-        } else {
-            std::fprintf(stderr,
-                "[db_key] Warning: key generated but Keychain storage failed — "
-                "databases encrypted this session only (key lost on restart)\n");
-        }
+        file_key_store(g_cached_key);
+        std::fprintf(stderr,
+            "[db_key] Generated new 256-bit AES database key and stored in file (%s)\n",
+            db_key_file_path().c_str());
     });
     return g_cached_key;
 }

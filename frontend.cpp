@@ -174,7 +174,7 @@ static void signal_handler(int signal) {
 
 struct LogEntry {
     std::string timestamp;
-    ServiceType service;
+    std::string service;
     uint32_t call_id;
     std::string level;
     std::string message;
@@ -414,8 +414,7 @@ public:
 
         mg_mgr_init(&mgr_);
         
-        // Security: binds to loopback only. TLS enabled via self-signed cert (tls_cert.h).
-        std::string listen_addr = "https://127.0.0.1:" + std::to_string(http_port_);
+        std::string listen_addr = "http://127.0.0.1:" + std::to_string(http_port_);
         struct mg_connection *c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
         if (c) c->fn_data = this;
         
@@ -427,18 +426,7 @@ public:
 
         std::cout << "Frontend web server started on " << listen_addr << "\n";
         std::cout << "Also listening on " << http_listen << " (plain HTTP, loopback only)\n";
-        std::cout << "Open https://localhost:" << http_port_ << " in your browser\n";
-
-        {
-            std::string active_cert = get_setting("active_cert_name", "");
-            std::string active_key  = get_setting("active_key_name",  "");
-            std::string dir = prodigy_tls::tls_dir();
-            if (!active_cert.empty() && !active_key.empty()) {
-                prodigy_tls::reload_certs(dir + "/" + active_cert, dir + "/" + active_key);
-            } else {
-                prodigy_tls::ensure_certs();
-            }
-        }
+        std::cout << "Open http://localhost:" << http_port_ << " in your browser\n";
 
         auto last_flush = std::chrono::steady_clock::now();
         auto last_rotation = last_flush;
@@ -1098,25 +1086,6 @@ private:
         }
         if (ev == MG_EV_HTTP_MSG) {
             struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-            if (get_setting("http_redirect_to_https", "0") == "1") {
-                char loc[1024];
-                if (hm->query.len > 0) {
-                    snprintf(loc, sizeof(loc), "https://127.0.0.1:%u%.*s?%.*s",
-                             (unsigned)http_port_,
-                             (int)hm->uri.len, hm->uri.buf,
-                             (int)hm->query.len, hm->query.buf);
-                } else {
-                    snprintf(loc, sizeof(loc), "https://127.0.0.1:%u%.*s",
-                             (unsigned)http_port_,
-                             (int)hm->uri.len, hm->uri.buf);
-                }
-                mg_printf(c,
-                    "HTTP/1.1 301 Moved Permanently\r\n"
-                    "Location: %s\r\n"
-                    "Content-Length: 0\r\n"
-                    "\r\n", loc);
-                return;
-            }
             handle_http_request(c, hm);
         }
     }
@@ -1127,16 +1096,6 @@ private:
     }
 
     void http_handler(struct mg_connection *c, int ev, void *ev_data) {
-        if (ev == MG_EV_ACCEPT) {
-            const auto certs = prodigy_tls::get_certs();
-            if (!certs.cert_pem.empty() && !certs.key_pem.empty()) {
-                struct mg_tls_opts opts{};
-                opts.cert = mg_str(certs.cert_pem.c_str());
-                opts.key  = mg_str(certs.key_pem.c_str());
-                mg_tls_init(c, &opts);
-            }
-            return;
-        }
         if (ev == MG_EV_CLOSE) {
             if (c->data[0] == 'S') {
                 remove_sse_connection(c);
@@ -1602,7 +1561,7 @@ private:
             if (count > 0) json << ",";
             json << "{"
                  << "\"timestamp\":\"" << escape_json(it->timestamp) << "\","
-                 << "\"service\":\"" << service_type_to_string(it->service) << "\","
+                 << "\"service\":\"" << escape_json(it->service) << "\","
                  << "\"level\":\"" << escape_json(it->level) << "\","
                  << "\"call_id\":" << it->call_id << ","
                  << "\"message\":\"" << escape_json(it->message) << "\""
@@ -3472,7 +3431,7 @@ private:
                 std::lock_guard<std::mutex> lock(logs_mutex_);
                 for (const auto& entry : recent_logs_) {
                     if (entry.seq <= last_found_seq) continue;
-                    if (entry.service != ServiceType::WHISPER_SERVICE) continue;
+                    if (entry.service != "WHISPER_SERVICE") continue;
                     if (filter_call_id > 0 && entry.call_id != filter_call_id) continue;
 
                     const std::string& msg = entry.message;
@@ -3545,7 +3504,7 @@ private:
                 std::lock_guard<std::mutex> lock(logs_mutex_);
                 for (const auto& entry : recent_logs_) {
                     if (entry.seq <= after_seq) continue;
-                    if (entry.service != ServiceType::LLAMA_SERVICE) continue;
+                    if (entry.service != "LLAMA_SERVICE") continue;
                     if (entry.level != "INFO") continue;
 
                     const std::string& msg = entry.message;
@@ -4972,7 +4931,7 @@ private:
 
                         const std::string& msg = entry.message;
 
-                        if (entry.service == ServiceType::WHISPER_SERVICE) {
+                        if (entry.service == "WHISPER_SERVICE") {
                             size_t tpos = msg.find("Transcription (");
                             if (tpos != std::string::npos) {
                                 size_t ms_end = msg.find("ms", tpos + 15);
@@ -5001,7 +4960,7 @@ private:
                                     }
                                 }
                             }
-                        } else if (entry.service == ServiceType::LLAMA_SERVICE && entry.level == "INFO"
+                        } else if (entry.service == "LLAMA_SERVICE" && entry.level == "INFO"
                                    && (l1_call_id == 0 || entry.call_id == l1_call_id)) {
                             size_t rpos = msg.find("Response (");
                             if (rpos != std::string::npos) {
@@ -7268,7 +7227,7 @@ private:
             for (auto it = recent_logs_.rbegin(); it != recent_logs_.rend() && count < DASHBOARD_RECENT_LOGS_LIMIT; ++it, ++count) {
                 if (count > 0) logs_json << ",";
                 logs_json << "{\"timestamp\":\"" << escape_json(it->timestamp)
-                          << "\",\"service\":\"" << service_type_to_string(it->service)
+                          << "\",\"service\":\"" << escape_json(it->service)
                           << "\",\"level\":\"" << escape_json(it->level)
                           << "\",\"message\":\"" << escape_json(it->message) << "\"}";
             }
@@ -9610,37 +9569,7 @@ document.getElementById('f').onsubmit=async function(e){
     // -------------------------------------------------------------------------
 
     void check_and_refresh_cert() {
-        if (get_setting("cert_self_refresh", "1") != "1") return;
-
-        std::string active_cert = get_setting("active_cert_name", "server.crt");
-        bool is_selfsigned = (active_cert == "server.crt" ||
-                              active_cert.substr(0, 11) == "selfsigned_");
-        if (!is_selfsigned) return;
-
-        std::string dir = prodigy_tls::tls_dir();
-        std::string cert_path = dir + "/" + active_cert;
-
-        time_t expiry = prodigy_tls::get_cert_expiry(cert_path);
-        time_t now = time(nullptr);
-        bool needs_refresh = (expiry == 0 || expiry < now + 7 * 24 * 3600);
-        if (!needs_refresh) return;
-
-        char ts[16];
-        struct tm tm_buf;
-        localtime_r(&now, &tm_buf);
-        strftime(ts, sizeof(ts), "%Y%m%d", &tm_buf);
-
-        std::string new_name = std::string("selfsigned_") + ts + ".crt";
-        std::string new_key_name = std::string("selfsigned_") + ts + ".key";
-        std::string new_cert_path = dir + "/" + new_name;
-        std::string new_key_path  = dir + "/" + new_key_name;
-
-        if (prodigy_tls::generate_self_signed_cert_90d(new_cert_path, new_key_path)) {
-            set_setting("active_cert_name", new_name);
-            set_setting("active_key_name", new_key_name);
-            prodigy_tls::reload_certs(new_cert_path, new_key_path);
-            std::fprintf(stderr, "[cert] Auto-refreshed TLS certificate: %s\n", new_name.c_str());
-        }
+        return;
     }
 
     void handle_api_certs_list(struct mg_connection *c) {

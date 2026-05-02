@@ -364,6 +364,8 @@ Save outgoing audio as WAV</label>
 <option value="TTS_SERVICE">TTS Stage (dock)</option>
 <option value="KOKORO_ENGINE">Kokoro Engine</option>
 <option value="NEUTTS_ENGINE">NeuTTS Engine</option>
+<option value="VITS2_ENGINE">VITS2 Engine</option>
+<option value="MATCHA_ENGINE">Matcha Engine</option>
 <option value="OUTBOUND_AUDIO_PROCESSOR">Outbound Audio</option>
 <option value="MOSHI_SERVICE">Moshi Voice</option>
 <option value="TOMEDO_CRAWL">Tomedo RAG</option>

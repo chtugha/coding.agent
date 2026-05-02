@@ -1499,9 +1499,13 @@ public:
     }
 
     void init(uint16_t port, ServiceType svc) {
+        init(port, service_type_to_string(svc));
+    }
+
+    void init(uint16_t port, const char* custom_name) {
         if (port == 0) return;
         port_ = port;
-        svc_name_ = service_type_to_string(svc);
+        svc_name_ = custom_name;
         sock_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock_ >= 0) {
             memset(&addr_, 0, sizeof(addr_));

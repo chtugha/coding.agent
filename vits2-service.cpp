@@ -274,7 +274,7 @@ public:
             return false;
         }
 
-        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::TTS_SERVICE);
+        log_fwd_.init(FRONTEND_LOG_PORT, "VITS2_ENGINE");
 
         std::printf("[vits2] Service initialized (Piper VITS2, ONNX Runtime)\n");
 

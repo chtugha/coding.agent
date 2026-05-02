@@ -835,8 +835,18 @@ private:
     void forward_text_to_engine(const Packet& pkt) {
         auto slot = current_slot();
         if (!slot) {
-            log_dropped_text(pkt.call_id);
-            return;
+            std::fprintf(stderr, "[TTS] no engine docked for call %u, waiting up to 10s...\n",
+                         pkt.call_id);
+            for (int i = 0; i < 100 && !slot; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                slot = current_slot();
+            }
+            if (!slot) {
+                log_dropped_text(pkt.call_id);
+                return;
+            }
+            std::fprintf(stderr, "[TTS] engine docked while waiting, forwarding text for call %u\n",
+                         pkt.call_id);
         }
         uint8_t tag = static_cast<uint8_t>(EngineFrameTag::PACKET);
         auto body = pkt.serialize();
