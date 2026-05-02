@@ -194,7 +194,7 @@ def do_annotate():
     },
     image=gpu_image,
     secrets=[modal.Secret.from_name("huggingface-token")],
-    timeout=5 * 3600,
+    timeout=12 * 3600,
 )
 def do_train():
     """Run moshi-finetune LoRA training on H100."""
