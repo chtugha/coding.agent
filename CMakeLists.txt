@@ -577,6 +577,7 @@ endif()
 add_executable(frontend frontend.cpp mongoose.c ${SQLCIPHER_DIR}/sqlite3.c)
 target_include_directories(frontend PRIVATE
     ${SQLCIPHER_DIR}                # SQLCipher sqlite3.h (must come first)
+    ${CMAKE_SOURCE_DIR}/third_party/hnswlib
     ${OPENSSL_INCLUDE_DIR})
 target_compile_definitions(frontend PRIVATE
     MG_ENABLE_PACKED_FS=0
@@ -601,7 +602,6 @@ endif()
 add_executable(tomedo-crawl tomedo-crawl.cpp mongoose.c ${SQLCIPHER_DIR}/sqlite3.c)
 target_include_directories(tomedo-crawl PRIVATE
     ${SQLCIPHER_DIR}                # SQLCipher sqlite3.h (must come first)
-    ${CMAKE_SOURCE_DIR}/third_party/hnswlib
     ${OPENSSL_INCLUDE_DIR})
 target_compile_definitions(tomedo-crawl PRIVATE
     MG_ENABLE_PACKED_FS=0

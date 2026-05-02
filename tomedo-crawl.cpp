@@ -192,10 +192,6 @@
 #include "db_key.h"
 #include "tls_cert.h"
 #include "interconnect.h"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#include "hnswlib.h"
-#pragma GCC diagnostic pop
 
 namespace {
 
@@ -222,10 +218,12 @@ struct TomedoConfig {
     std::string tomedo_cert_pem  = "/etc/tomedo-crawl/client.pem";
     int         crawl_interval_sec = 3600;
     std::string ollama_url       = "http://127.0.0.1:11434";
-    std::string ollama_model     = "embeddinggemma:300m";
+    std::string ollama_model     = "bge-small";
     std::string api_host         = "127.0.0.1";
     int         api_port         = 13181;
     int         log_port         = 22022;
+    std::string frontend_host   = "127.0.0.1";
+    int         frontend_port   = 8081;
     std::string db_path          = "tomedo-crawl.db";
     size_t      hnsw_max_elements = 500000;
 };
@@ -285,19 +283,6 @@ static std::string config_db_get(sqlite3* db, const std::string& key,
     return result;
 }
 
-static bool config_db_set(sqlite3* db, const std::string& key, const std::string& value) {
-    if (!db) return false;
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db,
-        "INSERT OR REPLACE INTO config(key,value) VALUES(?,?)", -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) return false;
-    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return rc == SQLITE_DONE;
-}
-
 static TomedoConfig load_config_from_db(const std::string& db_path) {
     TomedoConfig cfg;
     cfg.db_path = db_path;
@@ -330,6 +315,9 @@ static TomedoConfig load_config_from_db(const std::string& db_path) {
                                 std::to_string(cfg.api_port)), cfg.api_port);
     cfg.log_port          = parse_port(config_db_get(db, "log_port",
                                 std::to_string(cfg.log_port)), cfg.log_port);
+    cfg.frontend_host     = config_db_get(db, "frontend_host",    cfg.frontend_host);
+    cfg.frontend_port     = parse_port(config_db_get(db, "frontend_port",
+                                std::to_string(cfg.frontend_port)), cfg.frontend_port);
     std::string hnsw_str = config_db_get(db, "hnsw_max_elements",
                                 std::to_string(cfg.hnsw_max_elements));
     try {
@@ -363,264 +351,7 @@ whispertalk::LogForwarder g_log;
 
 std::atomic<long> g_last_crawl_time{0};
 std::atomic<bool> g_crawl_requested{false};
-std::atomic<bool> g_ollama_installed{false};
-std::atomic<bool> g_ollama_running{false};
-std::atomic<pid_t> g_ollama_pid{0};
-
 static int tcp_connect(const std::string& host, int port, int timeout_ms);
-
-static bool check_ollama_installed() {
-    FILE* fp = popen("which ollama 2>/dev/null", "r");
-    if (!fp) return false;
-    char buf[256];
-    bool found = false;
-    if (fgets(buf, sizeof(buf), fp) && buf[0] == '/') found = true;
-    pclose(fp);
-    return found;
-}
-
-static bool check_ollama_running(const std::string& ollama_url) {
-    std::string host = "127.0.0.1";
-    int port = 11434;
-    size_t scheme_end = ollama_url.find("://");
-    size_t host_start = (scheme_end == std::string::npos) ? 0 : scheme_end + 3;
-    size_t path_start = ollama_url.find('/', host_start);
-    std::string hostport = (path_start == std::string::npos) ?
-        ollama_url.substr(host_start) : ollama_url.substr(host_start, path_start - host_start);
-    auto colon = hostport.find(':');
-    if (colon != std::string::npos) {
-        host = hostport.substr(0, colon);
-        port = std::atoi(hostport.c_str() + colon + 1);
-    } else if (!hostport.empty()) {
-        host = hostport;
-    }
-    int fd = tcp_connect(host, port, 2000);
-    if (fd < 0) return false;
-    std::string req = "GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n";
-    ssize_t w = ::write(fd, req.c_str(), req.size());
-    if (w <= 0) { close(fd); return false; }
-    char buf[256];
-    struct pollfd pfd{fd, POLLIN, 0};
-    int pr = poll(&pfd, 1, 2000);
-    bool ok = false;
-    if (pr > 0) {
-        ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
-        if (n > 0) {
-            buf[n] = 0;
-            // Match only the HTTP status line to avoid false positives from
-            // JSON body content (e.g. {"code": 200} would fool a bare "200" search).
-            const char* status_line = strstr(buf, "HTTP/1.");
-            ok = (status_line && strstr(status_line, " 200 ") != nullptr);
-        }
-    }
-    close(fd);
-    return ok;
-}
-
-static pid_t spawn_ollama_serve_detached() {
-    int pidpipe[2];
-    if (pipe(pidpipe) < 0) return -1;
-    int execpipe[2];
-    if (pipe(execpipe) < 0) { close(pidpipe[0]); close(pidpipe[1]); return -1; }
-    fcntl(execpipe[1], F_SETFD, FD_CLOEXEC);
-    pid_t mid = fork();
-    if (mid < 0) { close(pidpipe[0]); close(pidpipe[1]); close(execpipe[0]); close(execpipe[1]); return -1; }
-    if (mid == 0) {
-        close(pidpipe[0]);
-        close(execpipe[0]);
-        pid_t child = fork();
-        if (child < 0) { pid_t z = 0; (void)write(pidpipe[1], &z, sizeof(z)); close(pidpipe[1]); close(execpipe[1]); _exit(127); }
-        if (child > 0) { (void)write(pidpipe[1], &child, sizeof(child)); close(pidpipe[1]); close(execpipe[1]); _exit(0); }
-        close(pidpipe[1]);
-        setsid();
-        int devnull = open("/dev/null", O_RDWR);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
-        execlp("ollama", "ollama", "serve", nullptr);
-        char err = 1;
-        (void)write(execpipe[1], &err, 1);
-        close(execpipe[1]);
-        _exit(127);
-    }
-    close(pidpipe[1]);
-    close(execpipe[1]);
-    pid_t grandchild = 0;
-    (void)read(pidpipe[0], &grandchild, sizeof(grandchild));
-    close(pidpipe[0]);
-    int status;
-    waitpid(mid, &status, 0);
-    if (grandchild < 1) { close(execpipe[0]); return -1; }
-    char err = 0;
-    struct pollfd pfd = {execpipe[0], POLLIN, 0};
-    if (poll(&pfd, 1, 200) > 0 && read(execpipe[0], &err, 1) == 1) {
-        close(execpipe[0]);
-        return -1;
-    }
-    close(execpipe[0]);
-    g_ollama_pid.store(grandchild);
-    return grandchild;
-}
-
-// Ollama must be installed by the operator before starting this service.
-// Automatic installation via curl | sh is intentionally NOT supported:
-// this application processes HIPAA/GDPR-regulated patient data and cannot
-// download and execute arbitrary scripts from the internet at runtime.
-// Direct the operator to https://ollama.com to install manually.
-
-static void kill_ollama_tracked() {
-    pid_t p = g_ollama_pid.exchange(0);
-    if (p > 1) {
-        kill(p, SIGTERM);
-        return;
-    }
-    FILE* fp = popen("pgrep -f 'ollama serve'", "r");
-    if (fp) {
-        char buf[64];
-        while (fgets(buf, sizeof(buf), fp)) {
-            pid_t kp = static_cast<pid_t>(atoi(buf));
-            if (kp > 1) kill(kp, SIGTERM);
-        }
-        pclose(fp);
-    }
-}
-
-static bool ollama_model_available(const std::string& ollama_url, const std::string& model) {
-    std::string host = "127.0.0.1";
-    int port = 11434;
-    size_t scheme_end = ollama_url.find("://");
-    size_t host_start = (scheme_end == std::string::npos) ? 0 : scheme_end + 3;
-    size_t path_start = ollama_url.find('/', host_start);
-    std::string hostport = (path_start == std::string::npos) ?
-        ollama_url.substr(host_start) : ollama_url.substr(host_start, path_start - host_start);
-    auto colon = hostport.find(':');
-    if (colon != std::string::npos) {
-        host = hostport.substr(0, colon);
-        port = std::atoi(hostport.c_str() + colon + 1);
-    } else if (!hostport.empty()) {
-        host = hostport;
-    }
-    int fd = tcp_connect(host, port, 5000);
-    if (fd < 0) return false;
-    std::string req = "GET /api/tags HTTP/1.1\r\nHost: " + host + ":" + std::to_string(port) +
-                      "\r\nConnection: close\r\n\r\n";
-    ssize_t w = ::write(fd, req.c_str(), req.size());
-    if (w <= 0) { close(fd); return false; }
-    std::string resp;
-    char buf[4096];
-    struct pollfd pfd{fd, POLLIN, 0};
-    while (poll(&pfd, 1, 5000) > 0) {
-        ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
-        if (n <= 0) break;
-        buf[n] = 0;
-        resp.append(buf, static_cast<size_t>(n));
-    }
-    close(fd);
-    std::string needle = "\"" + model + "\"";
-    if (resp.find(needle) != std::string::npos) return true;
-    size_t col = model.find(':');
-    if (col != std::string::npos) {
-        std::string base = model.substr(0, col);
-        if (resp.find("\"" + base + "\"") != std::string::npos) return true;
-        if (resp.find("\"" + base + ":") != std::string::npos &&
-            resp.find(model) != std::string::npos) return true;
-    }
-    return resp.find("\"name\":\"" + model + "\"") != std::string::npos;
-}
-
-static void ollama_pull_model(const std::string& ollama_url, const std::string& model) {
-    std::string host = "127.0.0.1";
-    int port = 11434;
-    size_t scheme_end = ollama_url.find("://");
-    size_t host_start = (scheme_end == std::string::npos) ? 0 : scheme_end + 3;
-    size_t path_start = ollama_url.find('/', host_start);
-    std::string hostport = (path_start == std::string::npos) ?
-        ollama_url.substr(host_start) : ollama_url.substr(host_start, path_start - host_start);
-    auto colon = hostport.find(':');
-    if (colon != std::string::npos) {
-        host = hostport.substr(0, colon);
-        port = std::atoi(hostport.c_str() + colon + 1);
-    } else if (!hostport.empty()) {
-        host = hostport;
-    }
-    std::string escaped_model;
-    for (char ch : model) {
-        if (ch == '"' || ch == '\\') escaped_model += '\\';
-        escaped_model += ch;
-    }
-    std::string body = "{\"name\":\"" + escaped_model + "\"}";
-    int fd = tcp_connect(host, port, 5000);
-    if (fd < 0) { LOG_ERROR("ollama pull: cannot connect"); return; }
-    std::ostringstream req;
-    req << "POST /api/pull HTTP/1.1\r\n"
-        << "Host: " << host << ":" << port << "\r\n"
-        << "Content-Type: application/json\r\n"
-        << "Content-Length: " << body.size() << "\r\n"
-        << "Connection: close\r\n\r\n"
-        << body;
-    std::string r = req.str();
-    ssize_t w = ::write(fd, r.c_str(), r.size());
-    if (w <= 0) { close(fd); LOG_ERROR("ollama pull: write failed"); return; }
-    std::string resp;
-    char buf[4096];
-    struct pollfd pfd{fd, POLLIN, 0};
-    while (poll(&pfd, 1, 300000) > 0) {
-        ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
-        if (n <= 0) break;
-        buf[n] = 0;
-        resp.append(buf, static_cast<size_t>(n));
-    }
-    close(fd);
-    if (resp.find("\"error\"") != std::string::npos)
-        LOG_WARN("ollama pull response contains error: %.200s", resp.c_str());
-}
-
-static void ensure_model_available(const TomedoConfig& cfg) {
-    if (s_quit.load()) return;
-    if (ollama_model_available(cfg.ollama_url, cfg.ollama_model)) {
-        LOG_INFO("embedding model '%s' is available", cfg.ollama_model.c_str());
-        return;
-    }
-    LOG_INFO("embedding model '%s' not found — pulling...", cfg.ollama_model.c_str());
-    ollama_pull_model(cfg.ollama_url, cfg.ollama_model);
-    if (ollama_model_available(cfg.ollama_url, cfg.ollama_model)) {
-        LOG_INFO("embedding model '%s' pulled successfully", cfg.ollama_model.c_str());
-    } else {
-        LOG_ERROR("failed to pull embedding model '%s'", cfg.ollama_model.c_str());
-    }
-}
-
-static void ollama_startup_check(const TomedoConfig& cfg) {
-    bool installed = check_ollama_installed();
-    g_ollama_installed.store(installed);
-    if (!installed) {
-        LOG_WARN("ollama is not installed — RAG embedding will be unavailable");
-        return;
-    }
-    LOG_INFO("ollama found in PATH");
-    bool running = check_ollama_running(cfg.ollama_url);
-    g_ollama_running.store(running);
-    if (running) {
-        LOG_INFO("ollama is already running at %s", cfg.ollama_url.c_str());
-        ensure_model_available(cfg);
-        return;
-    }
-    LOG_INFO("ollama not running — attempting auto-start");
-    pid_t pid = spawn_ollama_serve_detached();
-    if (pid > 0) {
-        LOG_INFO("ollama serve started (pid=%d)", (int)pid);
-        for (int i = 0; i < 10 && !s_quit.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            if (check_ollama_running(cfg.ollama_url)) {
-                g_ollama_running.store(true);
-                LOG_INFO("ollama is now reachable at %s", cfg.ollama_url.c_str());
-                ensure_model_available(cfg);
-                return;
-            }
-        }
-        LOG_WARN("ollama started but not yet reachable after 5s");
-    } else {
-        LOG_ERROR("failed to auto-start ollama serve");
-    }
-}
 
 constexpr int MG_POLL_TIMEOUT_MS      = 100;
 constexpr int CHARS_PER_TOKEN_APPROX  = 4;
@@ -631,338 +362,11 @@ constexpr int MAX_MEDICATIONS         = 20;
 constexpr int CRAWL_PROGRESS_INTERVAL = 50;
 constexpr int CRAWL_BATCH_SLEEP_MS    = 10;
 constexpr int EXPIRY_CHECK_INTERVAL_S  = 300;
-constexpr int QUERY_POOL_WORKERS       = 4;
 constexpr int RESOLVE_QUEUE_MAX_DEPTH  = 200;
-constexpr int EMBED_TIMEOUT_MS        = 30000;
 constexpr int TOMEDO_API_TIMEOUT_MS   = 15000;
 constexpr int TOMEDO_LIST_TIMEOUT_MS  = 60000;
 
-// ============================================================
-// Ollama embedding (forward declaration — implemented after HTTP helpers)
-// ============================================================
 
-static std::vector<float> embed_text(const std::string& text, const TomedoConfig& cfg);
-
-// ============================================================
-// VectorStore — hnswlib (ANN) + SQLite (persistence + text)
-// ============================================================
-//
-// Two-layer storage:
-//   • SQLite table "chunks": persistent storage of (source, patient_id, text,
-//     embedding BLOB, updated_at).  This is the authoritative store — it
-//     survives restarts and is the source-of-truth for text retrieval.
-//   • hnswlib HierarchicalNSW: in-memory Approximate Nearest Neighbour (ANN)
-//     index built from the SQLite embeddings at startup.  Provides O(log N)
-//     query latency (<10 ms for 50 k vectors).  hnswlib labels == SQLite row IDs
-//     so text can be fetched directly after ANN search.
-//
-// Thread safety:
-//   All public methods are guarded by mutex_.  The rebuild_index() call in
-//   main() runs before any other threads start and therefore does NOT lock.
-//
-// HNSW tuning constants (file scope):
-//   HNSW_M        = 16   — number of bidirectional links per element
-//   HNSW_EF_BUILD = 200  — construction beam width (higher = better recall)
-//   HNSW_EF_QUERY = 50   — query beam width (higher = better recall, slower)
-//
-// Encoding: embeddings are stored as raw little-endian float32 arrays in BLOB
-// columns.  Dimension is inferred from the first blob encountered; a mismatch
-// (e.g. after model change) is logged and the offending row is skipped.
-
-struct QueryResult {
-    std::string text;
-    float       score;
-    std::string source;
-    int         patient_id;
-};
-
-static constexpr int HNSW_M        = 16;
-static constexpr int HNSW_EF_BUILD = 200;
-static constexpr int HNSW_EF_QUERY = 50;
-
-class VectorStore {
-    sqlite3*                                        db_           = nullptr;
-    std::unique_ptr<hnswlib::L2Space>                space_;
-    std::unique_ptr<hnswlib::HierarchicalNSW<float>> hnsw_;
-    int                                              dim_          = 0;
-    size_t                                           max_elements_ = 500000;
-    mutable std::mutex                               mutex_;
-
-    bool ensure_index(int dim) {
-        if (hnsw_) {
-            if (dim_ != dim) {
-                LOG_ERROR("VectorStore: dim mismatch (stored=%d, new=%d)", dim_, dim);
-                return false;
-            }
-            return true;
-        }
-        dim_   = dim;
-        space_ = std::make_unique<hnswlib::L2Space>(static_cast<size_t>(dim));
-        hnsw_  = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-                     space_.get(), max_elements_, HNSW_M, HNSW_EF_BUILD);
-        hnsw_->setEf(HNSW_EF_QUERY);
-        return true;
-    }
-
-public:
-    void set_max_elements(size_t n) { max_elements_ = n; }
-
-    bool open(const std::string& db_path) {
-        int rc = prodigy_db::db_open_encrypted(db_path.c_str(), &db_);
-        if (rc != SQLITE_OK) {
-            LOG_ERROR("VectorStore: db_open_encrypted(%s): %s", db_path.c_str(), sqlite3_errmsg(db_));
-            return false;
-        }
-        sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
-        sqlite3_exec(db_, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
-        const char* schema =
-            "CREATE TABLE IF NOT EXISTS chunks ("
-            "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  source     TEXT    NOT NULL,"
-            "  patient_id INTEGER,"
-            "  text       TEXT    NOT NULL,"
-            "  embedding  BLOB    NOT NULL,"
-            "  updated_at INTEGER NOT NULL"
-            ");"
-            "CREATE INDEX IF NOT EXISTS idx_patient ON chunks(patient_id);"
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_source_patient ON chunks(source, patient_id);";
-        char* errmsg = nullptr;
-        rc = sqlite3_exec(db_, schema, nullptr, nullptr, &errmsg);
-        if (rc != SQLITE_OK) {
-            LOG_ERROR("VectorStore: schema: %s", errmsg ? errmsg : "unknown");
-            sqlite3_free(errmsg);
-            return false;
-        }
-        return true;
-    }
-
-    // Must be called from main() before the HTTP server thread starts.
-    // No mutex needed — no other threads access the store at this point.
-    void rebuild_index() {
-        if (!db_) return;
-        sqlite3_stmt* stmt = nullptr;
-        int rc = sqlite3_prepare_v2(db_,
-            "SELECT id, embedding FROM chunks", -1, &stmt, nullptr);
-        if (rc != SQLITE_OK) {
-            LOG_ERROR("VectorStore: rebuild_index prepare: %s", sqlite3_errmsg(db_));
-            return;
-        }
-
-        int count = 0;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            sqlite3_int64 id         = sqlite3_column_int64(stmt, 0);
-            const void*   blob       = sqlite3_column_blob(stmt,  1);
-            int           blob_bytes = sqlite3_column_bytes(stmt, 1);
-            if (!blob || blob_bytes < static_cast<int>(sizeof(float))) continue;
-            int emb_dim = blob_bytes / static_cast<int>(sizeof(float));
-            if (!ensure_index(emb_dim)) continue;
-            try {
-                hnsw_->addPoint(blob, static_cast<size_t>(id));
-                ++count;
-            } catch (const std::exception& e) {
-                LOG_ERROR("VectorStore: rebuild addPoint id=%lld: %s",
-                          (long long)id, e.what());
-            } catch (...) {
-                LOG_ERROR("VectorStore: rebuild addPoint id=%lld: unknown exception",
-                          (long long)id);
-            }
-        }
-        sqlite3_finalize(stmt);
-        LOG_INFO("VectorStore: rebuilt index with %d vectors", count);
-    }
-
-    void upsert(const std::string& source, int patient_id,
-                const std::string& text, const std::vector<float>& embedding) {
-        if (!db_ || embedding.empty()) return;
-        int emb_dim = static_cast<int>(embedding.size());
-        int blob_bytes = emb_dim * static_cast<int>(sizeof(float));
-        sqlite3_int64 now_ts = static_cast<sqlite3_int64>(
-            std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (!ensure_index(emb_dim)) return;
-
-        sqlite3_stmt* sel = nullptr;
-        int rc = sqlite3_prepare_v2(db_,
-            "SELECT id FROM chunks WHERE source=? AND patient_id=?",
-            -1, &sel, nullptr);
-        if (rc != SQLITE_OK) return;
-        sqlite3_bind_text(sel, 1, source.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(sel, 2, patient_id);
-
-        sqlite3_int64 existing_id = -1;
-        if (sqlite3_step(sel) == SQLITE_ROW)
-            existing_id = sqlite3_column_int64(sel, 0);
-        sqlite3_finalize(sel);
-
-        if (existing_id >= 0) {
-            sqlite3_stmt* upd = nullptr;
-            rc = sqlite3_prepare_v2(db_,
-                "UPDATE chunks SET text=?, embedding=?, updated_at=? WHERE id=?",
-                -1, &upd, nullptr);
-            if (rc != SQLITE_OK) return;
-            sqlite3_bind_text(upd, 1, text.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_blob(upd, 2, embedding.data(), blob_bytes, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(upd, 3, now_ts);
-            sqlite3_bind_int64(upd, 4, existing_id);
-            rc = sqlite3_step(upd);
-            sqlite3_finalize(upd);
-            if (rc != SQLITE_DONE) return;
-            try {
-                hnsw_->addPoint(embedding.data(), static_cast<size_t>(existing_id));
-            } catch (const std::exception& e) {
-                LOG_ERROR("VectorStore: upsert updatePoint id=%lld: %s — HNSW/SQLite diverged",
-                          (long long)existing_id, e.what());
-            } catch (...) {
-                LOG_ERROR("VectorStore: upsert updatePoint id=%lld: unknown — HNSW/SQLite diverged",
-                          (long long)existing_id);
-            }
-        } else {
-            sqlite3_stmt* ins = nullptr;
-            rc = sqlite3_prepare_v2(db_,
-                "INSERT INTO chunks(source,patient_id,text,embedding,updated_at)"
-                " VALUES(?,?,?,?,?)",
-                -1, &ins, nullptr);
-            if (rc != SQLITE_OK) return;
-            sqlite3_bind_text(ins, 1, source.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(ins, 2, patient_id);
-            sqlite3_bind_text(ins, 3, text.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_blob(ins, 4, embedding.data(), blob_bytes, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(ins, 5, now_ts);
-            rc = sqlite3_step(ins);
-            sqlite3_int64 rowid = sqlite3_last_insert_rowid(db_);
-            sqlite3_finalize(ins);
-            if (rc != SQLITE_DONE) return;
-
-            auto rollback_row = [&](const char* reason) {
-                LOG_ERROR("VectorStore: upsert addPoint rowid=%lld: %s — rolling back",
-                          (long long)rowid, reason);
-                sqlite3_stmt* del = nullptr;
-                if (sqlite3_prepare_v2(db_, "DELETE FROM chunks WHERE id=?",
-                                       -1, &del, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_int64(del, 1, rowid);
-                    sqlite3_step(del);
-                    sqlite3_finalize(del);
-                }
-            };
-            try {
-                hnsw_->addPoint(embedding.data(), static_cast<size_t>(rowid));
-            } catch (const std::exception& e) {
-                rollback_row(e.what());
-            } catch (...) {
-                rollback_row("unknown exception");
-            }
-        }
-    }
-
-    std::vector<QueryResult> query(const std::vector<float>& query_vec,
-                                   int top_k, int patient_id_filter = -1) {
-        if (!db_ || query_vec.empty()) return {};
-
-        int fetch_k = (patient_id_filter >= 0) ? top_k * 4 : top_k;
-
-        // Phase 1: ANN search — lock held only for HNSW, released before Phase 2.
-        // Snapshot db_ while the lock is held to guard against a concurrent close().
-        std::vector<std::pair<float, size_t>> candidates;
-        sqlite3* db_snap = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            db_snap = db_;
-            if (!hnsw_ || hnsw_->getCurrentElementCount() == 0) return {};
-            if (static_cast<int>(query_vec.size()) != dim_) return {};
-            int actual_k = std::min(fetch_k,
-                static_cast<int>(hnsw_->getCurrentElementCount()));
-            if (actual_k <= 0) return {};
-            auto knn = hnsw_->searchKnn(query_vec.data(), static_cast<size_t>(actual_k));
-            candidates.reserve(knn.size());
-            while (!knn.empty()) {
-                candidates.push_back(knn.top());
-                knn.pop();
-            }
-        }
-
-        // Phase 2: SQLite text fetch — safe without mutex_ because sqlite3.c is
-        // compiled with SQLITE_THREADSAFE=1 (serialized mode), which serialises
-        // all operations on this handle internally.
-        if (!db_snap) return {};
-
-        std::vector<QueryResult> results;
-        results.reserve(static_cast<size_t>(top_k));
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_snap,
-                "SELECT text, source, patient_id FROM chunks WHERE id=?",
-                -1, &stmt, nullptr) != SQLITE_OK)
-            return results;
-        for (auto& [dist, label] : candidates) {
-            if (static_cast<int>(results.size()) >= top_k) break;
-            sqlite3_reset(stmt);
-            sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(label));
-            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                const char* t   = (const char*)sqlite3_column_text(stmt, 0);
-                const char* s   = (const char*)sqlite3_column_text(stmt, 1);
-                int         pid = sqlite3_column_int(stmt, 2);
-                if (patient_id_filter < 0 || pid == patient_id_filter) {
-                    QueryResult qr;
-                    qr.text       = t ? t : "";
-                    qr.source     = s ? s : "";
-                    qr.patient_id = pid;
-                    qr.score      = dist;
-                    results.push_back(std::move(qr));
-                }
-            }
-        }
-        sqlite3_finalize(stmt);
-        return results;
-    }
-
-    int doc_count() {
-        if (!db_) return 0;
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM chunks",
-                               -1, &stmt, nullptr) != SQLITE_OK)
-            return 0;
-        int count = 0;
-        if (sqlite3_step(stmt) == SQLITE_ROW)
-            count = sqlite3_column_int(stmt, 0);
-        sqlite3_finalize(stmt);
-        return count;
-    }
-
-    void wipe() {
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (db_) {
-            sqlite3_exec(db_, "DELETE FROM chunks;", nullptr, nullptr, nullptr);
-            LOG_INFO("VectorStore: wiped all chunks from SQLite");
-        }
-        hnsw_.reset();
-        space_.reset();
-        dim_ = 0;
-        LOG_INFO("VectorStore: HNSW index cleared");
-    }
-
-    int index_usage_pct() {
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (!hnsw_ || max_elements_ == 0) return 0;
-        return static_cast<int>(hnsw_->getCurrentElementCount() * 100 / max_elements_);
-    }
-
-    void close() {
-        std::lock_guard<std::mutex> lk(mutex_);
-        hnsw_.reset();
-        space_.reset();
-        if (db_) {
-            sqlite3_close(db_);
-            db_ = nullptr;
-        }
-    }
-
-    ~VectorStore() {
-        close();
-    }
-};
-
-VectorStore g_vector_store;
 
 // ============================================================
 // CallerStore — thread-safe in-memory caller identity tracking
@@ -996,6 +400,12 @@ static const char* lookup_status_str(LookupStatus s) {
     return "error";
 }
 
+struct CallerPatient {
+    int patient_id = -1;
+    std::string name;
+    std::string vorname;
+};
+
 struct CallerRecord {
     int call_id = 0;
     std::string phone_number;
@@ -1003,6 +413,7 @@ struct CallerRecord {
     int patient_id = -1;
     std::string name;
     std::string vorname;
+    std::vector<CallerPatient> all_patients;
     std::chrono::steady_clock::time_point created_at;
 };
 
@@ -1022,7 +433,8 @@ public:
     }
 
     void update(int call_id, LookupStatus st, int patient_id,
-                const std::string& name, const std::string& vorname) {
+                const std::string& name, const std::string& vorname,
+                std::vector<CallerPatient> all = {}) {
         std::lock_guard<std::mutex> lk(mutex_);
         auto it = map_.find(call_id);
         if (it == map_.end()) return;
@@ -1030,6 +442,7 @@ public:
         it->second.patient_id = patient_id;
         it->second.name = name;
         it->second.vorname = vorname;
+        it->second.all_patients = std::move(all);
     }
 
     bool get(int call_id, CallerRecord& out) const {
@@ -1688,48 +1101,16 @@ static HttpResponse http_post_plain(const std::string& url, const std::string& b
     return parse_http_response(raw_resp);
 }
 
-// ============================================================
-// Ollama embedding client (real implementation)
-// ============================================================
-
-static std::vector<float> embed_text(const std::string& text, const TomedoConfig& cfg) {
-    if (text.empty()) return {};
-
-    std::string url = cfg.ollama_url + "/api/embeddings";
-    std::ostringstream body;
-    body << "{\"model\":\"" << json_escape(cfg.ollama_model)
-         << "\",\"prompt\":\"" << json_escape(text) << "\"}";
-
-    auto resp = http_post_plain(url, body.str(), EMBED_TIMEOUT_MS);
-    if (resp.status != 200 || resp.body.empty()) {
-        LOG_WARN("embed_text: Ollama status %d (url=%s)", resp.status, url.c_str());
-        return {};
-    }
-
-    auto pos = resp.body.find("\"embedding\"");
-    if (pos == std::string::npos) {
-        LOG_WARN("embed_text: no 'embedding' key in response");
-        return {};
-    }
-    pos += 11;
-    while (pos < resp.body.size() && resp.body[pos] != '[') ++pos;
-    if (pos >= resp.body.size()) return {};
-    ++pos;
-
-    std::vector<float> result;
-    while (pos < resp.body.size()) {
-        while (pos < resp.body.size() &&
-               (resp.body[pos] == ' ' || resp.body[pos] == '\t' ||
-                resp.body[pos] == '\n' || resp.body[pos] == '\r' ||
-                resp.body[pos] == ',')) ++pos;
-        if (pos >= resp.body.size() || resp.body[pos] == ']') break;
-        char* end = nullptr;
-        float val = std::strtof(resp.body.c_str() + pos, &end);
-        if (end == resp.body.c_str() + pos) break;
-        result.push_back(val);
-        pos = static_cast<size_t>(end - resp.body.c_str());
-    }
-    return result;
+static bool frontend_upsert(const std::string& source, int patient_id,
+                            const std::string& text,
+                            const std::string& host, int port) {
+    std::string body = "{\"source\":\"" + json_escape(source)
+                     + "\",\"patient_id\":" + std::to_string(patient_id)
+                     + ",\"text\":\"" + json_escape(text) + "\"}";
+    std::string url = "http://" + host + ":" + std::to_string(port)
+                    + "/api/embeddings/upsert";
+    auto resp = http_post_plain(url, body, 60000);
+    return resp.status == 200;
 }
 
 // ============================================================
@@ -1893,11 +1274,15 @@ static std::string normalize_phone(const std::string& raw) {
     return digits;
 }
 
-struct PhoneLookupResult {
-    bool found = false;
+struct PhoneLookupEntry {
     int patient_id = -1;
     std::string name;
     std::string vorname;
+};
+
+struct PhoneLookupResult {
+    bool found = false;
+    std::vector<PhoneLookupEntry> entries;
 };
 
 static PhoneLookupResult phone_index_lookup(sqlite3* db, const std::string& phone) {
@@ -1907,18 +1292,20 @@ static PhoneLookupResult phone_index_lookup(sqlite3* db, const std::string& phon
     std::string pattern = "%" + digits.substr(digits.size() > static_cast<size_t>(PHONE_SUFFIX_MATCH_LEN) ? digits.size() - PHONE_SUFFIX_MATCH_LEN : 0) + "%";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db,
-        "SELECT patient_id, name, vorname FROM phone_index WHERE phone LIKE ? LIMIT 1",
+        "SELECT patient_id, name, vorname FROM phone_index WHERE phone LIKE ?",
         -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return r;
     sqlite3_bind_text(stmt, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        r.found = true;
-        r.patient_id = sqlite3_column_int(stmt, 0);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        PhoneLookupEntry e;
+        e.patient_id = sqlite3_column_int(stmt, 0);
         const char* n = (const char*)sqlite3_column_text(stmt, 1);
         const char* v = (const char*)sqlite3_column_text(stmt, 2);
-        r.name = n ? n : "";
-        r.vorname = v ? v : "";
+        e.name = n ? n : "";
+        e.vorname = v ? v : "";
+        r.entries.push_back(std::move(e));
     }
+    r.found = !r.entries.empty();
     sqlite3_finalize(stmt);
     return r;
 }
@@ -2033,7 +1420,103 @@ struct PatientPhones {
     std::string telefon2;
     std::string handy;
     std::string telefon3;
+    std::vector<std::string> weitere;
 };
+
+static std::vector<std::string> extract_string_array(const std::string& body, const std::string& key) {
+    std::vector<std::string> result;
+    std::string needle = "\"" + key + "\"";
+    auto kp = body.find(needle);
+    if (kp == std::string::npos) return result;
+    kp += needle.size();
+    while (kp < body.size() && body[kp] != '[') {
+        if (body[kp] == ']' || body[kp] == '}') return result;
+        ++kp;
+    }
+    if (kp >= body.size()) return result;
+    ++kp;
+    while (kp < body.size()) {
+        while (kp < body.size() && (body[kp] == ' ' || body[kp] == ',' ||
+               body[kp] == '\t' || body[kp] == '\n' || body[kp] == '\r')) ++kp;
+        if (kp >= body.size() || body[kp] == ']') break;
+        if (body[kp] != '"') { ++kp; continue; }
+        ++kp;
+        std::string val;
+        while (kp < body.size() && body[kp] != '"') {
+            if (body[kp] == '\\' && kp + 1 < body.size()) {
+                ++kp;
+                switch (body[kp]) {
+                    case '"':  val += '"';  break;
+                    case '\\': val += '\\'; break;
+                    case '/':  val += '/';  break;
+                    case 'n':  val += '\n'; break;
+                    case 'r':  val += '\r'; break;
+                    case 't':  val += '\t'; break;
+                    case 'b':  val += '\b'; break;
+                    case 'f':  val += '\f'; break;
+                    case 'u': {
+                        if (kp + 4 < body.size()) {
+                            unsigned cp = 0;
+                            bool ok = true;
+                            for (int d = 1; d <= 4 && ok; ++d) {
+                                char h = body[kp + d];
+                                cp <<= 4;
+                                if (h >= '0' && h <= '9') cp |= (unsigned)(h - '0');
+                                else if (h >= 'a' && h <= 'f') cp |= (unsigned)(h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') cp |= (unsigned)(h - 'A' + 10);
+                                else ok = false;
+                            }
+                            if (ok) {
+                                kp += 4;
+                                if (cp >= 0xD800 && cp <= 0xDBFF &&
+                                    kp + 6 < body.size() && body[kp + 1] == '\\' && body[kp + 2] == 'u') {
+                                    unsigned lo = 0;
+                                    bool ok2 = true;
+                                    for (int d = 3; d <= 6 && ok2; ++d) {
+                                        char h = body[kp + d];
+                                        lo <<= 4;
+                                        if (h >= '0' && h <= '9') lo |= (unsigned)(h - '0');
+                                        else if (h >= 'a' && h <= 'f') lo |= (unsigned)(h - 'a' + 10);
+                                        else if (h >= 'A' && h <= 'F') lo |= (unsigned)(h - 'A' + 10);
+                                        else ok2 = false;
+                                    }
+                                    if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF) {
+                                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                        kp += 6;
+                                    }
+                                }
+                                if (cp < 0x80) {
+                                    val += (char)cp;
+                                } else if (cp < 0x800) {
+                                    val += (char)(0xC0 | (cp >> 6));
+                                    val += (char)(0x80 | (cp & 0x3F));
+                                } else if (cp < 0x10000) {
+                                    val += (char)(0xE0 | (cp >> 12));
+                                    val += (char)(0x80 | ((cp >> 6) & 0x3F));
+                                    val += (char)(0x80 | (cp & 0x3F));
+                                } else {
+                                    val += (char)(0xF0 | (cp >> 18));
+                                    val += (char)(0x80 | ((cp >> 12) & 0x3F));
+                                    val += (char)(0x80 | ((cp >> 6) & 0x3F));
+                                    val += (char)(0x80 | (cp & 0x3F));
+                                }
+                            } else {
+                                val += 'u';
+                            }
+                        }
+                        break;
+                    }
+                    default: val += body[kp]; break;
+                }
+                ++kp;
+            }
+            else { val += body[kp]; ++kp; }
+        }
+        if (kp < body.size()) ++kp;
+        if (!val.empty()) result.push_back(std::move(val));
+    }
+    return result;
+}
 
 static PatientPhones fetch_patient_phones(const std::string& body) {
     PatientPhones ph;
@@ -2041,6 +1524,28 @@ static PatientPhones fetch_patient_phones(const std::string& body) {
     ph.telefon2 = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "telefon2");
     ph.handy    = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "handyNummer");
     ph.telefon3 = json_get_deep_string(body, "patientenDetails", "kontaktdaten", "telefon3");
+    auto kontakt_pos = body.find("\"kontaktdaten\"");
+    if (kontakt_pos != std::string::npos) {
+        auto brace = body.find('{', kontakt_pos);
+        if (brace != std::string::npos) {
+            int depth = 1;
+            size_t end = brace + 1;
+            while (end < body.size() && depth > 0) {
+                if (body[end] == '{') ++depth;
+                else if (body[end] == '}') --depth;
+                else if (body[end] == '"') {
+                    ++end;
+                    while (end < body.size() && body[end] != '"') {
+                        if (body[end] == '\\') ++end;
+                        ++end;
+                    }
+                }
+                ++end;
+            }
+            std::string kontakt = body.substr(brace, end - brace);
+            ph.weitere = extract_string_array(kontakt, "weitereTelefonummern");
+        }
+    }
     return ph;
 }
 
@@ -2246,8 +1751,7 @@ static PatientContext fetch_patient_context_full(int patient_id, const TomedoCon
 //   1. fetch_patient_context_full() — makes up to 4 HTTPS calls to Tomedo.
 //   2. index_patient_phones() — writes phone digits to the phone_index table.
 //   3. chunk_text() — splits the context document into overlapping windows.
-//   4. embed_text() — calls Ollama /api/embeddings for each chunk.
-//   5. VectorStore::upsert() — writes the embedding to SQLite + hnswlib.
+//   4. frontend_upsert() — POSTs each chunk to frontend's /api/embeddings/upsert.
 //
 // Batching: patients are processed in groups of 100 with a 10 ms sleep between
 // batches to avoid overwhelming the Tomedo server.
@@ -2274,6 +1778,8 @@ static void index_patient_phones(sqlite3* db, int patient_id,
     store_phone(ph.telefon2);
     store_phone(ph.handy);
     store_phone(ph.telefon3);
+    for (const auto& w : ph.weitere)
+        store_phone(w);
 }
 
 struct CrawlStats {
@@ -2282,8 +1788,10 @@ struct CrawlStats {
     bool interrupted = false;
 };
 
+static constexpr int MAX_ACTIVE_PATIENTS = 2000;
+
 static CrawlStats run_full_crawl(const std::vector<PatientRef>& patients,
-                                  const TomedoConfig& cfg, VectorStore& store,
+                                  const TomedoConfig& cfg,
                                   sqlite3* phone_db, long long since_ts = 0) {
     CrawlStats stats;
     int processed = 0;
@@ -2323,13 +1831,12 @@ static CrawlStats run_full_crawl(const std::vector<PatientRef>& patients,
         std::string source = "patient/" + std::to_string(pid);
         for (size_t ci = 0; ci < chunks.size(); ++ci) {
             if (s_quit.load()) { stats.interrupted = true; break; }
-            auto emb = embed_text(chunks[ci], cfg);
-            if (emb.empty()) {
-                LOG_DEBUG("Crawl: embed_text empty for patient=%d chunk=%d", pid, (int)ci);
+            std::string chunk_source = source + "/chunk" + std::to_string(ci);
+            if (!frontend_upsert(chunk_source, pid, chunks[ci],
+                                cfg.frontend_host, cfg.frontend_port)) {
+                LOG_WARN("Crawl: frontend_upsert failed for patient=%d chunk=%d", pid, (int)ci);
                 continue;
             }
-            std::string chunk_source = source + "/chunk" + std::to_string(ci);
-            store.upsert(chunk_source, pid, chunks[ci], emb);
             ++stats.chunks;
         }
 
@@ -2358,10 +1865,22 @@ static void resolve_caller(int call_id, const std::string& phone) {
     }
     auto result = phone_index_lookup(g_phone_db, phone);
     if (result.found) {
-        LOG_INFO("Caller resolved: call_id=%d -> patient=%d %s %s",
-                 call_id, result.patient_id, result.vorname.c_str(), result.name.c_str());
+        auto& first = result.entries[0];
+        LOG_INFO("Caller resolved: call_id=%d -> %d patient(s), first: patient=%d %s %s",
+                 call_id, (int)result.entries.size(),
+                 first.patient_id, first.vorname.c_str(), first.name.c_str());
+        std::vector<CallerPatient> all;
+        all.reserve(result.entries.size());
+        for (auto& e : result.entries) {
+            CallerPatient cp;
+            cp.patient_id = e.patient_id;
+            cp.name       = e.name;
+            cp.vorname    = e.vorname;
+            all.push_back(std::move(cp));
+        }
         g_caller_store.update(call_id, LookupStatus::FOUND,
-                              result.patient_id, result.name, result.vorname);
+                              first.patient_id, first.name, first.vorname,
+                              std::move(all));
     } else {
         LOG_DEBUG("Caller not found in phone_index: call_id=%d phone=%s", call_id, phone.c_str());
         g_caller_store.update(call_id, LookupStatus::NOT_FOUND, -1, "", "");
@@ -2456,144 +1975,7 @@ struct HttpContext {
     struct mg_mgr*      mgr = nullptr;
 };
 
-// ============================================================
-// Pending query responses — written by worker threads, read by Mongoose thread
-// ============================================================
 
-struct PendingResponse {
-    int         status = 200;
-    std::string json;
-};
-
-static std::mutex                                         g_pending_mutex;
-static std::unordered_map<unsigned long, PendingResponse> g_pending_responses;
-static std::unordered_set<unsigned long>                  g_inflight_query_ids;
-static std::unordered_set<unsigned long>                  g_cancelled_queries;
-
-static std::string build_query_json(const std::vector<QueryResult>& results) {
-    std::ostringstream j;
-    j << "{\"results\":[";
-    for (size_t i = 0; i < results.size(); ++i) {
-        if (i) j << ",";
-        float safe_score = std::isfinite(results[i].score) ? results[i].score : 0.0f;
-        j << "{"
-          << "\"text\":\""     << json_escape(results[i].text)   << "\","
-          << "\"source\":\""   << json_escape(results[i].source) << "\","
-          << "\"patient_id\":" << results[i].patient_id          << ","
-          << "\"score\":"      << safe_score
-          << "}";
-    }
-    j << "]}";
-    return j.str();
-}
-
-// ============================================================
-// QueryWorkerPool — embeds text off the Mongoose event-loop thread
-// ============================================================
-//
-// /query requests require an Ollama embedding call (~50-200 ms) which must not
-// block the single-threaded Mongoose event loop.  Instead:
-//   1. http_handler() enqueues the job and returns immediately (connection stays
-//      open — Mongoose will buffer the response).
-//   2. A worker thread calls embed_text() + VectorStore::query().
-//   3. The result is stored in g_pending_responses (keyed by mg_connection::id).
-//   4. mg_wakeup() signals the Mongoose event loop, which picks up the result
-//      in the MG_EV_WAKEUP branch and sends the HTTP response.
-//
-// If the client disconnects before the worker finishes, the connection id is
-// moved from g_inflight_query_ids to g_cancelled_queries so the worker silently
-// discards its result instead of writing to a dead connection.
-//
-// The pool is bounded at QUERY_POOL_MAX_QUEUE = 32 concurrent jobs; overflow
-// returns HTTP 429.  QUERY_POOL_WORKERS threads are started in main() using
-// the value from argv or defaulting to 4.
-
-static constexpr size_t QUERY_POOL_MAX_QUEUE = 32;
-
-class QueryWorkerPool {
-    struct Job {
-        unsigned long      conn_id;
-        struct mg_mgr*     mgr;
-        std::string        text;
-        int                top_k;
-        int                patient_id_filter;
-        const TomedoConfig* cfg;
-    };
-
-    std::queue<Job>         queue_;
-    std::mutex              mutex_;
-    std::condition_variable cv_;
-    bool                    stop_ = false;
-    std::vector<std::thread> workers_;
-
-    void worker_func() {
-        while (true) {
-            Job job;
-            {
-                std::unique_lock<std::mutex> lk(mutex_);
-                cv_.wait(lk, [this]{ return stop_ || !queue_.empty(); });
-                if (stop_ && queue_.empty()) return;
-                job = std::move(queue_.front());
-                queue_.pop();
-            }
-
-            PendingResponse pr;
-            auto emb = embed_text(job.text, *job.cfg);
-            if (emb.empty()) {
-                pr.status = 503;
-                pr.json   = "{\"error\":\"embedding_unavailable\"}";
-            } else {
-                auto results = g_vector_store.query(emb, job.top_k, job.patient_id_filter);
-                pr.status = 200;
-                pr.json   = build_query_json(results);
-            }
-
-            bool should_wake = false;
-            {
-                std::lock_guard<std::mutex> lk(g_pending_mutex);
-                if (g_cancelled_queries.erase(job.conn_id) == 0) {
-                    g_pending_responses[job.conn_id] = std::move(pr);
-                    should_wake = true;
-                }
-            }
-            if (should_wake)
-                mg_wakeup(job.mgr, job.conn_id, "Q", 1);
-        }
-    }
-
-public:
-    void start(int n = 4) {
-        workers_.reserve(static_cast<size_t>(n));
-        for (int i = 0; i < n; ++i)
-            workers_.emplace_back([this]{ worker_func(); });
-    }
-
-    bool enqueue(unsigned long conn_id, struct mg_mgr* mgr,
-                 const std::string& text, int top_k, int patient_id_filter,
-                 const TomedoConfig* cfg) {
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            if (queue_.size() >= QUERY_POOL_MAX_QUEUE) return false;
-            queue_.push({conn_id, mgr, text, top_k, patient_id_filter, cfg});
-        }
-        cv_.notify_one();
-        return true;
-    }
-
-    void shutdown() {
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        for (auto& t : workers_)
-            if (t.joinable()) t.join();
-    }
-
-    ~QueryWorkerPool() { shutdown(); }
-};
-
-QueryWorkerPool g_query_pool;
 
 // ============================================================
 // Mongoose HTTP server
@@ -2605,19 +1987,15 @@ QueryWorkerPool g_query_pool;
 // by tls_cert.h, shared with the other Prodigy services).
 //
 // Endpoint summary:
-//   GET  /health            — service status, doc count, Ollama state
-//   GET/POST /query         — RAG semantic search (async via QueryWorkerPool)
+//   GET  /health            — service status, last crawl time
 //   POST /caller            — register incoming call + phone number
 //   GET  /caller/{id}       — poll lookup status for a call
 //   DELETE /caller/{id}     — deregister call on hangup
 //   POST /crawl/trigger     — request an immediate crawl (sets atomic flag)
-//   POST /wipe              — delete all vectors and rebuild empty index
-//   GET  /ollama/models     — list models from Ollama /api/tags
-//   POST /ollama/start      — start ollama serve (if not already running)
-//   POST /ollama/stop       — kill the tracked ollama process
-//   POST /ollama/pull       — background ollama pull {model}
 //   GET  /config            — read all config keys from SQLite
 //   POST /config            — write one or more config keys to SQLite
+//
+// Embedding queries and vector storage are handled by the frontend service.
 //
 // Security: the listener binds to api_host (127.0.0.1 by default).  No
 // authentication is required — the loopback-only binding is the security model.
@@ -2633,32 +2011,6 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         }
         return;
     }
-    if (ev == MG_EV_WAKEUP) {
-        PendingResponse pr;
-        bool found = false;
-        {
-            std::lock_guard<std::mutex> lk(g_pending_mutex);
-            auto it = g_pending_responses.find(c->id);
-            if (it != g_pending_responses.end()) {
-                pr    = std::move(it->second);
-                found = true;
-                g_pending_responses.erase(it);
-            }
-            g_inflight_query_ids.erase(c->id);
-        }
-        if (found)
-            mg_http_reply(c, pr.status, "Content-Type: application/json\r\n",
-                          "%s", pr.json.c_str());
-        return;
-    }
-
-    if (ev == MG_EV_CLOSE) {
-        std::lock_guard<std::mutex> lk(g_pending_mutex);
-        g_pending_responses.erase(c->id);
-        if (g_inflight_query_ids.erase(c->id))
-            g_cancelled_queries.insert(c->id);
-        return;
-    }
 
     if (ev != MG_EV_HTTP_MSG) return;
     struct mg_http_message *hm = (struct mg_http_message *)ev_data;
@@ -2667,66 +2019,13 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
 
     if (mg_strcmp(hm->uri, mg_str("/health")) == 0) {
         long lc = g_last_crawl_time.load();
-        int docs = g_vector_store.doc_count();
-        int idx_pct = g_vector_store.index_usage_pct();
-        bool oi = g_ollama_installed.load();
-        bool or_ = g_ollama_running.load();
         std::ostringstream j;
         j << "{\"status\":\"ok\","
-          << "\"indexed_docs\":" << docs << ","
-          << "\"index_usage_pct\":" << idx_pct << ","
-          << "\"ollama_installed\":" << (oi ? "true" : "false") << ","
-          << "\"ollama_running\":" << (or_ ? "true" : "false") << ","
           << "\"last_crawl\":";
         if (lc == 0) j << "null";
         else         j << lc;
         j << "}";
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
-
-    } else if (mg_strcmp(hm->uri, mg_str("/query")) == 0 &&
-               (mg_strcmp(hm->method, mg_str("GET")) == 0 ||
-                mg_strcmp(hm->method, mg_str("POST")) == 0)) {
-        std::string query_text;
-        int top_k = 3;
-        int patient_id_filter = -1;
-        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
-            char text_buf[4096] = {};
-            char topk_buf[32]   = {};
-            char pid_buf[32]    = {};
-            mg_http_get_var(&hm->query, "text",       text_buf, sizeof(text_buf));
-            mg_http_get_var(&hm->query, "top_k",      topk_buf, sizeof(topk_buf));
-            mg_http_get_var(&hm->query, "patient_id", pid_buf,  sizeof(pid_buf));
-            query_text = text_buf;
-            if (topk_buf[0]) top_k = std::atoi(topk_buf);
-            if (pid_buf[0])  patient_id_filter = std::atoi(pid_buf);
-        } else {
-            std::string body(hm->body.buf, hm->body.len);
-            query_text        = json_get_string(body, "text");
-            top_k             = json_get_int(body, "top_k", 3);
-            patient_id_filter = json_get_int(body, "patient_id", -1);
-        }
-        if (top_k <= 0) top_k = 3;
-        if (top_k > 20) top_k = 20;
-
-        if (query_text.empty()) {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
-                          "{\"error\":\"text parameter required\"}");
-            return;
-        }
-
-        {
-            std::lock_guard<std::mutex> lk(g_pending_mutex);
-            g_inflight_query_ids.insert(c->id);
-        }
-        if (!g_query_pool.enqueue(c->id, ctx->mgr, query_text, top_k, patient_id_filter, &cfg)) {
-            {
-                std::lock_guard<std::mutex> lk(g_pending_mutex);
-                g_inflight_query_ids.erase(c->id);
-            }
-            mg_http_reply(c, 429, "Content-Type: application/json\r\n",
-                          "{\"error\":\"too_many_requests\"}");
-            return;
-        }
 
     } else if (mg_strcmp(hm->uri, mg_str("/caller")) == 0 &&
                mg_strcmp(hm->method, mg_str("POST")) == 0) {
@@ -2748,56 +2047,6 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         g_crawl_requested.store(true);
         mg_http_reply(c, 202, "Content-Type: application/json\r\n",
                       "{\"status\":\"crawl_triggered\"}");
-
-    } else if (mg_strcmp(hm->uri, mg_str("/vectors/wipe")) == 0 &&
-               mg_strcmp(hm->method, mg_str("POST")) == 0) {
-        int before = g_vector_store.doc_count();
-        g_vector_store.wipe();
-        LOG_INFO("Vector store wiped via API (%d docs removed)", before);
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                      "{\"status\":\"wiped\",\"docs_removed\":%d}", before);
-
-    } else if (mg_strcmp(hm->uri, mg_str("/ollama/status")) == 0 &&
-               mg_strcmp(hm->method, mg_str("GET")) == 0) {
-        bool installed = g_ollama_installed.load();
-        bool running = installed ? check_ollama_running(cfg.ollama_url) : false;
-        g_ollama_running.store(running);
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-            "{\"installed\":%s,\"running\":%s}",
-            installed ? "true" : "false", running ? "true" : "false");
-
-    } else if (mg_strcmp(hm->uri, mg_str("/ollama/install")) == 0 &&
-               mg_strcmp(hm->method, mg_str("POST")) == 0) {
-        mg_http_reply(c, 501, "Content-Type: application/json\r\n",
-            "{\"error\":\"Automatic Ollama installation is not supported. "
-            "Install Ollama manually from https://ollama.com before starting this service.\"}");
-        LOG_WARN("POST /ollama/install called — automatic install is disabled for security reasons");
-
-    } else if (mg_strcmp(hm->uri, mg_str("/ollama/start")) == 0 &&
-               mg_strcmp(hm->method, mg_str("POST")) == 0) {
-        if (!g_ollama_installed.load()) {
-            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
-                "{\"error\":\"ollama not installed\"}");
-        } else {
-            pid_t pid = spawn_ollama_serve_detached();
-            if (pid > 0) {
-                LOG_INFO("ollama serve started via API (pid=%d)", (int)pid);
-                mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                    "{\"status\":\"started\"}");
-            } else {
-                mg_http_reply(c, 500, "Content-Type: application/json\r\n",
-                    "{\"error\":\"failed to start ollama\"}");
-            }
-        }
-
-    } else if (mg_strcmp(hm->uri, mg_str("/ollama/stop")) == 0 &&
-               mg_strcmp(hm->method, mg_str("POST")) == 0) {
-        std::thread([](){
-            kill_ollama_tracked();
-            g_ollama_running.store(false);
-        }).detach();
-        mg_http_reply(c, 202, "Content-Type: application/json\r\n",
-            "{\"status\":\"stopping\"}");
 
     } else if (mg_strcmp(hm->uri, mg_str("/config")) == 0 &&
                mg_strcmp(hm->method, mg_str("GET")) == 0) {
@@ -2834,10 +2083,18 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
             else
                 j << "\"name\":\"" << json_escape(rec.name) << "\",";
             if (rec.vorname.empty())
-                j << "\"vorname\":null";
+                j << "\"vorname\":null,";
             else
-                j << "\"vorname\":\"" << json_escape(rec.vorname) << "\"";
-            j << "}";
+                j << "\"vorname\":\"" << json_escape(rec.vorname) << "\",";
+            j << "\"all_patients\":[";
+            for (size_t pi = 0; pi < rec.all_patients.size(); ++pi) {
+                if (pi) j << ",";
+                auto& p = rec.all_patients[pi];
+                j << "{\"patient_id\":" << p.patient_id
+                  << ",\"name\":\"" << json_escape(p.name)
+                  << "\",\"vorname\":\"" << json_escape(p.vorname) << "\"}";
+            }
+            j << "]}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
         } else if (is_caller_wildcard && mg_strcmp(hm->method, mg_str("DELETE")) == 0) {
             int call_id = std::atoi(std::string(caps[0].buf, caps[0].len).c_str());
@@ -2851,8 +2108,7 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
 }
 
 // mgr is initialized in start(). The event-loop thread polls it until s_quit.
-// mg_mgr_free() is called from main() via free_mgr(), after g_query_pool.shutdown()
-// ensures no worker thread can call mg_wakeup on this mgr.
+// mg_mgr_free() is called from main() via free_mgr().
 struct HttpServer {
     struct mg_mgr mgr;
     std::thread   thread;
@@ -2862,11 +2118,6 @@ struct HttpServer {
     bool start(const TomedoConfig& cfg) {
         listen_addr = "https://" + cfg.api_host + ":" + std::to_string(cfg.api_port);
         mg_mgr_init(&mgr);
-        if (!mg_wakeup_init(&mgr)) {
-            LOG_ERROR("mg_wakeup_init failed — cannot serve /query asynchronously");
-            mg_mgr_free(&mgr);
-            return false;
-        }
         ctx.cfg = &cfg;
         ctx.mgr = &mgr;
         struct mg_connection *c = mg_http_listen(&mgr, listen_addr.c_str(), http_handler, &ctx);
@@ -2903,22 +2154,17 @@ struct HttpServer {
 // 1. Parse argv[1] as the database path (default: "tomedo-crawl.db").
 // 2. load_config_from_db() — reads config from the encrypted SQLite DB.
 // 3. LogForwarder initialisation — UDP datagrams to frontend log port 22022.
-// 4. Spawn ollama_init_thread — checks ollama installation/running state in
-//    parallel with the rest of startup to avoid a sequential delay.
-// 5. VectorStore::open() + rebuild_index() — open the encrypted DB and
-//    reconstruct the hnswlib ANN index from persisted embeddings.
-// 6. Active embedding model check — if the configured model changed since the
-//    last run, the vector store is wiped to prevent dimension mismatches.
-// 7. phone_index_init() — ensure the phone lookup table exists.
-// 8. ResolveQueue + QueryWorkerPool — start background worker threads.
-// 9. CallerStore expiry thread — calls expire_old() every 5 minutes.
-// 10. HttpServer::start() — bind the Mongoose listener before the crawl so
-//     /health is available immediately.
-// 11. Crawl thread — runs the first crawl immediately, then sleeps until the
-//     next scheduled time or a /crawl/trigger request arrives.
-// 12. Wait for s_quit (SIGINT/SIGTERM), then orderly shutdown:
-//     QueryWorkerPool → HttpServer → ResolveQueue → crawl thread → expiry
-//     thread → sqlite close → cleanup SSL.
+// 4. phone_index_init() — ensure the phone lookup table exists.
+// 5. ResolveQueue — start background worker threads.
+// 6. CallerStore expiry thread — calls expire_old() every 5 minutes.
+// 7. HttpServer::start() — bind the Mongoose listener before the crawl so
+//    /health is available immediately.
+// 8. Crawl thread — runs the first crawl immediately, then sleeps until the
+//    next scheduled time or a /crawl/trigger request arrives.
+//    Embedding and vector storage are delegated to frontend via HTTP API.
+// 9. Wait for s_quit (SIGINT/SIGTERM), then orderly shutdown:
+//    HttpServer → ResolveQueue → crawl thread → expiry thread → sqlite close
+//    → cleanup SSL.
 
 int main(int argc, char** argv) {
     signal(SIGINT,  sig_handler);
@@ -2939,39 +2185,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::thread ollama_init_thread([&cfg](){
-        ollama_startup_check(cfg);
-    });
-
-    g_vector_store.set_max_elements(cfg.hnsw_max_elements);
-    if (!g_vector_store.open(cfg.db_path)) {
-        LOG_ERROR("Failed to open vector store at '%s'", cfg.db_path.c_str());
-        s_quit.store(true);
-        if (ollama_init_thread.joinable()) ollama_init_thread.join();
-        return 1;
-    }
-    g_vector_store.rebuild_index();
-
-    {
-        sqlite3* cdb = nullptr;
-        if (prodigy_db::db_open_encrypted(cfg.db_path.c_str(), &cdb) == SQLITE_OK) {
-            sqlite3_exec(cdb, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
-            std::string prev_model = config_db_get(cdb, "active_embedding_model", "");
-            if (!prev_model.empty() && prev_model != cfg.ollama_model) {
-                LOG_WARN("Embedding model changed from '%s' to '%s' — wiping vector store",
-                         prev_model.c_str(), cfg.ollama_model.c_str());
-                g_vector_store.wipe();
-            }
-            config_db_set(cdb, "active_embedding_model", cfg.ollama_model);
-            sqlite3_close(cdb);
-        }
-    }
-
     sqlite3* phone_db = nullptr;
     if (prodigy_db::db_open_encrypted(cfg.db_path.c_str(), &phone_db) != SQLITE_OK) {
         LOG_ERROR("Failed to open phone_index DB");
-        s_quit.store(true);
-        if (ollama_init_thread.joinable()) ollama_init_thread.join();
         return 1;
     }
     sqlite3_exec(phone_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
@@ -2979,14 +2195,11 @@ int main(int argc, char** argv) {
     if (!phone_index_init(phone_db)) {
         LOG_ERROR("Failed to init phone_index table");
         sqlite3_close(phone_db);
-        s_quit.store(true);
-        if (ollama_init_thread.joinable()) ollama_init_thread.join();
         return 1;
     }
     g_phone_db = phone_db;
 
     g_resolve_queue.start();
-    g_query_pool.start(QUERY_POOL_WORKERS);
 
     std::thread expiry_thread([]() {
         while (!s_quit.load()) {
@@ -2996,13 +2209,9 @@ int main(int argc, char** argv) {
         }
     });
 
-    // Start HTTP server before crawl thread so /health is available from the
-    // very first request, even while the initial crawl is in progress.
     HttpServer srv;
     if (!srv.start(cfg)) {
         s_quit.store(true);
-        if (ollama_init_thread.joinable()) ollama_init_thread.join();
-        g_query_pool.shutdown();
         g_resolve_queue.shutdown();
         expiry_thread.join();
         sqlite3_close(phone_db);
@@ -3013,18 +2222,25 @@ int main(int argc, char** argv) {
 
     auto crawl_fn = [&cfg, phone_db]() {
         long long since_ts = 0;
-        // Returns the wall-clock epoch-ms at which the crawl STARTED (for use
-        // as the next since_ts), or 0 if the crawl was incomplete/interrupted.
-        // since_ts is only advanced when every patient was fetched without HTTP
-        // errors AND the crawl was not interrupted by SIGTERM — preventing
-        // partially-crawled patients from being silently skipped on the next run.
         auto do_crawl = [&](long long ts) -> long long {
             long long started_at = static_cast<long long>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count());
             auto patients = enumerate_patients(cfg);
-            if (patients.empty()) return 0;  // fetch failed — don't advance ts
-            auto stats = run_full_crawl(patients, cfg, g_vector_store, phone_db, ts);
+            if (patients.empty()) return 0;
+            std::sort(patients.begin(), patients.end(),
+                [](const PatientRef& a, const PatientRef& b) {
+                    return a.zuletzt_aufgerufen > b.zuletzt_aufgerufen;
+                });
+            int total_patients = static_cast<int>(patients.size());
+            if (patients.size() > static_cast<size_t>(MAX_ACTIVE_PATIENTS)) {
+                patients.resize(static_cast<size_t>(MAX_ACTIVE_PATIENTS));
+                LOG_WARN("Crawl: %d patients beyond top-%d will not be indexed",
+                         total_patients - MAX_ACTIVE_PATIENTS, MAX_ACTIVE_PATIENTS);
+            }
+            LOG_INFO("Crawl: selected top %d most recently active patients (of %d total)",
+                     (int)patients.size(), total_patients);
+            auto stats = run_full_crawl(patients, cfg, phone_db, ts);
             g_last_crawl_time.store(static_cast<long>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
@@ -3032,7 +2248,7 @@ int main(int argc, char** argv) {
                 LOG_WARN("Crawl incomplete (interrupted=%s, skipped=%d) — "
                          "since_ts not advanced; all patients will be re-checked next run",
                          stats.interrupted ? "yes" : "no", stats.skipped);
-                return 0;  // don't advance ts
+                return 0LL;
             }
             return started_at;
         };
@@ -3051,18 +2267,13 @@ int main(int argc, char** argv) {
     };
     std::thread crawl_thread(crawl_fn);
 
-    if (ollama_init_thread.joinable()) ollama_init_thread.join();
-
     srv.join();
-    kill_ollama_tracked();
-    g_query_pool.shutdown();
     srv.free_mgr();
     g_resolve_queue.shutdown();
     crawl_thread.join();
     expiry_thread.join();
     sqlite3_close(phone_db);
     g_phone_db = nullptr;
-    g_vector_store.close();
     cleanup_shared_ssl_ctx();
 
     LOG_INFO("tomedo-crawl stopped");
