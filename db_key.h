@@ -1,4 +1,4 @@
-// db_key.h — macOS Keychain-backed SQLCipher database encryption key management
+// db_key.h — File-based SQLCipher database encryption key management
 //
 // PURPOSE
 //   Provides a single 256-bit (32-byte hex) AES key used to encrypt all SQLite
@@ -76,6 +76,7 @@ static inline void secure_zero(void* ptr, std::size_t len) noexcept
 }
 
 // ─── Internal constants ────────────────────────────────────────────────────────
+static constexpr size_t HEX_KEY_LEN = 64;
 static const char* KEYCHAIN_SERVICE = "com.prodigy.db_encryption";
 static const char* KEYCHAIN_ACCOUNT = "db_key";
 
@@ -100,10 +101,10 @@ static std::string generate_hex_key()
     }
     std::fclose(f);
 #endif
-    char hex[65];
+    char hex[HEX_KEY_LEN + 1];
     for (int i = 0; i < 32; ++i) std::snprintf(hex + 2 * i, 3, "%02x", raw[i]);
-    hex[64] = '\0';
-    std::string result(hex, 64);
+    hex[HEX_KEY_LEN] = '\0';
+    std::string result(hex, HEX_KEY_LEN);
     // Zero sensitive key material from stack before returning.
     secure_zero(raw, sizeof(raw));
     secure_zero(hex, sizeof(hex));
@@ -166,8 +167,10 @@ static std::string file_key_load()
     std::fclose(f);
     while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' '))
         buf[--n] = '\0';
-    if (n != 64) return {};
-    return std::string(buf, 64);
+    std::string result;
+    if (n == HEX_KEY_LEN) result.assign(buf, HEX_KEY_LEN);
+    secure_zero(buf, sizeof(buf));
+    return result;
 }
 
 static bool file_key_store(const std::string& key)

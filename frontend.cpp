@@ -349,7 +349,6 @@ public:
             discover_tests();
             load_services();
             scan_testfiles_directory();
-            check_and_refresh_cert();
         }
     }
 
@@ -417,22 +416,15 @@ public:
         std::string listen_addr = "http://127.0.0.1:" + std::to_string(http_port_);
         struct mg_connection *c = mg_http_listen(&mgr_, listen_addr.c_str(), http_handler_static, this);
         if (c) c->fn_data = this;
-        
-        // Also listen on plain HTTP (http_port + 1) for tools/browsers that reject self-signed certs.
-        uint16_t http_plain_port = http_port_ + 1;
-        std::string http_listen = "http://127.0.0.1:" + std::to_string(http_plain_port);
-        struct mg_connection *ch = mg_http_listen(&mgr_, http_listen.c_str(), http_handler_plain_static, this);
-        if (ch) ch->fn_data = this;
 
         std::cout << "Frontend web server started on " << listen_addr << "\n";
-        std::cout << "Also listening on " << http_listen << " (plain HTTP, loopback only)\n";
         std::cout << "Open http://localhost:" << http_port_ << " in your browser\n";
 
         auto last_flush = std::chrono::steady_clock::now();
         auto last_rotation = last_flush;
         auto last_svc_check = std::chrono::steady_clock::now();
         auto last_async_cleanup = std::chrono::steady_clock::now();
-        auto last_cert_check = std::chrono::steady_clock::now();
+
         auto last_session_cleanup = std::chrono::steady_clock::now();
         while (!s_sigint_received) {
             mg_mgr_poll(&mgr_, MG_POLL_TIMEOUT_MS);
@@ -456,10 +448,7 @@ public:
                 rotate_logs();
                 last_rotation = now;
             }
-            if (now - last_cert_check >= std::chrono::hours(24)) {
-                check_and_refresh_cert();
-                last_cert_check = now;
-            }
+
             if (now - last_session_cleanup >= std::chrono::hours(1)) {
                 cleanup_expired_sessions();
                 last_session_cleanup = now;
@@ -1057,24 +1046,6 @@ private:
     void handle_sse_stream(struct mg_connection *c, struct mg_http_message *hm);
     void remove_sse_connection(struct mg_connection *c);
     void flush_sse_queue();
-
-    static void http_handler_plain_static(struct mg_connection *c, int ev, void *ev_data) {
-        FrontendServer* self = static_cast<FrontendServer*>(c->fn_data);
-        self->http_handler_plain(c, ev, ev_data);
-    }
-
-    void http_handler_plain(struct mg_connection *c, int ev, void *ev_data) {
-        if (ev == MG_EV_CLOSE) {
-            if (c->data[0] == 'S') {
-                remove_sse_connection(c);
-            }
-            return;
-        }
-        if (ev == MG_EV_HTTP_MSG) {
-            struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-            handle_http_request(c, hm);
-        }
-    }
 
     static void http_handler_static(struct mg_connection *c, int ev, void *ev_data) {
         FrontendServer* self = static_cast<FrontendServer*>(c->fn_data);
@@ -9553,10 +9524,6 @@ document.getElementById('f').onsubmit=async function(e){
     // -------------------------------------------------------------------------
     // Certificate management
     // -------------------------------------------------------------------------
-
-    void check_and_refresh_cert() {
-        return;
-    }
 
     void handle_api_certs_list(struct mg_connection *c) {
         std::string dir = prodigy_tls::tls_dir();

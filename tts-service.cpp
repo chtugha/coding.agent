@@ -567,8 +567,8 @@ private:
             std::lock_guard<std::mutex> lock(slot_mutex_);
             old_slot = active_slot_;
             active_slot_ = new_slot;
+            slot_cv_.notify_all();
         }
-        slot_cv_.notify_all();
 
         // Spawn recv + ping threads for the new slot. They run as long
         // as the slot remains active (generation-matches).
