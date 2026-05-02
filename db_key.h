@@ -3,7 +3,9 @@
 // PURPOSE
 //   Provides a single 256-bit (32-byte hex) AES key used to encrypt all SQLite
 //   databases in the project via SQLCipher.  The key is generated once, stored
-//   permanently in the macOS Keychain, and retrieved on subsequent startups.
+//   in a file (db_key.hex) next to the executable, and retrieved on subsequent
+//   startups.  On macOS, if no file is found, a one-time migration from the
+//   legacy macOS Keychain storage is attempted before generating a new key.
 //
 // USAGE
 //   #include "db_key.h"
@@ -16,13 +18,8 @@
 //   • AES-256-CBC page-level encryption via SQLCipher (OpenSSL 3.x backend).
 //   • Key material (32 bytes) generated with arc4random_buf() — a CSPRNG seeded
 //     by the macOS kernel; each device gets a unique key on first run.
-//   • Key stored in macOS Keychain as kSecClassGenericPassword with
-//     kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly:
-//       – Accessible to daemon/service processes after the first unlock following
-//         a reboot — survives screen-lock and sleep cycles.
-//       – Cannot be extracted via iCloud Backup or Migration Assistant.
-//       – On Apple Silicon the Keychain is hardware-rooted in the Secure Enclave
-//         coprocessor; the raw key material cannot be read by another process.
+//   • Key stored in db_key.hex with mode 0600 (owner read/write only).
+//   • fsync() is called after writing to prevent key loss on crash.
 //   • SQLITE_TEMP_STORE=2 compiled in: temp tables go to memory, never to disk
 //     in plaintext.
 //   • Migration: existing plaintext SQLite databases are encrypted in-place via
@@ -36,13 +33,12 @@
 //
 // CROSS-PROCESS COMPATIBILITY
 //   Both `frontend` and `tomedo-crawl` open the shared tomedo-crawl.db file.
-//   Because both processes retrieve the same Keychain item
-//   (KEYCHAIN_SERVICE / KEYCHAIN_ACCOUNT), they use an identical key and can
-//   interoperate with full SQLite WAL multi-reader concurrency.
+//   Because both processes read the same db_key.hex file, they use an identical
+//   key and can interoperate with full SQLite WAL multi-reader concurrency.
 //
 // THREAD SAFETY
 //   get_db_key() is safe to call from multiple threads — a std::once_flag
-//   ensures the Keychain is accessed exactly once per process lifetime.
+//   ensures the key file is read exactly once per process lifetime.
 
 #pragma once
 
@@ -144,78 +140,6 @@ static std::string keychain_load()
     if (data) CFRelease(data);
 #endif
     return {};
-}
-
-static bool keychain_store(const std::string& key)
-{
-#ifdef __APPLE__
-    CFStringRef cfSvc  = CFStringCreateWithCString(nullptr, KEYCHAIN_SERVICE, kCFStringEncodingUTF8);
-    CFStringRef cfAcc  = CFStringCreateWithCString(nullptr, KEYCHAIN_ACCOUNT, kCFStringEncodingUTF8);
-    CFDataRef   cfData = CFDataCreate(nullptr,
-                             reinterpret_cast<const UInt8*>(key.c_str()),
-                             static_cast<CFIndex>(key.size()));
-
-    CFMutableDictionaryRef addQ = CFDictionaryCreateMutable(
-        nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(addQ, kSecClass,        kSecClassGenericPassword);
-    CFDictionarySetValue(addQ, kSecAttrService,  cfSvc);
-    CFDictionarySetValue(addQ, kSecAttrAccount,  cfAcc);
-    CFDictionarySetValue(addQ, kSecValueData,    cfData);
-    // kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly:
-    //   • Readable after the first unlock following a reboot — correct for a
-    //     server/daemon process that must survive screen-lock and sleep cycles.
-    //   • NOT migrated to other devices — tied to this hardware's Secure Enclave.
-    //   • Using WhenUnlocked would block access while the screen is locked,
-    //     preventing the service from opening its database after a lock/sleep.
-    CFDictionarySetValue(addQ, kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
-
-    OSStatus st = SecItemAdd(addQ, nullptr);
-    CFRelease(addQ);
-    CFRelease(cfSvc);
-    CFRelease(cfAcc);
-    CFRelease(cfData);
-
-    if (st == errSecSuccess) return true;
-
-    if (st == errSecDuplicateItem) {
-        // Key already exists — update value in case it changed
-        CFStringRef cfSvc2  = CFStringCreateWithCString(nullptr, KEYCHAIN_SERVICE, kCFStringEncodingUTF8);
-        CFStringRef cfAcc2  = CFStringCreateWithCString(nullptr, KEYCHAIN_ACCOUNT, kCFStringEncodingUTF8);
-        CFDataRef   cfData2 = CFDataCreate(nullptr,
-                                 reinterpret_cast<const UInt8*>(key.c_str()),
-                                 static_cast<CFIndex>(key.size()));
-
-        CFMutableDictionaryRef findQ = CFDictionaryCreateMutable(
-            nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(findQ, kSecClass,       kSecClassGenericPassword);
-        CFDictionarySetValue(findQ, kSecAttrService, cfSvc2);
-        CFDictionarySetValue(findQ, kSecAttrAccount, cfAcc2);
-
-        CFMutableDictionaryRef updQ = CFDictionaryCreateMutable(
-            nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(updQ, kSecValueData, cfData2);
-        // Also update accessibility so a pre-existing WhenUnlocked entry is
-        // migrated to AfterFirstUnlock, which is required for daemon access
-        // after reboot while the screen is still locked.
-        CFDictionarySetValue(updQ, kSecAttrAccessible,
-                             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
-
-        st = SecItemUpdate(findQ, updQ);
-        CFRelease(findQ);
-        CFRelease(updQ);
-        CFRelease(cfSvc2);
-        CFRelease(cfAcc2);
-        CFRelease(cfData2);
-        return st == errSecSuccess;
-    }
-
-    std::fprintf(stderr, "[db_key] Warning: Keychain store failed (OSStatus %d) — "
-                 "key exists only in memory for this session\n", static_cast<int>(st));
-    return false;
-#else
-    (void)key;
-    return false;
-#endif
 }
 
 static std::string db_key_file_path()

@@ -385,6 +385,9 @@ public:
 
     void shutdown() {
         if (!running_.exchange(false)) return;
+        {
+            std::lock_guard<std::mutex> lock(slot_mutex_);
+        }
         slot_cv_.notify_all();
 
         // Close engine listen socket so accept loop exits.
