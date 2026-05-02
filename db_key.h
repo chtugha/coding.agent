@@ -1,9 +1,11 @@
-// db_key.h — macOS Keychain-backed SQLCipher database encryption key management
+// db_key.h — File-based SQLCipher database encryption key management
 //
 // PURPOSE
 //   Provides a single 256-bit (32-byte hex) AES key used to encrypt all SQLite
 //   databases in the project via SQLCipher.  The key is generated once, stored
-//   permanently in the macOS Keychain, and retrieved on subsequent startups.
+//   in a file (db_key.hex) next to the executable, and retrieved on subsequent
+//   startups.  On macOS, if no file is found, a one-time migration from the
+//   legacy macOS Keychain storage is attempted before generating a new key.
 //
 // USAGE
 //   #include "db_key.h"
@@ -16,13 +18,8 @@
 //   • AES-256-CBC page-level encryption via SQLCipher (OpenSSL 3.x backend).
 //   • Key material (32 bytes) generated with arc4random_buf() — a CSPRNG seeded
 //     by the macOS kernel; each device gets a unique key on first run.
-//   • Key stored in macOS Keychain as kSecClassGenericPassword with
-//     kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly:
-//       – Accessible to daemon/service processes after the first unlock following
-//         a reboot — survives screen-lock and sleep cycles.
-//       – Cannot be extracted via iCloud Backup or Migration Assistant.
-//       – On Apple Silicon the Keychain is hardware-rooted in the Secure Enclave
-//         coprocessor; the raw key material cannot be read by another process.
+//   • Key stored in db_key.hex with mode 0600 (owner read/write only).
+//   • fsync() is called after writing to prevent key loss on crash.
 //   • SQLITE_TEMP_STORE=2 compiled in: temp tables go to memory, never to disk
 //     in plaintext.
 //   • Migration: existing plaintext SQLite databases are encrypted in-place via
@@ -36,13 +33,12 @@
 //
 // CROSS-PROCESS COMPATIBILITY
 //   Both `frontend` and `tomedo-crawl` open the shared tomedo-crawl.db file.
-//   Because both processes retrieve the same Keychain item
-//   (KEYCHAIN_SERVICE / KEYCHAIN_ACCOUNT), they use an identical key and can
-//   interoperate with full SQLite WAL multi-reader concurrency.
+//   Because both processes read the same db_key.hex file, they use an identical
+//   key and can interoperate with full SQLite WAL multi-reader concurrency.
 //
 // THREAD SAFETY
 //   get_db_key() is safe to call from multiple threads — a std::once_flag
-//   ensures the Keychain is accessed exactly once per process lifetime.
+//   ensures the key file is read exactly once per process lifetime.
 
 #pragma once
 
@@ -50,9 +46,12 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <fcntl.h>
+#include <unistd.h>
 
 #ifdef __APPLE__
 #  include <Security/Security.h>
+#  include <mach-o/dyld.h>
 #  include <stdlib.h>   // arc4random_buf
 #endif
 
@@ -77,6 +76,7 @@ static inline void secure_zero(void* ptr, std::size_t len) noexcept
 }
 
 // ─── Internal constants ────────────────────────────────────────────────────────
+static constexpr size_t HEX_KEY_LEN = 64;
 static const char* KEYCHAIN_SERVICE = "com.prodigy.db_encryption";
 static const char* KEYCHAIN_ACCOUNT = "db_key";
 
@@ -101,10 +101,10 @@ static std::string generate_hex_key()
     }
     std::fclose(f);
 #endif
-    char hex[65];
+    char hex[HEX_KEY_LEN + 1];
     for (int i = 0; i < 32; ++i) std::snprintf(hex + 2 * i, 3, "%02x", raw[i]);
-    hex[64] = '\0';
-    std::string result(hex, 64);
+    hex[HEX_KEY_LEN] = '\0';
+    std::string result(hex, HEX_KEY_LEN);
     // Zero sensitive key material from stack before returning.
     secure_zero(raw, sizeof(raw));
     secure_zero(hex, sizeof(hex));
@@ -143,108 +143,89 @@ static std::string keychain_load()
     return {};
 }
 
-static bool keychain_store(const std::string& key)
+static std::string db_key_file_path()
 {
 #ifdef __APPLE__
-    CFStringRef cfSvc  = CFStringCreateWithCString(nullptr, KEYCHAIN_SERVICE, kCFStringEncodingUTF8);
-    CFStringRef cfAcc  = CFStringCreateWithCString(nullptr, KEYCHAIN_ACCOUNT, kCFStringEncodingUTF8);
-    CFDataRef   cfData = CFDataCreate(nullptr,
-                             reinterpret_cast<const UInt8*>(key.c_str()),
-                             static_cast<CFIndex>(key.size()));
-
-    CFMutableDictionaryRef addQ = CFDictionaryCreateMutable(
-        nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(addQ, kSecClass,        kSecClassGenericPassword);
-    CFDictionarySetValue(addQ, kSecAttrService,  cfSvc);
-    CFDictionarySetValue(addQ, kSecAttrAccount,  cfAcc);
-    CFDictionarySetValue(addQ, kSecValueData,    cfData);
-    // kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly:
-    //   • Readable after the first unlock following a reboot — correct for a
-    //     server/daemon process that must survive screen-lock and sleep cycles.
-    //   • NOT migrated to other devices — tied to this hardware's Secure Enclave.
-    //   • Using WhenUnlocked would block access while the screen is locked,
-    //     preventing the service from opening its database after a lock/sleep.
-    CFDictionarySetValue(addQ, kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
-
-    OSStatus st = SecItemAdd(addQ, nullptr);
-    CFRelease(addQ);
-    CFRelease(cfSvc);
-    CFRelease(cfAcc);
-    CFRelease(cfData);
-
-    if (st == errSecSuccess) return true;
-
-    if (st == errSecDuplicateItem) {
-        // Key already exists — update value in case it changed
-        CFStringRef cfSvc2  = CFStringCreateWithCString(nullptr, KEYCHAIN_SERVICE, kCFStringEncodingUTF8);
-        CFStringRef cfAcc2  = CFStringCreateWithCString(nullptr, KEYCHAIN_ACCOUNT, kCFStringEncodingUTF8);
-        CFDataRef   cfData2 = CFDataCreate(nullptr,
-                                 reinterpret_cast<const UInt8*>(key.c_str()),
-                                 static_cast<CFIndex>(key.size()));
-
-        CFMutableDictionaryRef findQ = CFDictionaryCreateMutable(
-            nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(findQ, kSecClass,       kSecClassGenericPassword);
-        CFDictionarySetValue(findQ, kSecAttrService, cfSvc2);
-        CFDictionarySetValue(findQ, kSecAttrAccount, cfAcc2);
-
-        CFMutableDictionaryRef updQ = CFDictionaryCreateMutable(
-            nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(updQ, kSecValueData, cfData2);
-        // Also update accessibility so a pre-existing WhenUnlocked entry is
-        // migrated to AfterFirstUnlock, which is required for daemon access
-        // after reboot while the screen is still locked.
-        CFDictionarySetValue(updQ, kSecAttrAccessible,
-                             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
-
-        st = SecItemUpdate(findQ, updQ);
-        CFRelease(findQ);
-        CFRelease(updQ);
-        CFRelease(cfSvc2);
-        CFRelease(cfAcc2);
-        CFRelease(cfData2);
-        return st == errSecSuccess;
+    char path[4096];
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) == 0) {
+        char* last_slash = strrchr(path, '/');
+        if (last_slash) { *last_slash = '\0'; }
+        return std::string(path) + "/db_key.hex";
     }
-
-    std::fprintf(stderr, "[db_key] Warning: Keychain store failed (OSStatus %d) — "
-                 "key exists only in memory for this session\n", static_cast<int>(st));
-    return false;
-#else
-    (void)key;
-    return false;
 #endif
+    return "./db_key.hex";
+}
+
+static std::string file_key_load()
+{
+    std::string path = db_key_file_path();
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return {};
+    char buf[128] = {0};
+    size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' '))
+        buf[--n] = '\0';
+    std::string result;
+    if (n == HEX_KEY_LEN) result.assign(buf, HEX_KEY_LEN);
+    secure_zero(buf, sizeof(buf));
+    return result;
+}
+
+static bool file_key_store(const std::string& key)
+{
+    std::string path = db_key_file_path();
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return false;
+    ssize_t w = write(fd, key.c_str(), key.size());
+    if (w != (ssize_t)key.size()) { close(fd); return false; }
+    fsync(fd);
+    close(fd);
+    return true;
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-// Returns the process-lifetime encryption key (64 hex chars = 256-bit AES).
-// Loads from Keychain on first call; generates + stores if not found.
-// Thread-safe — initialised exactly once via std::once_flag.
 static const std::string& get_db_key()
 {
     std::call_once(g_key_once, []() {
+        g_cached_key = file_key_load();
+        if (!g_cached_key.empty()) {
+            std::fprintf(stderr,
+                "[db_key] Loaded AES-256 database key from file (%s)\n",
+                db_key_file_path().c_str());
+            return;
+        }
+#ifdef __APPLE__
         g_cached_key = keychain_load();
         if (!g_cached_key.empty()) {
             std::fprintf(stderr,
-                "[db_key] Loaded AES-256 database key from macOS Keychain "
-                "(Secure Enclave backed on Apple Silicon)\n");
+                "[db_key] Migrating key from macOS Keychain to file (%s)\n",
+                db_key_file_path().c_str());
+            if (!file_key_store(g_cached_key)) {
+                std::fprintf(stderr,
+                    "[db_key] WARNING: failed to persist migrated key to disk\n");
+            }
             return;
         }
-        // First run — generate and persist
+#endif
         g_cached_key = generate_hex_key();
         if (g_cached_key.empty()) {
             std::fprintf(stderr, "[db_key] FATAL: key generation failed\n");
             return;
         }
-        if (keychain_store(g_cached_key)) {
+        if (!file_key_store(g_cached_key)) {
             std::fprintf(stderr,
-                "[db_key] Generated new 256-bit AES database key and stored "
-                "in macOS Keychain (kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)\n");
-        } else {
-            std::fprintf(stderr,
-                "[db_key] Warning: key generated but Keychain storage failed — "
-                "databases encrypted this session only (key lost on restart)\n");
+                "[db_key] FATAL: could not persist key to %s — "
+                "database will be unreadable on next startup\n",
+                db_key_file_path().c_str());
+            g_cached_key.clear();
+            return;
         }
+        std::fprintf(stderr,
+            "[db_key] Generated new 256-bit AES database key and stored in file (%s)\n",
+            db_key_file_path().c_str());
     });
     return g_cached_key;
 }

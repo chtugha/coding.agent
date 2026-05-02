@@ -385,6 +385,10 @@ public:
 
     void shutdown() {
         if (!running_.exchange(false)) return;
+        {
+            std::lock_guard<std::mutex> lock(slot_mutex_);
+            slot_cv_.notify_all();
+        }
 
         // Close engine listen socket so accept loop exits.
         int el = engine_listen_sock_.exchange(-1);
@@ -563,6 +567,7 @@ private:
             std::lock_guard<std::mutex> lock(slot_mutex_);
             old_slot = active_slot_;
             active_slot_ = new_slot;
+            slot_cv_.notify_all();
         }
 
         // Spawn recv + ping threads for the new slot. They run as long
@@ -835,8 +840,20 @@ private:
     void forward_text_to_engine(const Packet& pkt) {
         auto slot = current_slot();
         if (!slot) {
-            log_dropped_text(pkt.call_id);
-            return;
+            std::fprintf(stderr, "[TTS] no engine docked for call %u, waiting up to 10s...\n",
+                         pkt.call_id);
+            {
+                std::unique_lock<std::mutex> lock(slot_mutex_);
+                slot_cv_.wait_for(lock, std::chrono::seconds(10),
+                    [this]{ return active_slot_ != nullptr || !running_.load(); });
+                slot = active_slot_;
+            }
+            if (!slot || !running_.load()) {
+                if (running_.load()) log_dropped_text(pkt.call_id);
+                return;
+            }
+            std::fprintf(stderr, "[TTS] engine docked while waiting, forwarding text for call %u\n",
+                         pkt.call_id);
         }
         uint8_t tag = static_cast<uint8_t>(EngineFrameTag::PACKET);
         auto body = pkt.serialize();
@@ -985,6 +1002,7 @@ private:
     std::thread cmd_thread_;
 
     mutable std::mutex slot_mutex_;
+    std::condition_variable slot_cv_;
     std::shared_ptr<EngineSlot> active_slot_;
     std::atomic<uint64_t> next_generation_{0};
 

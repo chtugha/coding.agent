@@ -35,6 +35,10 @@ bin/models/**/*.mlpackage
 bin/models/**/*.onnx
 bin/models/**/*.onnx.data
 bin/models/**/*.json
+bin/models/**/*.safetensors
+bin/models/**/*.jsonl
+bin/models/**/*.yaml
+bin/models/**/events.out.tfevents.*
 
 # Compiled binaries
 whisper-service-local
@@ -130,3 +134,7 @@ third_party/onnxruntime/
 third_party/onnxruntime
 logs/
 .zenflow/
+
+# DB encryption key file (generated per-machine)
+db_key.hex
+bin/db_key.hex

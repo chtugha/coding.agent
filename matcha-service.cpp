@@ -706,7 +706,7 @@ public:
             return false;
         }
 
-        log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::TTS_SERVICE);
+        log_fwd_.init(FRONTEND_LOG_PORT, "MATCHA_ENGINE");
 
         std::printf("[matcha] Service initialized (Matcha-TTS, CoreML, espeak-ng)\n");
 

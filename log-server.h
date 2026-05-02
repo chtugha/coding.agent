@@ -56,7 +56,7 @@ inline void FrontendServer::process_log_message(const std::string& msg) {
     strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", localtime_r(&now, &tm_buf));
     entry.timestamp = timebuf;
 
-    entry.service = parse_service_type(msg.substr(0, p1));
+    entry.service = msg.substr(0, p1);
     entry.level = msg.substr(p1 + 1, p2 - p1 - 1);
     try {
         entry.call_id = static_cast<uint32_t>(std::stoul(msg.substr(p2 + 1, p3 - p2 - 1)));
@@ -110,7 +110,7 @@ inline void FrontendServer::flush_log_queue() {
     }
     for (const auto& entry : batch) {
         sqlite3_bind_text(stmt, 1, entry.timestamp.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, service_type_to_string(entry.service), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, entry.service.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 3, static_cast<int>(entry.call_id));
         sqlite3_bind_text(stmt, 4, entry.level.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 5, entry.message.c_str(), -1, SQLITE_TRANSIENT);
@@ -184,7 +184,7 @@ inline void FrontendServer::flush_sse_queue() {
     if (sse_connections_.empty()) return;
 
     for (const auto& entry : batch) {
-        std::string svc = service_type_to_string(entry.service);
+        const std::string& svc = entry.service;
         std::string json = "{\"timestamp\":\"" + escape_json(entry.timestamp) +
             "\",\"service\":\"" + escape_json(svc) +
             "\",\"level\":\"" + escape_json(entry.level) +

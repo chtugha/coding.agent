@@ -62,7 +62,7 @@ static constexpr int DISC_WARN_INTERVAL_S = 5;
 static constexpr float NOISE_FLOOR_INIT = 0.00005f;
 static constexpr float NOISE_FLOOR_HARD_MIN = 0.000005f;
 static constexpr float NOISE_FLOOR_EMA_ALPHA = 0.05f;
-static constexpr float RMS_SILENCE_GATE_DEFAULT = 0.04f;
+static constexpr float RMS_SILENCE_GATE_DEFAULT = 0.01f;
 
 static std::atomic<bool> g_running{true};
 static void sig_handler(int) { g_running = false; }
