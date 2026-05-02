@@ -192,10 +192,7 @@
 #include "db_key.h"
 #include "tls_cert.h"
 #include "interconnect.h"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#include "hnswlib.h"
-#pragma GCC diagnostic pop
+#include "embedding-db.h"
 
 namespace {
 
@@ -222,7 +219,7 @@ struct TomedoConfig {
     std::string tomedo_cert_pem  = "/etc/tomedo-crawl/client.pem";
     int         crawl_interval_sec = 3600;
     std::string ollama_url       = "http://127.0.0.1:11434";
-    std::string ollama_model     = "embeddinggemma:300m";
+    std::string ollama_model     = "bge-small";
     std::string api_host         = "127.0.0.1";
     int         api_port         = 13181;
     int         log_port         = 22022;
@@ -643,326 +640,9 @@ constexpr int TOMEDO_LIST_TIMEOUT_MS  = 60000;
 
 static std::vector<float> embed_text(const std::string& text, const TomedoConfig& cfg);
 
-// ============================================================
-// VectorStore — hnswlib (ANN) + SQLite (persistence + text)
-// ============================================================
-//
-// Two-layer storage:
-//   • SQLite table "chunks": persistent storage of (source, patient_id, text,
-//     embedding BLOB, updated_at).  This is the authoritative store — it
-//     survives restarts and is the source-of-truth for text retrieval.
-//   • hnswlib HierarchicalNSW: in-memory Approximate Nearest Neighbour (ANN)
-//     index built from the SQLite embeddings at startup.  Provides O(log N)
-//     query latency (<10 ms for 50 k vectors).  hnswlib labels == SQLite row IDs
-//     so text can be fetched directly after ANN search.
-//
-// Thread safety:
-//   All public methods are guarded by mutex_.  The rebuild_index() call in
-//   main() runs before any other threads start and therefore does NOT lock.
-//
-// HNSW tuning constants (file scope):
-//   HNSW_M        = 16   — number of bidirectional links per element
-//   HNSW_EF_BUILD = 200  — construction beam width (higher = better recall)
-//   HNSW_EF_QUERY = 50   — query beam width (higher = better recall, slower)
-//
-// Encoding: embeddings are stored as raw little-endian float32 arrays in BLOB
-// columns.  Dimension is inferred from the first blob encountered; a mismatch
-// (e.g. after model change) is logged and the offending row is skipped.
+using QueryResult = embedding_db::QueryResult;
 
-struct QueryResult {
-    std::string text;
-    float       score;
-    std::string source;
-    int         patient_id;
-};
-
-static constexpr int HNSW_M        = 16;
-static constexpr int HNSW_EF_BUILD = 200;
-static constexpr int HNSW_EF_QUERY = 50;
-
-class VectorStore {
-    sqlite3*                                        db_           = nullptr;
-    std::unique_ptr<hnswlib::L2Space>                space_;
-    std::unique_ptr<hnswlib::HierarchicalNSW<float>> hnsw_;
-    int                                              dim_          = 0;
-    size_t                                           max_elements_ = 500000;
-    mutable std::mutex                               mutex_;
-
-    bool ensure_index(int dim) {
-        if (hnsw_) {
-            if (dim_ != dim) {
-                LOG_ERROR("VectorStore: dim mismatch (stored=%d, new=%d)", dim_, dim);
-                return false;
-            }
-            return true;
-        }
-        dim_   = dim;
-        space_ = std::make_unique<hnswlib::L2Space>(static_cast<size_t>(dim));
-        hnsw_  = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-                     space_.get(), max_elements_, HNSW_M, HNSW_EF_BUILD);
-        hnsw_->setEf(HNSW_EF_QUERY);
-        return true;
-    }
-
-public:
-    void set_max_elements(size_t n) { max_elements_ = n; }
-
-    bool open(const std::string& db_path) {
-        int rc = prodigy_db::db_open_encrypted(db_path.c_str(), &db_);
-        if (rc != SQLITE_OK) {
-            LOG_ERROR("VectorStore: db_open_encrypted(%s): %s", db_path.c_str(), sqlite3_errmsg(db_));
-            return false;
-        }
-        sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
-        sqlite3_exec(db_, "PRAGMA busy_timeout=5000;", nullptr, nullptr, nullptr);
-        const char* schema =
-            "CREATE TABLE IF NOT EXISTS chunks ("
-            "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  source     TEXT    NOT NULL,"
-            "  patient_id INTEGER,"
-            "  text       TEXT    NOT NULL,"
-            "  embedding  BLOB    NOT NULL,"
-            "  updated_at INTEGER NOT NULL"
-            ");"
-            "CREATE INDEX IF NOT EXISTS idx_patient ON chunks(patient_id);"
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_source_patient ON chunks(source, patient_id);";
-        char* errmsg = nullptr;
-        rc = sqlite3_exec(db_, schema, nullptr, nullptr, &errmsg);
-        if (rc != SQLITE_OK) {
-            LOG_ERROR("VectorStore: schema: %s", errmsg ? errmsg : "unknown");
-            sqlite3_free(errmsg);
-            return false;
-        }
-        return true;
-    }
-
-    // Must be called from main() before the HTTP server thread starts.
-    // No mutex needed — no other threads access the store at this point.
-    void rebuild_index() {
-        if (!db_) return;
-        sqlite3_stmt* stmt = nullptr;
-        int rc = sqlite3_prepare_v2(db_,
-            "SELECT id, embedding FROM chunks", -1, &stmt, nullptr);
-        if (rc != SQLITE_OK) {
-            LOG_ERROR("VectorStore: rebuild_index prepare: %s", sqlite3_errmsg(db_));
-            return;
-        }
-
-        int count = 0;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            sqlite3_int64 id         = sqlite3_column_int64(stmt, 0);
-            const void*   blob       = sqlite3_column_blob(stmt,  1);
-            int           blob_bytes = sqlite3_column_bytes(stmt, 1);
-            if (!blob || blob_bytes < static_cast<int>(sizeof(float))) continue;
-            int emb_dim = blob_bytes / static_cast<int>(sizeof(float));
-            if (!ensure_index(emb_dim)) continue;
-            try {
-                hnsw_->addPoint(blob, static_cast<size_t>(id));
-                ++count;
-            } catch (const std::exception& e) {
-                LOG_ERROR("VectorStore: rebuild addPoint id=%lld: %s",
-                          (long long)id, e.what());
-            } catch (...) {
-                LOG_ERROR("VectorStore: rebuild addPoint id=%lld: unknown exception",
-                          (long long)id);
-            }
-        }
-        sqlite3_finalize(stmt);
-        LOG_INFO("VectorStore: rebuilt index with %d vectors", count);
-    }
-
-    void upsert(const std::string& source, int patient_id,
-                const std::string& text, const std::vector<float>& embedding) {
-        if (!db_ || embedding.empty()) return;
-        int emb_dim = static_cast<int>(embedding.size());
-        int blob_bytes = emb_dim * static_cast<int>(sizeof(float));
-        sqlite3_int64 now_ts = static_cast<sqlite3_int64>(
-            std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (!ensure_index(emb_dim)) return;
-
-        sqlite3_stmt* sel = nullptr;
-        int rc = sqlite3_prepare_v2(db_,
-            "SELECT id FROM chunks WHERE source=? AND patient_id=?",
-            -1, &sel, nullptr);
-        if (rc != SQLITE_OK) return;
-        sqlite3_bind_text(sel, 1, source.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(sel, 2, patient_id);
-
-        sqlite3_int64 existing_id = -1;
-        if (sqlite3_step(sel) == SQLITE_ROW)
-            existing_id = sqlite3_column_int64(sel, 0);
-        sqlite3_finalize(sel);
-
-        if (existing_id >= 0) {
-            sqlite3_stmt* upd = nullptr;
-            rc = sqlite3_prepare_v2(db_,
-                "UPDATE chunks SET text=?, embedding=?, updated_at=? WHERE id=?",
-                -1, &upd, nullptr);
-            if (rc != SQLITE_OK) return;
-            sqlite3_bind_text(upd, 1, text.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_blob(upd, 2, embedding.data(), blob_bytes, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(upd, 3, now_ts);
-            sqlite3_bind_int64(upd, 4, existing_id);
-            rc = sqlite3_step(upd);
-            sqlite3_finalize(upd);
-            if (rc != SQLITE_DONE) return;
-            try {
-                hnsw_->addPoint(embedding.data(), static_cast<size_t>(existing_id));
-            } catch (const std::exception& e) {
-                LOG_ERROR("VectorStore: upsert updatePoint id=%lld: %s — HNSW/SQLite diverged",
-                          (long long)existing_id, e.what());
-            } catch (...) {
-                LOG_ERROR("VectorStore: upsert updatePoint id=%lld: unknown — HNSW/SQLite diverged",
-                          (long long)existing_id);
-            }
-        } else {
-            sqlite3_stmt* ins = nullptr;
-            rc = sqlite3_prepare_v2(db_,
-                "INSERT INTO chunks(source,patient_id,text,embedding,updated_at)"
-                " VALUES(?,?,?,?,?)",
-                -1, &ins, nullptr);
-            if (rc != SQLITE_OK) return;
-            sqlite3_bind_text(ins, 1, source.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(ins, 2, patient_id);
-            sqlite3_bind_text(ins, 3, text.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_blob(ins, 4, embedding.data(), blob_bytes, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(ins, 5, now_ts);
-            rc = sqlite3_step(ins);
-            sqlite3_int64 rowid = sqlite3_last_insert_rowid(db_);
-            sqlite3_finalize(ins);
-            if (rc != SQLITE_DONE) return;
-
-            auto rollback_row = [&](const char* reason) {
-                LOG_ERROR("VectorStore: upsert addPoint rowid=%lld: %s — rolling back",
-                          (long long)rowid, reason);
-                sqlite3_stmt* del = nullptr;
-                if (sqlite3_prepare_v2(db_, "DELETE FROM chunks WHERE id=?",
-                                       -1, &del, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_int64(del, 1, rowid);
-                    sqlite3_step(del);
-                    sqlite3_finalize(del);
-                }
-            };
-            try {
-                hnsw_->addPoint(embedding.data(), static_cast<size_t>(rowid));
-            } catch (const std::exception& e) {
-                rollback_row(e.what());
-            } catch (...) {
-                rollback_row("unknown exception");
-            }
-        }
-    }
-
-    std::vector<QueryResult> query(const std::vector<float>& query_vec,
-                                   int top_k, int patient_id_filter = -1) {
-        if (!db_ || query_vec.empty()) return {};
-
-        int fetch_k = (patient_id_filter >= 0) ? top_k * 4 : top_k;
-
-        // Phase 1: ANN search — lock held only for HNSW, released before Phase 2.
-        // Snapshot db_ while the lock is held to guard against a concurrent close().
-        std::vector<std::pair<float, size_t>> candidates;
-        sqlite3* db_snap = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            db_snap = db_;
-            if (!hnsw_ || hnsw_->getCurrentElementCount() == 0) return {};
-            if (static_cast<int>(query_vec.size()) != dim_) return {};
-            int actual_k = std::min(fetch_k,
-                static_cast<int>(hnsw_->getCurrentElementCount()));
-            if (actual_k <= 0) return {};
-            auto knn = hnsw_->searchKnn(query_vec.data(), static_cast<size_t>(actual_k));
-            candidates.reserve(knn.size());
-            while (!knn.empty()) {
-                candidates.push_back(knn.top());
-                knn.pop();
-            }
-        }
-
-        // Phase 2: SQLite text fetch — safe without mutex_ because sqlite3.c is
-        // compiled with SQLITE_THREADSAFE=1 (serialized mode), which serialises
-        // all operations on this handle internally.
-        if (!db_snap) return {};
-
-        std::vector<QueryResult> results;
-        results.reserve(static_cast<size_t>(top_k));
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_snap,
-                "SELECT text, source, patient_id FROM chunks WHERE id=?",
-                -1, &stmt, nullptr) != SQLITE_OK)
-            return results;
-        for (auto& [dist, label] : candidates) {
-            if (static_cast<int>(results.size()) >= top_k) break;
-            sqlite3_reset(stmt);
-            sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(label));
-            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                const char* t   = (const char*)sqlite3_column_text(stmt, 0);
-                const char* s   = (const char*)sqlite3_column_text(stmt, 1);
-                int         pid = sqlite3_column_int(stmt, 2);
-                if (patient_id_filter < 0 || pid == patient_id_filter) {
-                    QueryResult qr;
-                    qr.text       = t ? t : "";
-                    qr.source     = s ? s : "";
-                    qr.patient_id = pid;
-                    qr.score      = dist;
-                    results.push_back(std::move(qr));
-                }
-            }
-        }
-        sqlite3_finalize(stmt);
-        return results;
-    }
-
-    int doc_count() {
-        if (!db_) return 0;
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM chunks",
-                               -1, &stmt, nullptr) != SQLITE_OK)
-            return 0;
-        int count = 0;
-        if (sqlite3_step(stmt) == SQLITE_ROW)
-            count = sqlite3_column_int(stmt, 0);
-        sqlite3_finalize(stmt);
-        return count;
-    }
-
-    void wipe() {
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (db_) {
-            sqlite3_exec(db_, "DELETE FROM chunks;", nullptr, nullptr, nullptr);
-            LOG_INFO("VectorStore: wiped all chunks from SQLite");
-        }
-        hnsw_.reset();
-        space_.reset();
-        dim_ = 0;
-        LOG_INFO("VectorStore: HNSW index cleared");
-    }
-
-    int index_usage_pct() {
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (!hnsw_ || max_elements_ == 0) return 0;
-        return static_cast<int>(hnsw_->getCurrentElementCount() * 100 / max_elements_);
-    }
-
-    void close() {
-        std::lock_guard<std::mutex> lk(mutex_);
-        hnsw_.reset();
-        space_.reset();
-        if (db_) {
-            sqlite3_close(db_);
-            db_ = nullptr;
-        }
-    }
-
-    ~VectorStore() {
-        close();
-    }
-};
-
-VectorStore g_vector_store;
+embedding_db::EmbeddingDB g_vector_store;
 
 // ============================================================
 // CallerStore — thread-safe in-memory caller identity tracking
@@ -996,6 +676,12 @@ static const char* lookup_status_str(LookupStatus s) {
     return "error";
 }
 
+struct CallerPatient {
+    int patient_id = -1;
+    std::string name;
+    std::string vorname;
+};
+
 struct CallerRecord {
     int call_id = 0;
     std::string phone_number;
@@ -1003,6 +689,7 @@ struct CallerRecord {
     int patient_id = -1;
     std::string name;
     std::string vorname;
+    std::vector<CallerPatient> all_patients;
     std::chrono::steady_clock::time_point created_at;
 };
 
@@ -1022,7 +709,8 @@ public:
     }
 
     void update(int call_id, LookupStatus st, int patient_id,
-                const std::string& name, const std::string& vorname) {
+                const std::string& name, const std::string& vorname,
+                std::vector<CallerPatient> all = {}) {
         std::lock_guard<std::mutex> lk(mutex_);
         auto it = map_.find(call_id);
         if (it == map_.end()) return;
@@ -1030,6 +718,7 @@ public:
         it->second.patient_id = patient_id;
         it->second.name = name;
         it->second.vorname = vorname;
+        it->second.all_patients = std::move(all);
     }
 
     bool get(int call_id, CallerRecord& out) const {
@@ -1893,11 +1582,15 @@ static std::string normalize_phone(const std::string& raw) {
     return digits;
 }
 
-struct PhoneLookupResult {
-    bool found = false;
+struct PhoneLookupEntry {
     int patient_id = -1;
     std::string name;
     std::string vorname;
+};
+
+struct PhoneLookupResult {
+    bool found = false;
+    std::vector<PhoneLookupEntry> entries;
 };
 
 static PhoneLookupResult phone_index_lookup(sqlite3* db, const std::string& phone) {
@@ -1907,18 +1600,20 @@ static PhoneLookupResult phone_index_lookup(sqlite3* db, const std::string& phon
     std::string pattern = "%" + digits.substr(digits.size() > static_cast<size_t>(PHONE_SUFFIX_MATCH_LEN) ? digits.size() - PHONE_SUFFIX_MATCH_LEN : 0) + "%";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db,
-        "SELECT patient_id, name, vorname FROM phone_index WHERE phone LIKE ? LIMIT 1",
+        "SELECT patient_id, name, vorname FROM phone_index WHERE phone LIKE ?",
         -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return r;
     sqlite3_bind_text(stmt, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        r.found = true;
-        r.patient_id = sqlite3_column_int(stmt, 0);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        PhoneLookupEntry e;
+        e.patient_id = sqlite3_column_int(stmt, 0);
         const char* n = (const char*)sqlite3_column_text(stmt, 1);
         const char* v = (const char*)sqlite3_column_text(stmt, 2);
-        r.name = n ? n : "";
-        r.vorname = v ? v : "";
+        e.name = n ? n : "";
+        e.vorname = v ? v : "";
+        r.entries.push_back(std::move(e));
     }
+    r.found = !r.entries.empty();
     sqlite3_finalize(stmt);
     return r;
 }
@@ -2282,8 +1977,10 @@ struct CrawlStats {
     bool interrupted = false;
 };
 
+static constexpr int MAX_ACTIVE_PATIENTS = 2000;
+
 static CrawlStats run_full_crawl(const std::vector<PatientRef>& patients,
-                                  const TomedoConfig& cfg, VectorStore& store,
+                                  const TomedoConfig& cfg, embedding_db::EmbeddingDB& store,
                                   sqlite3* phone_db, long long since_ts = 0) {
     CrawlStats stats;
     int processed = 0;
@@ -2358,10 +2055,22 @@ static void resolve_caller(int call_id, const std::string& phone) {
     }
     auto result = phone_index_lookup(g_phone_db, phone);
     if (result.found) {
-        LOG_INFO("Caller resolved: call_id=%d -> patient=%d %s %s",
-                 call_id, result.patient_id, result.vorname.c_str(), result.name.c_str());
+        auto& first = result.entries[0];
+        LOG_INFO("Caller resolved: call_id=%d -> %d patient(s), first: patient=%d %s %s",
+                 call_id, (int)result.entries.size(),
+                 first.patient_id, first.vorname.c_str(), first.name.c_str());
+        std::vector<CallerPatient> all;
+        all.reserve(result.entries.size());
+        for (auto& e : result.entries) {
+            CallerPatient cp;
+            cp.patient_id = e.patient_id;
+            cp.name       = e.name;
+            cp.vorname    = e.vorname;
+            all.push_back(std::move(cp));
+        }
         g_caller_store.update(call_id, LookupStatus::FOUND,
-                              result.patient_id, result.name, result.vorname);
+                              first.patient_id, first.name, first.vorname,
+                              std::move(all));
     } else {
         LOG_DEBUG("Caller not found in phone_index: call_id=%d phone=%s", call_id, phone.c_str());
         g_caller_store.update(call_id, LookupStatus::NOT_FOUND, -1, "", "");
@@ -2834,10 +2543,18 @@ void http_handler(struct mg_connection *c, int ev, void *ev_data) {
             else
                 j << "\"name\":\"" << json_escape(rec.name) << "\",";
             if (rec.vorname.empty())
-                j << "\"vorname\":null";
+                j << "\"vorname\":null,";
             else
-                j << "\"vorname\":\"" << json_escape(rec.vorname) << "\"";
-            j << "}";
+                j << "\"vorname\":\"" << json_escape(rec.vorname) << "\",";
+            j << "\"all_patients\":[";
+            for (size_t pi = 0; pi < rec.all_patients.size(); ++pi) {
+                if (pi) j << ",";
+                auto& p = rec.all_patients[pi];
+                j << "{\"patient_id\":" << p.patient_id
+                  << ",\"name\":\"" << json_escape(p.name)
+                  << "\",\"vorname\":\"" << json_escape(p.vorname) << "\"}";
+            }
+            j << "]}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
         } else if (is_caller_wildcard && mg_strcmp(hm->method, mg_str("DELETE")) == 0) {
             int call_id = std::atoi(std::string(caps[0].buf, caps[0].len).c_str());
@@ -2943,14 +2660,15 @@ int main(int argc, char** argv) {
         ollama_startup_check(cfg);
     });
 
+    std::string vector_store_path = cfg.db_path + ".vectors";
     g_vector_store.set_max_elements(cfg.hnsw_max_elements);
-    if (!g_vector_store.open(cfg.db_path)) {
-        LOG_ERROR("Failed to open vector store at '%s'", cfg.db_path.c_str());
+    if (!g_vector_store.open(vector_store_path)) {
+        LOG_ERROR("Failed to open vector store at '%s'", vector_store_path.c_str());
         s_quit.store(true);
         if (ollama_init_thread.joinable()) ollama_init_thread.join();
         return 1;
     }
-    g_vector_store.rebuild_index();
+    LOG_INFO("Vector store loaded (%d docs)", g_vector_store.doc_count());
 
     {
         sqlite3* cdb = nullptr;
@@ -3023,8 +2741,17 @@ int main(int argc, char** argv) {
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count());
             auto patients = enumerate_patients(cfg);
-            if (patients.empty()) return 0;  // fetch failed — don't advance ts
+            if (patients.empty()) return 0;
+            std::sort(patients.begin(), patients.end(),
+                [](const PatientRef& a, const PatientRef& b) {
+                    return a.zuletzt_aufgerufen > b.zuletzt_aufgerufen;
+                });
+            if (patients.size() > static_cast<size_t>(MAX_ACTIVE_PATIENTS))
+                patients.resize(static_cast<size_t>(MAX_ACTIVE_PATIENTS));
+            LOG_INFO("Crawl: selected top %d most recently active patients",
+                     (int)patients.size());
             auto stats = run_full_crawl(patients, cfg, g_vector_store, phone_db, ts);
+            g_vector_store.save();
             g_last_crawl_time.store(static_cast<long>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
