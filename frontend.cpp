@@ -91,6 +91,11 @@
 #include "css.h"
 #include "fonts.h"
 #include "vendors.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include "embedding-db.h"
+#pragma GCC diagnostic pop
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -412,7 +417,20 @@ public:
 
         log_thread_ = std::thread(&FrontendServer::log_receiver_loop, this);
 
+        embedding_model_ = get_setting("rag_ollama_model", "bge-small");
+        vector_store_path_ = project_root_ + "/embeddings";
+        vector_store_.set_max_elements(500000);
+        if (!vector_store_.open(vector_store_path_)) {
+            std::cerr << "WARNING: Failed to open vector store at " << vector_store_path_ << "\n";
+        }
+        std::cout << "Embedding DB loaded (" << vector_store_.doc_count() << " docs, model=" << embedding_model_ << ")\n";
+
         mg_mgr_init(&mgr_);
+        if (!mg_wakeup_init(&mgr_)) {
+            std::cerr << "FATAL: mg_wakeup_init failed\n";
+            interconnect_.shutdown();
+            return false;
+        }
         
         // Security: binds to loopback only. TLS enabled via self-signed cert (tls_cert.h).
         std::string listen_addr = "https://127.0.0.1:" + std::to_string(http_port_);
@@ -439,6 +457,8 @@ public:
                 prodigy_tls::ensure_certs();
             }
         }
+
+        start_emb_pool();
 
         auto last_flush = std::chrono::steady_clock::now();
         auto last_rotation = last_flush;
@@ -478,6 +498,8 @@ public:
             }
         }
         flush_log_queue();
+        shutdown_emb_pool();
+        vector_store_.close();
         shutdown_managed_processes();
 
         mg_mgr_free(&mgr_);
@@ -504,6 +526,37 @@ private:
     std::atomic<bool> ollama_pulling_{false};
     struct mg_mgr mgr_;
     std::thread log_thread_;
+
+    embedding_db::EmbeddingDB vector_store_;
+    std::string vector_store_path_;
+    std::string embedding_model_;
+
+    struct EmbeddingPendingResponse {
+        int status = 200;
+        std::string json;
+    };
+    std::mutex emb_pending_mutex_;
+    std::unordered_map<unsigned long, EmbeddingPendingResponse> emb_pending_responses_;
+    std::unordered_set<unsigned long> emb_inflight_ids_;
+    std::unordered_set<unsigned long> emb_cancelled_ids_;
+
+    struct EmbeddingJob {
+        enum Type { QUERY, UPSERT } type;
+        unsigned long conn_id;
+        struct mg_mgr* mgr;
+        std::string text;
+        std::string source;
+        int patient_id;
+        int top_k;
+        int patient_id_filter;
+    };
+    static constexpr size_t EMB_POOL_MAX_QUEUE = 64;
+    static constexpr int EMB_POOL_WORKERS = 4;
+    std::queue<EmbeddingJob> emb_queue_;
+    std::mutex emb_queue_mutex_;
+    std::condition_variable emb_queue_cv_;
+    bool emb_pool_stop_ = false;
+    std::vector<std::thread> emb_workers_;
     
     std::mutex tests_mutex_;
     std::vector<TestInfo> tests_;
@@ -1090,10 +1143,15 @@ private:
     }
 
     void http_handler_plain(struct mg_connection *c, int ev, void *ev_data) {
+        if (ev == MG_EV_WAKEUP) {
+            handle_emb_ev_wakeup(c);
+            return;
+        }
         if (ev == MG_EV_CLOSE) {
             if (c->data[0] == 'S') {
                 remove_sse_connection(c);
             }
+            handle_emb_ev_close(c);
             return;
         }
         if (ev == MG_EV_HTTP_MSG) {
@@ -1126,6 +1184,31 @@ private:
         self->http_handler(c, ev, ev_data);
     }
 
+    void handle_emb_ev_close(struct mg_connection *c) {
+        std::lock_guard<std::mutex> lk(emb_pending_mutex_);
+        emb_pending_responses_.erase(c->id);
+        if (emb_inflight_ids_.erase(c->id))
+            emb_cancelled_ids_.insert(c->id);
+    }
+
+    void handle_emb_ev_wakeup(struct mg_connection *c) {
+        EmbeddingPendingResponse pr;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lk(emb_pending_mutex_);
+            auto it = emb_pending_responses_.find(c->id);
+            if (it != emb_pending_responses_.end()) {
+                pr = std::move(it->second);
+                found = true;
+                emb_pending_responses_.erase(it);
+            }
+            emb_inflight_ids_.erase(c->id);
+        }
+        if (found)
+            mg_http_reply(c, pr.status, "Content-Type: application/json\r\n",
+                          "%s", pr.json.c_str());
+    }
+
     void http_handler(struct mg_connection *c, int ev, void *ev_data) {
         if (ev == MG_EV_ACCEPT) {
             const auto certs = prodigy_tls::get_certs();
@@ -1137,10 +1220,15 @@ private:
             }
             return;
         }
+        if (ev == MG_EV_WAKEUP) {
+            handle_emb_ev_wakeup(c);
+            return;
+        }
         if (ev == MG_EV_CLOSE) {
             if (c->data[0] == 'S') {
                 remove_sse_connection(c);
             }
+            handle_emb_ev_close(c);
             return;
         }
         if (ev == MG_EV_HTTP_MSG) {
@@ -1360,6 +1448,16 @@ private:
                 handle_ollama_install(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/rag/wipe_vectors")) == 0) {
                 handle_rag_wipe_vectors(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/embeddings/upsert")) == 0) {
+                handle_embeddings_upsert(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/embeddings/query")) == 0) {
+                handle_embeddings_query(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/embeddings/status")) == 0) {
+                handle_embeddings_status(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/embeddings/wipe")) == 0) {
+                handle_embeddings_wipe(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/embeddings/save")) == 0) {
+                handle_embeddings_save(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tests/setup/start")) == 0) {
                 handle_test_setup_start(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/tests/teardown")) == 0) {
@@ -6702,7 +6800,7 @@ private:
             {"tomedo_port",       get_setting("rag_tomedo_port", "8443")},
             {"tomedo_cert_pem",   cp},
             {"ollama_url",        get_setting("rag_ollama_url", "http://127.0.0.1:11434")},
-            {"ollama_model",      get_setting("rag_ollama_model", "embeddinggemma:300m")},
+            {"ollama_model",      get_setting("rag_ollama_model", "bge-small")},
             {"crawl_interval_sec",get_setting("rag_crawl_interval_sec", "3600")},
         };
         sqlite3_exec(rag_db, "BEGIN", nullptr, nullptr, nullptr);
@@ -6797,13 +6895,19 @@ private:
     }
 
     void handle_rag_health(struct mg_connection *c) {
-        std::string body = rag_http_request("GET", "/health");
-        if (body.empty()) {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
-                "{\"status\":\"offline\",\"indexed_docs\":0,\"last_crawl\":null}");
-        } else {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", body.c_str());
-        }
+        int docs = vector_store_.doc_count();
+        int idx_pct = vector_store_.index_usage_pct();
+        std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
+        std::string resp = ollama_http_request("GET", ollama_url, "/api/tags");
+        bool ollama_running = !resp.empty();
+        std::ostringstream j;
+        j << "{\"status\":\"ok\","
+          << "\"indexed_docs\":" << docs << ","
+          << "\"index_usage_pct\":" << idx_pct << ","
+          << "\"ollama_running\":" << (ollama_running ? "true" : "false") << ","
+          << "\"model\":\"" << escape_json(embedding_model_) << "\""
+          << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
     }
 
     void handle_rag_config(struct mg_connection *c, struct mg_http_message *hm) {
@@ -6811,7 +6915,7 @@ private:
             std::string tomedo_host = get_setting("rag_tomedo_host", "192.168.10.9");
             std::string tomedo_port = get_setting("rag_tomedo_port", "8443");
             std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
-            std::string ollama_model = get_setting("rag_ollama_model", "embeddinggemma:300m");
+            std::string ollama_model = get_setting("rag_ollama_model", "bge-small");
             std::string crawl_interval = get_setting("rag_crawl_interval_sec", "3600");
             std::string crawl_time = get_setting("rag_crawl_time", "02:00");
             std::string crawl_repeat_min = get_setting("rag_crawl_repeat_minutes", "0");
@@ -6861,6 +6965,12 @@ private:
             sync("crawl_interval_sec", "crawl_interval_sec");
             sync("crawl_time", "crawl_time");
             sync("crawl_repeat_minutes", "crawl_repeat_minutes");
+
+            std::string new_model = extract_json_string(body, "ollama_model");
+            if (!new_model.empty() && new_model != embedding_model_) {
+                embedding_model_ = new_model;
+                vector_store_.wipe();
+            }
 
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
         }
@@ -6936,13 +7046,9 @@ private:
             mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
             return;
         }
-        std::string resp = rag_http_request("POST", "/vectors/wipe");
-        if (resp.empty()) {
-            mg_http_reply(c, 503, "Content-Type: application/json\r\n",
-                "{\"error\":\"RAG service not reachable\"}");
-        } else {
-            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
-        }
+        vector_store_.wipe();
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"status\":\"wiped\",\"doc_count\":0}");
     }
 
     static std::string ollama_http_request(const std::string& method, const std::string& url_base,
@@ -7153,7 +7259,7 @@ private:
                 models.push_back(resp.substr(q1 + 1, q2 - q1 - 1));
                 pos = q2 + 1;
             }
-            std::string active_model = get_setting("rag_ollama_model", "embeddinggemma:300m");
+            std::string active_model = get_setting("rag_ollama_model", "bge-small");
             std::stringstream json;
             json << "{\"models\":[";
             for (size_t i = 0; i < models.size(); i++) {
@@ -7213,6 +7319,263 @@ private:
         } else {
             mg_http_reply(c, 202, "Content-Type: application/json\r\n", "%s", resp.c_str());
         }
+    }
+
+    std::vector<float> embed_text(const std::string& text) {
+        if (text.empty()) return {};
+        std::string ollama_url = get_setting("rag_ollama_url", "http://127.0.0.1:11434");
+        std::string model = embedding_model_;
+        std::string body = "{\"model\":\"" + escape_json(model)
+                         + "\",\"prompt\":\"" + escape_json(text) + "\"}";
+        std::string resp = ollama_http_request("POST", ollama_url, "/api/embeddings", body, 30000);
+        if (resp.empty()) return {};
+
+        auto pos = resp.find("\"embedding\"");
+        if (pos == std::string::npos) return {};
+        pos += 11;
+        while (pos < resp.size() && resp[pos] != '[') ++pos;
+        if (pos >= resp.size()) return {};
+        ++pos;
+
+        std::vector<float> result;
+        while (pos < resp.size()) {
+            while (pos < resp.size() &&
+                   (resp[pos] == ' ' || resp[pos] == '\t' ||
+                    resp[pos] == '\n' || resp[pos] == '\r' ||
+                    resp[pos] == ',')) ++pos;
+            if (pos >= resp.size() || resp[pos] == ']') break;
+            char* end = nullptr;
+            float val = std::strtof(resp.c_str() + pos, &end);
+            if (end == resp.c_str() + pos) break;
+            result.push_back(val);
+            pos = static_cast<size_t>(end - resp.c_str());
+        }
+        return result;
+    }
+
+    static std::string build_embedding_query_json(const std::vector<embedding_db::QueryResult>& results) {
+        std::ostringstream j;
+        j << "{\"results\":[";
+        for (size_t i = 0; i < results.size(); ++i) {
+            if (i) j << ",";
+            float safe_score = std::isfinite(results[i].score) ? results[i].score : 0.0f;
+            j << "{"
+              << "\"text\":\""     << escape_json(results[i].text)   << "\","
+              << "\"source\":\""   << escape_json(results[i].source) << "\","
+              << "\"patient_id\":" << results[i].patient_id          << ","
+              << "\"score\":"      << safe_score
+              << "}";
+        }
+        j << "]}";
+        return j.str();
+    }
+
+    void emb_worker_func() {
+        while (true) {
+            EmbeddingJob job;
+            {
+                std::unique_lock<std::mutex> lk(emb_queue_mutex_);
+                emb_queue_cv_.wait(lk, [this]{ return emb_pool_stop_ || !emb_queue_.empty(); });
+                if (emb_pool_stop_ && emb_queue_.empty()) return;
+                job = std::move(emb_queue_.front());
+                emb_queue_.pop();
+            }
+
+            EmbeddingPendingResponse pr;
+            if (job.type == EmbeddingJob::UPSERT) {
+                auto emb = embed_text(job.text);
+                if (emb.empty()) {
+                    pr.status = 503;
+                    pr.json = "{\"error\":\"embedding_unavailable\"}";
+                } else {
+                    vector_store_.upsert(job.source, job.patient_id, job.text, emb);
+                    pr.status = 200;
+                    pr.json = "{\"status\":\"ok\"}";
+                }
+            } else {
+                auto emb = embed_text(job.text);
+                if (emb.empty()) {
+                    pr.status = 503;
+                    pr.json = "{\"error\":\"embedding_unavailable\"}";
+                } else {
+                    auto results = vector_store_.query(emb, job.top_k, job.patient_id_filter);
+                    pr.status = 200;
+                    pr.json = build_embedding_query_json(results);
+                }
+            }
+
+            bool should_wake = false;
+            {
+                std::lock_guard<std::mutex> lk(emb_pending_mutex_);
+                if (emb_cancelled_ids_.erase(job.conn_id) == 0) {
+                    emb_pending_responses_[job.conn_id] = std::move(pr);
+                    should_wake = true;
+                }
+            }
+            if (should_wake)
+                mg_wakeup(job.mgr, job.conn_id, "E", 1);
+        }
+    }
+
+    void start_emb_pool() {
+        emb_workers_.reserve(EMB_POOL_WORKERS);
+        for (int i = 0; i < EMB_POOL_WORKERS; ++i)
+            emb_workers_.emplace_back([this]{ emb_worker_func(); });
+    }
+
+    void shutdown_emb_pool() {
+        {
+            std::lock_guard<std::mutex> lk(emb_queue_mutex_);
+            emb_pool_stop_ = true;
+        }
+        emb_queue_cv_.notify_all();
+        for (auto& t : emb_workers_)
+            if (t.joinable()) t.join();
+    }
+
+    bool enqueue_emb_job(EmbeddingJob job) {
+        {
+            std::lock_guard<std::mutex> lk(emb_queue_mutex_);
+            if (emb_queue_.size() >= EMB_POOL_MAX_QUEUE) return false;
+            emb_queue_.push(std::move(job));
+        }
+        emb_queue_cv_.notify_one();
+        return true;
+    }
+
+    void handle_embeddings_upsert(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        std::string body(hm->body.buf, hm->body.len);
+        std::string source = extract_json_string(body, "source");
+        std::string text = extract_json_string(body, "text");
+        int patient_id = 0;
+        {
+            auto pos = body.find("\"patient_id\"");
+            if (pos != std::string::npos) {
+                pos += 12;
+                while (pos < body.size() && (body[pos] == ' ' || body[pos] == ':')) ++pos;
+                patient_id = std::atoi(body.c_str() + pos);
+            }
+        }
+        if (text.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"text field required\"}");
+            return;
+        }
+
+        EmbeddingJob job;
+        job.type = EmbeddingJob::UPSERT;
+        job.conn_id = c->id;
+        job.mgr = &mgr_;
+        job.text = std::move(text);
+        job.source = std::move(source);
+        job.patient_id = patient_id;
+        job.top_k = 0;
+        job.patient_id_filter = -1;
+
+        {
+            std::lock_guard<std::mutex> lk(emb_pending_mutex_);
+            emb_inflight_ids_.insert(c->id);
+        }
+        if (!enqueue_emb_job(std::move(job))) {
+            std::lock_guard<std::mutex> lk(emb_pending_mutex_);
+            emb_inflight_ids_.erase(c->id);
+            mg_http_reply(c, 429, "Content-Type: application/json\r\n",
+                "{\"error\":\"embedding queue full\"}");
+        }
+    }
+
+    void handle_embeddings_query(struct mg_connection *c, struct mg_http_message *hm) {
+        std::string query_text;
+        int top_k = 3;
+        int patient_id_filter = -1;
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            char text_buf[4096] = {};
+            char topk_buf[32]   = {};
+            char pid_buf[32]    = {};
+            mg_http_get_var(&hm->query, "text",       text_buf, sizeof(text_buf));
+            mg_http_get_var(&hm->query, "top_k",      topk_buf, sizeof(topk_buf));
+            mg_http_get_var(&hm->query, "patient_id", pid_buf,  sizeof(pid_buf));
+            query_text = text_buf;
+            if (topk_buf[0]) top_k = std::atoi(topk_buf);
+            if (pid_buf[0])  patient_id_filter = std::atoi(pid_buf);
+        } else {
+            std::string body(hm->body.buf, hm->body.len);
+            query_text = extract_json_string(body, "text");
+            auto tk = body.find("\"top_k\"");
+            if (tk != std::string::npos) {
+                tk += 7;
+                while (tk < body.size() && (body[tk] == ' ' || body[tk] == ':')) ++tk;
+                top_k = std::atoi(body.c_str() + tk);
+            }
+            auto pf = body.find("\"patient_id\"");
+            if (pf != std::string::npos) {
+                pf += 12;
+                while (pf < body.size() && (body[pf] == ' ' || body[pf] == ':')) ++pf;
+                patient_id_filter = std::atoi(body.c_str() + pf);
+            }
+        }
+        if (query_text.empty()) {
+            mg_http_reply(c, 400, "Content-Type: application/json\r\n",
+                "{\"error\":\"text parameter required\"}");
+            return;
+        }
+
+        EmbeddingJob job;
+        job.type = EmbeddingJob::QUERY;
+        job.conn_id = c->id;
+        job.mgr = &mgr_;
+        job.text = std::move(query_text);
+        job.top_k = top_k;
+        job.patient_id_filter = patient_id_filter;
+        job.patient_id = 0;
+
+        {
+            std::lock_guard<std::mutex> lk(emb_pending_mutex_);
+            emb_inflight_ids_.insert(c->id);
+        }
+        if (!enqueue_emb_job(std::move(job))) {
+            std::lock_guard<std::mutex> lk(emb_pending_mutex_);
+            emb_inflight_ids_.erase(c->id);
+            mg_http_reply(c, 429, "Content-Type: application/json\r\n",
+                "{\"error\":\"embedding queue full\"}");
+        }
+    }
+
+    void handle_embeddings_status(struct mg_connection *c) {
+        int docs = vector_store_.doc_count();
+        int idx_pct = vector_store_.index_usage_pct();
+        std::ostringstream j;
+        j << "{\"doc_count\":" << docs
+          << ",\"index_usage_pct\":" << idx_pct
+          << ",\"model\":\"" << escape_json(embedding_model_) << "\""
+          << "}";
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", j.str().c_str());
+    }
+
+    void handle_embeddings_wipe(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        vector_store_.wipe();
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+            "{\"status\":\"wiped\",\"doc_count\":0}");
+    }
+
+    void handle_embeddings_save(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+            mg_http_reply(c, 405, "Content-Type: application/json\r\n", "{\"error\":\"POST required\"}");
+            return;
+        }
+        bool ok = vector_store_.save();
+        if (ok)
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"status\":\"saved\"}");
+        else
+            mg_http_reply(c, 500, "Content-Type: application/json\r\n", "{\"error\":\"save failed\"}");
     }
 
     // GET /api/dashboard — Aggregated dashboard data for the main overview page.
