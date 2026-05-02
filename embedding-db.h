@@ -73,6 +73,7 @@ class EmbeddingDB {
         if (len == 0 || !f.good()) return {};
         std::string s(len, '\0');
         f.read(&s[0], len);
+        if (!f.good()) { f.setstate(std::ios::failbit); return {}; }
         return s;
     }
 
@@ -223,7 +224,6 @@ public:
             } catch (...) {
                 meta_.erase(new_id);
                 source_index_.erase(key);
-                --next_id_;
             }
         }
     }

@@ -1751,7 +1751,73 @@ static std::vector<std::string> extract_string_array(const std::string& body, co
         ++kp;
         std::string val;
         while (kp < body.size() && body[kp] != '"') {
-            if (body[kp] == '\\' && kp + 1 < body.size()) { val += body[kp + 1]; kp += 2; }
+            if (body[kp] == '\\' && kp + 1 < body.size()) {
+                ++kp;
+                switch (body[kp]) {
+                    case '"':  val += '"';  break;
+                    case '\\': val += '\\'; break;
+                    case '/':  val += '/';  break;
+                    case 'n':  val += '\n'; break;
+                    case 'r':  val += '\r'; break;
+                    case 't':  val += '\t'; break;
+                    case 'b':  val += '\b'; break;
+                    case 'f':  val += '\f'; break;
+                    case 'u': {
+                        if (kp + 4 < body.size()) {
+                            unsigned cp = 0;
+                            bool ok = true;
+                            for (int d = 1; d <= 4 && ok; ++d) {
+                                char h = body[kp + d];
+                                cp <<= 4;
+                                if (h >= '0' && h <= '9') cp |= (unsigned)(h - '0');
+                                else if (h >= 'a' && h <= 'f') cp |= (unsigned)(h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') cp |= (unsigned)(h - 'A' + 10);
+                                else ok = false;
+                            }
+                            if (ok) {
+                                kp += 4;
+                                if (cp >= 0xD800 && cp <= 0xDBFF &&
+                                    kp + 6 < body.size() && body[kp + 1] == '\\' && body[kp + 2] == 'u') {
+                                    unsigned lo = 0;
+                                    bool ok2 = true;
+                                    for (int d = 3; d <= 6 && ok2; ++d) {
+                                        char h = body[kp + d];
+                                        lo <<= 4;
+                                        if (h >= '0' && h <= '9') lo |= (unsigned)(h - '0');
+                                        else if (h >= 'a' && h <= 'f') lo |= (unsigned)(h - 'a' + 10);
+                                        else if (h >= 'A' && h <= 'F') lo |= (unsigned)(h - 'A' + 10);
+                                        else ok2 = false;
+                                    }
+                                    if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF) {
+                                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                        kp += 6;
+                                    }
+                                }
+                                if (cp < 0x80) {
+                                    val += (char)cp;
+                                } else if (cp < 0x800) {
+                                    val += (char)(0xC0 | (cp >> 6));
+                                    val += (char)(0x80 | (cp & 0x3F));
+                                } else if (cp < 0x10000) {
+                                    val += (char)(0xE0 | (cp >> 12));
+                                    val += (char)(0x80 | ((cp >> 6) & 0x3F));
+                                    val += (char)(0x80 | (cp & 0x3F));
+                                } else {
+                                    val += (char)(0xF0 | (cp >> 18));
+                                    val += (char)(0x80 | ((cp >> 12) & 0x3F));
+                                    val += (char)(0x80 | ((cp >> 6) & 0x3F));
+                                    val += (char)(0x80 | (cp & 0x3F));
+                                }
+                            } else {
+                                val += 'u';
+                            }
+                        }
+                        break;
+                    }
+                    default: val += body[kp]; break;
+                }
+                ++kp;
+            }
             else { val += body[kp]; ++kp; }
         }
         if (kp < body.size()) ++kp;
