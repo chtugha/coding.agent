@@ -1046,20 +1046,6 @@ private:
 
     void log_receiver_loop();
 
-    static ServiceType parse_service_type(const std::string& name) {
-        if (name == "SIP_CLIENT") return ServiceType::SIP_CLIENT;
-        if (name == "INBOUND_AUDIO_PROCESSOR") return ServiceType::INBOUND_AUDIO_PROCESSOR;
-        if (name == "VAD_SERVICE") return ServiceType::VAD_SERVICE;
-        if (name == "WHISPER_SERVICE") return ServiceType::WHISPER_SERVICE;
-        if (name == "LLAMA_SERVICE") return ServiceType::LLAMA_SERVICE;
-        if (name == "TTS_SERVICE") return ServiceType::TTS_SERVICE;
-        if (name == "OUTBOUND_AUDIO_PROCESSOR") return ServiceType::OUTBOUND_AUDIO_PROCESSOR;
-        if (name == "TOMEDO_CRAWL_SERVICE" || name == "TOMEDO_CRAWL") return ServiceType::TOMEDO_CRAWL_SERVICE;
-        if (name == "MOSHI_SERVICE") return ServiceType::MOSHI_SERVICE;
-        if (name == "FRONTEND") return ServiceType::FRONTEND;
-        return ServiceType::SIP_CLIENT;
-    }
-
     void process_log_message(const std::string& msg);
 
     std::mutex log_queue_mutex_;

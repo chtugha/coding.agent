@@ -385,6 +385,7 @@ public:
 
     void shutdown() {
         if (!running_.exchange(false)) return;
+        slot_cv_.notify_all();
 
         // Close engine listen socket so accept loop exits.
         int el = engine_listen_sock_.exchange(-1);
@@ -564,6 +565,7 @@ private:
             old_slot = active_slot_;
             active_slot_ = new_slot;
         }
+        slot_cv_.notify_all();
 
         // Spawn recv + ping threads for the new slot. They run as long
         // as the slot remains active (generation-matches).
@@ -837,12 +839,14 @@ private:
         if (!slot) {
             std::fprintf(stderr, "[TTS] no engine docked for call %u, waiting up to 10s...\n",
                          pkt.call_id);
-            for (int i = 0; i < 100 && !slot; i++) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                slot = current_slot();
+            {
+                std::unique_lock<std::mutex> lock(slot_mutex_);
+                slot_cv_.wait_for(lock, std::chrono::seconds(10),
+                    [this]{ return active_slot_ != nullptr || !running_.load(); });
+                slot = active_slot_;
             }
-            if (!slot) {
-                log_dropped_text(pkt.call_id);
+            if (!slot || !running_.load()) {
+                if (running_.load()) log_dropped_text(pkt.call_id);
                 return;
             }
             std::fprintf(stderr, "[TTS] engine docked while waiting, forwarding text for call %u\n",
@@ -995,6 +999,7 @@ private:
     std::thread cmd_thread_;
 
     mutable std::mutex slot_mutex_;
+    std::condition_variable slot_cv_;
     std::shared_ptr<EngineSlot> active_slot_;
     std::atomic<uint64_t> next_generation_{0};
 

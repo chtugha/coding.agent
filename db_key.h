@@ -270,12 +270,32 @@ static const std::string& get_db_key()
                 db_key_file_path().c_str());
             return;
         }
+#ifdef __APPLE__
+        g_cached_key = keychain_load();
+        if (!g_cached_key.empty()) {
+            std::fprintf(stderr,
+                "[db_key] Migrating key from macOS Keychain to file (%s)\n",
+                db_key_file_path().c_str());
+            if (!file_key_store(g_cached_key)) {
+                std::fprintf(stderr,
+                    "[db_key] WARNING: failed to persist migrated key to disk\n");
+            }
+            return;
+        }
+#endif
         g_cached_key = generate_hex_key();
         if (g_cached_key.empty()) {
             std::fprintf(stderr, "[db_key] FATAL: key generation failed\n");
             return;
         }
-        file_key_store(g_cached_key);
+        if (!file_key_store(g_cached_key)) {
+            std::fprintf(stderr,
+                "[db_key] FATAL: could not persist key to %s — "
+                "database will be unreadable on next startup\n",
+                db_key_file_path().c_str());
+            g_cached_key.clear();
+            return;
+        }
         std::fprintf(stderr,
             "[db_key] Generated new 256-bit AES database key and stored in file (%s)\n",
             db_key_file_path().c_str());
