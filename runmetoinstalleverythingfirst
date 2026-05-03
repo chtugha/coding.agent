@@ -26,13 +26,14 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  13. Download NeuTTS Nano German model (GGUF + NeuCodec ONNX→CoreML)"
     echo "  14. Prepare NeuTTS reference voice (encode audio + phonemize text)"
     echo "  15. Check Ollama installation (optional, for tomedo-crawl RAG embeddings)"
-    echo "  16. Merge Moshi LoRA adapters (optional, for language-specific moshi backends)"
+    echo "  16. Download Moshi German LoRA (chtugha/moshi-german-lora → bin/models/german_moshi_lora/)"
+    echo "  17. Merge Moshi LoRA adapters into base model (produces moshiko-german-merged.safetensors)"
     echo ""
     echo "Optional TTS engines (called automatically, non-fatal if unavailable):"
-    echo "  17. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
-    echo "  18. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
-    echo "  19. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
-    echo "      Note: step 19 requires a German Matcha-TTS checkpoint (--checkpoint flag"
+    echo "  18. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
+    echo "  19. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
+    echo "  20. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
+    echo "      Note: step 20 requires a German Matcha-TTS checkpoint (--checkpoint flag"
     echo "      or fine-tuned from shivammehta25/Matcha-TTS). Falls back to English."
     echo ""
     echo "Requirements:"
@@ -79,8 +80,9 @@ ask_hf_token() {
         return
     fi
     echo ""
-    echo -e "${YELLOW}HuggingFace Token${NC}"
-    echo "  Some models (NeuCodec) require HuggingFace authentication."
+    echo -e "${YELLOW}HuggingFace Token (optional)${NC}"
+    echo "  All model repos used by this script are public — no token is required."
+    echo "  Providing a token avoids HuggingFace rate limits on large downloads."
     echo "  Get a free token at: https://huggingface.co/settings/tokens"
     echo -n "  Paste your HuggingFace token (or press Enter to skip): "
     read -r hf_token_input </dev/tty 2>/dev/null || hf_token_input=""
@@ -89,7 +91,7 @@ ask_hf_token() {
         export HUGGING_FACE_HUB_TOKEN="$hf_token_input"
         info "HuggingFace token set for this session"
     else
-        warn "No HuggingFace token provided — some downloads may fail if repos are gated"
+        info "Skipping HuggingFace token — all repos are public, proceeding without authentication"
     fi
     echo ""
 }
@@ -305,7 +307,7 @@ generate_whisper_coreml_encoder() {
             --optimize-ane True
 
         info "Compiling CoreML model for ${model_name}..."
-        xcrun coremlc compile \
+        xcrun coremlcompiler compile \
             "models/coreml-encoder-${model_name}.mlpackage" \
             models/
 
@@ -769,8 +771,54 @@ verify_installation() {
     fi
 }
 
+download_moshi_lora() {
+    step "Downloading Moshi German LoRA (chtugha/moshi-german-lora)"
+
+    local lora_dir="bin/models/german_moshi_lora"
+    local merged="bin/models/moshiko-german-merged.safetensors"
+
+    if [ -f "$merged" ]; then
+        info "Moshi German LoRA already merged at $merged — skipping download"
+        return
+    fi
+
+    local latest_ckpt="$lora_dir/checkpoints/checkpoint_003000/consolidated/lora.safetensors"
+    if [ -f "$latest_ckpt" ]; then
+        info "Moshi German LoRA already downloaded at $lora_dir"
+        return
+    fi
+
+    mkdir -p "$lora_dir"
+
+    info "Downloading chtugha/moshi-german-lora → $lora_dir/ ..."
+    if command -v huggingface-cli &> /dev/null; then
+        huggingface-cli download chtugha/moshi-german-lora \
+            --local-dir "$lora_dir/" \
+            --local-dir-use-symlinks False
+    else
+        warn "huggingface-cli not found — trying wget for individual files..."
+        local base_url="https://huggingface.co/chtugha/moshi-german-lora/resolve/main"
+        for ckpt in 002000 002500 003000; do
+            mkdir -p "$lora_dir/checkpoints/checkpoint_${ckpt}/consolidated"
+            wget -q --show-progress -O "$lora_dir/checkpoints/checkpoint_${ckpt}/consolidated/lora.safetensors" \
+                "${base_url}/checkpoints/checkpoint_${ckpt}/consolidated/lora.safetensors" || \
+                warn "  checkpoint_${ckpt} download failed"
+            wget -q -O "$lora_dir/checkpoints/checkpoint_${ckpt}/consolidated/config.json" \
+                "${base_url}/checkpoints/checkpoint_${ckpt}/consolidated/config.json" || true
+        done
+        wget -q -O "$lora_dir/args.yaml" "${base_url}/args.yaml" || true
+    fi
+
+    if [ -f "$latest_ckpt" ]; then
+        info "Moshi German LoRA downloaded"
+    else
+        warn "Moshi German LoRA download may have failed — check $lora_dir"
+        warn "  Manual: huggingface-cli download chtugha/moshi-german-lora --local-dir $lora_dir/"
+    fi
+}
+
 merge_moshi_loras() {
-    step "Merging Moshi LoRA adapters (step 16 — optional)"
+    step "Merging Moshi LoRA adapters (step 17 — optional)"
 
     local lora_base="bin/models"
     local found_any=false
@@ -935,6 +983,7 @@ main() {
     export_matcha_models
 
     check_ollama
+    download_moshi_lora
     merge_moshi_loras
     install_git_hooks
     verify_installation

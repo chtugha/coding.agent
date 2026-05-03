@@ -1737,7 +1737,7 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
 
     std::string variant = "kokoro-german";
-    std::string voice = "df_eva";
+    std::string voice = "victoria";
     std::string log_level = "INFO";
     std::string g2p_str = "auto";
 
@@ -1765,10 +1765,9 @@ int main(int argc, char* argv[]) {
             case 'g': g2p_str = optarg; break;
             case 'h':
                 std::printf("Usage: kokoro-service [OPTIONS]\n");
-                std::printf("  --variant NAME    Model variant subdir under models/ (default: kokoro-german = v1_1-de;\n");
-                std::printf("                    also: kokoro-german-martin for single-speaker Kikiri). Env: KOKORO_VARIANT\n");
-                std::printf("  --voice NAME      Voice to use (default: df_eva; for kokoro-german also dm_bernd;\n");
-                std::printf("                    for kokoro-german-martin: martin). Env: KOKORO_VOICE\n");
+                std::printf("  --variant NAME    Model variant subdir under models/ (default: kokoro-german = kikiri-victoria;\n");
+                std::printf("                    also: kokoro-german-martin for Kikiri Martin). Env: KOKORO_VARIANT\n");
+                std::printf("  --voice NAME      Voice to use (default: victoria). Env: KOKORO_VOICE\n");
                 std::printf("  --log-level LEVEL Log level: ERROR WARN INFO DEBUG TRACE (default: INFO)\n");
                 std::printf("  --g2p BACKEND     G2P backend: auto|neural|espeak (default: auto)\n");
                 return 0;

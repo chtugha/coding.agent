@@ -11,7 +11,7 @@ Exported artifacts (in bin/models/kokoro-german/):
   - decoder_variants/kokoro_decoder_split_{3s,5s,10s}.mlmodelc  CoreML decoder (ANE)
   - decoder_variants/kokoro_har_{3s,5s,10s}.pt                  HAR TorchScript (CPU)
   - decoder_variants/split_config.json  Bucket dimensions
-  - {df_eva,dm_bernd}_voice.bin         Raw float32 voice embeddings
+  - victoria_voice.bin                  Raw float32 voice embedding
   - vocab.json                          Phoneme-to-ID mapping
 
 Prerequisites:
@@ -35,6 +35,7 @@ Architecture:
 Tested with:
   - conda env: torch==2.5.0, coremltools==8.3.0, numpy==1.26.4
   - kokoro package from https://github.com/Thomcle/kokoro_german or pip install kokoro
+  - config.json is bundled in scripts/kokoro-german-config.json (no HF token required)
 """
 import os
 import sys
@@ -53,8 +54,8 @@ ROOT_DIR = os.path.realpath(os.path.join(SCRIPT_DIR, '..'))
 # Kokoro-compatible checkpoints (e.g. kokoro-german-v1_1, kikiri-german-martin)
 # into independent subdirectories under bin/models/ without touching code.
 MODELS_SUBDIR = os.environ.get('KOKORO_EXPORT_DIR', 'kokoro-german')
-MODEL_FILENAME = os.environ.get('KOKORO_MODEL_FILENAME', 'kokoro-german-v1_1-de.pth')
-VOICE_NAMES = [v.strip() for v in os.environ.get('KOKORO_VOICES', 'df_eva,dm_bernd').split(',') if v.strip()]
+MODEL_FILENAME = os.environ.get('KOKORO_MODEL_FILENAME', 'kikiri_german_victoria_ep10.pth')
+VOICE_NAMES = [v.strip() for v in os.environ.get('KOKORO_VOICES', 'victoria').split(',') if v.strip()]
 MODELS_DIR = os.path.join(ROOT_DIR, 'bin', 'models', MODELS_SUBDIR)
 CONFIG_PATH = os.path.join(MODELS_DIR, 'config.json')
 MODEL_PATH = os.path.join(MODELS_DIR, MODEL_FILENAME)
@@ -65,7 +66,8 @@ CONDA_ENV_NAME = 'kokoro_coreml'
 REQUIRED_TORCH = '2.5'
 REQUIRED_COREMLTOOLS = '8.3'
 
-HF_REPO_ID = os.environ.get('KOKORO_HF_REPO', 'Tundragoon/Kokoro-German')
+HF_REPO_ID = os.environ.get('KOKORO_HF_REPO', 'kikiri-tts/kikiri-german-victoria')
+BUNDLED_CONFIG = os.path.join(SCRIPT_DIR, 'kokoro-german-config.json')
 
 BUCKETS = [
     {"name": "3s",  "asr_frames": 72,  "f0_frames": 144},
@@ -136,20 +138,51 @@ def _find_local_file(filename, min_size=100):
     return None
 
 
+def _download_file_from_repo(hf, repo_id, repo_path, local_path, token):
+    if os.path.exists(local_path) and os.path.getsize(local_path) <= 1000:
+        os.remove(local_path)
+    print(f"  Downloading {repo_path} from {repo_id}...")
+    downloaded = hf.hf_hub_download(
+        repo_id=repo_id,
+        filename=repo_path,
+        token=token,
+        local_dir=None,
+    )
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    shutil.copy2(downloaded, local_path)
+    print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
+
+
 def download_models():
     print("\n=== Downloading models ===")
     os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(os.path.join(MODELS_DIR, 'voices'), exist_ok=True)
 
-    files = [
-        (MODEL_FILENAME, MODEL_PATH),
-        ('config.json', CONFIG_PATH),
-    ]
+    model_files = [(MODEL_FILENAME, MODEL_PATH)]
     for voice_name in VOICE_NAMES:
-        files.append((f'voices/{voice_name}.pt', os.path.join(MODELS_DIR, 'voices', f'{voice_name}.pt')))
+        model_files.append((f'voices/{voice_name}.pt', os.path.join(MODELS_DIR, 'voices', f'{voice_name}.pt')))
+
+    if not (os.path.exists(CONFIG_PATH) and os.path.getsize(CONFIG_PATH) > 1000):
+        found = _find_local_file('config.json', min_size=100)
+        if found:
+            print(f"  Found config locally: {found}")
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            if os.path.realpath(found) != os.path.realpath(CONFIG_PATH):
+                shutil.copy2(found, CONFIG_PATH)
+            print(f"  OK")
+        elif os.path.exists(BUNDLED_CONFIG):
+            print(f"  Using bundled config: {BUNDLED_CONFIG}")
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            shutil.copy2(BUNDLED_CONFIG, CONFIG_PATH)
+            print(f"  OK")
+        else:
+            print(f"  ERROR: config.json not found and bundled config missing: {BUNDLED_CONFIG}")
+            sys.exit(1)
+    else:
+        print(f"  Already exists: config.json")
 
     missing = []
-    for repo_path, local_path in files:
+    for repo_path, local_path in model_files:
         if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
             print(f"  Already exists: {os.path.basename(local_path)}")
             continue
@@ -166,31 +199,19 @@ def download_models():
     if not missing:
         return
 
-    print(f"  {len(missing)} file(s) need to be downloaded from HuggingFace.")
     hf = _ensure_huggingface_hub()
 
     hf_token = os.environ.get('HF_TOKEN', '')
     if not hf_token:
-        print("  HF_TOKEN not set. The Kokoro model repo may require authentication.")
+        print("  HF_TOKEN not set. All repos are public; a token is optional but avoids HuggingFace rate limits.")
         print("  Get a token at: https://huggingface.co/settings/tokens")
         hf_token = input("  Paste your HuggingFace token (or press Enter to try without): ").strip()
     token = hf_token if hf_token else None
 
     still_missing = []
     for repo_path, local_path in missing:
-        if os.path.exists(local_path) and os.path.getsize(local_path) <= 1000:
-            os.remove(local_path)
-        print(f"  Downloading {repo_path}...")
         try:
-            downloaded = hf.hf_hub_download(
-                repo_id=HF_REPO_ID,
-                filename=repo_path,
-                token=token,
-                local_dir=None,
-            )
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            shutil.copy2(downloaded, local_path)
-            print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
+            _download_file_from_repo(hf, HF_REPO_ID, repo_path, local_path, token)
         except Exception as e:
             print(f"  HuggingFace download failed: {e}")
             found = _find_local_file(repo_path, min_size=100)
@@ -201,7 +222,7 @@ def download_models():
                     shutil.copy2(found, local_path)
                 print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB)")
             else:
-                still_missing.append(repo_path)
+                still_missing.append(f"{HF_REPO_ID}/{repo_path}")
 
     if still_missing:
         print(f"\n  ERROR: {len(still_missing)} file(s) could not be downloaded or found locally:")

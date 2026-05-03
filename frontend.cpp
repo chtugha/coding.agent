@@ -1126,23 +1126,30 @@ private:
         if (ev == MG_EV_HTTP_MSG) {
             struct mg_http_message *hm = (struct mg_http_message *) ev_data;
             if (get_setting("http_redirect_to_https", "0") == "1") {
-                char loc[1024];
-                if (hm->query.len > 0) {
-                    snprintf(loc, sizeof(loc), "https://127.0.0.1:%u%.*s?%.*s",
-                             (unsigned)http_port_,
-                             (int)hm->uri.len, hm->uri.buf,
-                             (int)hm->query.len, hm->query.buf);
-                } else {
-                    snprintf(loc, sizeof(loc), "https://127.0.0.1:%u%.*s",
-                             (unsigned)http_port_,
-                             (int)hm->uri.len, hm->uri.buf);
+                static const uint8_t v6_loopback[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+                bool is_loopback = (!c->rem.is_ip6 &&
+                    c->rem.ip[0] == 127 && c->rem.ip[1] == 0 &&
+                    c->rem.ip[2] == 0   && c->rem.ip[3] == 1) ||
+                    (c->rem.is_ip6 && memcmp(c->rem.ip, v6_loopback, 16) == 0);
+                if (!is_loopback) {
+                    char loc[1024];
+                    if (hm->query.len > 0) {
+                        snprintf(loc, sizeof(loc), "https://127.0.0.1:%u%.*s?%.*s",
+                                 (unsigned)http_port_,
+                                 (int)hm->uri.len, hm->uri.buf,
+                                 (int)hm->query.len, hm->query.buf);
+                    } else {
+                        snprintf(loc, sizeof(loc), "https://127.0.0.1:%u%.*s",
+                                 (unsigned)http_port_,
+                                 (int)hm->uri.len, hm->uri.buf);
+                    }
+                    mg_printf(c,
+                        "HTTP/1.1 301 Moved Permanently\r\n"
+                        "Location: %s\r\n"
+                        "Content-Length: 0\r\n"
+                        "\r\n", loc);
+                    return;
                 }
-                mg_printf(c,
-                    "HTTP/1.1 301 Moved Permanently\r\n"
-                    "Location: %s\r\n"
-                    "Content-Length: 0\r\n"
-                    "\r\n", loc);
-                return;
             }
             handle_http_request(c, hm);
         }

@@ -154,8 +154,16 @@ public:
         
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx = 2048;
-        cparams.n_threads = 4;
-        cparams.n_threads_batch = 4;
+        int hw_threads = static_cast<int>(std::thread::hardware_concurrency());
+        int n_thr = std::max(4, hw_threads > 0 ? hw_threads : 8);
+        cparams.n_threads = n_thr;
+        cparams.n_threads_batch = n_thr;
+        cparams.n_batch = 2048;
+        cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        cparams.type_k = GGML_TYPE_F16;
+        cparams.type_v = GGML_TYPE_F16;
+        cparams.offload_kqv = true;
+        cparams.op_offload = true;
         cparams.kv_unified = true;
         ctx_ = llama_init_from_model(model_, cparams);
         if (!ctx_) {

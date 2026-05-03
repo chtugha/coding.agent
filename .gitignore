@@ -138,3 +138,6 @@ logs/
 # DB encryption key file (generated per-machine)
 db_key.hex
 bin/db_key.hex
+
+# Embedding DB metadata (generated at runtime)
+embeddings.meta
