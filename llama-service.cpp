@@ -1074,7 +1074,7 @@ private:
         if (it != calls_.end()) return it->second;
         auto call = std::make_shared<LlamaCall>();
         call->id = cid;
-        call->seq_id = 0;
+        call->seq_id = 0; // n_seq_max=1 with flash attention; only safe with single worker thread
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created conversation context");
@@ -1338,7 +1338,6 @@ private:
     float sampling_top_p_ = 0.95f;
     std::mutex llama_mutex_;
     std::mutex calls_mutex_;
-    std::atomic<uint32_t> next_seq_id_{0};
     std::map<uint32_t, std::shared_ptr<LlamaCall>> calls_;
     std::queue<WorkItem> work_queue_;
     std::mutex work_mutex_;

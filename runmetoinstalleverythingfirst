@@ -301,10 +301,14 @@ generate_whisper_coreml_encoder() {
         fi
 
         info "Converting ${model_name} to CoreML (this may take 5-10 minutes)..."
-        "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
+        if ! "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
             --model "${model_name}" \
             --encoder-only True \
-            --optimize-ane True
+            --quantize True \
+            --optimize-ane True; then
+            warn "CoreML conversion for ${model_name} failed (possibly OOM — try closing other apps and re-running)"
+            return
+        fi
 
         info "Compiling CoreML model for ${model_name}..."
         xcrun coremlcompiler compile \
