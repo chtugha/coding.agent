@@ -1017,8 +1017,16 @@ public:
                        har_actual_frames * sizeof(float));
         }
 
-        return coreml_split_decoder_->decode(*sb, asr_padded, f0_padded, n_padded,
+        auto audio = coreml_split_decoder_->decode(*sb, asr_padded, f0_padded, n_padded,
                                               intermediates.ref_s_dec, har_padded);
+        int actual_asr = static_cast<int>(intermediates.asr.size(2));
+        if (!audio.empty() && actual_asr < asr_frames) {
+            int64_t samples_per_frame = (int64_t)audio.size() / asr_frames;
+            int64_t trim_to = (int64_t)actual_asr * samples_per_frame;
+            if (trim_to > 0 && (int64_t)audio.size() > trim_to)
+                audio.resize(trim_to);
+        }
+        return audio;
     }
 
     AlignedIntermediates run_duration_and_align(const std::vector<int64_t>& ids,
@@ -1737,7 +1745,7 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
 
     std::string variant = "kokoro-german";
-    std::string voice = "victoria";
+    std::string voice = "df_eva";
     std::string log_level = "INFO";
     std::string g2p_str = "auto";
 
@@ -1765,9 +1773,9 @@ int main(int argc, char* argv[]) {
             case 'g': g2p_str = optarg; break;
             case 'h':
                 std::printf("Usage: kokoro-service [OPTIONS]\n");
-                std::printf("  --variant NAME    Model variant subdir under models/ (default: kokoro-german = kikiri-victoria;\n");
-                std::printf("                    also: kokoro-german-martin for Kikiri Martin). Env: KOKORO_VARIANT\n");
-                std::printf("  --voice NAME      Voice to use (default: victoria). Env: KOKORO_VOICE\n");
+                std::printf("  --variant NAME    Model variant subdir under models/ (default: kokoro-german).\n");
+                std::printf("                    also: kokoro-german-martin for Kikiri Martin. Env: KOKORO_VARIANT\n");
+                std::printf("  --voice NAME      Voice to use (default: df_eva; also dm_bernd). Env: KOKORO_VOICE\n");
                 std::printf("  --log-level LEVEL Log level: ERROR WARN INFO DEBUG TRACE (default: INFO)\n");
                 std::printf("  --g2p BACKEND     G2P backend: auto|neural|espeak (default: auto)\n");
                 return 0;

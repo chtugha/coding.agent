@@ -896,6 +896,7 @@ private:
         llama_memory_t mem = llama_get_memory(ctx_);
         llama_memory_seq_rm(mem, call->seq_id, -1, -1);
         call->n_past = 0;
+        llama_sampler_reset(sampler_);
 
         llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
         batch.n_tokens = tokens.size();
@@ -969,6 +970,8 @@ private:
             single_batch.logits[0] = true;
             
             if (llama_decode(ctx_, single_batch) != 0) {
+                log_fwd_.forward(whispertalk::LogLevel::ERROR, cid,
+                    "llama_decode failed at token %d (n_past=%d, seq=%u)", i, call->n_past, call->seq_id);
                 break;
             }
             call->n_past++;
@@ -1071,7 +1074,7 @@ private:
         if (it != calls_.end()) return it->second;
         auto call = std::make_shared<LlamaCall>();
         call->id = cid;
-        call->seq_id = next_seq_id_.fetch_add(1) % 256;
+        call->seq_id = 0;
         call->last_activity = std::chrono::steady_clock::now();
         calls_[cid] = call;
         log_fwd_.forward(whispertalk::LogLevel::INFO, cid, "Created conversation context");
