@@ -2227,14 +2227,37 @@ results.innerHTML=html;
   }).catch(e=>console.error('pollTtsRoundtripTask',e));
 }
 
+function updateFullLoopEngineUI(){
+  const eng=(document.getElementById('fullLoopEngine')||{}).value||'kokoro';
+  const desc=document.getElementById('fullLoopDesc');
+  if(!desc)return;
+  if(eng==='moshi'){
+    desc.innerHTML='Injects test audio files through the <strong>Moshi</strong> pipeline (SIP \u2192 IAP \u2192 MOSHI_SERVICE \u2192 OAP). '
+      +'Captures Moshi reference text (what it heard) from logs and compares against ground truth. '
+      +'Requires: SIP, IAP, MOSHI_SERVICE, OAP running + active call.';
+  }else{
+    const label=eng==='neutts'?'NeuTTS':'Kokoro';
+    desc.innerHTML='Injects test audio files through the Classic pipeline with 2 SIP lines using <strong>'+label+'</strong>. '
+      +'Measures WER between LLaMA response text and Whisper Line 2 re-transcription of '+label+'/OAP output. '
+      +'Flow: TestFile \u2192 SIP(L1) \u2192 IAP \u2192 VAD \u2192 Whisper \u2192 LLaMA \u2192 '+label+' \u2192 OAP \u2192 SIP(L2) \u2192 Whisper(L2). '
+      +'Requires: All Classic services + 2 lines + active conference call.';
+  }
+}
+
 function runFullLoopTest(){
   const status=document.getElementById('fullLoopStatus');
   const results=document.getElementById('fullLoopResults');
   const btn=document.getElementById('fullLoopBtn');
   const sel=document.getElementById('fullLoopFiles');
+  const engineSel=document.getElementById('fullLoopEngine');
+  const engine=engineSel?engineSel.value:'kokoro';
   const files=Array.from(sel.options).filter(o=>o.selected).map(o=>o.value);
   if(files.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one test file</span>';return;}
   results.innerHTML='';
+  if(engine==='moshi'){
+    runMoshiWerTest(files,status,results,btn);
+    return;
+  }
   const perEngine=[];
   runWithTestSetup(async({tts})=>{
     const r=await fetch('/api/full_loop_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files})});
@@ -2245,9 +2268,135 @@ function runFullLoopTest(){
     perEngine.push({tts,data:final});
     renderFullLoopMultiEngine(perEngine);
     return final;
-  },{statusEl:status,btnEl:btn}).catch(e=>{
+  },{statusEl:status,btnEl:btn,ttsOverride:engine}).catch(e=>{
     status.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e&&e.message||e))}</span>`;
   });
+}
+
+async function runMoshiWerTest(files,statusEl,resultsEl,btnEl){
+  if(btnEl){btnEl.disabled=true;btnEl._origText=btnEl.textContent;btnEl.textContent='Running...';}
+  try{
+    statusEl.innerHTML='<span style="color:var(--wt-accent)">\u23F3 Checking Moshi pipeline...</span>';
+    const health=await fetch('/api/pipeline/health').then(r=>r.json());
+    const moshiSvc=(health.services||[]).find(s=>s.name==='MOSHI_SERVICE');
+    if(!moshiSvc||!moshiSvc.reachable){
+      statusEl.innerHTML='<span style="color:var(--wt-danger)">MOSHI_SERVICE not reachable. Start it first.</span>';
+      return;
+    }
+    const sipStatus=await fetch(`http://localhost:${TSP_PORT}/status`).then(r=>r.json()).catch(()=>null);
+    if(!sipStatus||!sipStatus.call_active){
+      statusEl.innerHTML='<span style="color:var(--wt-danger)">No active call on test_sip_provider. Start a conference call first.</span>';
+      return;
+    }
+
+    const baselineLogs=await fetch('/api/logs?limit=500').then(r=>r.json()).catch(()=>({logs:[]}));
+    const baselineKeys=new Set();
+    (baselineLogs.logs||[]).forEach(l=>{
+      if((l.message||'').includes('Moshi transcription:'))baselineKeys.add(l.timestamp+l.message);
+    });
+
+    const testResults=[];
+    for(let fi=0;fi<files.length;fi++){
+      const file=files[fi];
+      statusEl.innerHTML=`<span style="color:var(--wt-accent)">\u23F3 [${fi+1}/${files.length}] Injecting ${escapeHtml(file)}...</span>`;
+
+      const gtFile=file.replace(/\.wav$/,'.txt');
+      let groundTruth='';
+      try{
+        const gtResp=await fetch(`/api/testfiles/content?file=${encodeURIComponent(gtFile)}`);
+        if(gtResp.ok)groundTruth=(await gtResp.text()).trim();
+      }catch(e){}
+
+      const injectResp=await fetch(`http://localhost:${TSP_PORT}/inject`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({file,leg:'a'})
+      }).then(r=>r.json()).catch(e=>({error:String(e)}));
+      if(injectResp.error){
+        testResults.push({file,status:'FAIL',error:'Injection: '+injectResp.error,ground_truth:groundTruth,transcription:'',similarity:0});
+        continue;
+      }
+
+      const allChunks=[];
+      const maxWait=30000;
+      const idleTimeout=6000;
+      let lastChunkTime=null;
+      const pollStart=Date.now();
+      while(Date.now()-pollStart<maxWait){
+        await new Promise(r=>setTimeout(r,2000));
+        const logs=await fetch('/api/logs?limit=500').then(r=>r.json()).catch(()=>({logs:[]}));
+        let foundNew=false;
+        (logs.logs||[]).slice().reverse().forEach(l=>{
+          const key=l.timestamp+l.message;
+          if(baselineKeys.has(key))return;
+          if((l.message||'').includes('Moshi transcription:')){
+            baselineKeys.add(key);
+            const m=(l.message||'').match(/Moshi transcription:\s*(.*)/);
+            if(m){allChunks.push(m[1].trim());lastChunkTime=Date.now();foundNew=true;}
+          }
+        });
+        if(!foundNew&&lastChunkTime&&Date.now()-lastChunkTime>=idleTimeout)break;
+      }
+
+      if(allChunks.length===0){
+        testResults.push({file,status:'TIMEOUT',error:'No Moshi transcription received',ground_truth:groundTruth,transcription:'',similarity:0});
+        await new Promise(r=>setTimeout(r,3000));
+        continue;
+      }
+
+      const fullText=allChunks.join(' ');
+      const sim=groundTruth?_werSimilarity(groundTruth,fullText):0;
+      const st=sim>=99.5?'PASS':sim>=90?'WARN':'FAIL';
+      testResults.push({file,status:st,ground_truth:groundTruth,transcription:fullText,similarity:sim,chunks:allChunks.length});
+      await new Promise(r=>setTimeout(r,3000));
+    }
+
+    renderMoshiWerResults(testResults,resultsEl);
+    const pass=testResults.filter(r=>r.status==='PASS').length;
+    const warn=testResults.filter(r=>r.status==='WARN').length;
+    const fail=testResults.filter(r=>r.status!=='PASS'&&r.status!=='WARN').length;
+    statusEl.innerHTML=`<span style="color:${fail===0?'var(--wt-success)':'var(--wt-danger)'}">Moshi WER: ${pass} pass, ${warn} warn, ${fail} fail out of ${testResults.length}</span>`;
+  }catch(e){
+    statusEl.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e&&e.message||e))}</span>`;
+  }finally{
+    if(btnEl){btnEl.disabled=false;btnEl.textContent=btnEl._origText||'Run WER Test';}
+  }
+}
+
+function _werSimilarity(a,b){
+  function norm(s){return s.toLowerCase().replace(/[.,;:!?\-\u2014"'«»\u201e\u201c\u201d]/g,'').replace(/\s+/g,' ').trim();}
+  const na=norm(a),nb=norm(b);
+  if(na.length===0&&nb.length===0)return 100;
+  const mx=Math.max(na.length,nb.length);
+  if(mx===0)return 100;
+  const m=na.length,n=nb.length;
+  const prev=Array.from({length:n+1},(_,i)=>i);
+  for(let i=0;i<m;i++){
+    const curr=[i+1];
+    for(let j=0;j<n;j++)curr.push(Math.min(prev[j+1]+1,curr[j]+1,prev[j]+(na[i]!==nb[j]?1:0)));
+    for(let j=0;j<=n;j++)prev[j]=curr[j];
+  }
+  return (1-prev[n]/mx)*100;
+}
+
+function renderMoshiWerResults(testResults,container){
+  if(!container)return;
+  let html='<div style="margin-top:8px;padding:8px;border:1px solid var(--wt-border);border-radius:4px">';
+  html+='<div style="font-weight:bold;margin-bottom:6px;color:var(--wt-accent-cyan)">\u26A1 Moshi WER Results</div>';
+  html+='<table class="wt-table"><tr><th>File</th><th>Ground Truth</th><th>Moshi Heard</th><th>Chunks</th><th>Sim%</th><th>Status</th></tr>';
+  testResults.forEach(r=>{
+    const color=r.status==='PASS'?'var(--wt-success)':r.status==='WARN'?'var(--wt-warning)':'var(--wt-danger)';
+    const simColor=(r.similarity||0)>=99.5?'var(--wt-success)':(r.similarity||0)>=90?'var(--wt-warning)':'var(--wt-danger)';
+    html+='<tr>';
+    html+=`<td style="font-size:11px">${escapeHtml(r.file||'')}</td>`;
+    html+=`<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml((r.ground_truth||'').substring(0,80))}</td>`;
+    html+=`<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:11px">${escapeHtml((r.transcription||r.error||'').substring(0,80))}</td>`;
+    html+=`<td style="text-align:center">${r.chunks||'&mdash;'}</td>`;
+    html+=`<td style="color:${simColor};font-weight:bold">${r.similarity!=null?r.similarity.toFixed(1):'&mdash;'}</td>`;
+    html+=`<td style="color:${color}">${escapeHtml(r.status||'')}</td>`;
+    html+='</tr>';
+  });
+  html+='</table></div>';
+  container.innerHTML=html;
 }
 
 function renderFullLoopMultiEngine(perEngine){

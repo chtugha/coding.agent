@@ -304,10 +304,17 @@ generate_whisper_coreml_encoder() {
         if ! "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
             --model "${model_name}" \
             --encoder-only True \
-            --quantize True \
             --optimize-ane True; then
-            warn "CoreML conversion for ${model_name} failed (possibly OOM — try closing other apps and re-running)"
-            return
+            warn "Full-precision CoreML conversion failed (possibly OOM) — retrying with quantization..."
+            if ! "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
+                --model "${model_name}" \
+                --encoder-only True \
+                --quantize True \
+                --optimize-ane True; then
+                warn "CoreML conversion for ${model_name} failed even with quantization — try closing other apps and re-running"
+                exit 1
+            fi
+            warn "CoreML conversion succeeded with quantization (lower precision). Re-run install with more free RAM for full precision."
         fi
 
         info "Compiling CoreML model for ${model_name}..."

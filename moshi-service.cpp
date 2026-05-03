@@ -288,6 +288,9 @@ struct MoshiCallState {
 
     bool rag_injected{false};
 
+    std::mutex text_mutex;
+    std::deque<std::string> pending_text;
+
     std::chrono::steady_clock::time_point last_activity;
 };
 
@@ -479,15 +482,26 @@ private:
     // ── Audio sender loop ───────────────────────────────────────────────────
     void sender_loop() {
         struct PendingChunk { uint32_t call_id; std::vector<float> data; };
+        struct PendingText { uint32_t call_id; std::string text; };
         while (running_ && g_running) {
             std::vector<PendingChunk> pending;
+            std::vector<PendingText> pending_texts;
             {
                 std::lock_guard<std::mutex> lock(calls_mutex_);
                 for (auto& [cid, state] : calls_) {
-                    std::lock_guard<std::mutex> olock(state->output_mutex);
-                    while (!state->output_chunks.empty()) {
-                        pending.push_back({cid, std::move(state->output_chunks.front())});
-                        state->output_chunks.pop_front();
+                    {
+                        std::lock_guard<std::mutex> olock(state->output_mutex);
+                        while (!state->output_chunks.empty()) {
+                            pending.push_back({cid, std::move(state->output_chunks.front())});
+                            state->output_chunks.pop_front();
+                        }
+                    }
+                    {
+                        std::lock_guard<std::mutex> tlock(state->text_mutex);
+                        while (!state->pending_text.empty()) {
+                            pending_texts.push_back({cid, std::move(state->pending_text.front())});
+                            state->pending_text.pop_front();
+                        }
                     }
                 }
             }
@@ -496,7 +510,11 @@ private:
                     static_cast<uint32_t>(p.data.size() * sizeof(float)));
                 interconnect_.send_to_downstream(out);
             }
-            if (pending.empty())
+            for (auto& t : pending_texts) {
+                log_fwd_.forward(whispertalk::LogLevel::INFO, t.call_id,
+                    "Moshi transcription: %s", t.text.c_str());
+            }
+            if (pending.empty() && pending_texts.empty())
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
@@ -581,11 +599,12 @@ private:
                 decode_ogg_audio(state, payload, plen);
             } else if (mt == MT_ERROR && plen > 0) {
                 std::string err(reinterpret_cast<const char*>(payload), plen);
-                // "batch_full" means no free slot; other errors are logged
-                // LogForwarder is not accessible from static context; ignore
                 (void)err;
+            } else if ((mt == MT_REFERENCE || mt == MT_COLORED_REF) && plen > 0) {
+                std::string txt(reinterpret_cast<const char*>(payload), plen);
+                std::lock_guard<std::mutex> lock(state->text_mutex);
+                state->pending_text.push_back(std::move(txt));
             }
-            // MT_TEXT, MT_COLORED_TEXT, MT_REFERENCE, etc. — ignore in this pipeline
 
         } else if (ev == MG_EV_CLOSE) {
             state->ws_connected.store(false);

@@ -3,33 +3,42 @@
 
 Usage::
 
+    python3 tests/run_pipeline_test.py --engine <ENGINE> [--model <MODEL_NAME>] [--testfiles <DIR>]
+
+    # Legacy positional syntax still supported:
     python3 tests/run_pipeline_test.py <MODEL_NAME> [TESTFILES_DIR]
 
 Args:
-    MODEL_NAME:    Label for this test run (e.g. "ggml-large-v3-turbo-q5_0").
-                   Used in the output filename: /tmp/pipeline_results_<MODEL_NAME>.json
-    TESTFILES_DIR: Directory containing sample_NN.wav + sample_NN.txt pairs
-                   (default: "Testfiles")
+    --engine ENGINE   Engine to test: kokoro, neutts, or moshi.
+                      For classic engines (kokoro/neutts) the script ensures the
+                      correct TTS engine is docked before running.
+                      For moshi the script uses the Moshi pipeline instead of classic.
+                      (default: whichever engine is currently docked)
+    --model NAME      Label for this test run (e.g. "ggml-large-v3-turbo-q5_0").
+                      Used in the output filename: /tmp/pipeline_results_<NAME>.json
+    --testfiles DIR   Directory containing sample_NN.wav + sample_NN.txt pairs
+                      (default: "Testfiles")
 
 Prerequisites:
-    - All pipeline services must be running (SIP, IAP, VAD, Whisper, LLaMA,
-      TTS_SERVICE stage with a docked engine such as KOKORO_ENGINE or
-      NEUTTS_ENGINE, OAP).
     - Frontend server must be at http://127.0.0.1:8080 (log API + service
       controls: /api/services/start, /api/services/stop, /api/tts/status).
     - TestSipProvider must be at http://127.0.0.1:22011 (audio injection API).
     - The "alice" SIP account must be registered with the provider.
+    - Classic engines (kokoro/neutts): SIP, IAP, VAD, Whisper, LLaMA,
+      TTS_SERVICE stage, OAP must be running.
+    - Moshi engine: SIP, IAP, MOSHI_SERVICE, OAP must be running.
 
 Test flow for each sample (sample_NN.wav):
-    1. POST /inject to SipProvider: injects WAV audio into alice's RTP stream.
-    2. Audio flows through the pipeline:
-       SIP→IAP→VAD→Whisper→LLaMA→TTS(dock)→<engine>→TTS(dock)→OAP→SIP.
-    3. Poll GET /api/logs on the frontend every 2s to find new transcription entries.
-       Entries match: "Transcription (Xms): <text>" in the Whisper service logs.
-    4. Collect ALL transcription chunks until no new chunk appears for 6s (idle timeout).
-       VAD splits audio into multiple chunks at silence boundaries; all chunks are
-       concatenated and scored as a single utterance.
-    5. Wait 3s for silence flush before injecting the next sample.
+    Classic (kokoro/neutts):
+        1. Inject WAV audio via SipProvider into alice's RTP stream.
+        2. Audio flows: SIP→IAP→VAD→Whisper→LLaMA→TTS(engine)→OAP→SIP.
+        3. Poll logs for Whisper transcription entries ("Transcription (Xms): <text>").
+        4. Collect all chunks until idle, compare against ground truth.
+    Moshi:
+        1. Inject WAV audio via SipProvider into alice's RTP stream.
+        2. Audio flows: SIP→IAP→MOSHI_SERVICE→OAP→SIP.
+        3. Poll logs for Moshi reference text entries ("Moshi transcription: <text>").
+        4. Collect all chunks until idle, compare against ground truth.
 
 WER computation:
     Similarity is computed as character-level Levenshtein distance normalized by the
@@ -50,18 +59,41 @@ WER computation:
         - TIMEOUT: no transcription received within audio_dur + 20s
 
 Results:
-    - Per-sample: status (PASS/WARN/FAIL/TIMEOUT), similarity%, Whisper inference ms,
+    - Per-sample: status (PASS/WARN/FAIL/TIMEOUT), similarity%, inference ms,
       chunk count, ground truth, and full concatenated transcription.
     - Summary: PASS/WARN/FAIL counts, avg inference time.
-    - Saved to: /tmp/pipeline_results_<MODEL_NAME>.json
+    - Saved to: /tmp/pipeline_results_<ENGINE>_<MODEL_NAME>.json
     - Also readable via GET /api/test_results in the frontend UI.
 """
-import json, sys, time, re, urllib.request, os
+import argparse, json, sys, time, re, urllib.request, os
 
 FRONTEND = "http://127.0.0.1:8080"
 SIP_PROVIDER = "http://127.0.0.1:22011"
-TESTFILES_DIR = sys.argv[2] if len(sys.argv) > 2 else "Testfiles"
-MODEL_NAME = sys.argv[1] if len(sys.argv) > 1 else "test"
+
+VALID_ENGINES = ("kokoro", "neutts", "moshi")
+ENGINE_SERVICE_MAP = {
+    "kokoro": "KOKORO_ENGINE",
+    "neutts": "NEUTTS_ENGINE",
+    "moshi": "MOSHI_SERVICE",
+}
+
+def parse_args():
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        model = sys.argv[1]
+        testfiles = sys.argv[2] if len(sys.argv) > 2 else "Testfiles"
+        engine = os.environ.get("WER_ENGINE", "")
+        return engine, model, testfiles
+    parser = argparse.ArgumentParser(description="Pipeline WER test")
+    parser.add_argument("--engine", choices=VALID_ENGINES, default="",
+                        help="Engine to test: kokoro, neutts, or moshi")
+    parser.add_argument("--model", default="test",
+                        help="Label for this test run")
+    parser.add_argument("--testfiles", default="Testfiles",
+                        help="Directory containing sample_NN.wav + sample_NN.txt")
+    args = parser.parse_args()
+    return args.engine, args.model, args.testfiles
+
+ENGINE, MODEL_NAME, TESTFILES_DIR = parse_args()
 
 def fetch_json(url, data=None):
     req = urllib.request.Request(url)
@@ -241,8 +273,84 @@ def get_latest_transcription():
                 return int(m.group(1)), m.group(2).strip()
     return None, None
 
-print(f"=== Pipeline Test: {MODEL_NAME} ===")
+def is_moshi_engine():
+    return ENGINE == "moshi"
+
+def ensure_engine():
+    if not ENGINE:
+        cur = tts_status()
+        if cur:
+            print(f"No engine specified, using currently docked engine: {cur}")
+        else:
+            print("No engine specified and no engine docked. Running with whatever is available.")
+        return
+
+    if is_moshi_engine():
+        svc_name = ENGINE_SERVICE_MAP["moshi"]
+        services = fetch_json(f"{FRONTEND}/api/services")
+        moshi_running = False
+        for svc in services.get("services", []):
+            if svc.get("name") == svc_name and svc.get("pid", 0) > 0:
+                moshi_running = True
+                break
+        if not moshi_running:
+            print(f"Starting {svc_name}...")
+            if not start_service(svc_name):
+                print(f"ERROR: could not start {svc_name}")
+                sys.exit(1)
+            print(f"  Waiting for Moshi backend to initialize (30s)...")
+            time.sleep(30)
+        else:
+            print(f"Moshi service already running.")
+        return
+
+    svc_name = ENGINE_SERVICE_MAP[ENGINE]
+    cur = tts_status()
+    if cur == ENGINE:
+        print(f"Engine '{ENGINE}' already docked.")
+        return
+
+    if cur and cur != ENGINE:
+        other_svc = ENGINE_SERVICE_MAP.get(cur)
+        if other_svc:
+            print(f"Stopping current engine '{cur}' ({other_svc})...")
+            stop_service(other_svc)
+            if not wait_for_tts_engine_gone(cur, timeout_s=30):
+                print(f"WARNING: dock did not release {cur} within 30s, continuing anyway")
+            time.sleep(2)
+
+    print(f"Starting engine '{ENGINE}' ({svc_name})...")
+    if not start_service(svc_name):
+        print(f"ERROR: could not start {svc_name}")
+        sys.exit(1)
+    print(f"  Waiting for '{ENGINE}' to dock (up to 120s)...")
+    if not wait_for_tts_engine(ENGINE, timeout_s=120):
+        print(f"ERROR: '{ENGINE}' did not dock within 120s (status={tts_status()})")
+        sys.exit(1)
+    print(f"  Engine '{ENGINE}' docked successfully.")
+
+def collect_transcription_log_pattern():
+    if is_moshi_engine():
+        return "Moshi transcription: "
+    return "Transcription ("
+
+def parse_transcription_log(message):
+    if is_moshi_engine():
+        m = re.search(r'Moshi transcription:\s*(.*)', message)
+        if m:
+            return 0, m.group(1).strip()
+        return None, None
+    m = re.search(r'Transcription \((\d+)ms\):\s*(.*)', message)
+    if m:
+        return int(m.group(1)), m.group(2).strip()
+    return None, None
+
+engine_label = ENGINE if ENGINE else "auto"
+print(f"=== Pipeline WER Test: engine={engine_label} model={MODEL_NAME} ===")
 print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+print()
+
+ensure_engine()
 print()
 
 SIP_LEG = "alice"
@@ -250,10 +358,8 @@ SIP_LEG = "alice"
 results = []
 last_ts = None
 
-# Ensure a single-leg call with alice is active (no conference feedback loop)
 status = fetch_json(f"{SIP_PROVIDER}/calls")
 if not status.get("calls") or not status["calls"]:
-    # No active call — need to wait for alice to register and then start
     print("No active call. Checking if alice is registered...")
     for attempt in range(30):
         users_data = fetch_json(f"{SIP_PROVIDER}/users")
@@ -275,7 +381,6 @@ if not status.get("calls") or not status["calls"]:
         sys.exit(1)
 else:
     print(f"Call already active ({len(status['calls'][0].get('legs',0))} legs)")
-    # If the active call has 2 legs (old conference), tear it down and restart single-leg
     call = status["calls"][0]
     if isinstance(call.get("legs"), list) and len(call["legs"]) >= 2:
         print("  2-leg conference detected — hanging up and restarting as single-leg to avoid feedback loop...")
@@ -288,11 +393,12 @@ else:
         print(f"  Single-leg call started: {r}")
         time.sleep(3)
 
-# Get current latest transcription timestamp to use as baseline
+log_pattern = collect_transcription_log_pattern()
+
 data = fetch_json(f"{FRONTEND}/api/logs?limit=500")
 baseline_msgs = set()
 for log in data.get("logs", []):
-    if "Transcription (" in log.get("message", ""):
+    if log_pattern in log.get("message", ""):
         baseline_msgs.add(log["timestamp"] + log["message"])
 
 for i in range(1, 21):
@@ -306,16 +412,14 @@ for i in range(1, 21):
     with open(gt_file) as f:
         ground_truth = f.read().strip()
     
-    # Inject
     result = fetch_json(f"{SIP_PROVIDER}/inject", {"file": f"{sample}.wav", "leg": SIP_LEG})
     if "error" in result:
         print(f"FAIL {sample}: injection error: {result['error']}")
         results.append((sample, "FAIL", 0, 0, ground_truth, f"injection error: {result['error']}"))
         continue
     
-    # Estimate audio duration to know how long to wait for all VAD chunks
     wav_file = os.path.join(TESTFILES_DIR, f"{sample}.wav")
-    audio_dur_s = 10.0  # default
+    audio_dur_s = 10.0
     try:
         import wave
         with wave.open(wav_file) as wf:
@@ -323,38 +427,32 @@ for i in range(1, 21):
     except Exception:
         pass
     
-    # Wait for ALL transcription chunks from this sample.
-    # VAD splits audio into chunks at silence boundaries; we collect all chunks
-    # until no new transcription appears for 6s after the last one.
-    # Total window: audio_dur_s + 8s whisper latency + 6s idle timeout.
-    all_transcriptions = []  # list of (whisper_ms, text) pairs
-    whisper_ms_total = []
-    max_wait = int(audio_dur_s + 20)   # generous ceiling
+    all_transcriptions = []
+    inference_ms_total = []
+    max_wait = int(audio_dur_s + 20)
     last_chunk_time = None
-    idle_timeout = 6.0  # seconds with no new chunk before we stop collecting
+    idle_timeout = 6.0
     
     poll_start = time.time()
     while time.time() - poll_start < max_wait:
         time.sleep(2)
         data = fetch_json(f"{FRONTEND}/api/logs?limit=500")
         found_new = False
-        for log in reversed(data.get("logs", [])):  # oldest first
+        for log in reversed(data.get("logs", [])):
             key = log["timestamp"] + log["message"]
             if key in baseline_msgs:
                 continue
-            if "Transcription (" in log.get("message", ""):
-                m = re.search(r'Transcription \((\d+)ms\):\s*(.*)', log["message"])
-                if m:
+            if log_pattern in log.get("message", ""):
+                ms, txt = parse_transcription_log(log["message"])
+                if txt is not None:
                     baseline_msgs.add(key)
-                    wms = int(m.group(1))
-                    txt = m.group(2).strip()
-                    all_transcriptions.append((wms, txt))
-                    whisper_ms_total.append(wms)
+                    all_transcriptions.append((ms, txt))
+                    inference_ms_total.append(ms)
                     last_chunk_time = time.time()
                     found_new = True
         if not found_new and last_chunk_time is not None:
             if time.time() - last_chunk_time >= idle_timeout:
-                break  # no new chunks for idle_timeout seconds — done
+                break
     
     if not all_transcriptions:
         print(f"TIMEOUT {sample}: no transcription after {max_wait}s")
@@ -362,37 +460,35 @@ for i in range(1, 21):
         time.sleep(5)
         continue
     
-    # Concatenate all chunks in order and score against full ground truth
     full_transcription = " ".join(t for _, t in all_transcriptions)
-    whisper_ms = int(sum(whisper_ms_total) / len(whisper_ms_total))
+    avg_ms = int(sum(inference_ms_total) / len(inference_ms_total)) if inference_ms_total else 0
     
     if len(all_transcriptions) > 1:
         print(f"  [{len(all_transcriptions)} chunks: {' | '.join(t[:30] for _,t in all_transcriptions)}]")
     
     sim = similarity(ground_truth, full_transcription)
     if sim >= 99.5:
-        status = "PASS"
+        verdict = "PASS"
     elif sim >= 90:
-        status = "WARN"
+        verdict = "WARN"
     else:
-        status = "FAIL"
+        verdict = "FAIL"
     
     gt_short = ground_truth[:60]
     tr_short = full_transcription[:60]
-    print(f"{status} {sample}: {sim:.1f}% ({whisper_ms}ms avg, {len(all_transcriptions)} chunk(s))")
+    print(f"{verdict} {sample}: {sim:.1f}% ({avg_ms}ms avg, {len(all_transcriptions)} chunk(s))")
     print(f"  GT:  {gt_short}")
     print(f"  GOT: {tr_short}")
     print()
     
-    results.append((sample, status, sim, whisper_ms, ground_truth, full_transcription))
+    results.append((sample, verdict, sim, avg_ms, ground_truth, full_transcription))
     
-    # Wait for silence flush before next injection
     time.sleep(3)
 
 # Summary
 print()
 print("=" * 60)
-print(f"SUMMARY: {MODEL_NAME}")
+print(f"SUMMARY: engine={engine_label} model={MODEL_NAME}")
 print("=" * 60)
 pass_count = sum(1 for r in results if r[1] == "PASS")
 warn_count = sum(1 for r in results if r[1] == "WARN")
@@ -407,9 +503,11 @@ for r in results:
     print(f"  {r[1]:7s} {r[0]}: {r[2]:.1f}% ({r[3]}ms)")
 
 # Save results as JSON
-outfile = f"/tmp/pipeline_results_{MODEL_NAME.replace(' ', '_').replace('+', '_')}.json"
+safe_name = MODEL_NAME.replace(' ', '_').replace('+', '_')
+outfile = f"/tmp/pipeline_results_{engine_label}_{safe_name}.json"
 with open(outfile, 'w') as f:
     json.dump({
+        "engine": engine_label,
         "model": MODEL_NAME,
         "results": [{"sample": r[0], "status": r[1], "similarity": r[2], 
                      "inference_ms": r[3], "ground_truth": r[4], "transcription": r[5]} for r in results],

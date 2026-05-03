@@ -832,19 +832,28 @@ Save outgoing audio as WAV</label>
 <div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 3: Full Loop File Test (WER)</span><span id="prereq-fullloop" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
-<p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
-  Injects test audio files through the Classic pipeline with 2 SIP lines. Measures Word Error Rate (WER)
-  between LLaMA response text and Whisper Line 2 re-transcription of Kokoro/OAP output.
-  Flow: TestFile &#x2192; SIP(L1) &#x2192; IAP &#x2192; VAD &#x2192; Whisper &#x2192; LLaMA &#x2192; Kokoro &#x2192; OAP &#x2192; SIP(L2) &#x2192; Whisper(L2).
-  Requires: All Classic services + 2 lines + active conference call.
+<p id="fullLoopDesc" style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
+  Injects test audio files through the pipeline and measures Word Error Rate (WER).
+  Classic engines (Kokoro/NeuTTS): 2-line loop &mdash; compares LLaMA response text vs Whisper L2 re-transcription.
+  Moshi: single-line &mdash; compares Moshi reference text (what it heard) vs ground truth.
 </p>
+<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+<div class="wt-field" style="margin-bottom:0">
+<label style="font-size:12px">Engine</label>
+<select class="wt-select" id="fullLoopEngine" onchange="updateFullLoopEngineUI()" style="font-size:12px;padding:4px 8px">
+<option value="kokoro">Kokoro</option>
+<option value="neutts">NeuTTS</option>
+<option value="moshi">Moshi</option>
+</select>
+</div>
+</div>
 <div class="wt-field">
 <label>Select Test Files (hold Ctrl/Cmd for multiple)</label>
 <select class="wt-select" id="fullLoopFiles" multiple style="width:100%;padding:8px;height:100px">
 </select>
 </div>
 <div style="display:flex;gap:8px;margin-top:8px">
-<button class="wt-btn wt-btn-primary" id="fullLoopBtn" onclick="runFullLoopTest()">&#x25B6; Run Full Loop (Classic)</button>
+<button class="wt-btn wt-btn-primary" id="fullLoopBtn" onclick="runFullLoopTest()">&#x25B6; Run WER Test</button>
 </div>
 <div id="fullLoopStatus" style="margin-top:8px;font-size:12px"></div>
 <div id="fullLoopResults" style="margin-top:12px"></div>
