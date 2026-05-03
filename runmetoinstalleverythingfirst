@@ -26,12 +26,13 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  13. Download NeuTTS Nano German model (GGUF + NeuCodec ONNX→CoreML)"
     echo "  14. Prepare NeuTTS reference voice (encode audio + phonemize text)"
     echo "  15. Check Ollama installation (optional, for tomedo-crawl RAG embeddings)"
+    echo "  16. Merge Moshi LoRA adapters (optional, for language-specific moshi backends)"
     echo ""
     echo "Optional TTS engines (called automatically, non-fatal if unavailable):"
-    echo "  16. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
-    echo "  17. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
-    echo "  18. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
-    echo "      Note: step 18 requires a German Matcha-TTS checkpoint (--checkpoint flag"
+    echo "  17. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
+    echo "  18. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
+    echo "  19. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
+    echo "      Note: step 19 requires a German Matcha-TTS checkpoint (--checkpoint flag"
     echo "      or fine-tuned from shivammehta25/Matcha-TTS). Falls back to English."
     echo ""
     echo "Requirements:"
@@ -768,6 +769,76 @@ verify_installation() {
     fi
 }
 
+merge_moshi_loras() {
+    step "Merging Moshi LoRA adapters (step 16 — optional)"
+
+    local lora_base="bin/models"
+    local found_any=false
+    local port_offset=0  # port = 8998 + offset; order follows glob expansion (alphabetical on most FS)
+
+    for run_dir in "$lora_base"/*_moshi_lora/; do
+        [ -d "$run_dir" ] || continue
+        found_any=true
+
+        local dir_name
+        dir_name="$(basename "$run_dir")"
+        local lang
+        lang="${dir_name%%_moshi_lora}"
+
+        local merged_path="$lora_base/moshiko-${lang}-merged.safetensors"
+        if [ -f "$merged_path" ]; then
+            info "LoRA already merged for language '$lang': $merged_path"
+            continue
+        fi
+
+        info "Found LoRA run dir for language '$lang': $run_dir"
+        info "Merging into $merged_path ..."
+
+        if ! "$WHISPERTALK_PYTHON" scripts/merge_moshi_lora.py \
+            --language "$lang" \
+            --lora-run-dir "$run_dir" \
+            --output "$merged_path" \
+            --no-backend-config; then
+            warn "LoRA merge failed for language '$lang' — skipping"
+            warn "  To retry manually: python3 scripts/merge_moshi_lora.py --language $lang --lora-run-dir $run_dir --output $merged_path"
+            continue
+        fi
+
+        info "LoRA merged for language '$lang': $merged_path"
+
+        local config_path="$lora_base/moshi-${lang}-backend-config.json"
+        if [ ! -f "$config_path" ]; then
+            local abs_merged abs_logdir
+            abs_merged="$(cd "$(dirname "$merged_path")" && pwd)/$(basename "$merged_path")"
+            abs_logdir="$(cd "$lora_base" && pwd)"
+            python3 -c "
+import json, sys
+config = {
+    'instance_name': 'moshi-' + sys.argv[1] + '-backend',
+    'hf_repo': 'kyutai/moshiko-pytorch-bf16',
+    'lm_model_file': sys.argv[2],
+    'text_tokenizer_file': 'hf://kyutai/moshiko-pytorch-bf16/tokenizer_spm_32k_3.model',
+    'log_dir': sys.argv[3],
+    'mimi_model_file': 'hf://kyutai/moshiko-pytorch-bf16/tokenizer-e351c8d8-checkpoint125.safetensors',
+    'mimi_num_codebooks': 8,
+    'addr': '127.0.0.1',
+    'port': 8998 + int(sys.argv[5]),
+    'cert_dir': '.'
+}
+with open(sys.argv[4], 'w') as f:
+    json.dump(config, f, indent=2)
+print('[INFO] Backend config written to ' + sys.argv[4])
+" "$lang" "$abs_merged" "$abs_logdir" "$config_path" "$port_offset"
+        fi
+        port_offset=$((port_offset + 1))
+    done
+
+    if [ "$found_any" = "false" ]; then
+        info "No *_moshi_lora run directories found under $lora_base — skipping LoRA merge"
+        info "  To merge a LoRA manually: python3 scripts/merge_moshi_lora.py --help"
+    fi
+}
+
 check_ollama() {
     step "Checking Ollama (for tomedo-crawl RAG embeddings)"
     if command -v ollama &> /dev/null; then
@@ -864,6 +935,7 @@ main() {
     export_matcha_models
 
     check_ollama
+    merge_moshi_loras
     install_git_hooks
     verify_installation
 }

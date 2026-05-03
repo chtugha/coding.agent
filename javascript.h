@@ -541,6 +541,15 @@ if(s.name==='MATCHA_ENGINE'){
   mc.classList.add('hidden');
 }
   }
+  const moshic=document.getElementById('moshiConfig');
+  if(moshic){
+if(s.name==='MOSHI_SERVICE'){
+  moshic.classList.remove('hidden');
+  loadMoshiConfig();
+} else {
+  moshic.classList.add('hidden');
+}
+  }
 }
 function loadWhisperConfig(args){
   fetch('/api/whisper/models').then(r=>r.json()).then(d=>{
@@ -702,6 +711,117 @@ function saveMatchaConfig(){
     setTimeout(()=>{if(statusEl)statusEl.textContent='';},2000);
   }).catch(()=>{if(statusEl)statusEl.textContent='Error';setTimeout(()=>{if(statusEl)statusEl.textContent='';},3000);});
   updateMatchaArgs();
+}
+let _moshiBackends=[];
+let _moshiTriggers=[];
+function loadMoshiConfig(){
+  fetch('/api/moshi/config').then(r=>r.json()).then(d=>{
+    _moshiBackends=d.backends||[];
+    _moshiTriggers=d.triggers||[];
+    const dl=document.getElementById('moshiDefaultLang');
+    if(dl)dl.value=d.default_language||'en';
+    renderMoshiBackendList();
+    renderMoshiTriggerList();
+    buildMoshiArgs();
+  }).catch(()=>{});
+}
+function renderMoshiBackendList(){
+  const el=document.getElementById('moshiBackendList');
+  if(!el)return;
+  if(_moshiBackends.length===0){el.innerHTML='<div style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:4px">No backends configured.</div>';return;}
+  let h='<table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:4px">'
+    +'<tr style="color:var(--wt-text-secondary)"><th style="text-align:left;padding:2px 4px">Lang</th><th style="text-align:left;padding:2px 4px">Config JSON</th><th style="text-align:left;padding:2px 4px">Binary</th><th></th></tr>';
+  _moshiBackends.forEach(function(b,i){
+    h+=`<tr><td style="padding:2px 4px">${escapeHtml(b.lang)}</td>`
+      +`<td style="padding:2px 4px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(b.config)}">${escapeHtml(b.config)}</td>`
+      +`<td style="padding:2px 4px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(b.binary||'')}</td>`
+      +`<td style="padding:2px 4px"><button class="wt-btn wt-btn-sm wt-btn-danger" style="font-size:10px;padding:1px 6px" onclick="moshiRemoveBackend(${i})">✕</button></td></tr>`;
+  });
+  el.innerHTML=h+'</table>';
+}
+function renderMoshiTriggerList(){
+  const el=document.getElementById('moshiTriggerList');
+  if(!el)return;
+  if(_moshiTriggers.length===0){el.innerHTML='<div style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:4px">No triggers configured.</div>';return;}
+  let h='<table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:4px">'
+    +'<tr style="color:var(--wt-text-secondary)"><th style="text-align:left;padding:2px 4px">Type</th><th style="text-align:left;padding:2px 4px">Match</th><th style="text-align:left;padding:2px 4px">Action</th><th style="text-align:left;padding:2px 4px">Label</th><th></th></tr>';
+  _moshiTriggers.forEach(function(t,i){
+    h+=`<tr><td style="padding:2px 4px">${escapeHtml(t.type)}</td>`
+      +`<td style="padding:2px 4px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(t.match)}">${escapeHtml(t.match||'')}</td>`
+      +`<td style="padding:2px 4px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(t.action)}">${escapeHtml(t.action||'')}</td>`
+      +`<td style="padding:2px 4px">${escapeHtml(t.label||'')}</td>`
+      +`<td style="padding:2px 4px"><button class="wt-btn wt-btn-sm wt-btn-danger" style="font-size:10px;padding:1px 6px" onclick="moshiRemoveTrigger(${i})">✕</button></td></tr>`;
+  });
+  el.innerHTML=h+'</table>';
+}
+function moshiAddBackend(){
+  const lang=(document.getElementById('moshiNewLang')||{}).value||'';
+  const config=(document.getElementById('moshiNewConfig')||{}).value||'';
+  const binary=(document.getElementById('moshiNewBinary')||{}).value||'';
+  if(!lang||!config){alert('Language code and config path are required.');return;}
+  _moshiBackends.push({lang,config,binary});
+  renderMoshiBackendList();
+  buildMoshiArgs();
+  document.getElementById('moshiNewLang').value='';
+  document.getElementById('moshiNewConfig').value='';
+  document.getElementById('moshiNewBinary').value='';
+}
+function moshiRemoveBackend(i){
+  _moshiBackends.splice(i,1);
+  renderMoshiBackendList();
+  buildMoshiArgs();
+}
+function moshiAddTrigger(){
+  const type=(document.getElementById('moshiNewTriggerType')||{}).value||'keyword';
+  const match=(document.getElementById('moshiNewTriggerMatch')||{}).value||'';
+  const action=(document.getElementById('moshiNewTriggerAction')||{}).value||'';
+  const label=(document.getElementById('moshiNewTriggerLabel')||{}).value||'';
+  if(!action){alert('Tomedo action/endpoint is required.');return;}
+  _moshiTriggers.push({type,match,action,label});
+  renderMoshiTriggerList();
+  document.getElementById('moshiNewTriggerMatch').value='';
+  document.getElementById('moshiNewTriggerAction').value='';
+  document.getElementById('moshiNewTriggerLabel').value='';
+}
+function moshiRemoveTrigger(i){
+  _moshiTriggers.splice(i,1);
+  renderMoshiTriggerList();
+}
+function buildMoshiArgs(){
+  const dl=(document.getElementById('moshiDefaultLang')||{}).value||'en';
+  const f=document.getElementById('svcDetailArgs');
+  if(!f)return;
+  let existing=f.value||'';
+  let kept=[];
+  let tokens=existing.match(/(?:[^\s"]+|"[^"]*")+/g)||[];
+  for(let i=0;i<tokens.length;i++){
+    if(tokens[i]==='--backend-config'||tokens[i]==='-B'){i++;continue;}
+    if(tokens[i].startsWith('--backend-config='))continue;
+    if(tokens[i]==='--default-language'||tokens[i]==='-d'){i++;continue;}
+    if(tokens[i].startsWith('--default-language='))continue;
+    kept.push(tokens[i]);
+  }
+  let args='';
+  _moshiBackends.forEach(function(b){
+    let spec=b.lang+':'+b.config;
+    if(b.binary)spec+=':'+b.binary;
+    args+='--backend-config '+spec+' ';
+  });
+  args+='--default-language '+dl;
+  if(kept.length>0)args+=' '+kept.join(' ');
+  f.value=args.trim();
+}
+function saveMoshiConfig(){
+  const dl=(document.getElementById('moshiDefaultLang')||{}).value||'en';
+  const st=document.getElementById('moshiConfigStatus');
+  if(st)st.textContent='Saving...';
+  buildMoshiArgs();
+  fetch('/api/moshi/config',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({backends:_moshiBackends,triggers:_moshiTriggers,default_language:dl})
+  }).then(r=>r.json()).then(d=>{
+    if(st)st.textContent='Saved';
+    setTimeout(()=>{if(st)st.textContent='';},2000);
+  }).catch(()=>{if(st)st.textContent='Error';setTimeout(()=>{if(st)st.textContent='';},3000);});
 }
 function toggleHallucinationFilter(enabled){
   const statusEl=document.getElementById('whisperHalluFilterStatus');

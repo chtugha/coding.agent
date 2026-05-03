@@ -1415,6 +1415,8 @@ private:
                 handle_ollama_pull(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/ollama/install")) == 0) {
                 handle_ollama_install(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/moshi/config")) == 0) {
+                handle_moshi_config(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/rag/wipe_vectors")) == 0) {
                 handle_rag_wipe_vectors(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/embeddings/upsert")) == 0) {
@@ -6861,6 +6863,72 @@ private:
         auto hdr_end = response.find("\r\n\r\n");
         if (hdr_end != std::string::npos) return response.substr(hdr_end + 4);
         return response;
+    }
+
+    void handle_moshi_config(struct mg_connection *c, struct mg_http_message *hm) {
+        if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
+            std::string backends_json = get_setting("moshi_backends", "[]");
+            std::string triggers_json = get_setting("moshi_triggers", "[]");
+            std::string default_lang  = get_setting("moshi_default_language", "en");
+            std::string resp = "{\"backends\":" + backends_json
+                + ",\"triggers\":" + triggers_json
+                + ",\"default_language\":\"" + escape_json(default_lang) + "\"}";
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
+            return;
+        }
+        if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
+            std::string body(hm->body.buf, hm->body.len);
+            auto extract = [&](const std::string& key) -> std::string {
+                auto pos = body.find("\"" + key + "\"");
+                if (pos == std::string::npos) return "";
+                auto colon = body.find(':', pos);
+                if (colon == std::string::npos) return "";
+                auto start = colon + 1;
+                while (start < body.size() && body[start] == ' ') start++;
+                if (start >= body.size()) return "";
+                if (body[start] == '"') {
+                    auto end = body.find('"', start + 1);
+                    if (end == std::string::npos) return "";
+                    return body.substr(start + 1, end - start - 1);
+                }
+                return "";
+            };
+            auto extract_json_value = [&](const std::string& key) -> std::string {
+                auto pos = body.find("\"" + key + "\"");
+                if (pos == std::string::npos) return "[]";
+                auto colon = body.find(':', pos);
+                if (colon == std::string::npos) return "[]";
+                auto start = colon + 1;
+                while (start < body.size() && body[start] == ' ') start++;
+                if (start >= body.size()) return "[]";
+                char open = body[start];
+                if (open != '[' && open != '{') return "[]";
+                int depth = 1;
+                bool in_string = false;
+                bool escaped = false;
+                size_t i = start + 1;
+                for (; i < body.size() && depth > 0; i++) {
+                    char ch = body[i];
+                    if (escaped) { escaped = false; continue; }
+                    if (ch == '\\' && in_string) { escaped = true; continue; }
+                    if (ch == '"') { in_string = !in_string; continue; }
+                    if (in_string) continue;
+                    if (ch == '[' || ch == '{') depth++;
+                    else if (ch == ']' || ch == '}') depth--;
+                }
+                return body.substr(start, i - start);
+            };
+            std::string backends = extract_json_value("backends");
+            std::string triggers = extract_json_value("triggers");
+            std::string def_lang = extract("default_language");
+            if (def_lang.empty()) def_lang = "en";
+            set_setting("moshi_backends", backends);
+            set_setting("moshi_triggers", triggers);
+            set_setting("moshi_default_language", def_lang);
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
+            return;
+        }
+        mg_http_reply(c, 405, "", "Method Not Allowed\n");
     }
 
     void handle_rag_health(struct mg_connection *c) {

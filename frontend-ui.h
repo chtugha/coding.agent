@@ -319,6 +319,44 @@ Save incoming audio as WAV</label>
 <span id="ragConfigStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
 </div>
 </div>
+<div id="moshiConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
+<div style="font-size:12px;font-weight:600;margin-bottom:6px">Moshi Voice Configuration</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Language Backends</div>
+<p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:6px">Each backend is a persistent Rust moshi-backend process. One process per language. Slots in each process handle multiple simultaneous calls (batch_size in config.json).</p>
+<div id="moshiBackendList" style="margin-bottom:8px"></div>
+<div style="display:grid;grid-template-columns:60px 1fr 1fr 80px;gap:4px;margin-bottom:4px;font-size:11px;align-items:end">
+<div><label style="font-size:11px">Lang code</label><input class="wt-input" id="moshiNewLang" placeholder="de" title="ISO-639-1 language code, e.g. en, de, fr" style="font-size:11px"></div>
+<div><label style="font-size:11px">Config JSON path</label><input class="wt-input" id="moshiNewConfig" placeholder="bin/models/moshi-de-backend-config.json" title="Path to moshi-backend config.json relative to the project root" style="font-size:11px"></div>
+<div><label style="font-size:11px">Binary path (optional)</label><input class="wt-input" id="moshiNewBinary" placeholder="bin/moshi-backend" title="Path to the moshi-backend binary. Leave empty to use the default binary." style="font-size:11px"></div>
+<div style="display:flex;align-items:flex-end"><button class="wt-btn wt-btn-secondary" style="font-size:10px;height:32px;white-space:nowrap" onclick="moshiAddBackend()">+ Add</button></div>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;margin-top:10px;color:var(--wt-text-secondary)">Default Language</div>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+<input class="wt-input" id="moshiDefaultLang" placeholder="en" title="Language code used when no language-specific backend is available. Must match one of the configured backend language codes." style="font-size:11px;width:80px">
+<span style="font-size:11px;color:var(--wt-text-secondary)">Falls back to this language if no backend matches the pipeline language.</span>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Retrieval Trigger Rules</div>
+<p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:6px">Triggers are evaluated by the retrieval shim (MoshiRAG integration). When a matching keyword or phrase is detected in the STT transcript the configured tomedo API action is fired and the result is injected into Moshi as reference context.</p>
+<div id="moshiTriggerList" style="margin-bottom:8px"></div>
+<div style="display:grid;grid-template-columns:90px 1fr 1fr 1fr 80px;gap:4px;margin-bottom:4px;font-size:11px;align-items:end">
+<div>
+<label style="font-size:11px">Type</label>
+<select class="wt-select" id="moshiNewTriggerType" style="font-size:11px">
+<option value="keyword">Keyword</option>
+<option value="regex">Regex</option>
+<option value="command">Command</option>
+</select>
+</div>
+<div><label style="font-size:11px">Match (keyword/regex)</label><input class="wt-input" id="moshiNewTriggerMatch" placeholder="Medikament|medication" title="Keyword or regex to match against STT transcript. Leave empty for a command-only trigger that fires on every retrieval event." style="font-size:11px"></div>
+<div><label style="font-size:11px">Tomedo action / endpoint</label><input class="wt-input" id="moshiNewTriggerAction" placeholder="/api/patient/medication" title="Tomedo REST endpoint or command name to call when this trigger fires. The response is injected as reference text." style="font-size:11px"></div>
+<div><label style="font-size:11px">Label</label><input class="wt-input" id="moshiNewTriggerLabel" placeholder="Medication query" title="Human-readable label for this trigger, shown in logs." style="font-size:11px"></div>
+<div style="display:flex;align-items:flex-end"><button class="wt-btn wt-btn-secondary" style="font-size:10px;height:32px;white-space:nowrap" onclick="moshiAddTrigger()">+ Add</button></div>
+</div>
+<div style="display:flex;gap:6px;align-items:center;margin-top:8px">
+<button class="wt-btn wt-btn-primary" style="font-size:11px" onclick="saveMoshiConfig()">Save Config</button>
+<span id="moshiConfigStatus" style="font-size:11px;color:var(--wt-text-secondary)"></span>
+</div>
+</div>
 <div id="oapConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">Outbound Audio Processor Configuration</div>
 <div class="wt-field" style="margin-top:8px;margin-bottom:6px;display:flex;align-items:center;gap:8px">
