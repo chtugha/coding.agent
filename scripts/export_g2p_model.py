@@ -254,6 +254,23 @@ def _build_vocabs_from_checkpoint(ckpt):
                             break
                 if char_vocab:
                     break
+        elif hasattr(prep, 'text_tokenizer'):
+            tok = prep.text_tokenizer
+            for vkey in ('vocab', 'token_to_idx', 'char_to_idx', '_token_to_idx'):
+                if hasattr(tok, vkey):
+                    vdict = getattr(tok, vkey)
+                    if isinstance(vdict, dict) and len(vdict) > 0:
+                        char_vocab = {str(k): int(v) for k, v in vdict.items()}
+                        break
+            if not phoneme_vocab and hasattr(prep, 'phoneme_tokenizer'):
+                ptok = prep.phoneme_tokenizer
+                for pkey in ('vocab', 'token_to_idx', '_token_to_idx'):
+                    if hasattr(ptok, pkey):
+                        pdict = getattr(ptok, pkey)
+                        if isinstance(pdict, dict) and len(pdict) > 0:
+                            inv = {int(v): str(k) for k, v in pdict.items()}
+                            phoneme_vocab = [inv.get(i, '') for i in range(max(inv.keys()) + 1)]
+                            break
 
     return char_vocab, phoneme_vocab
 
