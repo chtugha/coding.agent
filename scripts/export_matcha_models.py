@@ -90,7 +90,6 @@ HF_EN_REPO_ID = 'shivammehta25/Matcha-TTS'
 HF_EN_FILENAME = 'matcha_ljspeech.ckpt'
 
 GH_RELEASES_URL = 'https://github.com/shivammehta25/Matcha-TTS-checkpoints/releases/download/v1.0'
-GH_EN_FILENAME = 'matcha_ljspeech.ckpt'
 
 KNOWN_DE_REPOS = [
     ('Flux9999/Matcha-TTS-German', 'matcha_german.ckpt'),
@@ -270,11 +269,17 @@ def download_checkpoint(output_dir):
     except Exception as e:
         print(f'  HuggingFace download failed: {e}')
 
-    gh_url = f'{GH_RELEASES_URL}/{GH_EN_FILENAME}'
+    gh_url = f'{GH_RELEASES_URL}/{HF_EN_FILENAME}'
     print(f'  Trying GitHub Releases fallback: {gh_url}')
     try:
         import urllib.request
-        urllib.request.urlretrieve(gh_url, en_path)
+        import socket
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(60)
+        try:
+            urllib.request.urlretrieve(gh_url, en_path)
+        finally:
+            socket.setdefaulttimeout(old_timeout)
         size_mb = os.path.getsize(en_path) / 1e6
         print(f'  OK ({size_mb:.1f} MB) -> {en_path}')
         return en_path, True

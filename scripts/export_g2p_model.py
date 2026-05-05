@@ -108,10 +108,16 @@ def _ensure_huggingface_hub():
         return huggingface_hub
 
 
-def _download_url(url, dest):
+def _download_url(url, dest, timeout=60):
     import urllib.request
+    import socket
     print(f"  Downloading {url} ...")
-    urllib.request.urlretrieve(url, dest)
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
+    try:
+        urllib.request.urlretrieve(url, dest)
+    finally:
+        socket.setdefaulttimeout(old_timeout)
     size_mb = os.path.getsize(dest) / 1e6
     print(f"  OK ({size_mb:.1f} MB) -> {dest}")
 
