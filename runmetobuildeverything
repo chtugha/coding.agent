@@ -16,6 +16,25 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 step()  { echo -e "\n${BLUE}==============================${NC}"; echo -e "${BLUE} $1${NC}"; echo -e "${BLUE}==============================${NC}"; }
 
+self_update() {
+    local top_level
+    top_level="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || return 0
+    local branch
+    branch="$(git -C "$top_level" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    if [ "$branch" != "main" ]; then
+        return 0
+    fi
+    git -C "$top_level" fetch --quiet origin main 2>/dev/null || return 0
+    local behind
+    behind="$(git -C "$top_level" rev-list HEAD..origin/main --count 2>/dev/null || echo 0)"
+    if [ "$behind" -gt 0 ]; then
+        echo -e "${YELLOW}[INFO]${NC} Repo is $behind commit(s) behind origin/main — pulling latest scripts..."
+        git -C "$top_level" merge --ff-only origin/main
+        echo -e "${GREEN}[INFO]${NC} Self-update complete. Re-exec with updated scripts..."
+        exec "$SCRIPT_DIR/$(basename "$0")" "$@"
+    fi
+}
+
 NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 FORCE_REBUILD=0
@@ -42,7 +61,8 @@ while [[ $# -gt 0 ]]; do
             echo "  1. whisper.cpp (CoreML + Metal, static libs)"
             echo "  2. llama.cpp (Metal, static libs)"
             echo "  3. SQLCipher (auto-updated from GitHub master)"
-            echo "  4. Prodigy main project (all services)"
+            echo "  4. Moshi Rust backend (cargo build, Metal)"
+            echo "  5. Prodigy main project (all services)"
             echo ""
             echo "SQLCipher (database encryption):"
             echo "  Source is fetched from https://github.com/sqlcipher/sqlcipher"
@@ -285,6 +305,49 @@ build_sqlcipher_amalgamation() {
     info "Output: ${out_dir}/sqlite3.c + sqlite3.h"
 }
 
+build_moshi_backend() {
+    step "Building Moshi Rust backend"
+
+    local moshi_dir="$SCRIPT_DIR/moshi-rust"
+
+    if ! command -v cargo &> /dev/null; then
+        warn "Rust/Cargo not found — skipping moshi-backend build"
+        warn "  Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        warn "  Then re-run this script."
+        return
+    fi
+
+    if [ -d "$moshi_dir/.git" ]; then
+        info "Updating moshi Rust repo..."
+        git -C "$moshi_dir" pull --quiet origin main 2>/dev/null \
+            || warn "moshi-rust git pull failed — using cached version"
+    else
+        info "Cloning kyutai-labs/moshi Rust backend..."
+        git clone --depth=1 https://github.com/kyutai-labs/moshi.git "$moshi_dir"
+    fi
+
+    local bin_out="$SCRIPT_DIR/bin/moshi-backend"
+    if [ -f "$bin_out" ] && [ "$FORCE_REBUILD" != "1" ]; then
+        info "moshi-backend already built (use --force to rebuild)"
+        return
+    fi
+
+    info "Building moshi-backend (cargo build --release, Metal)..."
+    cd "$moshi_dir/rust"
+    cargo build --features metal --bin moshi-backend --release 2>&1 \
+        | tail -5
+
+    local built="$moshi_dir/rust/target/release/moshi-backend"
+    if [ -f "$built" ]; then
+        cp "$built" "$bin_out"
+        info "moshi-backend built: $bin_out ($(du -h "$bin_out" | cut -f1))"
+    else
+        warn "moshi-backend build failed — check Rust/Cargo output above"
+        warn "  To build manually: cd moshi-rust/rust && cargo build --features metal --bin moshi-backend --release"
+    fi
+    cd "$SCRIPT_DIR"
+}
+
 build_main_project() {
     step "Building Prodigy"
 
@@ -329,6 +392,7 @@ verify_binaries() {
         "bin/vits2-service"
         "bin/matcha-service"
         "bin/moshi-service"
+        "bin/moshi-backend"
     )
 
     ALL_OK=true
@@ -370,6 +434,12 @@ verify_binaries() {
     fi
 }
 
+echo -e "${BLUE}===============================================${NC}"
+echo -e "${BLUE} Prodigy - Build Everything${NC}"
+echo -e "${BLUE}===============================================${NC}"
+
+self_update "$@"
+
 preflight_check
 
 if [ "$SKIP_DEPS" != "1" ]; then
@@ -379,5 +449,6 @@ else
     info "Skipping dependency builds (--skip-deps)"
 fi
 
+build_moshi_backend
 build_main_project
 verify_binaries

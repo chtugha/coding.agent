@@ -87,6 +87,8 @@ compile_commands.json
 /tmp/whisper-cpp-*
 llama-cpp/
 llama-cpp
+moshi-rust/
+moshi-rust
 
 
 # Binaries and symbol files
