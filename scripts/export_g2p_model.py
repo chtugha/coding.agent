@@ -42,7 +42,9 @@ REQUIRED_TORCH = '2.5'
 REQUIRED_COREMLTOOLS = '8.3'
 
 HF_REPO_ID = 'as-ideas/DeepPhonemizer'
+HF_REPO_ID_MIRROR = 'mrfakename/deep-phonemizer'
 HF_MODEL_FILENAME = 'en_us_cmudict_ipa_forward.pt'
+HF_MODEL_FILENAME_MIRROR = 'en_us_cmudict_ipa.pt'
 HF_DE_MODEL_FILENAME = 'de_forward_en_ipa.pt'
 
 MAX_CHAR_LEN = 128
@@ -118,12 +120,16 @@ def download_checkpoint(output_dir):
         print("  If download fails, set HF_TOKEN or use --checkpoint to specify local path.")
     token = hf_token if hf_token else None
 
-    for filename in [HF_DE_MODEL_FILENAME, HF_MODEL_FILENAME]:
-        is_english_fallback = (filename == HF_MODEL_FILENAME)
-        print(f"  Downloading {filename} from {HF_REPO_ID}...")
+    candidates = [
+        (HF_REPO_ID, HF_DE_MODEL_FILENAME, False),
+        (HF_REPO_ID, HF_MODEL_FILENAME, True),
+        (HF_REPO_ID_MIRROR, HF_MODEL_FILENAME_MIRROR, True),
+    ]
+    for repo_id, filename, is_english_fallback in candidates:
+        print(f"  Downloading {filename} from {repo_id}...")
         try:
             downloaded = hf.hf_hub_download(
-                repo_id=HF_REPO_ID,
+                repo_id=repo_id,
                 filename=filename,
                 token=token,
             )
@@ -132,7 +138,8 @@ def download_checkpoint(output_dir):
                 print()
                 print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
                 print("  WARNING: The German checkpoint (de_forward_en_ipa.pt) could not")
-                print("  be downloaded. Falling back to the ENGLISH model instead.")
+                print("  be downloaded (as-ideas/DeepPhonemizer repo is no longer public).")
+                print("  Falling back to the ENGLISH model instead.")
                 print("  The exported de_g2p.mlmodelc will phonemize text as ENGLISH,")
                 print("  not German. German compound words and medical terms will produce")
                 print("  incorrect IPA output. Use --checkpoint with a German checkpoint")
@@ -142,12 +149,13 @@ def download_checkpoint(output_dir):
             print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB) -> {local_path}")
             return local_path, is_english_fallback
         except Exception as e:
-            print(f"  Failed to download {filename}: {e}")
+            print(f"  Failed to download {filename} from {repo_id}: {e}")
 
-    print("\n  ERROR: Could not download DeepPhonemizer checkpoint.")
-    print(f"  Manually place a checkpoint at: {local_path}")
-    print("  Or use --checkpoint /path/to/de_g2p.pt")
-    sys.exit(1)
+    print("\n  ERROR: Could not download any DeepPhonemizer checkpoint.")
+    print(f"  The German model (de_forward_en_ipa.pt) from as-ideas/DeepPhonemizer")
+    print(f"  is no longer publicly available. Neural G2P export will be skipped.")
+    print(f"  Kokoro and Matcha will fall back to espeak-ng for phonemization.")
+    return None, False
 
 
 def load_phonemizer(checkpoint_path):
@@ -703,6 +711,8 @@ def main():
     if checkpoint_path is None:
         dl_dir = os.path.join(ROOT_DIR, 'bin', 'models', 'g2p', 'checkpoint')
         checkpoint_path, is_english_fallback = download_checkpoint(dl_dir)
+        if checkpoint_path is None:
+            sys.exit(2)
     else:
         if not os.path.isfile(checkpoint_path):
             print(f"  ERROR: Checkpoint not found: {checkpoint_path}")

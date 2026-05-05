@@ -25,7 +25,7 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  12. Export Kokoro TTS models (CoreML duration + decoder)"
     echo "  13. Download NeuTTS Nano German model (GGUF + NeuCodec ONNX→CoreML)"
     echo "  14. Prepare NeuTTS reference voice (encode audio + phonemize text)"
-    echo "  15. Check Ollama installation (optional, for tomedo-crawl RAG embeddings)"
+    echo "  15. Install Ollama (via brew cask) + pull embeddinggemma:300m for tomedo-crawl RAG"
     echo "  16. Download Moshi German LoRA (chtugha/moshi-german-lora → bin/models/german_moshi_lora/)"
     echo "  17. Merge Moshi LoRA adapters into base model (produces moshiko-german-merged.safetensors)"
     echo ""
@@ -100,8 +100,10 @@ resolve_whispertalk_python() {
     local conda_base
     conda_base="$(conda info --base 2>/dev/null)"
     WHISPERTALK_PYTHON="$conda_base/envs/whispertalk/bin/python3"
+    WHISPERTALK_HF_CLI="$conda_base/envs/whispertalk/bin/huggingface-cli"
 }
 WHISPERTALK_PYTHON=""
+WHISPERTALK_HF_CLI=""
 
 check_macos() {
     step "Checking macOS / Apple Silicon"
@@ -198,12 +200,14 @@ setup_python_env() {
     "$WHISPERTALK_PYTHON" -m pip install --quiet --upgrade pip
     "$WHISPERTALK_PYTHON" -m pip install --quiet coremltools
     "$WHISPERTALK_PYTHON" -m pip install --quiet openai-whisper
-    "$WHISPERTALK_PYTHON" -m pip install --quiet huggingface-hub
+    "$WHISPERTALK_PYTHON" -m pip install --quiet "huggingface_hub[cli]"
     "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
     "$WHISPERTALK_PYTHON" -m pip install --quiet --no-deps ane-transformers
     "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
     "$WHISPERTALK_PYTHON" -m pip install --quiet deep-phonemizer || \
-        warn "deep-phonemizer install failed — neural G2P export (step 16) will not be available"
+        warn "deep-phonemizer install failed — neural G2P export will not be available"
+    "$WHISPERTALK_PYTHON" -m pip install --quiet matcha-tts || \
+        warn "matcha-tts install failed — Matcha-TTS export will not be available"
     info "Python environment ready"
 }
 
@@ -353,8 +357,8 @@ download_llama_model() {
     activate_conda_env whispertalk
 
     info "Downloading Llama-3.2-1B-Instruct-Q8_0.gguf (~1.2 GB)..."
-    if command -v huggingface-cli &> /dev/null; then
-        huggingface-cli download bartowski/Llama-3.2-1B-Instruct-GGUF \
+    if [ -x "$WHISPERTALK_HF_CLI" ]; then
+        "$WHISPERTALK_HF_CLI" download bartowski/Llama-3.2-1B-Instruct-GGUF \
             Llama-3.2-1B-Instruct-Q8_0.gguf \
             --local-dir bin/models/ \
             --local-dir-use-symlinks False
@@ -397,8 +401,8 @@ download_neutts_models() {
         info "NeuTTS GGUF backbone already exists"
     else
         info "Downloading NeuTTS Nano German Q4_0 GGUF (~185 MB)..."
-        if command -v huggingface-cli &> /dev/null; then
-            huggingface-cli download neuphonic/neutts-nano-german-q4-gguf \
+        if [ -x "$WHISPERTALK_HF_CLI" ]; then
+            "$WHISPERTALK_HF_CLI" download neuphonic/neutts-nano-german-q4-gguf \
                 neutts-nano-german-Q4_0.gguf \
                 --local-dir "$neutts_dir/" \
                 --local-dir-use-symlinks False
@@ -413,8 +417,8 @@ download_neutts_models() {
         info "NeuCodec ONNX decoder already exists"
     else
         info "Downloading NeuCodec ONNX decoder (~3.4 GB)..."
-        if command -v huggingface-cli &> /dev/null; then
-            huggingface-cli download neuphonic/neucodec-onnx-decoder \
+        if [ -x "$WHISPERTALK_HF_CLI" ]; then
+            "$WHISPERTALK_HF_CLI" download neuphonic/neucodec-onnx-decoder \
                 model.onnx \
                 --local-dir "$neutts_dir/" \
                 --local-dir-use-symlinks False
@@ -637,13 +641,16 @@ export_g2p_models() {
     fi
 
     info "Running Neural G2P export script..."
-    "$WHISPERTALK_PYTHON" scripts/export_g2p_model.py --output-dir "$g2p_dir" \
-        || warn "Neural G2P export failed — Kokoro and Matcha will fall back to espeak-ng"
+    local g2p_exit=0
+    "$WHISPERTALK_PYTHON" scripts/export_g2p_model.py --output-dir "$g2p_dir" || g2p_exit=$?
 
     if [ -d "${g2p_dir}/de_g2p.mlmodelc" ]; then
         info "Neural G2P model exported to ${g2p_dir}"
+    elif [ "$g2p_exit" -eq 2 ]; then
+        warn "Neural G2P model unavailable — as-ideas/DeepPhonemizer German checkpoint is no longer public."
+        warn "  Kokoro and Matcha will fall back to espeak-ng (works fine for German TTS)."
     else
-        warn "Neural G2P export may have failed. Run manually:"
+        warn "Neural G2P export failed (exit $g2p_exit). Run manually:"
         warn "  python3 scripts/export_g2p_model.py --output-dir ${g2p_dir}"
     fi
 }
@@ -678,9 +685,7 @@ export_matcha_models() {
     fi
 
     if ! "$WHISPERTALK_PYTHON" -c "import matcha" 2>/dev/null; then
-        warn "matcha-tts package not installed — skipping Matcha-TTS export"
-        warn "  Install: pip install matcha-tts"
-        warn "  Then export: python3 scripts/export_matcha_models.py --output-dir ${matcha_dir}"
+        warn "matcha-tts not importable after install — skipping Matcha-TTS export"
         return
     fi
 
@@ -802,12 +807,12 @@ download_moshi_lora() {
     mkdir -p "$lora_dir"
 
     info "Downloading chtugha/moshi-german-lora → $lora_dir/ ..."
-    if command -v huggingface-cli &> /dev/null; then
-        huggingface-cli download chtugha/moshi-german-lora \
+    if [ -x "$WHISPERTALK_HF_CLI" ]; then
+        "$WHISPERTALK_HF_CLI" download chtugha/moshi-german-lora \
             --local-dir "$lora_dir/" \
             --local-dir-use-symlinks False
     else
-        warn "huggingface-cli not found — trying wget for individual files..."
+        warn "huggingface-cli not available — trying wget for individual files..."
         local base_url="https://huggingface.co/chtugha/moshi-german-lora/resolve/main"
         for ckpt in 002000 002500 003000; do
             mkdir -p "$lora_dir/checkpoints/checkpoint_${ckpt}/consolidated"
@@ -899,28 +904,37 @@ print('[INFO] Backend config written to ' + sys.argv[4])
 }
 
 check_ollama() {
-    step "Checking Ollama (for tomedo-crawl RAG embeddings)"
-    if command -v ollama &> /dev/null; then
-        info "Ollama installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
-        local list_output
-        if list_output=$(ollama list 2>/dev/null); then
-            local has_embed
-            has_embed=$(echo "$list_output" | grep -i "embeddinggemma" || true)
-            if [ -n "$has_embed" ]; then
-                info "Embedding model 'embeddinggemma:300m' already available"
-            else
-                warn "Embedding model 'embeddinggemma:300m' not found."
-                warn "  tomedo-crawl needs it for RAG. Pull with: ollama pull embeddinggemma:300m"
-            fi
+    step "Installing Ollama (for tomedo-crawl RAG embeddings)"
+
+    if ! command -v ollama &> /dev/null; then
+        info "Installing Ollama via Homebrew..."
+        brew install --cask ollama
+    fi
+
+    if ! command -v ollama &> /dev/null; then
+        warn "Ollama install failed — tomedo-crawl RAG will not work."
+        warn "  Install manually from: https://ollama.com/download"
+        return
+    fi
+
+    info "Ollama: $(ollama --version 2>/dev/null || echo 'installed')"
+
+    if ! ollama list 2>/dev/null | grep -qi "embeddinggemma"; then
+        info "Starting Ollama and pulling embeddinggemma:300m..."
+        open -a Ollama 2>/dev/null || true
+        local retries=0
+        while [ $retries -lt 10 ] && ! ollama list &>/dev/null; do
+            sleep 3
+            retries=$((retries + 1))
+        done
+        if ollama list &>/dev/null; then
+            ollama pull embeddinggemma:300m || warn "Failed to pull embeddinggemma:300m — try manually: ollama pull embeddinggemma:300m"
         else
-            warn "Ollama is installed but not running. Start with: ollama serve"
-            warn "  Then pull the embedding model: ollama pull embeddinggemma:300m"
+            warn "Ollama server did not start in time."
+            warn "  Open Ollama.app, then run: ollama pull embeddinggemma:300m"
         fi
     else
-        warn "Ollama not installed. tomedo-crawl RAG service requires Ollama for embeddings."
-        warn "  Install from: https://ollama.com/download"
-        warn "  Then pull: ollama pull embeddinggemma:300m"
-        warn "  (This is optional — all other services work without Ollama)"
+        info "Embedding model 'embeddinggemma:300m' already available"
     fi
 }
 
