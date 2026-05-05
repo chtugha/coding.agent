@@ -24,19 +24,107 @@ Usage:
 Merge formula (from moshi/modules/lora.py LoRALinear.merge_weight):
     W_merged = W_base + scaling * (lora_B @ lora_A)
 
+Key mapping: The Moshi training code decomposes attention projections
+(in_projs.0..N, out_projs.0..N) but the base HF checkpoint stores them
+concatenated (in_proj_weight, out_proj.weight). This script handles the
+decomposition automatically during merge.
+
+Memory-efficient: Uses numpy + safetensors mmap to merge on machines with
+limited RAM (tested on 16GB with a 14.6GB bf16 base model). Processes one
+tensor at a time and writes the output incrementally.
+
 The merged safetensors file is saved with the same key names as the base model,
 so the Rust moshi-backend can load it directly via lm_model_file in config.json.
 """
 
 import argparse
+import gc
 import json
 import os
+import re
+import struct
 import sys
 from pathlib import Path
 
+import numpy as np
+
+
+DTYPE_MAP = {
+    "F16": ("float16", 2),
+    "BF16": ("bfloat16", 2),
+    "F32": ("float32", 4),
+    "F64": ("float64", 8),
+    "I8": ("int8", 1),
+    "I16": ("int16", 2),
+    "I32": ("int32", 4),
+    "I64": ("int64", 8),
+    "U8": ("uint8", 1),
+    "U16": ("uint16", 2),
+    "U32": ("uint32", 4),
+    "U64": ("uint64", 8),
+    "BOOL": ("bool", 1),
+}
+
+NP_TO_ST_DTYPE = {
+    "float16": "F16",
+    "bfloat16": "BF16",
+    "float32": "F32",
+    "float64": "F64",
+    "int8": "I8",
+    "int16": "I16",
+    "int32": "I32",
+    "int64": "I64",
+    "uint8": "U8",
+    "uint16": "U16",
+    "uint32": "U32",
+    "uint64": "U64",
+    "bool": "BOOL",
+}
+
+
+def parse_safetensors_header(path: Path) -> tuple:
+    with open(path, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header_json = f.read(header_len)
+    header = json.loads(header_json)
+    data_offset = 8 + header_len
+    return header, data_offset
+
+
+def load_tensor_numpy(path: Path, data_offset: int, meta: dict) -> np.ndarray:
+    dtype_str, elem_size = DTYPE_MAP[meta["dtype"]]
+    shape = meta["shape"]
+    begin, end = meta["data_offsets"]
+    n_bytes = end - begin
+
+    if dtype_str == "bfloat16":
+        raw = np.memmap(path, dtype=np.uint16, mode="r",
+                        offset=data_offset + begin, shape=(n_bytes // 2,))
+        return np.array(raw)
+
+    np_dtype = np.dtype(dtype_str)
+    n_elems = 1
+    for s in shape:
+        n_elems *= s
+    raw = np.memmap(path, dtype=np_dtype, mode="r",
+                    offset=data_offset + begin, shape=tuple(shape))
+    return np.array(raw)
+
+
+def bf16_to_f32(arr: np.ndarray) -> np.ndarray:
+    return np.frombuffer(
+        np.stack([np.zeros_like(arr), arr], axis=-1).tobytes(),
+        dtype=np.float32
+    ).reshape(arr.shape if len(arr.shape) > 0 else (arr.size,))
+
+
+def f32_to_bf16(arr: np.ndarray) -> np.ndarray:
+    return np.frombuffer(arr.tobytes(), dtype=np.uint16).reshape(
+        list(arr.shape) + [2]
+    )[..., 1].copy()
+
 
 def find_latest_checkpoint(run_dir: Path) -> Path:
-    """Return the consolidated dir of the numerically highest checkpoint in run_dir."""
     ckpt_root = run_dir / "checkpoints"
     if not ckpt_root.is_dir():
         print(f"[ERROR] No 'checkpoints' directory found under {run_dir}", file=sys.stderr)
@@ -75,7 +163,6 @@ def load_lora_config(lora_dir: Path) -> dict:
 
 
 def download_base_model(hf_repo: str, cache_dir: Path) -> Path:
-    """Download or locate the base model safetensors from HuggingFace."""
     try:
         from huggingface_hub import hf_hub_download, list_repo_files
     except ImportError:
@@ -118,116 +205,201 @@ def download_base_model(hf_repo: str, cache_dir: Path) -> Path:
     return Path(local_path)
 
 
-def load_base_tensors(base_path) -> dict:
-    """Load base model tensors. Accepts a single Path or list of shard Paths."""
-    try:
-        from safetensors import safe_open
-    except ImportError:
-        print("[ERROR] safetensors not installed. Run: pip install safetensors", file=sys.stderr)
-        sys.exit(1)
-
-    import torch
-    tensors = {}
-
-    paths = base_path if isinstance(base_path, list) else [base_path]
-    for p in paths:
-        print(f"[INFO] Loading base model shard: {p}")
-        with safe_open(str(p), framework="pt", device="cpu") as f:
-            for key in f.keys():
-                tensors[key] = f.get_tensor(key)
-
-    print(f"[INFO] Base model loaded — {len(tensors)} tensors")
-    return tensors
+def get_base_paths(base_path) -> list:
+    return base_path if isinstance(base_path, list) else [base_path]
 
 
-def load_lora_tensors(lora_dir: Path) -> dict:
-    """Load LoRA adapter tensors from lora.safetensors."""
-    try:
-        from safetensors import safe_open
-    except ImportError:
-        print("[ERROR] safetensors not installed. Run: pip install safetensors", file=sys.stderr)
-        sys.exit(1)
-
+def load_lora_numpy(lora_dir: Path) -> dict:
     lora_path = lora_dir / "lora.safetensors"
     if not lora_path.is_file():
         print(f"[ERROR] lora.safetensors not found at {lora_path}", file=sys.stderr)
         sys.exit(1)
 
-    import torch
+    header, data_offset = parse_safetensors_header(lora_path)
     tensors = {}
-    with safe_open(str(lora_path), framework="pt", device="cpu") as f:
-        for key in f.keys():
-            tensors[key] = f.get_tensor(key)
+    for key, meta in header.items():
+        if key == "__metadata__":
+            continue
+        arr = load_tensor_numpy(lora_path, data_offset, meta)
+        is_bf16 = meta["dtype"] == "BF16"
+        if is_bf16:
+            tensors[key] = bf16_to_f32(arr)
+        else:
+            dtype_str = DTYPE_MAP[meta["dtype"]][0]
+            if dtype_str == "float16":
+                tensors[key] = arr.astype(np.float32)
+            else:
+                tensors[key] = arr if dtype_str == "float32" else arr.astype(np.float32)
+        tensors[key] = tensors[key].reshape(meta["shape"])
 
     print(f"[INFO] LoRA adapter loaded — {len(tensors)} tensors ({len(tensors)//2} LoRA pairs)")
     return tensors
 
 
-def merge_weights(base: dict, lora: dict, rank: int, scaling: float) -> dict:
-    """
-    Merge LoRA adapters into base weights.
+def build_lora_mapping(lora: dict, base_keys: set) -> dict:
+    prefixes = {k[: -len(".lora_A.weight")] for k in lora if k.endswith(".lora_A.weight")}
 
-    For each LoRA pair (<prefix>.lora_A.weight, <prefix>.lora_B.weight):
-        merged = base[<prefix>.weight] + scaling * (lora_B @ lora_A)
-
-    Keys that have no corresponding LoRA pair are copied unchanged.
-    """
-    import torch
-
-    lora_a_keys = {k for k in lora if k.endswith(".lora_A.weight")}
-    lora_b_keys = {k for k in lora if k.endswith(".lora_B.weight")}
-    prefixes = {k[: -len(".lora_A.weight")] for k in lora_a_keys}
-
-    n_merged = 0
+    mapping = {}
+    n_direct = 0
+    n_decomposed = 0
     n_skipped = 0
-    merged = dict(base)
 
     for prefix in sorted(prefixes):
         a_key = prefix + ".lora_A.weight"
         b_key = prefix + ".lora_B.weight"
-
         if a_key not in lora or b_key not in lora:
             print(f"[WARN] Incomplete LoRA pair for prefix {prefix} — skipping", file=sys.stderr)
             n_skipped += 1
             continue
 
         base_key = prefix + ".weight"
-        if base_key not in base:
-            print(f"[WARN] Base key not found: {base_key} — skipping LoRA for {prefix}", file=sys.stderr)
-            n_skipped += 1
+        if base_key in base_keys:
+            mapping.setdefault(base_key, []).append((0, a_key, b_key))
+            n_direct += 1
             continue
 
-        lora_A = lora[a_key]
-        lora_B = lora[b_key]
-        W = base[base_key]
+        m = re.match(r'^(.*\.self_attn)\.(in_projs|out_projs)\.(\d+)$', prefix)
+        if m:
+            attn_prefix, proj_type, idx_str = m.group(1), m.group(2), int(m.group(3))
+            if proj_type == "in_projs":
+                concat_key = attn_prefix + ".in_proj_weight"
+            else:
+                concat_key = attn_prefix + ".out_proj.weight"
 
-        dtype = W.dtype
-        delta = scaling * (lora_B.to(torch.float32) @ lora_A.to(torch.float32))
-        merged[base_key] = (W.to(torch.float32) + delta).to(dtype)
-        n_merged += 1
+            if concat_key in base_keys:
+                mapping.setdefault(concat_key, []).append((idx_str, a_key, b_key))
+                n_decomposed += 1
+                continue
 
-    print(f"[INFO] Merged {n_merged} LoRA pairs ({n_skipped} skipped)")
-    return merged
+        print(f"[WARN] No base key for LoRA prefix {prefix} — skipping", file=sys.stderr)
+        n_skipped += 1
+
+    for k in mapping:
+        mapping[k].sort(key=lambda x: x[0])
+
+    print(f"[INFO] LoRA mapping: {n_direct} direct, {n_decomposed} decomposed (concat), {n_skipped} skipped")
+    return mapping
 
 
-def save_merged(tensors: dict, output_path: Path):
-    """Save merged tensors to a safetensors file."""
-    try:
-        from safetensors.torch import save_file
-    except ImportError:
-        print("[ERROR] safetensors not installed. Run: pip install safetensors", file=sys.stderr)
-        sys.exit(1)
+def merge_one_tensor(W_raw: np.ndarray, shape: list, dtype_name: str,
+                     entries: list, lora: dict, scaling: float) -> bytes:
+    is_bf16 = dtype_name == "BF16"
+    n_chunks = len(entries)
 
+    if is_bf16:
+        W_f32 = bf16_to_f32(W_raw).reshape(shape).copy()
+    elif DTYPE_MAP[dtype_name][0] == "float16":
+        W_f32 = W_raw.astype(np.float32).reshape(shape)
+    else:
+        W_f32 = W_raw.reshape(shape).astype(np.float32, copy=True)
+    del W_raw
+
+    if n_chunks == 1 and entries[0][0] == 0:
+        _, a_key, b_key = entries[0]
+        delta = scaling * (lora[b_key] @ lora[a_key])
+        W_f32 += delta
+        del delta
+    else:
+        chunk_size = W_f32.shape[0] // n_chunks
+        for idx, a_key, b_key in entries:
+            delta = scaling * (lora[b_key] @ lora[a_key])
+            start = idx * chunk_size
+            W_f32[start:start + chunk_size] += delta
+            del delta
+
+    if is_bf16:
+        result = f32_to_bf16(W_f32)
+    elif DTYPE_MAP[dtype_name][0] == "float16":
+        result = W_f32.astype(np.float16)
+    else:
+        result = W_f32
+    del W_f32
+
+    out = result.tobytes()
+    del result
+    return out
+
+
+def write_safetensors_streaming(output_path: Path, base_paths: list, lora: dict,
+                                 lora_mapping: dict, scaling: float):
+    base_headers = []
+    for p in base_paths:
+        hdr, off = parse_safetensors_header(p)
+        base_headers.append((p, hdr, off))
+
+    all_keys = []
+    key_source = {}
+    for p, hdr, off in base_headers:
+        for key, meta in hdr.items():
+            if key == "__metadata__":
+                continue
+            all_keys.append(key)
+            key_source[key] = (p, meta, off)
+
+    out_header = {}
+    current_offset = 0
+    n_merged = 0
+    n_copied = 0
+
+    for key in all_keys:
+        _, meta, _ = key_source[key]
+        begin, end = meta["data_offsets"]
+        n_bytes = end - begin
+        out_header[key] = {
+            "dtype": meta["dtype"],
+            "shape": meta["shape"],
+            "data_offsets": [current_offset, current_offset + n_bytes],
+        }
+        current_offset += n_bytes
+
+    header_json = json.dumps(out_header, separators=(",", ":")).encode("utf-8")
+    pad = (8 - len(header_json) % 8) % 8
+    header_json += b" " * pad
+
+    total_data = current_offset
+    print(f"[INFO] Writing {output_path} ({total_data / 1024 / 1024:.1f} MB data, {len(all_keys)} tensors)...")
+
+    temp_path = output_path.with_suffix(".tmp")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"[INFO] Saving merged model to {output_path} ...")
-    save_file(tensors, str(output_path))
+
+    with open(temp_path, "wb") as f:
+        f.write(struct.pack("<Q", len(header_json)))
+        f.write(header_json)
+
+        for ki, key in enumerate(all_keys):
+            p, meta, data_offset = key_source[key]
+            begin, end = meta["data_offsets"]
+            n_bytes = end - begin
+
+            if key not in lora_mapping:
+                with open(p, "rb") as src:
+                    src.seek(data_offset + begin)
+                    remaining = n_bytes
+                    while remaining > 0:
+                        chunk = src.read(min(remaining, 8 * 1024 * 1024))
+                        f.write(chunk)
+                        remaining -= len(chunk)
+                n_copied += 1
+            else:
+                W_raw = load_tensor_numpy(p, data_offset, meta)
+                merged_bytes = merge_one_tensor(
+                    W_raw, meta["shape"], meta["dtype"],
+                    lora_mapping[key], lora, scaling)
+                f.write(merged_bytes)
+                del W_raw, merged_bytes
+                n_merged += 1
+                gc.collect()
+
+            if (ki + 1) % 50 == 0 or ki == len(all_keys) - 1:
+                print(f"[INFO]   {ki+1}/{len(all_keys)} tensors written ({n_merged} merged, {n_copied} copied)")
+
+    temp_path.rename(output_path)
     size_mb = output_path.stat().st_size / 1024 / 1024
-    print(f"[INFO] Saved {len(tensors)} tensors ({size_mb:.1f} MB)")
+    print(f"[INFO] Saved {len(all_keys)} tensors ({size_mb:.1f} MB)")
 
 
 def generate_backend_config(output_path: Path, language: str, hf_repo: str, rank: int, scaling: float,
                              mimi_model_file: str, text_tokenizer_file: str):
-    """Generate a ready-to-use moshi-backend config.json next to the merged model."""
     config_path = output_path.parent / f"moshi-{language}-backend-config.json"
     config = {
         "instance_name": f"moshi-{language}-backend",
@@ -317,13 +489,6 @@ def main():
 
     args = parser.parse_args()
 
-    try:
-        import torch
-    except ImportError:
-        print("[ERROR] PyTorch not installed. Activate the whispertalk conda env:", file=sys.stderr)
-        print("        conda activate whispertalk && pip install torch safetensors huggingface_hub", file=sys.stderr)
-        sys.exit(1)
-
     lora_dir = args.lora_dir if args.lora_dir else find_latest_checkpoint(args.lora_run_dir)
 
     lora_cfg = load_lora_config(lora_dir)
@@ -341,12 +506,19 @@ def main():
             sys.exit(0)
 
     base_path = download_base_model(args.base_repo, args.cache_dir)
-    base_tensors = load_base_tensors(base_path)
-    lora_tensors = load_lora_tensors(lora_dir)
+    base_paths = get_base_paths(base_path)
 
-    merged_tensors = merge_weights(base_tensors, lora_tensors, rank=rank, scaling=scaling)
+    lora_tensors = load_lora_numpy(lora_dir)
 
-    save_merged(merged_tensors, output_path)
+    base_keys = set()
+    for p in base_paths:
+        hdr, _ = parse_safetensors_header(p)
+        base_keys.update(k for k in hdr if k != "__metadata__")
+    print(f"[INFO] Base model has {len(base_keys)} tensors")
+
+    lora_mapping = build_lora_mapping(lora_tensors, base_keys)
+
+    write_safetensors_streaming(output_path, base_paths, lora_tensors, lora_mapping, scaling=scaling)
 
     if not args.no_backend_config:
         generate_backend_config(
