@@ -186,11 +186,29 @@ def _build_vocabs_from_phonemizer(phonemizer):
 
     if hasattr(phonemizer, 'preprocessor'):
         prep = phonemizer.preprocessor
-        if hasattr(prep, 'text_tokenizer') and hasattr(prep.text_tokenizer, 'vocab'):
-            char_vocab = {str(k): int(v) for k, v in prep.text_tokenizer.vocab.items()}
-        if hasattr(prep, 'phoneme_tokenizer') and hasattr(prep.phoneme_tokenizer, 'vocab'):
-            inv = {int(v): str(k) for k, v in prep.phoneme_tokenizer.vocab.items()}
-            phoneme_vocab = [inv.get(i, '') for i in range(max(inv.keys()) + 1)]
+        if hasattr(prep, 'text_tokenizer'):
+            tok = prep.text_tokenizer
+            vocab_dict = None
+            for attr in ('vocab', 'token_to_idx', 'char_to_idx', '_token_to_idx'):
+                if hasattr(tok, attr):
+                    vocab_dict = getattr(tok, attr)
+                    if isinstance(vocab_dict, dict) and len(vocab_dict) > 0:
+                        break
+                    vocab_dict = None
+            if vocab_dict:
+                char_vocab = {str(k): int(v) for k, v in vocab_dict.items()}
+        if hasattr(prep, 'phoneme_tokenizer'):
+            ptok = prep.phoneme_tokenizer
+            pvocab_dict = None
+            for attr in ('vocab', 'token_to_idx', '_token_to_idx'):
+                if hasattr(ptok, attr):
+                    pvocab_dict = getattr(ptok, attr)
+                    if isinstance(pvocab_dict, dict) and len(pvocab_dict) > 0:
+                        break
+                    pvocab_dict = None
+            if pvocab_dict:
+                inv = {int(v): str(k) for k, v in pvocab_dict.items()}
+                phoneme_vocab = [inv.get(i, '') for i in range(max(inv.keys()) + 1)]
 
     if not char_vocab and hasattr(phonemizer, 'lang_phoneme_dict'):
         print("  Note: lang_phoneme_dict fallback found phoneme_vocab but not char_vocab.")
@@ -205,15 +223,37 @@ def _build_vocabs_from_checkpoint(ckpt):
     char_vocab = {}
     phoneme_vocab = []
 
+    if not isinstance(ckpt, dict):
+        return char_vocab, phoneme_vocab
+
     search_keys = ['config', 'text_tokenizer', 'phoneme_tokenizer', 'preprocessor']
     for key in search_keys:
-        if isinstance(ckpt, dict) and key in ckpt:
+        if key in ckpt:
             sub = ckpt[key]
             if isinstance(sub, dict):
-                if 'vocab' in sub:
-                    char_vocab = {str(k): int(v) for k, v in sub['vocab'].items()}
-                if 'phonemes' in sub:
-                    phoneme_vocab = list(sub['phonemes'])
+                for vkey in ('vocab', 'token_to_idx', 'char_to_idx'):
+                    if not char_vocab and vkey in sub:
+                        char_vocab = {str(k): int(v) for k, v in sub[vkey].items()}
+                for pkey in ('phonemes', 'phoneme_to_idx'):
+                    if not phoneme_vocab and pkey in sub:
+                        val = sub[pkey]
+                        if isinstance(val, dict):
+                            inv = {int(v): str(k) for k, v in val.items()}
+                            phoneme_vocab = [inv.get(i, '') for i in range(max(inv.keys()) + 1)]
+                        else:
+                            phoneme_vocab = list(val)
+
+    if not char_vocab and 'preprocessor' in ckpt:
+        prep = ckpt['preprocessor']
+        if isinstance(prep, dict):
+            for sub_key in ('text_tokenizer', 'char_tokenizer'):
+                if sub_key in prep and isinstance(prep[sub_key], dict):
+                    for vkey in ('vocab', 'token_to_idx', 'char_to_idx'):
+                        if vkey in prep[sub_key]:
+                            char_vocab = {str(k): int(v) for k, v in prep[sub_key][vkey].items()}
+                            break
+                if char_vocab:
+                    break
 
     return char_vocab, phoneme_vocab
 

@@ -206,8 +206,6 @@ setup_python_env() {
     "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
     "$WHISPERTALK_PYTHON" -m pip install --quiet deep-phonemizer || \
         warn "deep-phonemizer install failed — neural G2P export will not be available"
-    "$WHISPERTALK_PYTHON" -m pip install --quiet matcha-tts || \
-        warn "matcha-tts install failed — Matcha-TTS export will not be available"
     info "Python environment ready"
 }
 
@@ -681,11 +679,6 @@ export_matcha_models() {
     local matcha_dir="bin/models/matcha-german/coreml"
     if [ -d "${matcha_dir}/matcha_encoder.mlmodelc" ]; then
         info "Matcha-TTS CoreML models already exist at ${matcha_dir}/"
-        return
-    fi
-
-    if ! "$WHISPERTALK_PYTHON" -c "import matcha" 2>/dev/null; then
-        warn "matcha-tts not importable after install — skipping Matcha-TTS export"
         return
     fi
 
