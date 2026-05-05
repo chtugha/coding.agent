@@ -204,8 +204,6 @@ setup_python_env() {
     "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
     "$WHISPERTALK_PYTHON" -m pip install --quiet --no-deps ane-transformers
     "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
-    "$WHISPERTALK_PYTHON" -m pip install --quiet deep-phonemizer || \
-        warn "deep-phonemizer install failed — neural G2P export will not be available"
     info "Python environment ready"
 }
 
@@ -632,12 +630,6 @@ export_g2p_models() {
         return
     fi
 
-    if ! "$WHISPERTALK_PYTHON" -c "import dp" 2>/dev/null; then
-        warn "deep-phonemizer not installed — skipping Neural G2P export"
-        warn "  To export manually: python3 scripts/export_g2p_model.py --output-dir ${g2p_dir}"
-        return
-    fi
-
     info "Running Neural G2P export script..."
     local g2p_exit=0
     "$WHISPERTALK_PYTHON" scripts/export_g2p_model.py --output-dir "$g2p_dir" || g2p_exit=$?
@@ -645,7 +637,7 @@ export_g2p_models() {
     if [ -d "${g2p_dir}/de_g2p.mlmodelc" ]; then
         info "Neural G2P model exported to ${g2p_dir}"
     elif [ "$g2p_exit" -eq 2 ]; then
-        warn "Neural G2P model unavailable — as-ideas/DeepPhonemizer German checkpoint is no longer public."
+        warn "Neural G2P model unavailable — all download sources failed."
         warn "  Kokoro and Matcha will fall back to espeak-ng (works fine for German TTS)."
     else
         warn "Neural G2P export failed (exit $g2p_exit). Run manually:"

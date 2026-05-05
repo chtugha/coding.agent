@@ -47,6 +47,10 @@ HF_MODEL_FILENAME = 'en_us_cmudict_ipa_forward.pt'
 HF_MODEL_FILENAME_MIRROR = 'en_us_cmudict_ipa.pt'
 HF_DE_MODEL_FILENAME = 'de_forward_en_ipa.pt'
 
+S3_BASE_URL = 'https://public-asai-dl-models.s3.eu-central-1.amazonaws.com/DeepPhonemizer'
+S3_LATIN_IPA = f'{S3_BASE_URL}/latin_ipa_forward.pt'
+S3_EN_US_IPA = f'{S3_BASE_URL}/en_us_cmudict_ipa_forward.pt'
+
 MAX_CHAR_LEN = 128
 
 _FORWARD_STYLES = [
@@ -104,6 +108,14 @@ def _ensure_huggingface_hub():
         return huggingface_hub
 
 
+def _download_url(url, dest):
+    import urllib.request
+    print(f"  Downloading {url} ...")
+    urllib.request.urlretrieve(url, dest)
+    size_mb = os.path.getsize(dest) / 1e6
+    print(f"  OK ({size_mb:.1f} MB) -> {dest}")
+
+
 def download_checkpoint(output_dir):
     print("\n=== Downloading DeepPhonemizer German checkpoint ===")
     os.makedirs(output_dir, exist_ok=True)
@@ -113,37 +125,36 @@ def download_checkpoint(output_dir):
         print(f"  Already exists: {local_path}")
         return local_path, False
 
+    print("  Trying latin_ipa_forward.pt from AWS S3 (supports de, en_us, en_uk, fr, es)...")
+    try:
+        _download_url(S3_LATIN_IPA, local_path)
+        print("  Multilingual checkpoint (incl. German) downloaded successfully.")
+        return local_path, False
+    except Exception as e:
+        print(f"  S3 download failed: {e}")
+
     hf = _ensure_huggingface_hub()
     hf_token = os.environ.get('HF_TOKEN', '')
-    if not hf_token:
-        print("  HF_TOKEN not set. Attempting download without authentication.")
-        print("  If download fails, set HF_TOKEN or use --checkpoint to specify local path.")
     token = hf_token if hf_token else None
 
-    candidates = [
+    hf_candidates = [
         (HF_REPO_ID, HF_DE_MODEL_FILENAME, False),
-        (HF_REPO_ID, HF_MODEL_FILENAME, True),
         (HF_REPO_ID_MIRROR, HF_MODEL_FILENAME_MIRROR, True),
     ]
-    for repo_id, filename, is_english_fallback in candidates:
-        print(f"  Downloading {filename} from {repo_id}...")
+    for repo_id, filename, is_english_fallback in hf_candidates:
+        print(f"  Trying {filename} from {repo_id}...")
         try:
             downloaded = hf.hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
-                token=token,
+                repo_id=repo_id, filename=filename, token=token,
             )
             shutil.copy2(downloaded, local_path)
             if is_english_fallback:
                 print()
                 print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                print("  WARNING: The German checkpoint (de_forward_en_ipa.pt) could not")
-                print("  be downloaded (as-ideas/DeepPhonemizer repo is no longer public).")
-                print("  Falling back to the ENGLISH model instead.")
+                print("  WARNING: Falling back to ENGLISH-only model.")
                 print("  The exported de_g2p.mlmodelc will phonemize text as ENGLISH,")
-                print("  not German. German compound words and medical terms will produce")
-                print("  incorrect IPA output. Use --checkpoint with a German checkpoint")
-                print("  for correct German G2P.")
+                print("  not German. Use --checkpoint with a German checkpoint for")
+                print("  correct German G2P.")
                 print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
                 print()
             print(f"  OK ({os.path.getsize(local_path) / 1e6:.1f} MB) -> {local_path}")
@@ -151,9 +162,21 @@ def download_checkpoint(output_dir):
         except Exception as e:
             print(f"  Failed to download {filename} from {repo_id}: {e}")
 
+    print("  Trying en_us_cmudict_ipa_forward.pt from AWS S3 (English-only fallback)...")
+    try:
+        _download_url(S3_EN_US_IPA, local_path)
+        print()
+        print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print("  WARNING: Falling back to ENGLISH-only model from S3.")
+        print("  The exported de_g2p.mlmodelc will phonemize text as ENGLISH,")
+        print("  not German.")
+        print("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print()
+        return local_path, True
+    except Exception as e:
+        print(f"  S3 English fallback failed: {e}")
+
     print("\n  ERROR: Could not download any DeepPhonemizer checkpoint.")
-    print(f"  The German model (de_forward_en_ipa.pt) from as-ideas/DeepPhonemizer")
-    print(f"  is no longer publicly available. Neural G2P export will be skipped.")
     print(f"  Kokoro and Matcha will fall back to espeak-ng for phonemization.")
     return None, False
 
