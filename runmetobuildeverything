@@ -43,6 +43,7 @@ FORCE_REBUILD=0
 SKIP_DEPS=0
 BUILD_TESTS=ON
 
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --force)      FORCE_REBUILD=1; shift ;;
@@ -334,6 +335,11 @@ build_moshi_backend() {
         return
     fi
 
+    if [ ! -d "$moshi_dir/rust" ]; then
+        warn "moshi-rust/rust/ directory not found — skipping moshi-backend build"
+        return
+    fi
+
     info "Building moshi-backend (cargo build --release, Metal)..."
     cd "$moshi_dir/rust"
     cargo build --features metal --bin moshi-backend --release 2>&1 \
@@ -341,6 +347,7 @@ build_moshi_backend() {
 
     local built="$moshi_dir/rust/target/release/moshi-backend"
     if [ -f "$built" ]; then
+        mkdir -p "$(dirname "$bin_out")"
         cp "$built" "$bin_out"
         info "moshi-backend built: $bin_out ($(du -h "$bin_out" | cut -f1))"
     else
@@ -440,7 +447,7 @@ echo -e "${BLUE}===============================================${NC}"
 echo -e "${BLUE} Prodigy - Build Everything${NC}"
 echo -e "${BLUE}===============================================${NC}"
 
-self_update "$@"
+self_update "${ORIG_ARGS[@]}"
 
 preflight_check
 
