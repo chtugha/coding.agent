@@ -100,7 +100,7 @@ resolve_whispertalk_python() {
     local conda_base
     conda_base="$(conda info --base 2>/dev/null)"
     WHISPERTALK_PYTHON="$conda_base/envs/whispertalk/bin/python3"
-    WHISPERTALK_HF_CLI="$conda_base/envs/whispertalk/bin/huggingface-cli"
+    WHISPERTALK_HF_CLI="$conda_base/envs/whispertalk/bin/hf"
 }
 WHISPERTALK_PYTHON=""
 WHISPERTALK_HF_CLI=""
@@ -1006,7 +1006,7 @@ download_moshi_lora() {
             --local-dir "$lora_dir/" \
             --local-dir-use-symlinks False
     else
-        warn "huggingface-cli not available — trying wget for individual files..."
+        warn "hf CLI not available — trying wget for individual files..."
         local base_url="https://huggingface.co/chtugha/moshi-german-lora/resolve/main"
         for ckpt in 002000 002500 003000; do
             mkdir -p "$lora_dir/checkpoints/checkpoint_${ckpt}/consolidated"
@@ -1023,7 +1023,7 @@ download_moshi_lora() {
         info "Moshi German LoRA downloaded"
     else
         warn "Moshi German LoRA download may have failed — check $lora_dir"
-        warn "  Manual: huggingface-cli download chtugha/moshi-german-lora --local-dir $lora_dir/"
+        warn "  Manual: hf download chtugha/moshi-german-lora --local-dir $lora_dir/"
     fi
 }
 
