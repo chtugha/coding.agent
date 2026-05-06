@@ -120,12 +120,17 @@ check_and_install_homebrew() {
     step "Checking Homebrew"
     if ! command -v brew &> /dev/null; then
         warn "Homebrew not found. Installing..."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
         eval "$(/opt/homebrew/bin/brew shellenv)"
-        echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zshrc
+        grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zprofile 2>/dev/null || \
+            echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
         info "Homebrew installed"
     else
         info "Homebrew: $(brew --version | head -1)"
+    fi
+    if [ -f ~/.zshrc ] && grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zshrc 2>/dev/null; then
+        sed -i '' '\|^eval "\$(/opt/homebrew/bin/brew shellenv)"$|d' ~/.zshrc
+        info "Removed stale brew shellenv entry from ~/.zshrc"
     fi
 }
 
@@ -157,6 +162,16 @@ install_system_deps() {
         warn "tclsh not found in PATH — installing tcl-tk via Homebrew (needed for SQLCipher amalgamation build)"
         brew install tcl-tk
     fi
+
+    export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"
+    grep -qxF 'export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"' ~/.zprofile 2>/dev/null || \
+        echo 'export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"' >> ~/.zprofile
+}
+
+accept_conda_tos() {
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
+    conda tos accept 2>/dev/null || true
 }
 
 check_and_install_python() {
@@ -174,6 +189,7 @@ check_and_install_python() {
         info "Miniconda: $(conda --version)"
     fi
     eval "$(conda shell.zsh hook)" 2>/dev/null || true
+    accept_conda_tos
 }
 
 setup_python_env() {
