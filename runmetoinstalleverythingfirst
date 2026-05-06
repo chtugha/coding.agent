@@ -503,12 +503,12 @@ generate_whisper_coreml_encoder() {
         fi
 
         info "Converting ${model_name} to CoreML (this may take 5-10 minutes)..."
-        if ! "$WHISPER_COREML_PYTHON" models/convert-whisper-to-coreml.py \
+        if ! "$WHISPER_COREML_PYTHON" -W ignore models/convert-whisper-to-coreml.py \
             --model "${model_name}" \
             --encoder-only True \
             --optimize-ane True; then
             warn "Full-precision CoreML conversion failed (possibly OOM) — retrying with quantization..."
-            if ! "$WHISPER_COREML_PYTHON" models/convert-whisper-to-coreml.py \
+            if ! "$WHISPER_COREML_PYTHON" -W ignore models/convert-whisper-to-coreml.py \
                 --model "${model_name}" \
                 --encoder-only True \
                 --quantize True \
