@@ -171,11 +171,16 @@ check_and_install_xcode_clt() {
 XCODE_INSTALL_PENDING=false
 XCODE_TIMED_OUT=false
 
+activate_xcode() {
+    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+    sudo xcodebuild -license accept 2>/dev/null || true
+    sudo xcodebuild -runFirstLaunch 2>/dev/null || true
+}
+
 check_and_install_xcode() {
     step "Checking Xcode"
     if [ -d "/Applications/Xcode.app" ]; then
-        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
-        sudo xcodebuild -license accept 2>/dev/null || true
+        activate_xcode
         info "Xcode.app active: $(xcodebuild -version 2>/dev/null | head -1 || echo 'found')"
         return
     fi
@@ -199,8 +204,7 @@ wait_for_xcode_if_needed() {
     if [ -d "/Applications/Xcode.app" ]; then
         XCODE_INSTALL_PENDING=false
         info "Xcode.app installed — activating..."
-        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
-        sudo xcodebuild -license accept 2>/dev/null || true
+        activate_xcode
         info "Xcode ready: $(xcodebuild -version 2>/dev/null | head -1 || echo 'activated')"
         return
     fi
@@ -226,8 +230,7 @@ wait_for_xcode_if_needed() {
     echo ""
     XCODE_INSTALL_PENDING=false
     info "Xcode.app detected — activating..."
-    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
-    sudo xcodebuild -license accept 2>/dev/null || true
+    activate_xcode
     info "Xcode ready: $(xcodebuild -version 2>/dev/null | head -1 || echo 'activated')"
 }
 
