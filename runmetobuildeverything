@@ -67,8 +67,7 @@ if isinstance(items, list):
         [ -z "$f" ] && continue
         local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${sha}/${subpath}/${f}"
         local dest="$local_dir/$f"
-        if [ ! -f "$dest" ]; then
-            echo -e "${BLUE}[INFO]${NC} Syncing missing file: ${subpath}/${f}"
+        if [ ! -f "$dest" ] || [ "${FORCE_SYNC:-0}" = "1" ]; then
             curl -fsSL --max-time 60 "$raw_url" -o "$dest" 2>/dev/null || true
         fi
     done <<< "$file_list"
@@ -98,9 +97,8 @@ for item in items:
     while IFS= read -r name; do
         [ -z "$name" ] && continue
         [[ "$skip_dirs" == *"|${name}|"* ]] && continue
-        if [ ! -f "$SCRIPT_DIR/$name" ]; then
+        if [ ! -f "$SCRIPT_DIR/$name" ] || [ "${FORCE_SYNC:-0}" = "1" ]; then
             local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${sha}/${name}"
-            echo -e "${BLUE}[INFO]${NC} Syncing missing source file: $name"
             curl -fsSL --max-time 60 "$raw_url" -o "$SCRIPT_DIR/$name" 2>/dev/null || true
         fi
     done <<< "$file_names"
@@ -145,10 +143,12 @@ self_update() {
 
     if [ "$local_sha" != "$latest_sha" ]; then
         echo -e "${YELLOW}[INFO]${NC} New version available — updating to ${latest_sha:0:7}..."
+        FORCE_SYNC=1
     fi
 
     sync_scripts_dir "$latest_sha"
     sync_source_files "$latest_sha"
+    FORCE_SYNC=0
 
     local tmp_script
     tmp_script="$(mktemp /tmp/prodigy-build-update.XXXXXX)" || {
