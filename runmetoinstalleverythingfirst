@@ -263,6 +263,31 @@ setup_python_env() {
     info "Python environment ready"
 }
 
+setup_whisper_coreml_env() {
+    step "Setting up whisper_coreml environment (ANE-optimised CoreML export)"
+    eval "$(conda shell.zsh hook)" 2>/dev/null || eval "$(conda shell.bash hook)" 2>/dev/null || true
+
+    if conda env list | grep -q "^whisper_coreml "; then
+        info "whisper_coreml environment already exists"
+        return 0
+    fi
+
+    info "Creating whisper_coreml conda environment (Python 3.10, torch 1.11)..."
+    conda create -n whisper_coreml python=3.10 -y
+
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null)"
+    local COREML_PYTHON="$conda_base/envs/whisper_coreml/bin/python3"
+
+    "$COREML_PYTHON" -m pip install --quiet --upgrade pip
+    "$COREML_PYTHON" -m pip install --quiet "torch==1.11.0" "torchvision==0.12.0"
+    "$COREML_PYTHON" -m pip install --quiet "protobuf>=3.1.0,<=3.20.1"
+    "$COREML_PYTHON" -m pip install --quiet "ane-transformers==0.1.3"
+    "$COREML_PYTHON" -m pip install --quiet "coremltools==6.3.0"
+    "$COREML_PYTHON" -m pip install --quiet "openai-whisper"
+    info "whisper_coreml environment ready"
+}
+
 clone_or_update_repo() {
     local name="$1"
     local url="$2"
@@ -346,7 +371,9 @@ generate_whisper_coreml_encoder() {
         return
     fi
 
-    activate_conda_env whispertalk
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null)"
+    local COREML_PYTHON="$conda_base/envs/whisper_coreml/bin/python3"
 
     (
         cd whisper-cpp
@@ -357,14 +384,16 @@ generate_whisper_coreml_encoder() {
         fi
 
         info "Converting ${model_name} to CoreML (this may take 5-10 minutes)..."
-        if ! "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
+        if ! "$COREML_PYTHON" models/convert-whisper-to-coreml.py \
             --model "${model_name}" \
-            --encoder-only True; then
+            --encoder-only True \
+            --optimize-ane True; then
             warn "Full-precision CoreML conversion failed (possibly OOM) — retrying with quantization..."
-            if ! "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
+            if ! "$COREML_PYTHON" models/convert-whisper-to-coreml.py \
                 --model "${model_name}" \
                 --encoder-only True \
-                --quantize True; then
+                --quantize True \
+                --optimize-ane True; then
                 warn "CoreML conversion for ${model_name} failed even with quantization — try closing other apps and re-running"
                 exit 1
             fi
@@ -1074,6 +1103,7 @@ main() {
     install_system_deps
     check_and_install_python
     setup_python_env
+    setup_whisper_coreml_env
     resolve_whispertalk_python
 
     setup_whisper_cpp
