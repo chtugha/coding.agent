@@ -623,7 +623,7 @@ download_neutts_models() {
         if [ -x "$WHISPERTALK_HF_CLI" ]; then
             "$WHISPERTALK_HF_CLI" download neuphonic/neucodec-onnx-decoder \
                 model.onnx \
-                --local-dir "$neutts_dir/" \
+                --local-dir "$neutts_dir/"
             mv "$neutts_dir/model.onnx" "$neutts_dir/neucodec_decoder.onnx" 2>/dev/null || true
         else
             curl -L -o "$neutts_dir/neucodec_decoder.onnx" \
