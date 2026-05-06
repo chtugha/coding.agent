@@ -854,6 +854,15 @@ private:
                 return true;
             };
 
+            if (name == "INBOUND_AUDIO_PROCESSOR" && args_override.empty()) {
+                std::string moshi_backends = get_setting("moshi_backends", "[]");
+                bool has_moshi = moshi_backends.find('{') != std::string::npos;
+                if (has_moshi && use_args.find("--moshi-mode") == std::string::npos
+                              && use_args.find("-M") == std::string::npos) {
+                    use_args += " --moshi-mode";
+                }
+            }
+
             if (name == "WHISPER_SERVICE" && args_override.empty()) {
                 std::string lang = get_setting("pipeline_language", "");
                 if (!lang.empty()) {
@@ -932,7 +941,8 @@ private:
                     use_args += " --g2p " + g2p;
             }
 
-            if (name == "MOSHI_SERVICE" && args_override.empty()) {
+            if (name == "MOSHI_SERVICE" && args_override.empty()
+                && use_args.find("--backend-config") == std::string::npos) {
                 std::string backends_json = get_setting("moshi_backends", "[]");
                 std::string default_lang  = get_setting("moshi_default_language", "en");
                 size_t pos = 0;
