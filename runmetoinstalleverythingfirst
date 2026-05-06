@@ -316,6 +316,8 @@ install_rust() {
     rustup_tmp=$(mktemp /tmp/rustup-init.XXXXXX.sh)
     _prior=$(trap -p EXIT 2>/dev/null)
     if [[ -n "$_prior" ]]; then
+        # sed strips the 'trap -- ' prefix and ' EXIT' suffix from trap -p output.
+        # Assumes the body contains no literal single quotes (safe for all traps in this script).
         _prior_body=$(printf '%s' "$_prior" | sed "s/^trap -- '//;s/' EXIT\$//")
         trap "rm -f '$rustup_tmp'; $_prior_body" EXIT
     else
