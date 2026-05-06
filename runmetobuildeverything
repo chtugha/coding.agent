@@ -39,6 +39,27 @@ sync_scripts_dir() {
     done <<< "$file_list"
 }
 
+_sync_gh_dir() {
+    local sha="$1" subpath="$2" local_dir="$3"
+    mkdir -p "$local_dir"
+    local contents_url="https://api.github.com/repos/chtugha/coding.agent/contents/${subpath}?ref=${sha}"
+    local file_list
+    file_list=$(curl -fsSL --max-time 15 "$contents_url" 2>/dev/null \
+        | grep '"name"' \
+        | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    [ -z "$file_list" ] && return 0
+    local f
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${sha}/${subpath}/${f}"
+        local dest="$local_dir/$f"
+        if [ ! -f "$dest" ]; then
+            echo -e "${BLUE}[INFO]${NC} Syncing missing file: ${subpath}/${f}"
+            curl -fsSL --max-time 60 "$raw_url" -o "$dest" 2>/dev/null || true
+        fi
+    done <<< "$file_list"
+}
+
 sync_source_files() {
     local sha="$1"
     local skip_dirs="|bin|whisper-cpp|llama-cpp|third_party|moshi-rust|scripts|.git|.zenflow|"
@@ -65,6 +86,11 @@ sync_source_files() {
             curl -fsSL --max-time 60 "$raw_url" -o "$SCRIPT_DIR/$name" 2>/dev/null || true
         fi
     done <<< "$names"
+
+    _sync_gh_dir "$sha" "tests" "$SCRIPT_DIR/tests"
+    _sync_gh_dir "$sha" "libpiper" "$SCRIPT_DIR/libpiper"
+    _sync_gh_dir "$sha" "libpiper/include" "$SCRIPT_DIR/libpiper/include"
+    _sync_gh_dir "$sha" "libpiper/src" "$SCRIPT_DIR/libpiper/src"
 }
 
 self_update() {
@@ -436,8 +462,7 @@ build_moshi_backend() {
 
     info "Building moshi-backend (cargo build --release, Metal)..."
     cd "$moshi_dir/rust"
-    cargo build --features metal --bin moshi-backend --release 2>&1 \
-        | tail -5
+    cargo build --features metal --bin moshi-backend --release 2>&1
 
     local built="$moshi_dir/rust/target/release/moshi-backend"
     if [ -f "$built" ]; then
