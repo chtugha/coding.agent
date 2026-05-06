@@ -314,9 +314,11 @@ def _extract_torch_model(phonemizer_or_ckpt):
             return candidate
 
     if hasattr(phonemizer_or_ckpt, 'predictor'):
-        candidate = phonemizer_or_ckpt.predictor
-        if _is_nn_module(candidate):
-            return candidate
+        pred = phonemizer_or_ckpt.predictor
+        if _is_nn_module(pred):
+            return pred
+        if hasattr(pred, 'model') and _is_nn_module(pred.model):
+            return pred.model
 
     if isinstance(phonemizer_or_ckpt, dict):
         if 'model' in phonemizer_or_ckpt:
@@ -480,13 +482,17 @@ def export_g2p_model(checkpoint_path, output_dir, use_script=False):
         print(f"  Could not extract inner model: {e}")
         print("  Attempting attribute scan...")
         torch_model = None
-        for attr in ['model', 'net', 'encoder', 'transformer']:
+        candidates = []
+        for attr in ['model', 'net', 'encoder', 'transformer', 'predictor']:
             if hasattr(phonemizer_obj, attr):
                 candidate = getattr(phonemizer_obj, attr)
                 if hasattr(candidate, 'parameters'):
-                    print(f"  Found model at .{attr}")
-                    torch_model = candidate
-                    break
+                    candidates.append((attr, candidate))
+                elif attr == 'predictor' and hasattr(candidate, 'model') and hasattr(candidate.model, 'parameters'):
+                    candidates.append((f'predictor.model', candidate.model))
+        if candidates:
+            path, torch_model = candidates[0]
+            print(f"  Found model at .{path}")
         if torch_model is None:
             raise RuntimeError("Cannot locate inner PyTorch model for CoreML export.")
 
