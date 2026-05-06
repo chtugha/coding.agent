@@ -6,6 +6,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
 [ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+[ -d "${HOME}/.cargo/bin" ] && export PATH="${HOME}/.cargo/bin:$PATH"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,23 +19,82 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 step()  { echo -e "\n${BLUE}==============================${NC}"; echo -e "${BLUE} $1${NC}"; echo -e "${BLUE}==============================${NC}"; }
 
-self_update() {
-    local top_level
-    top_level="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || return 0
-    local branch
-    branch="$(git -C "$top_level" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-    if [ "$branch" != "main" ]; then
+sync_scripts_dir() {
+    local sha="$1"
+    local scripts_dir="$SCRIPT_DIR/scripts"
+    mkdir -p "$scripts_dir"
+    local contents_url="https://api.github.com/repos/chtugha/coding.agent/contents/scripts?ref=${sha}"
+    local file_list
+    file_list=$(curl -fsSL --max-time 15 "$contents_url" 2>/dev/null \
+        | grep '"name"' \
+        | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    if [ -z "$file_list" ]; then
         return 0
     fi
-    git -C "$top_level" fetch --quiet origin main 2>/dev/null || return 0
-    local behind
-    behind="$(git -C "$top_level" rev-list HEAD..origin/main --count 2>/dev/null || echo 0)"
-    if [ "$behind" -gt 0 ]; then
-        echo -e "${YELLOW}[INFO]${NC} Repo is $behind commit(s) behind origin/main — pulling latest scripts..."
-        git -C "$top_level" merge --ff-only origin/main
-        echo -e "${GREEN}[INFO]${NC} Self-update complete. Re-exec with updated scripts..."
-        exec "$SCRIPT_DIR/$(basename "$0")" "$@"
+    local f
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${sha}/scripts/${f}"
+        curl -fsSL --max-time 60 "$raw_url" -o "$scripts_dir/$f" 2>/dev/null || true
+    done <<< "$file_list"
+}
+
+self_update() {
+    echo -e "${BLUE}[INFO]${NC} Checking for updates..."
+    local script_name
+    script_name="$(basename "$0")"
+    local script_path="$SCRIPT_DIR/$script_name"
+    local version_file="$SCRIPT_DIR/.build_version"
+
+    local head_api_url="https://api.github.com/repos/chtugha/coding.agent/commits/main"
+    local latest_sha
+    latest_sha=$(curl -fsSL --max-time 15 "$head_api_url" 2>/dev/null \
+        | grep -m1 '"sha"' \
+        | sed 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+
+    if [ -z "$latest_sha" ]; then
+        echo -e "${YELLOW}[INFO]${NC} Could not reach GitHub — skipping update check"
+        return 0
     fi
+
+    local local_sha=""
+    [ -f "$version_file" ] && local_sha=$(cat "$version_file" | tr -d '[:space:]')
+
+    if [ "$local_sha" = "$latest_sha" ]; then
+        echo -e "${GREEN}[INFO]${NC} Already up to date (${latest_sha:0:7})"
+        return 0
+    fi
+
+    echo -e "${YELLOW}[INFO]${NC} New version available — updating to ${latest_sha:0:7}..."
+
+    sync_scripts_dir "$latest_sha"
+
+    local tmp_script
+    tmp_script="$(mktemp /tmp/prodigy-build-update.XXXXXX)" || {
+        echo -e "${YELLOW}[INFO]${NC} Could not create temp file — skipping update"
+        echo "$latest_sha" > "$version_file" 2>/dev/null || true
+        return 0
+    }
+    local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${latest_sha}/${script_name}"
+    if ! curl -fsSL --max-time 30 "$raw_url" -o "$tmp_script" 2>/dev/null; then
+        echo -e "${YELLOW}[WARN]${NC} Script download failed — re-run to retry the update"
+        rm -f "$tmp_script"
+        return 0
+    fi
+
+    if diff -q "$tmp_script" "$script_path" &>/dev/null; then
+        rm -f "$tmp_script"
+        echo "$latest_sha" > "$version_file" 2>/dev/null || true
+        echo -e "${GREEN}[INFO]${NC} Scripts synced (${latest_sha:0:7})"
+        return 0
+    fi
+
+    chmod +x "$tmp_script"
+    cp "$tmp_script" "$script_path"
+    rm -f "$tmp_script"
+    echo "$latest_sha" > "$version_file" 2>/dev/null || true
+    echo -e "${GREEN}[INFO]${NC} Update applied (${latest_sha:0:7}). Re-launching..."
+    exec "$script_path" "$@"
 }
 
 NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
