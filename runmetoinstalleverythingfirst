@@ -153,16 +153,15 @@ check_and_install_xcode_clt() {
     fi
     info "Installing Xcode Command Line Tools..."
     touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-    local clt_label
-    clt_label=$(softwareupdate -l 2>/dev/null | awk '/\* Label:.*Command Line/{gsub(/\* Label: /,""); print; exit}')
+    local su_output clt_label
+    su_output="$(softwareupdate -l 2>/dev/null)"
+    clt_label=$(echo "$su_output" | awk '/\* Label:.*Command Line/{gsub(/\* Label: /,""); print; exit}')
     if [ -z "$clt_label" ]; then
-        clt_label=$(softwareupdate -l 2>/dev/null | grep -B1 "Command Line Tools" | awk -F"*" '/\*/{gsub(/^ /,"",$2); print $2}' | head -1)
+        clt_label=$(echo "$su_output" | grep -B1 "Command Line Tools" | awk -F"*" '/\*/{gsub(/^ /,"",$2); print $2}' | head -1)
     fi
     rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
     if [ -z "$clt_label" ]; then
-        warn "Could not find Xcode Command Line Tools in softwareupdate catalog."
-        warn "Run manually: xcode-select --install — then re-run this script."
-        exit 1
+        error "Could not find Xcode Command Line Tools in softwareupdate catalog. Run manually: xcode-select --install — then re-run this script."
     fi
     sudo softwareupdate -i "$clt_label" --verbose
     sudo xcode-select --switch /Library/Developer/CommandLineTools 2>/dev/null || true
@@ -170,6 +169,7 @@ check_and_install_xcode_clt() {
 }
 
 XCODE_INSTALL_PENDING=false
+XCODE_TIMED_OUT=false
 
 check_and_install_xcode() {
     step "Checking Xcode"
@@ -216,6 +216,7 @@ wait_for_xcode_if_needed() {
         echo -n "."
         if [ $waited -ge $max_wait ]; then
             echo ""
+            XCODE_TIMED_OUT=true
             warn "Timed out waiting for Xcode (2 h). CoreML compilation will be skipped."
             warn "After Xcode installs, run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
             warn "Then re-run this script to complete CoreML setup."
@@ -457,6 +458,11 @@ download_whisper_models() {
 generate_whisper_coreml_encoder() {
     local model_name="$1"
     local encoder_name="ggml-${model_name}-encoder.mlmodelc"
+
+    if [ "$XCODE_TIMED_OUT" = "true" ]; then
+        warn "Skipping CoreML encoder for ${model_name} — Xcode installation timed out."
+        return
+    fi
 
     if [ -d "bin/models/${encoder_name}" ]; then
         info "CoreML encoder for ${model_name} already exists"
