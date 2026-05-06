@@ -102,6 +102,7 @@ def ensure_conda_env():
     run_cmd(f"{conda_python} -m pip install -q torch=={REQUIRED_TORCH}.0 --index-url https://download.pytorch.org/whl/cpu")
     run_cmd(f"{conda_python} -m pip install -q coremltools=={REQUIRED_COREMLTOOLS}.0 numpy==1.26.4")
     run_cmd(f"{conda_python} -m pip install -q kokoro")
+    run_cmd(f"{conda_python} -m pip install -q 'transformers<4.50.0'")
 
     version_check = run_cmd(
         f'{conda_python} -c "import torch, coremltools as ct, numpy as np; '
