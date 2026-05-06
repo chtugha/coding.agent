@@ -115,16 +115,16 @@ def _patch_matcha_for_torchscript():
         import torch
         import matcha.models.components.text_encoder as _te
 
-        def _scriptable_ln_forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
             assert x.dim() == 3, f"LayerNorm patch expects 3D input [B,C,T], got {x.dim()}D"
             mean = torch.mean(x, 1, keepdim=True)
             variance = torch.mean((x - mean) ** 2, 1, keepdim=True)
             x = (x - mean) * torch.rsqrt(variance + self.eps)
             return x * self.gamma.unsqueeze(0).unsqueeze(-1) + self.beta.unsqueeze(0).unsqueeze(-1)
 
-        _te.LayerNorm.forward = _scriptable_ln_forward
+        _te.LayerNorm.forward = forward
 
-        def _scriptable_crn_forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
             x_org = x
             for conv, norm in zip(self.conv_layers, self.norm_layers):
                 x = conv(x * x_mask)
@@ -133,16 +133,16 @@ def _patch_matcha_for_torchscript():
             x = x_org + self.proj(x)
             return x * x_mask
 
-        _te.ConvReluNorm.forward = _scriptable_crn_forward
+        _te.ConvReluNorm.forward = forward
 
-        def _scriptable_encoder_forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
             attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
-            for attn, norm1, ffn, norm2 in zip(
+            for attn_layer, norm1, ffn, norm2 in zip(
                 self.attn_layers, self.norm_layers_1,
                 self.ffn_layers, self.norm_layers_2,
             ):
                 x = x * x_mask
-                y = attn(x, x, attn_mask)
+                y = attn_layer(x, x, attn_mask)
                 y = self.drop(y)
                 x = norm1(x + y)
                 y = ffn(x, x_mask)
@@ -151,9 +151,9 @@ def _patch_matcha_for_torchscript():
             x = x * x_mask
             return x
 
-        _te.Encoder.forward = _scriptable_encoder_forward
+        _te.Encoder.forward = forward
 
-        def _scriptable_rope_forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
             b, h, t, d = x.shape
             x = x.permute(2, 0, 1, 3)
             self._build_cache(x)
@@ -165,11 +165,11 @@ def _patch_matcha_for_torchscript():
             out = torch.cat((x_rope, x_pass), dim=-1)
             return out.permute(1, 2, 0, 3)
 
-        _te.RotaryPositionalEmbeddings.forward = _scriptable_rope_forward
+        _te.RotaryPositionalEmbeddings.forward = forward
 
-        def _scriptable_mha_attention(self, query: torch.Tensor, key: torch.Tensor,
-                                      value: torch.Tensor,
-                                      mask: torch.Tensor = None):
+        def attention(self, query: torch.Tensor, key: torch.Tensor,
+                      value: torch.Tensor,
+                      mask: torch.Tensor = None):
             b, d, t_s = key.shape
             t_t = query.shape[2]
             c = d // self.n_heads
@@ -190,7 +190,7 @@ def _patch_matcha_for_torchscript():
             output = output.transpose(2, 3).contiguous().view(b, d, t_t)
             return output, p_attn
 
-        _te.MultiHeadAttention.attention = _scriptable_mha_attention
+        _te.MultiHeadAttention.attention = attention
     except Exception as e:
         print(f'  [WARN] Could not patch matcha modules for TorchScript: {e}')
 
