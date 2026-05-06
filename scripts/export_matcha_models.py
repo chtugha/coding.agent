@@ -188,8 +188,7 @@ def ensure_conda_env():
         capture=False,
     )
     run_cmd(
-        f'{conda_python} -m pip install -q '
-        f'"git+https://github.com/shivammehta25/Matcha-TTS.git"',
+        f'{conda_python} -m pip install -q matcha-tts',
         capture=False,
     )
 
@@ -299,12 +298,14 @@ def _load_matcha_tts_module():
     except ImportError:
         pass
 
+    import site
+    search_dirs = list(site.getsitepackages())
+
     conda_base = os.environ.get('CONDA_PREFIX', '')
-    search_dirs = []
     if conda_base:
         for pyver in ['python3.11', 'python3.10', 'python3.12']:
             d = os.path.join(conda_base, 'lib', pyver, 'site-packages')
-            if os.path.isdir(d):
+            if os.path.isdir(d) and d not in search_dirs:
                 search_dirs.append(d)
 
     for d in search_dirs:
@@ -317,7 +318,7 @@ def _load_matcha_tts_module():
 
     raise ImportError(
         'Could not import matcha package. Install with:\n'
-        '  pip install git+https://github.com/shivammehta25/Matcha-TTS.git'
+        '  pip install matcha-tts'
     )
 
 
@@ -1156,7 +1157,22 @@ def main():
     checkpoint_dir = os.path.join(ROOT_DIR, 'bin', 'models', DEFAULT_OUTPUT_SUBDIR, 'checkpoint')
 
     if not args.no_install:
-        ensure_conda_env()
+        conda_python = ensure_conda_env()
+        if os.path.realpath(sys.executable) != os.path.realpath(conda_python):
+            print(f'\n  Re-launching with conda python: {conda_python}')
+            relaunch_args = [conda_python, __file__, '--no-install']
+            if args.checkpoint:
+                relaunch_args += ['--checkpoint', args.checkpoint]
+            relaunch_args += ['--output-dir', coreml_dir]
+            if args.steps != DEFAULT_STEPS:
+                relaunch_args += ['--steps', str(args.steps)]
+            if args.encoder_only:
+                relaunch_args.append('--encoder-only')
+            if args.flow_only:
+                relaunch_args.append('--flow-only')
+            if args.vocoder_only:
+                relaunch_args.append('--vocoder-only')
+            os.execv(conda_python, relaunch_args)
 
     if args.checkpoint:
         checkpoint_path = args.checkpoint
