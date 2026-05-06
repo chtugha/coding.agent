@@ -1223,9 +1223,8 @@ self_update() {
     }
     local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${latest_sha}/${script_name}"
     if ! curl -fsSL --max-time 30 "$raw_url" -o "$tmp_script" 2>/dev/null; then
-        echo -e "${YELLOW}[INFO]${NC} Script download failed — skipping self-update"
+        echo -e "${YELLOW}[WARN]${NC} Script download failed — re-run to retry the update"
         rm -f "$tmp_script"
-        echo "$latest_sha" > "$version_file" 2>/dev/null || true
         return 0
     fi
 
