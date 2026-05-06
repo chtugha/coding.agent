@@ -58,6 +58,7 @@ _FORWARD_STYLES = [
     ('x_only',            lambda m, x, l: m(x)),
     ('keyword_lengths',   lambda m, x, l: m(x, lengths=l)),
     ('attention_mask',    lambda m, x, l: m(input_ids=x, attention_mask=(x != 0).long())),
+    ('dict_text',         lambda m, x, l: m({'text': x})),
 ]
 
 
@@ -397,6 +398,18 @@ def _make_traceable_wrapper(torch_model, working_style):
             def forward(self, x, lengths):
                 mask = (x != 0).long()
                 out = self.inner(input_ids=x, attention_mask=mask)
+                if isinstance(out, tuple):
+                    return out[0]
+                return out
+
+    elif working_style == 'dict_text':
+        class TraceableWrapper(torch.nn.Module):
+            def __init__(self, inner):
+                super().__init__()
+                self.inner = inner
+
+            def forward(self, x, lengths):
+                out = self.inner({'text': x})
                 if isinstance(out, tuple):
                     return out[0]
                 return out
