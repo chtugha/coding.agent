@@ -460,14 +460,14 @@ build_moshi_backend() {
         return
     fi
 
-    for _dep in pkg-config sentencepiece opus; do
+    for _dep in pkg-config sentencepiece opus protobuf; do
         if ! brew list "$_dep" &>/dev/null; then
             info "Installing $_dep (required by moshi-backend)..."
             brew install "$_dep"
         fi
     done
     export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    export CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+    export CMAKE_POLICY_VERSION_MINIMUM=3.5
 
     info "Building moshi-backend (cargo build --release, Metal)..."
     cd "$moshi_dir/rust"
