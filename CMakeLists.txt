@@ -574,6 +574,7 @@ endif()
 # AES-256 encryption via db_key.h / prodigy_db::db_open_encrypted.
 # ${SQLCIPHER_DIR} is prepended so the compiler finds SQLCipher's sqlite3.h
 # (which declares sqlite3_key/sqlite3_rekey) before the project-root copy.
+set_source_files_properties(${SQLCIPHER_DIR}/sqlite3.c PROPERTIES COMPILE_OPTIONS "-w")
 add_executable(frontend frontend.cpp mongoose.c ${SQLCIPHER_DIR}/sqlite3.c)
 target_include_directories(frontend PRIVATE
     ${SQLCIPHER_DIR}                # SQLCipher sqlite3.h (must come first)

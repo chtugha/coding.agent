@@ -98,16 +98,18 @@ static constexpr int CMD_BUF_SIZE           = 4096;
 static constexpr int BACKEND_STARTUP_WAIT_MS= 3000;  // grace after spawning backend
 
 // ─── Moshi wire protocol constants ──────────────────────────────────────────
-static constexpr uint8_t MT_HANDSHAKE   = 0;
-static constexpr uint8_t MT_AUDIO       = 1;
-static constexpr uint8_t MT_TEXT        = 2;
-static constexpr uint8_t MT_CONTROL     = 3;
-static constexpr uint8_t MT_METADATA    = 4;
-static constexpr uint8_t MT_ERROR       = 5;
-static constexpr uint8_t MT_PING        = 6;
-static constexpr uint8_t MT_COLORED_TEXT= 7;
-static constexpr uint8_t MT_REFERENCE   = 8;
-static constexpr uint8_t MT_COLORED_REF = 9;
+enum MoshiMsgType : uint8_t {
+    MT_HANDSHAKE    = 0,
+    MT_AUDIO        = 1,
+    MT_TEXT         = 2,
+    MT_CONTROL      = 3,
+    MT_METADATA     = 4,
+    MT_ERROR        = 5,
+    MT_PING         = 6,
+    MT_COLORED_TEXT = 7,
+    MT_REFERENCE    = 8,
+    MT_COLORED_REF  = 9,
+};
 
 // ─── OGG page builder (minimal, enough to wrap one Opus packet per page) ───
 // OGG capture pattern + header fields as per RFC 3533.
