@@ -145,6 +145,91 @@ check_admin_access() {
     info "Administrator access granted — password cached for this session"
 }
 
+check_and_install_xcode_clt() {
+    step "Checking Xcode Command Line Tools"
+    if xcode-select -p &>/dev/null; then
+        info "Xcode CLT active: $(xcode-select -p)"
+        return
+    fi
+    info "Installing Xcode Command Line Tools..."
+    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    local clt_label
+    clt_label=$(softwareupdate -l 2>/dev/null | awk '/\* Label:.*Command Line/{gsub(/\* Label: /,""); print; exit}')
+    if [ -z "$clt_label" ]; then
+        clt_label=$(softwareupdate -l 2>/dev/null | grep -B1 "Command Line Tools" | awk -F"*" '/\*/{gsub(/^ /,"",$2); print $2}' | head -1)
+    fi
+    rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    if [ -z "$clt_label" ]; then
+        warn "Could not find Xcode Command Line Tools in softwareupdate catalog."
+        warn "Run manually: xcode-select --install — then re-run this script."
+        exit 1
+    fi
+    sudo softwareupdate -i "$clt_label" --verbose
+    sudo xcode-select --switch /Library/Developer/CommandLineTools 2>/dev/null || true
+    info "Xcode Command Line Tools installed"
+}
+
+XCODE_INSTALL_PENDING=false
+
+check_and_install_xcode() {
+    step "Checking Xcode"
+    if [ -d "/Applications/Xcode.app" ]; then
+        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+        sudo xcodebuild -license accept 2>/dev/null || true
+        info "Xcode.app active: $(xcodebuild -version 2>/dev/null | head -1 || echo 'found')"
+        return
+    fi
+    echo ""
+    echo -e "${YELLOW}==============================${NC}"
+    echo -e "${YELLOW} ACTION REQUIRED: Install Xcode${NC}"
+    echo -e "${YELLOW}==============================${NC}"
+    echo "  Xcode.app is required for CoreML model compilation."
+    echo "  The Mac App Store is opening now."
+    echo -e "  ${YELLOW}Please click Get / Install on the Xcode page.${NC}"
+    echo "  This script will continue setup and wait for Xcode before the CoreML step."
+    echo ""
+    open "macappstores://apps.apple.com/app/xcode/id497799835" 2>/dev/null || true
+    XCODE_INSTALL_PENDING=true
+}
+
+wait_for_xcode_if_needed() {
+    if [ "$XCODE_INSTALL_PENDING" != "true" ]; then
+        return
+    fi
+    if [ -d "/Applications/Xcode.app" ]; then
+        XCODE_INSTALL_PENDING=false
+        info "Xcode.app installed — activating..."
+        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+        sudo xcodebuild -license accept 2>/dev/null || true
+        info "Xcode ready: $(xcodebuild -version 2>/dev/null | head -1 || echo 'activated')"
+        return
+    fi
+    echo ""
+    echo -e "${YELLOW}  Waiting for Xcode installation to complete...${NC}"
+    echo "  (If you have not clicked Install in the App Store yet, please do so now.)"
+    echo -n "  Waiting"
+    local waited=0
+    local max_wait=7200
+    while [ ! -d "/Applications/Xcode.app" ]; do
+        sleep 30
+        waited=$((waited + 30))
+        echo -n "."
+        if [ $waited -ge $max_wait ]; then
+            echo ""
+            warn "Timed out waiting for Xcode (2 h). CoreML compilation will be skipped."
+            warn "After Xcode installs, run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+            warn "Then re-run this script to complete CoreML setup."
+            return
+        fi
+    done
+    echo ""
+    XCODE_INSTALL_PENDING=false
+    info "Xcode.app detected — activating..."
+    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+    sudo xcodebuild -license accept 2>/dev/null || true
+    info "Xcode ready: $(xcodebuild -version 2>/dev/null | head -1 || echo 'activated')"
+}
+
 check_and_install_homebrew() {
     step "Checking Homebrew"
     if ! command -v brew &> /dev/null; then
@@ -1113,6 +1198,8 @@ main() {
     check_macos
     ask_hf_token
     check_admin_access
+    check_and_install_xcode_clt
+    check_and_install_xcode
     check_and_install_homebrew
     install_system_deps
     check_and_install_python
@@ -1128,6 +1215,7 @@ main() {
     mkdir -p bin/models
 
     download_whisper_models
+    wait_for_xcode_if_needed
     generate_whisper_coreml
     download_llama_model
     export_kokoro_models
