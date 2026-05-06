@@ -1104,6 +1104,7 @@ check_ollama() {
             for _op in /opt/homebrew/bin /usr/local/bin; do
                 [ -x "$_op/ollama" ] && export PATH="$_op:$PATH" && break
             done
+            unset _op
         else
             info "Installing Ollama via Homebrew..."
             brew install --cask ollama

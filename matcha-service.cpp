@@ -77,9 +77,10 @@ static constexpr size_t CMD_BUF_SIZE = 4096;
 // Mel spectrogram constants (standard Matcha-TTS / HiFi-GAN config)
 static constexpr int MEL_BINS = 80;
 // Bucket frame counts (T_mel frames per bucket)
-// At hop_size=256 and 24kHz: 3s→281 frames, 5s→469 frames, 10s→938 frames
-static constexpr int BUCKET_3S_FRAMES  = 281;
-static constexpr int BUCKET_5S_FRAMES  = 469;
+// At hop_size=256 and 24kHz: 3s→280 frames, 5s→468 frames, 10s→938 frames
+// (rounded to even for UNet skip-connection compatibility)
+static constexpr int BUCKET_3S_FRAMES  = 280;
+static constexpr int BUCKET_5S_FRAMES  = 468;
 static constexpr int BUCKET_10S_FRAMES = 938;
 
 // Token count thresholds for bucket selection

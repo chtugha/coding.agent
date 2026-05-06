@@ -7,8 +7,8 @@ all components to CoreML .mlmodelc bundles for static inference with no Python r
 
 Exported artifacts (in bin/models/matcha-german/coreml/ or --output-dir):
   - matcha_encoder.mlmodelc          CoreML text encoder (10s bucket, max size)
-  - matcha_encoder_3s.mlmodelc       CoreML text encoder (3s bucket, 281 mel frames)
-  - matcha_encoder_5s.mlmodelc       CoreML text encoder (5s bucket, 469 mel frames)
+  - matcha_encoder_3s.mlmodelc       CoreML text encoder (3s bucket, 280 mel frames)
+  - matcha_encoder_5s.mlmodelc       CoreML text encoder (5s bucket, 468 mel frames)
   - matcha_encoder_10s.mlmodelc      CoreML text encoder (10s bucket, 938 mel frames)
   - matcha_flow_3s.mlmodelc          CoreML ODE flow (10-step baked Euler, 3s bucket)
   - matcha_flow_5s.mlmodelc          CoreML ODE flow (10-step baked Euler, 5s bucket)
@@ -117,8 +117,8 @@ def _patch_matcha_layernorm():
             return x * self.gamma.unsqueeze(0).unsqueeze(-1) + self.beta.unsqueeze(0).unsqueeze(-1)
 
         _te.LayerNorm.forward = _scriptable_forward
-    except Exception:
-        pass
+    except Exception as e:
+        print(f'  [WARN] Could not patch LayerNorm for TorchScript: {e}')
 
 
 def run_cmd(cmd, check=True, capture=True):
@@ -165,7 +165,7 @@ def parse_args():
     parser.add_argument(
         '--bucket-sizes', default=None,
         help=(
-            'Comma-separated T_mel frame counts for 3 buckets (default: 281,469,938). '
+            'Comma-separated T_mel frame counts for 3 buckets (default: 280,468,938). '
             'Must be 3 values in ascending order, e.g. --bucket-sizes 256,512,1024.'
         ),
     )
@@ -686,7 +686,6 @@ def export_encoder(model, coreml_dir, bucket, no_validate=False):
         print(f'  Encoder attrs: {[a for a in dir(model) if not a.startswith("_")]}')
         raise
 
-    _patch_matcha_layernorm()
     print('  Scripting encoder (trace not safe: dynamic slicing via .item() bakes T at trace time)...')
     traced = None
     try:
@@ -929,7 +928,7 @@ def export_flow(model, coreml_dir, bucket, n_steps, no_validate=False):
     return mlmodelc or pkg_path
 
 
-def export_vocoder(model, coreml_dir, sample_T_mel=281, no_validate=False):
+def export_vocoder(model, coreml_dir, sample_T_mel=280, no_validate=False):
     """Export HiFi-GAN vocoder. Returns path to .mlmodelc."""
     import torch
     import numpy as np
@@ -1222,6 +1221,7 @@ def main():
     results = {}
 
     if do_encoder:
+        _patch_matcha_layernorm()
         for bucket in buckets:
             path = export_encoder(model, coreml_dir, bucket)
             results[f'matcha_encoder_{bucket["name"]}.mlmodelc'] = path
