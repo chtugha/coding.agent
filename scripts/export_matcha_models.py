@@ -1160,6 +1160,7 @@ def main():
         conda_python = ensure_conda_env()
         if os.path.realpath(sys.executable) != os.path.realpath(conda_python):
             print(f'\n  Re-launching with conda python: {conda_python}')
+            # NOTE: if new args are added to parse_args(), add them here too.
             relaunch_args = [conda_python, __file__, '--no-install']
             if args.checkpoint:
                 relaunch_args += ['--checkpoint', args.checkpoint]
@@ -1172,7 +1173,11 @@ def main():
                 relaunch_args.append('--flow-only')
             if args.vocoder_only:
                 relaunch_args.append('--vocoder-only')
-            os.execv(conda_python, relaunch_args)
+            try:
+                os.execv(conda_python, relaunch_args)
+            except OSError as e:
+                print(f'[ERROR] Could not re-launch with {conda_python}: {e}')
+                sys.exit(1)
 
     if args.checkpoint:
         checkpoint_path = args.checkpoint
