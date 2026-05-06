@@ -370,7 +370,7 @@ setup_whisper_coreml_env() {
     local conda_base _coreml_py marker
     conda_base="$(conda info --base 2>/dev/null)"
     _coreml_py="$conda_base/envs/whisper_coreml/bin/python3"
-    marker="$conda_base/envs/whisper_coreml/.prodigy_deps_v1"
+    marker="$conda_base/envs/whisper_coreml/.prodigy_deps_v2"
 
     if ! conda env list | grep -q "^whisper_coreml "; then
         info "Creating whisper_coreml conda environment (Python 3.10, torch 1.12.1)..."
@@ -385,7 +385,7 @@ setup_whisper_coreml_env() {
     "$_coreml_py" -m pip install --quiet "pip" "setuptools"
     "$_coreml_py" -m pip install --quiet "torch==1.12.1" "torchvision==0.13.1"
     "$_coreml_py" -m pip install --quiet "protobuf>=3.1.0,<=3.20.1"
-    "$_coreml_py" -m pip install --quiet "ane-transformers==0.1.3"
+    "$_coreml_py" -m pip install --quiet --no-deps "ane-transformers==0.1.3"
     "$_coreml_py" -m pip install --quiet "coremltools==6.3.0"
     "$_coreml_py" -m pip install --quiet "openai-whisper"
     "$_coreml_py" -m pip install --quiet "numpy<2"
