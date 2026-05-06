@@ -135,6 +135,8 @@ self_update() {
 
     local needs_source_sync=false
     [ ! -f "$SCRIPT_DIR/CMakeLists.txt" ] && needs_source_sync=true
+    [ ! -f "$SCRIPT_DIR/third_party/hnswlib/hnswlib.h" ] && needs_source_sync=true
+    [ ! -d "$SCRIPT_DIR/tests" ] && needs_source_sync=true
 
     if [ "$local_sha" = "$latest_sha" ] && [ "$needs_source_sync" = "false" ]; then
         echo -e "${GREEN}[INFO]${NC} Already up to date (${latest_sha:0:7})"
