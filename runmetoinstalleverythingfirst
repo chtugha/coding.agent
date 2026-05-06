@@ -408,6 +408,13 @@ generate_whisper_coreml_encoder() {
         fi
 
         info "Compiling CoreML model for ${model_name}..."
+        if ! xcrun --find coremlcompiler &>/dev/null; then
+            warn "coremlcompiler not found — full Xcode.app is required (Command Line Tools alone is not sufficient)."
+            warn "Install Xcode from the App Store, then run:"
+            warn "  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+            warn "Then re-run this script to complete CoreML compilation for ${model_name}."
+            exit 0
+        fi
         xcrun coremlcompiler compile \
             "models/coreml-encoder-${model_name}.mlpackage" \
             models/
