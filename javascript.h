@@ -447,7 +447,7 @@ if(s)updateSvcDetail(s);
 
 function updateSvcDetail(s){
   document.getElementById('svcDetailPath').textContent=s.binary_path;
-  document.getElementById('svcDetailArgs').value=s.default_args||'';
+  if(s.name!=='MOSHI_SERVICE') document.getElementById('svcDetailArgs').value=s.default_args||'';
   const online=s.online;
   document.getElementById('svcDetailStatus').innerHTML=online
 ?'<span class="wt-badge wt-badge-success">Online</span>'
@@ -545,7 +545,7 @@ if(s.name==='MATCHA_ENGINE'){
   if(moshic){
 if(s.name==='MOSHI_SERVICE'){
   moshic.classList.remove('hidden');
-  loadMoshiConfig();
+  if(!_moshiDirty) loadMoshiConfig();
 } else {
   moshic.classList.add('hidden');
 }
@@ -714,6 +714,7 @@ function saveMatchaConfig(){
 }
 let _moshiBackends=[];
 let _moshiTriggers=[];
+let _moshiDirty=false;
 function loadMoshiConfig(){
   fetch('/api/moshi/config').then(r=>r.json()).then(d=>{
     _moshiBackends=d.backends||[];
@@ -760,6 +761,7 @@ function moshiAddBackend(){
   const binary=(document.getElementById('moshiNewBinary')||{}).value||'';
   if(!lang||!config){alert('Language code and config path are required.');return;}
   _moshiBackends.push({lang,config,binary});
+  _moshiDirty=true;
   renderMoshiBackendList();
   buildMoshiArgs();
   document.getElementById('moshiNewLang').value='';
@@ -768,6 +770,7 @@ function moshiAddBackend(){
 }
 function moshiRemoveBackend(i){
   _moshiBackends.splice(i,1);
+  _moshiDirty=true;
   renderMoshiBackendList();
   buildMoshiArgs();
 }
@@ -778,6 +781,7 @@ function moshiAddTrigger(){
   const label=(document.getElementById('moshiNewTriggerLabel')||{}).value||'';
   if(!action){alert('Tomedo action/endpoint is required.');return;}
   _moshiTriggers.push({type,match,action,label});
+  _moshiDirty=true;
   renderMoshiTriggerList();
   document.getElementById('moshiNewTriggerMatch').value='';
   document.getElementById('moshiNewTriggerAction').value='';
@@ -785,6 +789,7 @@ function moshiAddTrigger(){
 }
 function moshiRemoveTrigger(i){
   _moshiTriggers.splice(i,1);
+  _moshiDirty=true;
   renderMoshiTriggerList();
 }
 function buildMoshiArgs(){
@@ -819,8 +824,10 @@ function saveMoshiConfig(){
   fetch('/api/moshi/config',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({backends:_moshiBackends,triggers:_moshiTriggers,default_language:dl})
   }).then(r=>r.json()).then(d=>{
+    _moshiDirty=false;
     if(st)st.textContent='Saved';
     setTimeout(()=>{if(st)st.textContent='';},2000);
+    saveSvcConfig();
   }).catch(()=>{if(st)st.textContent='Error';setTimeout(()=>{if(st)st.textContent='';},3000);});
 }
 function toggleHallucinationFilter(enabled){
