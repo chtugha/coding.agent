@@ -565,7 +565,7 @@ download_llama_model() {
     if [ -x "$WHISPERTALK_HF_CLI" ]; then
         "$WHISPERTALK_HF_CLI" download bartowski/Llama-3.2-1B-Instruct-GGUF \
             Llama-3.2-1B-Instruct-Q8_0.gguf \
-            --local-dir bin/models/ \
+            --local-dir bin/models/
     else
         wget -q --show-progress \
             "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q8_0.gguf" \
@@ -608,7 +608,7 @@ download_neutts_models() {
         if [ -x "$WHISPERTALK_HF_CLI" ]; then
             "$WHISPERTALK_HF_CLI" download neuphonic/neutts-nano-german-q4-gguf \
                 neutts-nano-german-Q4_0.gguf \
-                --local-dir "$neutts_dir/" \
+                --local-dir "$neutts_dir/"
         else
             curl -L -o "$neutts_dir/neutts-nano-german-Q4_0.gguf" \
                 "https://huggingface.co/neuphonic/neutts-nano-german-q4-gguf/resolve/main/neutts-nano-german-Q4_0.gguf"
@@ -1000,7 +1000,7 @@ download_moshi_lora() {
     info "Downloading chtugha/moshi-german-lora → $lora_dir/ ..."
     if [ -x "$WHISPERTALK_HF_CLI" ]; then
         "$WHISPERTALK_HF_CLI" download chtugha/moshi-german-lora \
-            --local-dir "$lora_dir/" \
+            --local-dir "$lora_dir/"
     else
         warn "hf CLI not available — trying wget for individual files..."
         local base_url="https://huggingface.co/chtugha/moshi-german-lora/resolve/main"
