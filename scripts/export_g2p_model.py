@@ -305,11 +305,18 @@ def _build_vocabs_from_checkpoint(ckpt):
 
 
 def _extract_torch_model(phonemizer_or_ckpt):
-    if hasattr(phonemizer_or_ckpt, 'predictor'):
-        return phonemizer_or_ckpt.predictor
+    def _is_nn_module(obj):
+        return hasattr(obj, 'parameters') and hasattr(obj, 'eval') and callable(getattr(obj, 'eval', None))
 
     if hasattr(phonemizer_or_ckpt, 'model'):
-        return phonemizer_or_ckpt.model
+        candidate = phonemizer_or_ckpt.model
+        if _is_nn_module(candidate):
+            return candidate
+
+    if hasattr(phonemizer_or_ckpt, 'predictor'):
+        candidate = phonemizer_or_ckpt.predictor
+        if _is_nn_module(candidate):
+            return candidate
 
     if isinstance(phonemizer_or_ckpt, dict):
         if 'model' in phonemizer_or_ckpt:
