@@ -191,6 +191,31 @@ def _patch_matcha_for_torchscript():
             return output, p_attn
 
         _te.MultiHeadAttention.attention = attention
+
+        import matcha.utils.model as _mu
+
+        def sequence_mask(length: torch.Tensor, max_length: int = -1) -> torch.Tensor:
+            if max_length < 0:
+                max_length = int(length.max().item())
+            x = torch.arange(max_length, dtype=length.dtype, device=length.device)
+            return x.unsqueeze(0) < length.unsqueeze(1)
+
+        _mu.sequence_mask = sequence_mask
+        _te.sequence_mask = sequence_mask
+
+        def forward(self, x: torch.Tensor, x_lengths: torch.Tensor,
+                    spks: torch.Tensor = None) -> tuple:
+            x = self.emb(x) * math.sqrt(self.n_channels)
+            x = torch.transpose(x, 1, -1)
+            x_mask = torch.unsqueeze(sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
+            x = self.prenet(x, x_mask)
+            x = self.encoder(x, x_mask)
+            mu = self.proj_m(x) * x_mask
+            x_dp = torch.detach(x)
+            logw = self.proj_w(x_dp, x_mask)
+            return mu, logw, x_mask
+
+        _te.TextEncoder.forward = forward
     except Exception as e:
         print(f'  [WARN] Could not patch matcha modules for TorchScript: {e}')
 
