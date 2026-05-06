@@ -997,25 +997,29 @@ HOOKEOF
 
 self_update() {
     echo -e "${BLUE}[INFO]${NC} Checking for updates..."
-    local top_level
-    top_level="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || { echo -e "${YELLOW}[INFO]${NC} Not a git repo — skipping update check"; return 0; }
-    local branch
-    branch="$(git -C "$top_level" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-    if [ "$branch" != "main" ]; then
-        echo -e "${YELLOW}[INFO]${NC} Not on main branch — skipping update check"
+    local script_path="$SCRIPT_DIR/$(basename "$0")"
+    local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/main/$(basename "$0")"
+    local tmp_script
+    tmp_script="$(mktemp /tmp/prodigy-install-update.XXXXXX)" || {
+        echo -e "${YELLOW}[INFO]${NC} Could not create temp file — skipping update check"
+        return 0
+    }
+    if ! curl -fsSL --max-time 15 "$raw_url" -o "$tmp_script" 2>/dev/null; then
+        echo -e "${YELLOW}[INFO]${NC} Could not reach GitHub — skipping update check"
+        rm -f "$tmp_script"
         return 0
     fi
-    git -C "$top_level" fetch --quiet origin main 2>/dev/null || { echo -e "${YELLOW}[INFO]${NC} Could not reach origin — skipping update check"; return 0; }
-    local behind
-    behind="$(git -C "$top_level" rev-list HEAD..origin/main --count 2>/dev/null || echo 0)"
-    if [ "$behind" -gt 0 ]; then
-        echo -e "${YELLOW}[INFO]${NC} Repo is $behind commit(s) behind origin/main — pulling latest scripts..."
-        git -C "$top_level" merge --ff-only origin/main
-        echo -e "${GREEN}[INFO]${NC} Self-update complete. Re-exec with updated scripts..."
-        exec "$SCRIPT_DIR/$(basename "$0")" "$@"
-    else
+    if cmp -s "$script_path" "$tmp_script"; then
         echo -e "${GREEN}[INFO]${NC} Already up to date"
+        rm -f "$tmp_script"
+        return 0
     fi
+    echo -e "${YELLOW}[INFO]${NC} New version available — updating..."
+    chmod +x "$tmp_script"
+    cp "$tmp_script" "$script_path"
+    rm -f "$tmp_script"
+    echo -e "${GREEN}[INFO]${NC} Update applied. Re-launching..."
+    exec "$script_path" "$@"
 }
 
 main() {
