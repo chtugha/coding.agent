@@ -336,7 +336,7 @@ build_moshi_backend() {
     fi
 
     if [ ! -d "$moshi_dir/rust" ]; then
-        warn "moshi-rust/rust/ directory not found — skipping moshi-backend build"
+        warn "$moshi_dir/rust/ directory not found — skipping moshi-backend build"
         return
     fi
 
