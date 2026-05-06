@@ -459,13 +459,13 @@ generate_whisper_coreml_encoder() {
     local model_name="$1"
     local encoder_name="ggml-${model_name}-encoder.mlmodelc"
 
-    if [ "$XCODE_TIMED_OUT" = "true" ]; then
-        warn "Skipping CoreML encoder for ${model_name} — Xcode installation timed out."
+    if [ -d "bin/models/${encoder_name}" ]; then
+        info "CoreML encoder for ${model_name} already exists"
         return
     fi
 
-    if [ -d "bin/models/${encoder_name}" ]; then
-        info "CoreML encoder for ${model_name} already exists"
+    if [ "$XCODE_TIMED_OUT" = "true" ]; then
+        warn "Skipping CoreML encoder for ${model_name} — Xcode installation timed out."
         return
     fi
 
