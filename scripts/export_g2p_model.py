@@ -566,8 +566,12 @@ def export_g2p_model(checkpoint_path, output_dir, use_script=False):
         ct.TensorType(name="x", shape=(1, MAX_CHAR_LEN), dtype=np.int32),
         ct.TensorType(name="lengths", shape=(1,), dtype=np.int32),
     ]
-    coreml_outputs = [ct.TensorType(name="logits")]
+    if num_phonemes is not None:
+        coreml_outputs = [ct.TensorType(name="logits", shape=(1, MAX_CHAR_LEN, num_phonemes))]
+    else:
+        coreml_outputs = [ct.TensorType(name="logits")]
 
+    mlmodel = None
     try:
         mlmodel = ct.convert(
             traced_or_scripted,
@@ -580,6 +584,22 @@ def export_g2p_model(checkpoint_path, output_dir, use_script=False):
         )
     except Exception as e:
         print(f"  CoreML conversion with lengths input failed: {e}")
+        if num_phonemes is not None:
+            print("  Retrying without explicit output shape...")
+            try:
+                mlmodel = ct.convert(
+                    traced_or_scripted,
+                    inputs=coreml_inputs,
+                    outputs=[ct.TensorType(name="logits")],
+                    convert_to="mlprogram",
+                    minimum_deployment_target=ct.target.macOS12,
+                    compute_precision=ct.precision.FLOAT16,
+                    compute_units=ct.ComputeUnit.ALL,
+                )
+            except Exception:
+                pass
+
+    if mlmodel is None:
         if working_style != 'x_only':
             print(f"  ERROR: x-only fallback is not applicable for working_style='{working_style}'.")
             print(f"  The model requires the '{working_style}' calling convention, which needs")

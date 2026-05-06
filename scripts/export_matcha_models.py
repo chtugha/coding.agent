@@ -111,6 +111,7 @@ def _patch_matcha_layernorm():
         import matcha.models.components.text_encoder as _te
 
         def _scriptable_forward(self, x: torch.Tensor) -> torch.Tensor:
+            assert x.dim() == 3, f"LayerNorm patch expects 3D input [B,C,T], got {x.dim()}D"
             mean = torch.mean(x, 1, keepdim=True)
             variance = torch.mean((x - mean) ** 2, 1, keepdim=True)
             x = (x - mean) * torch.rsqrt(variance + self.eps)
