@@ -932,6 +932,44 @@ private:
                     use_args += " --g2p " + g2p;
             }
 
+            if (name == "MOSHI_SERVICE" && args_override.empty()) {
+                std::string backends_json = get_setting("moshi_backends", "[]");
+                std::string default_lang  = get_setting("moshi_default_language", "en");
+                size_t pos = 0;
+                while (pos < backends_json.size()) {
+                    size_t obj_start = backends_json.find('{', pos);
+                    if (obj_start == std::string::npos) break;
+                    int depth = 1;
+                    size_t obj_end = obj_start + 1;
+                    bool in_str = false;
+                    bool esc = false;
+                    for (; obj_end < backends_json.size() && depth > 0; obj_end++) {
+                        char ch = backends_json[obj_end];
+                        if (esc) { esc = false; continue; }
+                        if (ch == '\\' && in_str) { esc = true; continue; }
+                        if (ch == '"') { in_str = !in_str; continue; }
+                        if (in_str) continue;
+                        if (ch == '{') depth++;
+                        else if (ch == '}') depth--;
+                    }
+                    std::string obj = backends_json.substr(obj_start, obj_end - obj_start);
+                    std::string lang   = extract_json_string(obj, "lang");
+                    std::string config = extract_json_string(obj, "config");
+                    std::string binary = extract_json_string(obj, "binary");
+                    if (!lang.empty() && !config.empty() &&
+                        lang.find(' ') == std::string::npos &&
+                        config.find(' ') == std::string::npos) {
+                        std::string spec = lang + ":" + config;
+                        if (!binary.empty() && binary.find(' ') == std::string::npos)
+                            spec += ":" + binary;
+                        use_args += " --backend-config " + spec;
+                    }
+                    pos = obj_end;
+                }
+                if (!default_lang.empty() && default_lang.find(' ') == std::string::npos)
+                    use_args += " --default-language " + default_lang;
+            }
+
             auto argv_strings = split_args(use_args);
 
             mkdir("logs", 0755);
