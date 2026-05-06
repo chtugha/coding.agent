@@ -566,10 +566,7 @@ def export_g2p_model(checkpoint_path, output_dir, use_script=False):
         ct.TensorType(name="x", shape=(1, MAX_CHAR_LEN), dtype=np.int32),
         ct.TensorType(name="lengths", shape=(1,), dtype=np.int32),
     ]
-    if num_phonemes is not None:
-        coreml_outputs = [ct.TensorType(name="logits", shape=(1, MAX_CHAR_LEN, num_phonemes))]
-    else:
-        coreml_outputs = [ct.TensorType(name="logits")]
+    coreml_outputs = [ct.TensorType(name="logits")]
 
     try:
         mlmodel = ct.convert(
@@ -613,11 +610,7 @@ def export_g2p_model(checkpoint_path, output_dir, use_script=False):
             print(f"  Try --use-script to attempt torch.jit.script() export instead.")
             sys.exit(1)
 
-        x_only_outputs = (
-            [ct.TensorType(name="logits", shape=(1, MAX_CHAR_LEN, num_phonemes))]
-            if num_phonemes is not None
-            else [ct.TensorType(name="logits")]
-        )
+        x_only_outputs = [ct.TensorType(name="logits")]
         try:
             mlmodel = ct.convert(
                 traced_x_only,

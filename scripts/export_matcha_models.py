@@ -33,8 +33,8 @@ Architecture notes:
   Matcha-TTS = text encoder + OT-CFM flow (ODE matching) + HiFi-GAN vocoder
   The ODE flow is baked at export time by unrolling N Euler steps into a static graph.
   Each bucket (3s/5s/10s) gets separate encoder + flow models with fixed output shapes:
-    3s  bucket: T_mel = 281 frames  (at hop=256, sr=24000)
-    5s  bucket: T_mel = 469 frames
+    3s  bucket: T_mel = 280 frames  (at hop=256, sr=24000; rounded to even for UNet skip-conn compat)
+    5s  bucket: T_mel = 468 frames
     10s bucket: T_mel = 938 frames
 
   Encoder wrapper includes: text encoding + duration prediction + length regulation
@@ -53,7 +53,7 @@ Usage:
   python3 scripts/export_matcha_models.py
   python3 scripts/export_matcha_models.py --checkpoint /path/to/matcha_de.ckpt
   python3 scripts/export_matcha_models.py --output-dir /tmp/matcha_test
-  python3 scripts/export_matcha_models.py --steps 10 --bucket-sizes 281,469,938
+  python3 scripts/export_matcha_models.py --steps 10 --bucket-sizes 280,468,938
   python3 scripts/export_matcha_models.py --no-install
 
 Required conda environment packages:
@@ -81,8 +81,8 @@ MEL_BINS = 80
 DEFAULT_STEPS = 10
 
 BUCKETS = [
-    {'name': '3s',  'frames': 281,  'max_tokens': 50},
-    {'name': '5s',  'frames': 469,  'max_tokens': 100},
+    {'name': '3s',  'frames': 280,  'max_tokens': 50},
+    {'name': '5s',  'frames': 468,  'max_tokens': 100},
     {'name': '10s', 'frames': 938,  'max_tokens': 999999},
 ]
 
@@ -95,6 +95,30 @@ KNOWN_DE_REPOS = [
     ('Flux9999/Matcha-TTS-German', 'matcha_german.ckpt'),
     ('freds0/Matcha-TTS-de', 'matcha_de.ckpt'),
 ]
+
+
+def _patch_matcha_layernorm():
+    """Patch matcha text_encoder.LayerNorm.forward to be TorchScript-compatible.
+
+    The original implementation builds a view shape with a dynamic list expression:
+        shape = [1, -1] + [1] * (n_dims - 2)
+    which TorchScript cannot statically analyse.  For 3-D tensors [B, C, T] (the
+    only shape used in the text encoder) the equivalent is view(1, -1, 1).
+    Must be called before the first torch.jit.script() on any Matcha encoder wrapper.
+    """
+    try:
+        import torch
+        import matcha.models.components.text_encoder as _te
+
+        def _scriptable_forward(self, x: torch.Tensor) -> torch.Tensor:
+            mean = torch.mean(x, 1, keepdim=True)
+            variance = torch.mean((x - mean) ** 2, 1, keepdim=True)
+            x = (x - mean) * torch.rsqrt(variance + self.eps)
+            return x * self.gamma.unsqueeze(0).unsqueeze(-1) + self.beta.unsqueeze(0).unsqueeze(-1)
+
+        _te.LayerNorm.forward = _scriptable_forward
+    except Exception:
+        pass
 
 
 def run_cmd(cmd, check=True, capture=True):
@@ -662,6 +686,7 @@ def export_encoder(model, coreml_dir, bucket, no_validate=False):
         print(f'  Encoder attrs: {[a for a in dir(model) if not a.startswith("_")]}')
         raise
 
+    _patch_matcha_layernorm()
     print('  Scripting encoder (trace not safe: dynamic slicing via .item() bakes T at trace time)...')
     traced = None
     try:
