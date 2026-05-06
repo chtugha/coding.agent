@@ -428,10 +428,7 @@ def _build_encoder_wrapper(model, T_mel, bucket_name):
             T = int(x_lengths[0].item())
             x_actual = input_ids[:, :T]
 
-            x_mask = (torch.arange(T, device=input_ids.device).unsqueeze(0)
-                      < x_lengths.unsqueeze(1)).unsqueeze(1).float()
-
-            mu_phone, logw, x_mask_enc = self.encoder(x_actual, x_mask)
+            mu_phone, logw, x_mask_enc = self.encoder(x_actual, x_lengths)
 
             spd = float(speed[0].item())
             if spd < 0.1:
