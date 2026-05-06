@@ -199,6 +199,10 @@ check_and_install_xcode() {
     echo -e "  ${YELLOW}Please click Get / Install on the Xcode page.${NC}"
     echo "  This script will continue setup and wait for Xcode before the CoreML step."
     echo ""
+    echo -e "  ${YELLOW}NOTE:${NC} If you step away while Xcode downloads (~8 GB), the script will"
+    echo "  pause and ask for your macOS login password once Xcode is installed."
+    echo "  Just enter it when you return and the script will continue automatically."
+    echo ""
     open "macappstores://apps.apple.com/app/xcode/id497799835" 2>/dev/null || true
     XCODE_INSTALL_PENDING=true
 }
