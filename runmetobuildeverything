@@ -24,13 +24,19 @@ sync_scripts_dir() {
     local scripts_dir="$SCRIPT_DIR/scripts"
     mkdir -p "$scripts_dir"
     local contents_url="https://api.github.com/repos/chtugha/coding.agent/contents/scripts?ref=${sha}"
+    local api_resp
+    api_resp=$(curl -fsSL --max-time 15 "$contents_url" 2>/dev/null)
+    [ -z "$api_resp" ] && return 0
     local file_list
-    file_list=$(curl -fsSL --max-time 15 "$contents_url" 2>/dev/null \
-        | grep '"name"' \
-        | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-    if [ -z "$file_list" ]; then
-        return 0
-    fi
+    file_list=$(python3 -c "
+import json, sys
+items = json.loads(sys.stdin.read())
+if isinstance(items, list):
+    for item in items:
+        if item.get('type') == 'file':
+            print(item['name'])
+" <<< "$api_resp" 2>/dev/null)
+    [ -z "$file_list" ] && return 0
     local f
     while IFS= read -r f; do
         [ -z "$f" ] && continue
@@ -43,10 +49,18 @@ _sync_gh_dir() {
     local sha="$1" subpath="$2" local_dir="$3"
     mkdir -p "$local_dir"
     local contents_url="https://api.github.com/repos/chtugha/coding.agent/contents/${subpath}?ref=${sha}"
+    local api_resp
+    api_resp=$(curl -fsSL --max-time 15 "$contents_url" 2>/dev/null)
+    [ -z "$api_resp" ] && return 0
     local file_list
-    file_list=$(curl -fsSL --max-time 15 "$contents_url" 2>/dev/null \
-        | grep '"name"' \
-        | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    file_list=$(python3 -c "
+import json, sys
+items = json.loads(sys.stdin.read())
+if isinstance(items, list):
+    for item in items:
+        if item.get('type') == 'file':
+            print(item['name'])
+" <<< "$api_resp" 2>/dev/null)
     [ -z "$file_list" ] && return 0
     local f
     while IFS= read -r f; do
@@ -70,22 +84,26 @@ sync_source_files() {
         return 0
     fi
 
-    local names types
-    names=$(echo "$api_response" | grep '"name"' | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-    types=$(echo "$api_response" | grep '"type"' | sed 's/.*"type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    local file_names
+    file_names=$(python3 -c "
+import json, sys
+items = json.loads(sys.stdin.read())
+for item in items:
+    if item.get('type') == 'file':
+        print(item['name'])
+" <<< "$api_response" 2>/dev/null)
+    [ -z "$file_names" ] && return 0
 
-    local name type i=0
+    local name
     while IFS= read -r name; do
-        i=$((i + 1))
-        type=$(echo "$types" | sed -n "${i}p")
-        [ "$type" != "file" ] && continue
+        [ -z "$name" ] && continue
         [[ "$skip_dirs" == *"|${name}|"* ]] && continue
         if [ ! -f "$SCRIPT_DIR/$name" ]; then
             local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${sha}/${name}"
             echo -e "${BLUE}[INFO]${NC} Syncing missing source file: $name"
             curl -fsSL --max-time 60 "$raw_url" -o "$SCRIPT_DIR/$name" 2>/dev/null || true
         fi
-    done <<< "$names"
+    done <<< "$file_names"
 
     _sync_gh_dir "$sha" "tests" "$SCRIPT_DIR/tests"
     _sync_gh_dir "$sha" "libpiper" "$SCRIPT_DIR/libpiper"
@@ -466,12 +484,13 @@ build_moshi_backend() {
             brew install "$_dep"
         fi
     done
-    export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    export CMAKE_POLICY_VERSION_MINIMUM=3.5
-
     info "Building moshi-backend (cargo build --release, Metal)..."
-    cd "$moshi_dir/rust"
-    cargo build --features metal --bin moshi-backend --release 2>&1
+    (
+        export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        export CMAKE_POLICY_VERSION_MINIMUM=3.5
+        cd "$moshi_dir/rust"
+        cargo build --features metal --bin moshi-backend --release 2>&1
+    )
 
     local built="$moshi_dir/rust/target/release/moshi-backend"
     if [ -f "$built" ]; then
@@ -482,7 +501,6 @@ build_moshi_backend() {
         warn "moshi-backend build failed — check Rust/Cargo output above"
         warn "  To build manually: cd moshi-rust/rust && cargo build --features metal --bin moshi-backend --release"
     fi
-    cd "$SCRIPT_DIR"
 }
 
 build_main_project() {

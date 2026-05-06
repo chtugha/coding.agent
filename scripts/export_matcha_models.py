@@ -311,7 +311,7 @@ def ensure_conda_env():
     )
     run_cmd(
         f'{conda_python} -m pip install -q '
-        f'coremltools>={REQUIRED_COREMLTOOLS} numpy==1.26.4 huggingface_hub',
+        f"'coremltools>={REQUIRED_COREMLTOOLS}' numpy==1.26.4 huggingface_hub",
         capture=False,
     )
     run_cmd(
