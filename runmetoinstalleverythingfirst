@@ -172,6 +172,12 @@ XCODE_INSTALL_PENDING=false
 XCODE_TIMED_OUT=false
 
 activate_xcode() {
+    if ! sudo -n true 2>/dev/null; then
+        echo ""
+        echo "  Administrator access is needed to activate Xcode."
+        echo "  (Session timed out during the long download — please enter your password.)"
+        sudo -v
+    fi
     sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
     sudo xcodebuild -license accept 2>/dev/null || true
     sudo xcodebuild -runFirstLaunch 2>/dev/null || true
