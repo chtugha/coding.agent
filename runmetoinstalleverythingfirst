@@ -116,6 +116,25 @@ check_macos() {
     info "macOS $(sw_vers -productVersion) on Apple Silicon"
 }
 
+check_admin_access() {
+    step "Checking administrator access"
+    if ! groups | grep -qw admin; then
+        echo ""
+        echo -e "${RED}[ERROR]${NC} The current user '$(whoami)' is not an Administrator."
+        echo ""
+        echo "  Homebrew requires sudo access to create system directories under /opt/homebrew."
+        echo "  To grant administrator rights to this account, ask an existing admin to run:"
+        echo ""
+        echo "    sudo dseditgroup -o edit -a $(whoami) -t user admin"
+        echo ""
+        echo "  Or go to: System Settings → Users & Groups → select this user → enable 'Allow this user to administer this computer'"
+        echo ""
+        echo "  After granting admin rights, open a new terminal and re-run this script."
+        exit 1
+    fi
+    info "Administrator access confirmed"
+}
+
 check_and_install_homebrew() {
     step "Checking Homebrew"
     if ! command -v brew &> /dev/null; then
@@ -1004,6 +1023,7 @@ main() {
     ask_hf_token
 
     check_macos
+    check_admin_access
     check_and_install_homebrew
     install_system_deps
     check_and_install_python
