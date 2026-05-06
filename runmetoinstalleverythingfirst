@@ -14,26 +14,27 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  1. Check macOS + Apple Silicon"
     echo "  2. Install Homebrew (if not present)"
     echo "  3. Install system deps (cmake, wget, git, espeak-ng, ccache, openssl@3)"
-    echo "  4. Install Miniconda (if not present)"
-    echo "  5. Create Python environment with PyTorch, CoreML tools"
-    echo "  6. Clone/update whisper.cpp from GitHub (latest)"
-    echo "  7. Clone/update llama.cpp from GitHub (latest)"
-    echo "  8. Check Kokoro dependencies"
-    echo "  9. Download Whisper models (large-v3-q5_0, large-v3-turbo-q5_0)"
-    echo "  10. Generate Whisper CoreML encoders (large-v3, large-v3-turbo)"
-    echo "  11. Download LLaMA model (Llama-3.2-1B-Instruct-Q8_0)"
-    echo "  12. Export Kokoro TTS models (CoreML duration + decoder)"
-    echo "  13. Download NeuTTS Nano German model (GGUF + NeuCodec ONNX→CoreML)"
-    echo "  14. Prepare NeuTTS reference voice (encode audio + phonemize text)"
-    echo "  15. Install Ollama (via brew cask) + pull embeddinggemma:300m for tomedo-crawl RAG"
-    echo "  16. Download Moshi German LoRA (chtugha/moshi-german-lora → bin/models/german_moshi_lora/)"
-    echo "  17. Merge Moshi LoRA adapters into base model (produces moshiko-german-merged.safetensors)"
+    echo "  4. Install Rust/Cargo via rustup (required for moshi-backend build)"
+    echo "  5. Install Miniconda (if not present)"
+    echo "  6. Create Python environment with PyTorch, CoreML tools"
+    echo "  7. Clone/update whisper.cpp from GitHub (latest)"
+    echo "  8. Clone/update llama.cpp from GitHub (latest)"
+    echo "  9. Check Kokoro dependencies"
+    echo "  10. Download Whisper models (large-v3-q5_0, large-v3-turbo-q5_0)"
+    echo "  11. Generate Whisper CoreML encoders (large-v3, large-v3-turbo)"
+    echo "  12. Download LLaMA model (Llama-3.2-1B-Instruct-Q8_0)"
+    echo "  13. Export Kokoro TTS models (CoreML duration + decoder)"
+    echo "  14. Download NeuTTS Nano German model (GGUF + NeuCodec ONNX→CoreML)"
+    echo "  15. Prepare NeuTTS reference voice (encode audio + phonemize text)"
+    echo "  16. Install Ollama (via brew cask) + pull embeddinggemma:300m for tomedo-crawl RAG"
+    echo "  17. Download Moshi German LoRA (chtugha/moshi-german-lora → bin/models/german_moshi_lora/)"
+    echo "  18. Merge Moshi LoRA adapters into base model (produces moshiko-german-merged.safetensors)"
     echo ""
     echo "Optional TTS engines (called automatically, non-fatal if unavailable):"
-    echo "  18. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
-    echo "  19. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
-    echo "  20. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
-    echo "      Note: step 20 requires a German Matcha-TTS checkpoint (--checkpoint flag"
+    echo "  19. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
+    echo "  20. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
+    echo "  21. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
+    echo "      Note: step 21 requires a German Matcha-TTS checkpoint (--checkpoint flag"
     echo "      or fine-tuned from shivammehta25/Matcha-TTS). Falls back to English."
     echo ""
     echo "Requirements:"
@@ -297,6 +298,29 @@ install_system_deps() {
     export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"
     grep -qxF 'export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"' ~/.zprofile 2>/dev/null || \
         echo 'export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"' >> ~/.zprofile
+}
+
+install_rust() {
+    step "Checking Rust / Cargo"
+
+    local cargo_bin="${HOME}/.cargo/bin/cargo"
+
+    if command -v cargo &> /dev/null || [ -x "$cargo_bin" ]; then
+        export PATH="${HOME}/.cargo/bin:$PATH"
+        info "Rust already installed: $(cargo --version 2>/dev/null || ${cargo_bin} --version)"
+        return
+    fi
+
+    info "Installing Rust via rustup (minimal profile, no PATH modification)..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal
+
+    export PATH="${HOME}/.cargo/bin:$PATH"
+
+    grep -qxF 'export PATH="$HOME/.cargo/bin:$PATH"' ~/.zprofile 2>/dev/null || \
+        echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zprofile
+
+    info "Rust installed: $(cargo --version)"
 }
 
 accept_conda_tos() {
@@ -1290,6 +1314,7 @@ main() {
     check_and_install_xcode
     check_and_install_homebrew
     install_system_deps
+    install_rust
     check_and_install_python
     setup_python_env
     setup_whisper_coreml_env
