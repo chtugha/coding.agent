@@ -138,9 +138,9 @@ check_admin_access() {
     if ! sudo -v; then
         error "sudo authentication failed. Ensure your account has a password set and try again."
     fi
-    (while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit 0; done) &
+    (while true; do sudo -n true 2>/dev/null || true; sleep 50; kill -0 "$$" 2>/dev/null || exit 0; done) &
     SUDO_KEEPALIVE_PID=$!
-    trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null; exit' INT TERM EXIT
+    trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' INT TERM EXIT
     info "Administrator access granted — password cached for this session"
 }
 
@@ -1038,10 +1038,9 @@ main() {
     echo -e "${BLUE} Prodigy - Full Installation${NC}"
     echo -e "${BLUE}===============================================${NC}"
 
+    check_macos
     ask_hf_token
     check_admin_access
-
-    check_macos
     check_and_install_homebrew
     install_system_deps
     check_and_install_python
