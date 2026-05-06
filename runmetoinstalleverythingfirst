@@ -117,7 +117,7 @@ check_macos() {
 }
 
 check_admin_access() {
-    step "Checking administrator access"
+    step "Requesting administrator access"
     if ! groups | grep -qw admin; then
         echo ""
         echo -e "${RED}[ERROR]${NC} The current user '$(whoami)' is not an Administrator."
@@ -132,7 +132,16 @@ check_admin_access() {
         echo "  After granting admin rights, open a new terminal and re-run this script."
         exit 1
     fi
-    info "Administrator access confirmed"
+    echo "  This script needs administrator (sudo) access to install Homebrew and system tools."
+    echo "  Please enter your macOS login password when prompted."
+    echo ""
+    if ! sudo -v; then
+        error "sudo authentication failed. Ensure your account has a password set and try again."
+    fi
+    (while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit 0; done) &
+    SUDO_KEEPALIVE_PID=$!
+    trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null; exit' INT TERM EXIT
+    info "Administrator access granted — password cached for this session"
 }
 
 check_and_install_homebrew() {
@@ -1030,9 +1039,9 @@ main() {
     echo -e "${BLUE}===============================================${NC}"
 
     ask_hf_token
+    check_admin_access
 
     check_macos
-    check_admin_access
     check_and_install_homebrew
     install_system_deps
     check_and_install_python
