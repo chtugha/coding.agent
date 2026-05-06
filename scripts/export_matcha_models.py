@@ -454,7 +454,7 @@ def _build_encoder_wrapper(model, T_mel, bucket_name):
             idx = torch.arange(T_y, device=w_int.device).unsqueeze(0).unsqueeze(0)
             path = ((idx >= cum_dur_prev.unsqueeze(-1)) &
                     (idx < cum_dur.unsqueeze(-1))).float()
-            path = path * attn_mask.squeeze(1).unsqueeze(1)
+            path = path * attn_mask.squeeze(1)
             attn = path
 
             mu_y = torch.matmul(
