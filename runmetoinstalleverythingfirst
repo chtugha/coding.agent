@@ -259,7 +259,6 @@ setup_python_env() {
     "$WHISPERTALK_PYTHON" -m pip install --quiet openai-whisper
     "$WHISPERTALK_PYTHON" -m pip install --quiet huggingface_hub
     "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
-    "$WHISPERTALK_PYTHON" -m pip install --quiet --no-deps ane-transformers
     "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
     info "Python environment ready"
 }
@@ -360,14 +359,12 @@ generate_whisper_coreml_encoder() {
         info "Converting ${model_name} to CoreML (this may take 5-10 minutes)..."
         if ! "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
             --model "${model_name}" \
-            --encoder-only True \
-            --optimize-ane True; then
+            --encoder-only True; then
             warn "Full-precision CoreML conversion failed (possibly OOM) — retrying with quantization..."
             if ! "$WHISPERTALK_PYTHON" models/convert-whisper-to-coreml.py \
                 --model "${model_name}" \
                 --encoder-only True \
-                --quantize True \
-                --optimize-ane True; then
+                --quantize True; then
                 warn "CoreML conversion for ${model_name} failed even with quantization — try closing other apps and re-running"
                 exit 1
             fi
