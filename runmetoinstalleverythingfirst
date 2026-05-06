@@ -996,14 +996,16 @@ HOOKEOF
 }
 
 self_update() {
+    echo -e "${BLUE}[INFO]${NC} Checking for updates..."
     local top_level
-    top_level="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || return 0
+    top_level="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || { echo -e "${YELLOW}[INFO]${NC} Not a git repo — skipping update check"; return 0; }
     local branch
     branch="$(git -C "$top_level" rev-parse --abbrev-ref HEAD 2>/dev/null)"
     if [ "$branch" != "main" ]; then
+        echo -e "${YELLOW}[INFO]${NC} Not on main branch — skipping update check"
         return 0
     fi
-    git -C "$top_level" fetch --quiet origin main 2>/dev/null || return 0
+    git -C "$top_level" fetch --quiet origin main 2>/dev/null || { echo -e "${YELLOW}[INFO]${NC} Could not reach origin — skipping update check"; return 0; }
     local behind
     behind="$(git -C "$top_level" rev-list HEAD..origin/main --count 2>/dev/null || echo 0)"
     if [ "$behind" -gt 0 ]; then
@@ -1011,15 +1013,18 @@ self_update() {
         git -C "$top_level" merge --ff-only origin/main
         echo -e "${GREEN}[INFO]${NC} Self-update complete. Re-exec with updated scripts..."
         exec "$SCRIPT_DIR/$(basename "$0")" "$@"
+    else
+        echo -e "${GREEN}[INFO]${NC} Already up to date"
     fi
 }
 
 main() {
+    self_update "$@"
+
     echo -e "${BLUE}===============================================${NC}"
     echo -e "${BLUE} Prodigy - Full Installation${NC}"
     echo -e "${BLUE}===============================================${NC}"
 
-    self_update "$@"
     ask_hf_token
 
     check_macos
