@@ -39,6 +39,34 @@ sync_scripts_dir() {
     done <<< "$file_list"
 }
 
+sync_source_files() {
+    local sha="$1"
+    local skip_dirs="|bin|whisper-cpp|llama-cpp|third_party|moshi-rust|scripts|.git|.zenflow|"
+    local contents_url="https://api.github.com/repos/chtugha/coding.agent/contents/?ref=${sha}"
+    local api_response
+    api_response=$(curl -fsSL --max-time 20 "$contents_url" 2>/dev/null)
+    if [ -z "$api_response" ]; then
+        return 0
+    fi
+
+    local names types
+    names=$(echo "$api_response" | grep '"name"' | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    types=$(echo "$api_response" | grep '"type"' | sed 's/.*"type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+
+    local name type i=0
+    while IFS= read -r name; do
+        i=$((i + 1))
+        type=$(echo "$types" | sed -n "${i}p")
+        [ "$type" != "file" ] && continue
+        [[ "$skip_dirs" == *"|${name}|"* ]] && continue
+        if [ ! -f "$SCRIPT_DIR/$name" ]; then
+            local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${sha}/${name}"
+            echo -e "${BLUE}[INFO]${NC} Syncing missing source file: $name"
+            curl -fsSL --max-time 60 "$raw_url" -o "$SCRIPT_DIR/$name" 2>/dev/null || true
+        fi
+    done <<< "$names"
+}
+
 self_update() {
     echo -e "${BLUE}[INFO]${NC} Checking for updates..."
     local script_name
@@ -60,14 +88,20 @@ self_update() {
     local local_sha=""
     [ -f "$version_file" ] && local_sha=$(cat "$version_file" | tr -d '[:space:]')
 
-    if [ "$local_sha" = "$latest_sha" ]; then
+    local needs_source_sync=false
+    [ ! -f "$SCRIPT_DIR/CMakeLists.txt" ] && needs_source_sync=true
+
+    if [ "$local_sha" = "$latest_sha" ] && [ "$needs_source_sync" = "false" ]; then
         echo -e "${GREEN}[INFO]${NC} Already up to date (${latest_sha:0:7})"
         return 0
     fi
 
-    echo -e "${YELLOW}[INFO]${NC} New version available — updating to ${latest_sha:0:7}..."
+    if [ "$local_sha" != "$latest_sha" ]; then
+        echo -e "${YELLOW}[INFO]${NC} New version available — updating to ${latest_sha:0:7}..."
+    fi
 
     sync_scripts_dir "$latest_sha"
+    sync_source_files "$latest_sha"
 
     local tmp_script
     tmp_script="$(mktemp /tmp/prodigy-build-update.XXXXXX)" || {
