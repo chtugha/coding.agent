@@ -1192,9 +1192,9 @@ self_update() {
     local script_path="$SCRIPT_DIR/$script_name"
     local version_file="$SCRIPT_DIR/.install_version"
 
-    local api_url="https://api.github.com/repos/chtugha/coding.agent/commits?path=${script_name}&per_page=1"
+    local head_api_url="https://api.github.com/repos/chtugha/coding.agent/commits/main"
     local latest_sha
-    latest_sha=$(curl -fsSL --max-time 15 "$api_url" 2>/dev/null \
+    latest_sha=$(curl -fsSL --max-time 15 "$head_api_url" 2>/dev/null \
         | grep -m1 '"sha"' \
         | sed 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 
@@ -1208,29 +1208,37 @@ self_update() {
 
     if [ "$local_sha" = "$latest_sha" ]; then
         echo -e "${GREEN}[INFO]${NC} Already up to date (${latest_sha:0:7})"
-        if [ ! -f "$SCRIPT_DIR/scripts/export_kokoro_models.py" ]; then
-            echo -e "${BLUE}[INFO]${NC} Syncing missing scripts directory..."
-            sync_scripts_dir "$latest_sha"
-        fi
         return 0
     fi
 
     echo -e "${YELLOW}[INFO]${NC} New version available — updating to ${latest_sha:0:7}..."
+
+    sync_scripts_dir "$latest_sha"
+
     local tmp_script
     tmp_script="$(mktemp /tmp/prodigy-install-update.XXXXXX)" || {
         echo -e "${YELLOW}[INFO]${NC} Could not create temp file — skipping update"
+        echo "$latest_sha" > "$version_file" 2>/dev/null || true
         return 0
     }
     local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${latest_sha}/${script_name}"
     if ! curl -fsSL --max-time 30 "$raw_url" -o "$tmp_script" 2>/dev/null; then
-        echo -e "${YELLOW}[INFO]${NC} Download failed — skipping update"
+        echo -e "${YELLOW}[INFO]${NC} Script download failed — skipping self-update"
         rm -f "$tmp_script"
+        echo "$latest_sha" > "$version_file" 2>/dev/null || true
         return 0
     fi
+
+    if diff -q "$tmp_script" "$script_path" &>/dev/null; then
+        rm -f "$tmp_script"
+        echo "$latest_sha" > "$version_file" 2>/dev/null || true
+        echo -e "${GREEN}[INFO]${NC} Scripts synced (${latest_sha:0:7})"
+        return 0
+    fi
+
     chmod +x "$tmp_script"
     cp "$tmp_script" "$script_path"
     rm -f "$tmp_script"
-    sync_scripts_dir "$latest_sha"
     echo "$latest_sha" > "$version_file" 2>/dev/null || true
     echo -e "${GREEN}[INFO]${NC} Update applied (${latest_sha:0:7}). Re-launching..."
     exec "$script_path" "$@"
