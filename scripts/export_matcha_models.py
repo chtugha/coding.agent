@@ -97,29 +97,102 @@ KNOWN_DE_REPOS = [
 ]
 
 
-def _patch_matcha_layernorm():
-    """Patch matcha text_encoder.LayerNorm.forward to be TorchScript-compatible.
+def _patch_matcha_for_torchscript():
+    """Patch matcha text_encoder classes to be TorchScript-compatible.
 
-    The original implementation builds a view shape with a dynamic list expression:
+    LayerNorm.forward: builds a view shape with a dynamic list expression
         shape = [1, -1] + [1] * (n_dims - 2)
     which TorchScript cannot statically analyse.  For 3-D tensors [B, C, T] (the
-    only shape used in the text encoder) the equivalent is view(1, -1, 1).
+    only shape used in the text encoder) the equivalent is unsqueeze(0).unsqueeze(-1).
+
+    ConvReluNorm.forward: uses self.conv_layers[i] with a variable index, which
+    TorchScript does not support.  Replaced with zip() enumeration.
+
     Must be called before the first torch.jit.script() on any Matcha encoder wrapper.
     """
     try:
+        import math
         import torch
         import matcha.models.components.text_encoder as _te
 
-        def _scriptable_forward(self, x: torch.Tensor) -> torch.Tensor:
+        def _scriptable_ln_forward(self, x: torch.Tensor) -> torch.Tensor:
             assert x.dim() == 3, f"LayerNorm patch expects 3D input [B,C,T], got {x.dim()}D"
             mean = torch.mean(x, 1, keepdim=True)
             variance = torch.mean((x - mean) ** 2, 1, keepdim=True)
             x = (x - mean) * torch.rsqrt(variance + self.eps)
             return x * self.gamma.unsqueeze(0).unsqueeze(-1) + self.beta.unsqueeze(0).unsqueeze(-1)
 
-        _te.LayerNorm.forward = _scriptable_forward
+        _te.LayerNorm.forward = _scriptable_ln_forward
+
+        def _scriptable_crn_forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
+            x_org = x
+            for conv, norm in zip(self.conv_layers, self.norm_layers):
+                x = conv(x * x_mask)
+                x = norm(x)
+                x = self.relu_drop(x)
+            x = x_org + self.proj(x)
+            return x * x_mask
+
+        _te.ConvReluNorm.forward = _scriptable_crn_forward
+
+        def _scriptable_encoder_forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
+            attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
+            for attn, norm1, ffn, norm2 in zip(
+                self.attn_layers, self.norm_layers_1,
+                self.ffn_layers, self.norm_layers_2,
+            ):
+                x = x * x_mask
+                y = attn(x, x, attn_mask)
+                y = self.drop(y)
+                x = norm1(x + y)
+                y = ffn(x, x_mask)
+                y = self.drop(y)
+                x = norm2(x + y)
+            x = x * x_mask
+            return x
+
+        _te.Encoder.forward = _scriptable_encoder_forward
+
+        def _scriptable_rope_forward(self, x: torch.Tensor) -> torch.Tensor:
+            b, h, t, d = x.shape
+            x = x.permute(2, 0, 1, 3)
+            self._build_cache(x)
+            x_rope = x[..., : self.d]
+            x_pass = x[..., self.d :]
+            d_2 = self.d // 2
+            neg_half_x = torch.cat([-x_rope[:, :, :, d_2:], x_rope[:, :, :, :d_2]], dim=-1)
+            x_rope = (x_rope * self.cos_cached[: x.shape[0]]) + (neg_half_x * self.sin_cached[: x.shape[0]])
+            out = torch.cat((x_rope, x_pass), dim=-1)
+            return out.permute(1, 2, 0, 3)
+
+        _te.RotaryPositionalEmbeddings.forward = _scriptable_rope_forward
+
+        def _scriptable_mha_attention(self, query: torch.Tensor, key: torch.Tensor,
+                                      value: torch.Tensor,
+                                      mask: torch.Tensor = None):
+            b, d, t_s = key.shape
+            t_t = query.shape[2]
+            c = d // self.n_heads
+            query = query.view(b, self.n_heads, c, t_t).permute(0, 1, 3, 2)
+            key = key.view(b, self.n_heads, c, t_s).permute(0, 1, 3, 2)
+            value = value.view(b, self.n_heads, c, t_s).permute(0, 1, 3, 2)
+
+            query = self.query_rotary_pe(query)
+            key = self.key_rotary_pe(key)
+
+            scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.k_channels)
+
+            if mask is not None:
+                scores = scores.masked_fill(mask == 0, -1e4)
+            p_attn = torch.nn.functional.softmax(scores, dim=-1)
+            p_attn = self.drop(p_attn)
+            output = torch.matmul(p_attn, value)
+            output = output.transpose(2, 3).contiguous().view(b, d, t_t)
+            return output, p_attn
+
+        _te.MultiHeadAttention.attention = _scriptable_mha_attention
     except Exception as e:
-        print(f'  [WARN] Could not patch LayerNorm for TorchScript: {e}')
+        print(f'  [WARN] Could not patch matcha modules for TorchScript: {e}')
 
 
 def run_cmd(cmd, check=True, capture=True):
@@ -1222,7 +1295,7 @@ def main():
     results = {}
 
     if do_encoder:
-        _patch_matcha_layernorm()
+        _patch_matcha_for_torchscript()
         for bucket in buckets:
             path = export_encoder(model, coreml_dir, bucket)
             results[f'matcha_encoder_{bucket["name"]}.mlmodelc'] = path

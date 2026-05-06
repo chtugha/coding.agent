@@ -961,6 +961,29 @@ verify_installation() {
     done
 
     echo ""
+    echo "Moshi German LoRA:"
+    if [ -f "bin/models/moshiko-german-merged.safetensors" ]; then
+        info "  [OK] Merged model ($(du -h "bin/models/moshiko-german-merged.safetensors" | cut -f1))"
+    elif [ -f "bin/models/german_moshi_lora/checkpoints/checkpoint_003000/consolidated/lora.safetensors" ]; then
+        info "  [OK] LoRA checkpoint downloaded (not yet merged)"
+    else
+        warn "  [--] Moshi German LoRA not present"
+    fi
+
+    echo ""
+    echo "Ollama (RAG embeddings):"
+    if command -v ollama &> /dev/null; then
+        info "  [OK] Ollama installed ($(ollama --version 2>/dev/null || echo 'version unknown'))"
+        if ollama list 2>/dev/null | grep -qi "embeddinggemma"; then
+            info "  [OK] embeddinggemma model pulled"
+        else
+            warn "  [--] embeddinggemma model not pulled (run: ollama pull embeddinggemma:300m)"
+        fi
+    else
+        warn "  [--] Ollama not installed (install from https://ollama.com/download)"
+    fi
+
+    echo ""
     if $ALL_OK; then
         echo -e "${GREEN}===============================================${NC}"
         echo -e "${GREEN} Installation Complete!${NC}"
