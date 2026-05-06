@@ -109,6 +109,7 @@ for item in items:
     _sync_gh_dir "$sha" "libpiper" "$SCRIPT_DIR/libpiper"
     _sync_gh_dir "$sha" "libpiper/include" "$SCRIPT_DIR/libpiper/include"
     _sync_gh_dir "$sha" "libpiper/src" "$SCRIPT_DIR/libpiper/src"
+    _sync_gh_dir "$sha" "third_party/hnswlib" "$SCRIPT_DIR/third_party/hnswlib"
 }
 
 self_update() {
