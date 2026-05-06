@@ -1006,28 +1006,47 @@ HOOKEOF
 
 self_update() {
     echo -e "${BLUE}[INFO]${NC} Checking for updates..."
-    local script_path="$SCRIPT_DIR/$(basename "$0")"
-    local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/main/$(basename "$0")"
+    local script_name
+    script_name="$(basename "$0")"
+    local script_path="$SCRIPT_DIR/$script_name"
+    local version_file="$SCRIPT_DIR/.install_version"
+
+    local api_url="https://api.github.com/repos/chtugha/coding.agent/commits?path=${script_name}&per_page=1"
+    local latest_sha
+    latest_sha=$(curl -fsSL --max-time 15 "$api_url" 2>/dev/null \
+        | grep -m1 '"sha"' \
+        | sed 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+
+    if [ -z "$latest_sha" ]; then
+        echo -e "${YELLOW}[INFO]${NC} Could not reach GitHub — skipping update check"
+        return 0
+    fi
+
+    local local_sha=""
+    [ -f "$version_file" ] && local_sha=$(cat "$version_file" | tr -d '[:space:]')
+
+    if [ "$local_sha" = "$latest_sha" ]; then
+        echo -e "${GREEN}[INFO]${NC} Already up to date (${latest_sha:0:7})"
+        return 0
+    fi
+
+    echo -e "${YELLOW}[INFO]${NC} New version available — updating to ${latest_sha:0:7}..."
     local tmp_script
     tmp_script="$(mktemp /tmp/prodigy-install-update.XXXXXX)" || {
-        echo -e "${YELLOW}[INFO]${NC} Could not create temp file — skipping update check"
+        echo -e "${YELLOW}[INFO]${NC} Could not create temp file — skipping update"
         return 0
     }
-    if ! curl -fsSL --max-time 15 "$raw_url" -o "$tmp_script" 2>/dev/null; then
-        echo -e "${YELLOW}[INFO]${NC} Could not reach GitHub — skipping update check"
+    local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${latest_sha}/${script_name}"
+    if ! curl -fsSL --max-time 30 "$raw_url" -o "$tmp_script" 2>/dev/null; then
+        echo -e "${YELLOW}[INFO]${NC} Download failed — skipping update"
         rm -f "$tmp_script"
         return 0
     fi
-    if cmp -s "$script_path" "$tmp_script"; then
-        echo -e "${GREEN}[INFO]${NC} Already up to date"
-        rm -f "$tmp_script"
-        return 0
-    fi
-    echo -e "${YELLOW}[INFO]${NC} New version available — updating..."
     chmod +x "$tmp_script"
     cp "$tmp_script" "$script_path"
     rm -f "$tmp_script"
-    echo -e "${GREEN}[INFO]${NC} Update applied. Re-launching..."
+    echo "$latest_sha" > "$version_file" 2>/dev/null || true
+    echo -e "${GREEN}[INFO]${NC} Update applied (${latest_sha:0:7}). Re-launching..."
     exec "$script_path" "$@"
 }
 

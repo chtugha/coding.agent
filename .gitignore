@@ -143,3 +143,4 @@ bin/db_key.hex
 
 # Embedding DB metadata (generated at runtime)
 embeddings.meta
+.install_version
