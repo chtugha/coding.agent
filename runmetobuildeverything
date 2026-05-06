@@ -516,6 +516,10 @@ build_main_project() {
     build_sqlcipher_amalgamation
 
     clear_stale_cache build
+    if [ -f build/CMakeCache.txt ] && grep -q 'NOTFOUND' build/CMakeCache.txt 2>/dev/null; then
+        info "Clearing stale CMake cache (contains NOTFOUND entries from missing deps)"
+        rm -rf build
+    fi
     info "Configuring Prodigy (CoreML, Release, tests=${BUILD_TESTS})..."
     # shellcheck disable=SC2086
     cmake $CMAKE_GEN -S . -B build \
