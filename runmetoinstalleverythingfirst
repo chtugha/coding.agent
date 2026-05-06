@@ -277,7 +277,7 @@ install_system_deps() {
     #   tclsh ships with macOS Xcode Command Line Tools (/usr/bin/tclsh).
     #   If /usr/bin/tclsh is missing, tcl-tk is installed via Homebrew as
     #   a fallback.
-    DEPS=("cmake" "wget" "git" "espeak-ng" "ccache" "openssl@3" "pkg-config" "sentencepiece" "opus" "protobuf")
+    DEPS=("cmake" "wget" "git" "espeak-ng" "ccache" "openssl@3" "pkg-config" "sentencepiece" "opus" "protobuf" "nlohmann-json")
     for dep in "${DEPS[@]}"; do
         if ! brew list "$dep" &> /dev/null; then
             info "Installing $dep..."

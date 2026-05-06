@@ -506,10 +506,13 @@ build_moshi_backend() {
 build_main_project() {
     step "Building Prodigy"
 
-    # Build (or update) the SQLCipher amalgamation before cmake configure.
-    # This ensures every build picks up the latest SQLCipher security patches.
-    # cmake references third_party/sqlcipher/sqlite3.c directly — no network
-    # access is needed at cmake time.
+    for _dep in nlohmann-json; do
+        if ! brew list "$_dep" &>/dev/null; then
+            info "Installing $_dep (required by libpiper)..."
+            brew install "$_dep"
+        fi
+    done
+
     build_sqlcipher_amalgamation
 
     clear_stale_cache build
