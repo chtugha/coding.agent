@@ -1165,6 +1165,26 @@ HOOKEOF
     info "Git hooks installed (post-merge, post-commit hint)"
 }
 
+sync_scripts_dir() {
+    local sha="$1"
+    local scripts_dir="$SCRIPT_DIR/scripts"
+    mkdir -p "$scripts_dir"
+    local contents_url="https://api.github.com/repos/chtugha/coding.agent/contents/scripts?ref=${sha}"
+    local file_list
+    file_list=$(curl -fsSL --max-time 15 "$contents_url" 2>/dev/null \
+        | grep '"name"' \
+        | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    if [ -z "$file_list" ]; then
+        return 0
+    fi
+    local f
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${sha}/scripts/${f}"
+        curl -fsSL --max-time 60 "$raw_url" -o "$scripts_dir/$f" 2>/dev/null || true
+    done <<< "$file_list"
+}
+
 self_update() {
     echo -e "${BLUE}[INFO]${NC} Checking for updates..."
     local script_name
@@ -1188,6 +1208,10 @@ self_update() {
 
     if [ "$local_sha" = "$latest_sha" ]; then
         echo -e "${GREEN}[INFO]${NC} Already up to date (${latest_sha:0:7})"
+        if [ ! -f "$SCRIPT_DIR/scripts/export_kokoro_models.py" ]; then
+            echo -e "${BLUE}[INFO]${NC} Syncing missing scripts directory..."
+            sync_scripts_dir "$latest_sha"
+        fi
         return 0
     fi
 
@@ -1206,6 +1230,7 @@ self_update() {
     chmod +x "$tmp_script"
     cp "$tmp_script" "$script_path"
     rm -f "$tmp_script"
+    sync_scripts_dir "$latest_sha"
     echo "$latest_sha" > "$version_file" 2>/dev/null || true
     echo -e "${GREEN}[INFO]${NC} Update applied (${latest_sha:0:7}). Re-launching..."
     exec "$script_path" "$@"
