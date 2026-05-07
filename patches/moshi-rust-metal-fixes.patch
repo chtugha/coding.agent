@@ -1,0 +1,178 @@
+diff --git a/rust/moshi-backend/src/standalone.rs b/rust/moshi-backend/src/standalone.rs
+index 117e760..f73b677 100644
+--- a/rust/moshi-backend/src/standalone.rs
++++ b/rust/moshi-backend/src/standalone.rs
+@@ -57,7 +57,7 @@ pub(crate) fn device(cpu: bool) -> Result<candle::Device> {
+ impl stream_both::AppStateInner {
+     pub fn new(args: &StandaloneArgs, config: &stream_both::Config) -> Result<Self> {
+         let device = device(args.cpu)?;
+-        let dtype = if device.is_cuda() { candle::DType::BF16 } else { candle::DType::F32 };
++        let dtype = if device.is_cuda() || device.is_metal() { candle::DType::BF16 } else { candle::DType::F32 };
+         let lm_model = moshi::lm::load_streaming(&config.lm_model_file, dtype, &device)?;
+         let mimi_device = if config.use_cpu_for_mimi { &candle::Device::Cpu } else { &device };
+         let mimi_model = moshi::mimi::load(
+@@ -123,6 +123,9 @@ pub async fn download_from_hub(config: &mut stream_both::Config) -> Result<()> {
+         [&mut config.lm_model_file, &mut config.mimi_model_file, &mut config.text_tokenizer_file]
+             .iter_mut()
+     {
++        if Path::new(file_path.as_str()).exists() {
++            continue;
++        }
+         let filename = extract_filename(file_path)
+             .with_context(|| format!("Failed to extract filename for '{file_path}'"))?;
+         let downloaded_path = repo
+@@ -138,17 +141,6 @@ pub async fn download_from_hub(config: &mut stream_both::Config) -> Result<()> {
+ }
+ 
+ pub async fn run(args: &StandaloneArgs, config: &Config) -> Result<()> {
+-    let cert_pem = config.cert_file("cert.pem");
+-    let key_pem = config.cert_file("key.pem");
+-    if !cert_pem.exists() || !key_pem.exists() {
+-        let rcgen::CertifiedKey { cert, key_pair } =
+-            rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
+-        std::fs::write(&cert_pem, cert.pem())?;
+-        std::fs::write(&key_pem, key_pair.serialize_pem())?;
+-    }
+-
+-    let tls_config =
+-        axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_pem, key_pem).await?;
+     let sock_addr = std::net::SocketAddr::from((
+         std::net::IpAddr::from_str(config.addr.as_str())
+             .unwrap_or(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+@@ -164,9 +156,9 @@ pub async fn run(args: &StandaloneArgs, config: &Config) -> Result<()> {
+         )
+         .layer(tower::ServiceBuilder::new().layer(tower_http::trace::TraceLayer::new_for_http()))
+         .with_state(state);
+-    tracing::info!("standalone worker listening on https://{}", sock_addr);
+-    axum_server::bind_rustls(sock_addr, tls_config)
+-        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
++    tracing::info!("standalone worker listening on http://{}", sock_addr);
++    let listener = tokio::net::TcpListener::bind(sock_addr).await?;
++    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+         .await?;
+     Ok(())
+ }
+diff --git a/rust/moshi-backend/src/stream_both.rs b/rust/moshi-backend/src/stream_both.rs
+index ec66e1f..7771c80 100644
+--- a/rust/moshi-backend/src/stream_both.rs
++++ b/rust/moshi-backend/src/stream_both.rs
+@@ -401,19 +401,37 @@ impl StreamingModel {
+             if self.state.config.use_cpu_for_mimi { &candle::Device::Cpu } else { &self.device };
+         mimi_device.synchronize()?;
+         sender.send(StreamOut::Ready)?;
++        let mut recv_count: u64 = 0;
++        let mut token_count: u64 = 0;
++        let mut none_count: u64 = 0;
++        let mut out_count: u64 = 0;
+         while let Ok(in_pcm) = receiver.recv() {
+             if in_pcm.is_empty() {
+                 continue;
+             }
++            recv_count += 1;
+             let pcm_len = in_pcm.len();
++            if recv_count <= 3 {
++                tracing::info!(recv_count, pcm_len, "processing loop: received PCM");
++            }
+             sender.send(StreamOut::InputPcm { pcm_len })?;
+             let pcms = candle::Tensor::from_vec(in_pcm, (1, 1, pcm_len), mimi_device)?;
+             let audio_tokens = mimi.encode_step(&pcms.into(), &().into())?;
+             let audio_tokens = match audio_tokens.as_option() {
+-                None => continue,
++                None => {
++                    none_count += 1;
++                    if none_count <= 3 {
++                        tracing::info!(recv_count, none_count, "mimi encode_step returned None");
++                    }
++                    continue;
++                }
+                 Some(audio_tokens) => audio_tokens,
+             };
+             let (_one, _codebooks, steps) = audio_tokens.dims3()?;
++            token_count += steps as u64;
++            if token_count <= 3 || (recv_count <= 10 && steps > 0) {
++                tracing::info!(recv_count, steps, token_count, "mimi produced tokens");
++            }
+ 
+             for step in 0..steps {
+                 let codes = audio_tokens.i((0, .., step))?.to_vec1::<u32>()?;
+@@ -429,6 +447,7 @@ impl StreamingModel {
+                     let pcm = mimi.decode_step(&audio_tokens.into(), &().into())?;
+                     if let Some(pcm) = pcm.as_option() {
+                         let pcm = pcm.i((0, 0))?.to_vec1::<f32>()?;
++                        out_count += 1;
+                         sender.send(StreamOut::Pcm { pcm })?;
+                     }
+                 }
+@@ -438,7 +457,7 @@ impl StreamingModel {
+                 prev_text_token = text_token;
+             }
+         }
+-        tracing::info!("finished the processing loop");
++        tracing::info!(recv_count, token_count, none_count, out_count, "finished the processing loop");
+         Ok(())
+     }
+ 
+@@ -721,29 +740,37 @@ fn spawn_recv_loops(
+         }
+     });
+     let handle2 = tokio::spawn(async move {
+-        // TODO: dynamic sizing?
+         let mut pcm_buf = vec![0f32; 24_000 * 10];
+         let mut size_in_buf = 0;
++        let mut pkt_count: u64 = 0;
++        let mut send_count: u64 = 0;
+         loop {
+             match pr.next().await {
+                 None => {
++                    tracing::info!(pkt_count, send_count, "ogg reader returned None");
+                     break;
+                 }
+                 Some(packet) => {
+                     let packet = packet?;
+                     if packet.data.starts_with(b"OpusHead") || packet.data.starts_with(b"OpusTags")
+                     {
++                        tracing::info!(len = packet.data.len(), "skipping ogg header packet");
+                         continue;
+                     }
++                    pkt_count += 1;
+                     let read_size = decoder.decode_float(
+                         &packet.data,
+                         &mut pcm_buf[size_in_buf..],
+-                        /* Forward Error Correction */ false,
++                        false,
+                     )?;
+                     size_in_buf += read_size;
+-                    // flush the data every half timestep
++                    if pkt_count <= 3 {
++                        tracing::info!(pkt_count, read_size, size_in_buf, "decoded opus packet");
++                    }
+                     if size_in_buf >= 24_000 / 25 {
++                        send_count += 1;
+                         if sender.send(pcm_buf[..size_in_buf].to_vec()).is_err() {
++                            tracing::info!(send_count, "pcm channel closed");
+                             break;
+                         }
+                         size_in_buf = 0;
+@@ -751,7 +778,7 @@ fn spawn_recv_loops(
+                 }
+             }
+         }
+-        tracing::info!("decoder closed");
++        tracing::info!(pkt_count, send_count, "decoder closed");
+         Ok::<_, anyhow::Error>(())
+     });
+     Ok((handle1, handle2))
+diff --git a/rust/moshi-core/src/nn.rs b/rust/moshi-core/src/nn.rs
+index 69eac5b..bf0f21d 100644
+--- a/rust/moshi-core/src/nn.rs
++++ b/rust/moshi-core/src/nn.rs
+@@ -22,8 +22,7 @@ impl MaybeQuantizedWeight {
+ }
+ 
+ pub fn matmul_dtype(device: &candle::Device) -> DType {
+-    // Dtype used for intermediate matmul in attention during quantized execution
+-    if device.is_cuda() {
++    if device.is_cuda() || device.is_metal() {
+         DType::BF16
+     } else {
+         DType::F32

@@ -226,12 +226,12 @@ static std::vector<uint8_t> build_ogg_opus_preamble(uint32_t serial) {
     OggPage pg;
     pg.serial = serial;
     pg.bos = true;
-    pg.granule = static_cast<uint64_t>(-1);
+    pg.granule = 0;
 
     auto head = ogg_opus_head();
     auto page0 = build_ogg_page(pg, head.data(), head.size());
 
-    pg.granule = static_cast<uint64_t>(-1);
+    pg.granule = 0;
     auto tags = ogg_opus_tags();
     auto page1 = build_ogg_page(pg, tags.data(), tags.size());
 
@@ -542,6 +542,8 @@ private:
                 frame.push_back(MT_AUDIO);
                 frame.insert(frame.end(), preamble.begin(), preamble.end());
                 enqueue_ws_frame(state, std::move(frame));
+                state->ogg_out.sequence = 2;
+                state->ogg_out.bos = false;
                 state->ogg_preamble_sent = true;
             }
 

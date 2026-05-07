@@ -29,12 +29,14 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  16. Install Ollama (via brew cask) + pull embeddinggemma:300m for tomedo-crawl RAG"
     echo "  17. Download Moshi German LoRA (chtugha/moshi-german-lora → bin/models/german_moshi_lora/)"
     echo "  18. Merge Moshi LoRA adapters into base model (produces moshiko-german-merged.safetensors)"
+    echo "  19. Download Moshi Q8 GGUF model (kyutai/moshiko-candle-q8 → bin/models/)"
+    echo "       Required for 16 GB Macs — BF16 models cause swap thrashing."
     echo ""
     echo "Optional TTS engines (called automatically, non-fatal if unavailable):"
-    echo "  19. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
-    echo "  20. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
-    echo "  21. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
-    echo "      Note: step 21 requires a German Matcha-TTS checkpoint (--checkpoint flag"
+    echo "  20. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
+    echo "  21. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
+    echo "  22. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
+    echo "      Note: step 22 requires a German Matcha-TTS checkpoint (--checkpoint flag"
     echo "      or fine-tuned from shivammehta25/Matcha-TTS). Falls back to English."
     echo ""
     echo "Requirements:"
@@ -999,11 +1001,16 @@ verify_installation() {
     done
 
     echo ""
-    echo "Moshi German LoRA:"
+    echo "Moshi models:"
+    if [ -f "bin/models/moshiko-pytorch-bf16-q8.gguf" ]; then
+        info "  [OK] Moshi Q8 GGUF model ($(du -h "bin/models/moshiko-pytorch-bf16-q8.gguf" | cut -f1))"
+    else
+        warn "  [--] Moshi Q8 GGUF model not present"
+    fi
     if [ -f "bin/models/moshiko-german-merged.safetensors" ]; then
-        info "  [OK] Merged model ($(du -h "bin/models/moshiko-german-merged.safetensors" | cut -f1))"
+        info "  [OK] German LoRA merged model ($(du -h "bin/models/moshiko-german-merged.safetensors" | cut -f1))"
     elif [ -f "bin/models/german_moshi_lora/checkpoints/checkpoint_003000/consolidated/lora.safetensors" ]; then
-        info "  [OK] LoRA checkpoint downloaded (not yet merged)"
+        info "  [OK] German LoRA checkpoint downloaded (not yet merged)"
     else
         warn "  [--] Moshi German LoRA not present"
     fi
@@ -1151,6 +1158,59 @@ print('[INFO] Backend config written to ' + sys.argv[4])
     if [ "$found_any" = "false" ]; then
         info "No *_moshi_lora run directories found under $lora_base — skipping LoRA merge"
         info "  To merge a LoRA manually: python3 scripts/merge_moshi_lora.py --help"
+    fi
+}
+
+download_moshi_q8_model() {
+    step "Downloading Moshi Q8 model (kyutai/moshiko-candle-q8)"
+
+    local models_dir="bin/models"
+    local q8_model="$models_dir/moshiko-pytorch-bf16-q8.gguf"
+    local config_en="$models_dir/moshi-en-q8-backend-config.json"
+
+    if [ -f "$q8_model" ]; then
+        info "Moshi Q8 model already exists: $q8_model"
+    else
+        info "Downloading official Q8 GGUF model from kyutai/moshiko-candle-q8..."
+        if [ -x "$WHISPERTALK_HF_CLI" ]; then
+            "$WHISPERTALK_HF_CLI" download kyutai/moshiko-candle-q8 \
+                moshiko-pytorch-bf16-q8.gguf \
+                --local-dir "$models_dir/"
+        else
+            curl -L -o "$q8_model" \
+                "https://huggingface.co/kyutai/moshiko-candle-q8/resolve/main/moshiko-pytorch-bf16-q8.gguf"
+        fi
+        if [ -f "$q8_model" ]; then
+            info "Moshi Q8 model downloaded: $q8_model ($(du -h "$q8_model" | cut -f1))"
+        else
+            warn "Moshi Q8 model download failed"
+        fi
+    fi
+
+    if [ ! -f "$config_en" ] && [ -f "$q8_model" ]; then
+        local abs_model abs_logdir
+        abs_model="$(cd "$(dirname "$q8_model")" && pwd)/$(basename "$q8_model")"
+        abs_logdir="$(cd "$models_dir" && pwd)"
+        python3 -c "
+import json, sys
+config = {
+    'instance_name': 'moshi-en-q8-backend',
+    'hf_repo': 'kyutai/moshiko-candle-q8',
+    'lm_model_file': sys.argv[1],
+    'text_tokenizer_file': 'hf://kyutai/moshiko-candle-q8/tokenizer_spm_32k_3.model',
+    'log_dir': sys.argv[2],
+    'mimi_model_file': 'hf://kyutai/moshiko-candle-q8/tokenizer-e351c8d8-checkpoint125.safetensors',
+    'mimi_num_codebooks': 8,
+    'static_dir': '.',
+    'addr': '127.0.0.1',
+    'port': 8998,
+    'cert_dir': '.'
+}
+with open(sys.argv[3], 'w') as f:
+    json.dump(config, f, indent=2)
+print('[INFO] Backend config written to ' + sys.argv[3])
+" "$abs_model" "$abs_logdir" "$config_en"
+        info "Moshi English Q8 backend config created: $config_en"
     fi
 }
 
@@ -1357,6 +1417,7 @@ main() {
     check_ollama
     download_moshi_lora
     merge_moshi_loras
+    download_moshi_q8_model
     install_git_hooks
     verify_installation
 }

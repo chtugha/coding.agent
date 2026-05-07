@@ -72,3 +72,10 @@ cd build && ninja -j$(sysctl -n hw.ncpu)
 ## Lint / Typecheck
 
 This is a C++17 project. Build with ninja to catch compilation errors. No separate lint command.
+
+## Agent Rules
+
+- NEVER wait/sleep/poll for more than 15 minutes in a single action. If a process takes longer (model loading, builds, etc.), use short polls (30-60s) with a timeout counter and bail out with a status report if the limit is reached. This prevents the agent from going idle/unresponsive.
+- For moshi-backend: model warmup takes ~4 seconds with Q8 GGUF on Metal. If it hasn't finished in 2 minutes, something is wrong.
+- The moshi model (moshiko) is 7.7B params. On this 16GB M4 Mac, use the Q8 GGUF model (~8GB) with Metal. BF16 safetensors (15GB) causes swap thrashing. Steady-state LM step latency: ~101ms (1.26x real-time at 12.5Hz).
+- The `matmul_dtype` function in `moshi-core/src/nn.rs` MUST return BF16 for Metal (not just CUDA). This is critical for Q8 performance (30x speedup).

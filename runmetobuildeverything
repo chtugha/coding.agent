@@ -470,6 +470,18 @@ build_moshi_backend() {
         git clone --depth=1 https://github.com/kyutai-labs/moshi.git "$moshi_dir"
     fi
 
+    local patch_file="$SCRIPT_DIR/patches/moshi-rust-metal-fixes.patch"
+    if [ -f "$patch_file" ]; then
+        info "Applying Metal/BF16 patches to moshi-rust..."
+        git -C "$moshi_dir" checkout -- . 2>/dev/null || true
+        if ! git -C "$moshi_dir" apply --check "$patch_file" 2>/dev/null; then
+            warn "Patch does not apply cleanly — may already be applied or upstream changed"
+        else
+            git -C "$moshi_dir" apply "$patch_file"
+            info "Patches applied successfully"
+        fi
+    fi
+
     local bin_out="$SCRIPT_DIR/bin/moshi-backend"
     if [ -f "$bin_out" ] && [ "$FORCE_REBUILD" != "1" ]; then
         info "moshi-backend already built (use --force to rebuild)"

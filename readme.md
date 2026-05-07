@@ -154,6 +154,24 @@ Located in `bin/models/matcha-german/coreml/`:
 
 Export with `python3 scripts/export_matcha_models.py --checkpoint <path> --output-dir bin/models/matcha-german/coreml`.
 
+### Moshi (real-time speech-to-speech)
+
+Located in `bin/models/`:
+
+| File | Size | Purpose |
+|------|------|---------|
+| `moshiko-pytorch-bf16-q8.gguf` | ~8 GB | Q8 quantized LM model (recommended for 16GB Macs) |
+| `moshi-en-q8-backend-config.json` | - | English Q8 backend config |
+| `moshi-german-backend-config.json` | - | German LoRA-merged backend config |
+| `moshiko-german-candle.q8.gguf` | ~8 GB | German LoRA-merged Q8 model (if converted) |
+
+The Moshi backend is built from [kyutai-labs/moshi](https://github.com/kyutai-labs/moshi) (Rust) with Metal patches for Apple Silicon. The Q8 GGUF model is required on 16GB Macs — BF16 safetensors (15GB) causes swap thrashing.
+
+**Performance** (Apple M4 Mac mini, 16GB, Q8 GGUF + Metal):
+- Steady-state LM step: ~101ms (12.5Hz frame rate = 80ms budget → 1.26× real-time)
+- Model warmup: ~4 seconds
+- First step: ~2.2s (Metal shader compilation)
+
 ### Neural G2P (German grapheme-to-phoneme)
 
 Located in `bin/models/g2p/`:
@@ -183,6 +201,8 @@ All services bind to `127.0.0.1`:
 | VITS2 engine | — | — | 13175 | Docks into TTS stage on 13143 |
 | Matcha-TTS engine | — | — | 13176 | Docks into TTS stage on 13143 |
 | OAP | 13150 | 13151 | 13152 | |
+| Moshi service | 13160 | 13161 | 13162 | |
+| Moshi backend | — | — | — | WebSocket 8998+ (one per language) |
 | Frontend | - | - | - | HTTP 8080, Log UDP 22022 |
 | tomedo-crawl | 13180 | **13181** | 13182 | REST API on 13181; 13180/13182 reserved |
 
@@ -548,6 +568,33 @@ Alternative TTS engine based on [Matcha-TTS](https://github.com/shivammehta25/Ma
 | `TEST_SYNTH:<text>` | Synthesize and return timing stats |
 | `SYNTH_WAV:<path>\|<text>` | Synthesize text to a WAV file at the given path |
 | `SET_LOG_LEVEL:<LEVEL>` | Change log verbosity without restart |
+
+---
+
+### 7. Moshi Service (`bin/moshi-service` + `bin/moshi-backend`)
+
+Real-time speech-to-speech conversation using the [Moshi](https://github.com/kyutai-labs/moshi) model. Two-component architecture: `moshi-service` (C++) handles WebSocket transport, OGG/Opus encoding/decoding, and integration with the frontend pipeline; `moshi-backend` (Rust) runs the neural model inference on Metal GPU.
+
+**Architecture:**
+- `moshi-service` connects to `moshi-backend` via WebSocket (localhost, plain HTTP)
+- Input audio: OGG/Opus encoded, sent as WebSocket binary frames
+- Output: interleaved audio (OGG/Opus) and text tokens
+- Multi-language support via backend pool (one backend per language, routed by `--backend-config` args)
+
+**Key fixes applied (via `patches/moshi-rust-metal-fixes.patch`):**
+- `matmul_dtype()` returns BF16 on Metal (30× speedup for Q8 models)
+- Model loading uses BF16 dtype on Metal (not just CUDA)
+- TLS removed for localhost backend (plain HTTP WebSocket)
+- HuggingFace download skipped for local model files
+- Enhanced logging in processing loop and OGG decoder
+
+**Command-Line Parameters (moshi-service):**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--backend-config <lang>:<config>[:<binary>]` | (none) | Backend language, config JSON path, optional binary path |
+| `--default-language <lang>` | `en` | Default language when no preference is specified |
+| `--log-level <LEVEL>` | `INFO` | Log verbosity |
 
 ---
 
