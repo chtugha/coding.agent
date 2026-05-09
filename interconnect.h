@@ -31,7 +31,8 @@
 //   SIP_CLIENT (13100/13101/13102), IAP (13110/13111/13112)
 //   VAD (13115/13116/13117), WHISPER (13120/13121/13122)
 //   LLAMA (13130/13131/13132), TTS (13140/13141/13142/13143)
-//   OAP (13150/13151/13152), MOSHI_SERVICE (13155/13156/13157)
+//   OAP (13150/13151/13152), MOSHI_SERVICE (13155/13156/13157/13158)
+//     MOSHI_SERVICE port +3 (13158): Whisper text input (moshi-rag mode only)
 //   FRONTEND (13160/13161/13162), TOMEDO_CRAWL (13180/13181/13182)
 //   Log UDP: 22022
 //
@@ -368,6 +369,7 @@ struct PacketTrace {
 //   TTS        (base 13140): mgmt_listen=13140, data_listen=13141, engine_listen=13143
 //   OAP        (base 13150): mgmt_listen=13150, data_listen=13151
 //   MOSHI      (base 13155): mgmt_listen=13155, data_listen=13156, cmd_listen=13157
+//                             text_listen=13158 (moshi-rag mode: Whisper text input)
 //   FRONTEND   (base 13160): mgmt_listen=13160, data_listen=13161
 //   TOMEDO_CRAWL (base 13180): mgmt_listen=13180, data_listen=13181
 //

@@ -144,3 +144,6 @@ bin/db_key.hex
 # Embedding DB metadata (generated at runtime)
 embeddings.meta
 .install_version
+
+# Moshi-RAG Rust build artifacts
+moshi-rag/rust/target/
