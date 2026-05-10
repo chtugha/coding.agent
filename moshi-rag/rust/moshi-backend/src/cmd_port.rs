@@ -1,10 +1,10 @@
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::interconnect;
 use crate::log_forwarder::LogForwarder;
 
 const CMD_POLL_TIMEOUT: Duration = Duration::from_millis(500);
@@ -26,13 +26,14 @@ impl StatusProvider for DefaultStatusProvider {
 }
 
 pub fn run_cmd_listener(
+    listener: TcpListener,
     running: Arc<AtomicBool>,
     log_forwarder: Arc<LogForwarder>,
     status_provider: Arc<dyn StatusProvider>,
 ) -> Result<()> {
-    let listener = interconnect::bind_listen(interconnect::CMD_PORT)?;
     listener.set_nonblocking(true)?;
-    tracing::info!("CMD listener on port {}", interconnect::CMD_PORT);
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    tracing::info!("CMD listener on port {}", port);
 
     while running.load(Ordering::Relaxed) {
         let stream = match listener.accept() {
@@ -91,6 +92,7 @@ fn handle_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpStream;
 
     struct MockStatus;
     impl StatusProvider for MockStatus {
@@ -133,6 +135,9 @@ mod tests {
 
     #[test]
     fn cmd_listener_starts_and_stops() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
         let running = Arc::new(AtomicBool::new(true));
         let fwd = Arc::new(LogForwarder::new("TEST"));
         let status: Arc<dyn StatusProvider> =
@@ -142,13 +147,10 @@ mod tests {
         let f = fwd.clone();
         let s = status.clone();
         let handle = std::thread::spawn(move || {
-            let _ = run_cmd_listener(r, f, s);
+            let _ = run_cmd_listener(listener, r, f, s);
         });
 
-        std::thread::sleep(Duration::from_millis(200));
-
-        let mut stream =
-            std::net::TcpStream::connect(format!("127.0.0.1:{}", interconnect::CMD_PORT)).unwrap();
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
         stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         stream.write_all(b"PING\n").unwrap();

@@ -112,6 +112,7 @@ async fn main() -> Result<()> {
         Command::Standalone(standalone_args) => {
             let mut config = standalone::Config::load(&args.config)?;
             let fwd = std::sync::Arc::new(log_forwarder::LogForwarder::new("MOSHI_SERVICE"));
+            let fwd_for_cmd = std::sync::Arc::clone(&fwd);
             let _guard = tracing_init(
                 &config.stream.log_dir,
                 &config.stream.instance_name,
@@ -124,7 +125,7 @@ async fn main() -> Result<()> {
             if config.stream.requires_model_download() {
                 standalone::download_from_hub(&mut config.stream).await?;
             }
-            standalone::run(&standalone_args, &config).await?;
+            standalone::run(&standalone_args, &config, fwd_for_cmd).await?;
         }
         Command::Benchmark(standalone_args) => {
             let config = stream_both::Config::load(&args.config)?;

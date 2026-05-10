@@ -3,7 +3,18 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 const FRONTEND_LOG_PORT: u16 = 22022;
 const MAX_MSG_LEN: usize = 2048;
-const MAX_BUF_LEN: usize = 2304;
+const MAX_DATAGRAM_LEN: usize = 2304;
+
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &s[..boundary]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -71,17 +82,11 @@ impl LogForwarder {
         if (level as u8) > self.level.load(Ordering::Relaxed) {
             return;
         }
-        let msg = if message.len() > MAX_MSG_LEN {
-            &message[..MAX_MSG_LEN]
-        } else {
-            message
-        };
-        let mut buf = [0u8; MAX_BUF_LEN];
+        let msg = truncate_to_char_boundary(message, MAX_MSG_LEN);
         let formatted = format!("{} {} {} {}", self.service_name, level.as_str(), call_id, msg);
         let bytes = formatted.as_bytes();
-        let len = bytes.len().min(MAX_BUF_LEN);
-        buf[..len].copy_from_slice(&bytes[..len]);
-        let _ = socket.send(&buf[..len]);
+        let to_send = if bytes.len() > MAX_DATAGRAM_LEN { &bytes[..MAX_DATAGRAM_LEN] } else { bytes };
+        let _ = socket.send(to_send);
     }
 }
 
@@ -199,5 +204,29 @@ mod tests {
         fwd.set_level(LogLevel::Error);
         fwd.forward(LogLevel::Debug, 1, "should be filtered");
         fwd.forward(LogLevel::Error, 1, "should pass");
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_ascii() {
+        let s = "hello world";
+        assert_eq!(truncate_to_char_boundary(s, 5), "hello");
+        assert_eq!(truncate_to_char_boundary(s, 100), s);
+        assert_eq!(truncate_to_char_boundary(s, 0), "");
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_multibyte() {
+        let s = "Grüße";
+        assert_eq!(s.len(), 7);
+        assert_eq!(truncate_to_char_boundary(s, 4), "Gr\u{fc}");
+        assert_eq!(truncate_to_char_boundary(s, 3), "Gr");
+        assert_eq!(truncate_to_char_boundary(s, 2), "Gr");
+    }
+
+    #[test]
+    fn forward_with_multibyte_message_does_not_panic() {
+        let fwd = LogForwarder::new("TEST");
+        let long_german = "ü".repeat(MAX_MSG_LEN);
+        fwd.forward(LogLevel::Info, 0, &long_german);
     }
 }

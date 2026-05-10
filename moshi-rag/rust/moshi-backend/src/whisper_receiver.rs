@@ -108,7 +108,7 @@ fn whisper_receiver_loop(
     tracing::info!("whisper receiver listening on port {}", TEXT_PORT);
 
     while running.load(std::sync::atomic::Ordering::Relaxed) {
-        tracing::info!("whisper receiver waiting for connection on port {}", TEXT_PORT);
+        tracing::trace!("whisper receiver waiting for connection on port {}", TEXT_PORT);
         let stream = match accept_connection(&listener) {
             Ok(s) => s,
             Err(e) => {

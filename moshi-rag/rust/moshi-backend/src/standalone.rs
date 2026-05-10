@@ -207,7 +207,11 @@ pub async fn download_from_hub(config: &mut stream_both::Config) -> Result<()> {
     Ok(())
 }
 
-pub async fn run(args: &StandaloneArgs, config: &Config) -> Result<()> {
+pub async fn run(
+    args: &StandaloneArgs,
+    config: &Config,
+    log_forwarder: Arc<crate::log_forwarder::LogForwarder>,
+) -> Result<()> {
     let _state: Arc<stream_both::AppStateVariant> = if config.stream.batch_size > 1 {
         let inner = Arc::new(stream_both::AppStateInner::new(args, &config.stream)?);
         let batched_state = stream_both::BatchedState::new(inner)?;
@@ -228,6 +232,7 @@ pub async fn run(args: &StandaloneArgs, config: &Config) -> Result<()> {
         config.stream.batch_size,
         config.stream.use_rag()
     );
+    let _ = log_forwarder;
     tracing::info!("prodigy bridge will be wired in a future step");
     Ok(())
 }
