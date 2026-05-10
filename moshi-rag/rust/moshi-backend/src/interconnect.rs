@@ -129,7 +129,14 @@ pub fn recv_packet<R: Read>(reader: &mut R) -> Result<Packet> {
             payload_size
         );
     }
-    let payload = inner[8..expected_len].to_vec();
+    if inner.len() > expected_len {
+        bail!(
+            "frame body is {} bytes but packet header claims only {} bytes of payload — protocol violation",
+            inner.len(),
+            payload_size
+        );
+    }
+    let payload = inner[8..].to_vec();
     Ok(Packet { call_id, payload })
 }
 
@@ -167,11 +174,14 @@ fn serialize_mgmt(msg: &MgmtMsg) -> Result<Vec<u8>> {
         MgmtMsg::Pong => Ok(vec![TYPE_PONG]),
         MgmtMsg::Custom(s) => {
             let bytes = s.as_bytes();
-            let capped_len = bytes.len().min(65535) as u16;
-            let mut buf = Vec::with_capacity(3 + capped_len as usize);
+            if bytes.len() > 65535 {
+                bail!("CUSTOM message string too long: {} bytes (max 65535)", bytes.len());
+            }
+            let str_len = bytes.len() as u16;
+            let mut buf = Vec::with_capacity(3 + bytes.len());
             buf.push(TYPE_CUSTOM);
-            buf.write_u16::<BigEndian>(capped_len)?;
-            buf.extend_from_slice(&bytes[..capped_len as usize]);
+            buf.write_u16::<BigEndian>(str_len)?;
+            buf.extend_from_slice(bytes);
             Ok(buf)
         }
     }
@@ -186,6 +196,9 @@ fn deserialize_mgmt(inner: &[u8]) -> Result<MgmtMsg> {
             if inner.len() < 5 {
                 bail!("mgmt frame type {} too short: {} bytes (need 5)", inner[0], inner.len());
             }
+            if inner.len() > 5 {
+                bail!("mgmt frame type {} too long: {} bytes (expected 5)", inner[0], inner.len());
+            }
             let mut cursor = std::io::Cursor::new(&inner[1..5]);
             let call_id = cursor.read_u32::<BigEndian>()?;
             Ok(match inner[0] {
@@ -194,8 +207,18 @@ fn deserialize_mgmt(inner: &[u8]) -> Result<MgmtMsg> {
                 _ => MgmtMsg::SpeechIdle(call_id),
             })
         }
-        TYPE_PING => Ok(MgmtMsg::Ping),
-        TYPE_PONG => Ok(MgmtMsg::Pong),
+        TYPE_PING => {
+            if inner.len() != 1 {
+                bail!("PING mgmt frame wrong length: {} bytes (expected 1)", inner.len());
+            }
+            Ok(MgmtMsg::Ping)
+        }
+        TYPE_PONG => {
+            if inner.len() != 1 {
+                bail!("PONG mgmt frame wrong length: {} bytes (expected 1)", inner.len());
+            }
+            Ok(MgmtMsg::Pong)
+        }
         TYPE_CUSTOM => {
             if inner.len() < 3 {
                 bail!("CUSTOM mgmt frame too short: {} bytes (need at least 3)", inner.len());
@@ -207,6 +230,12 @@ fn deserialize_mgmt(inner: &[u8]) -> Result<MgmtMsg> {
                     "CUSTOM mgmt frame truncated: header claims {} str bytes, frame has {}",
                     str_len,
                     inner.len() - 3
+                );
+            }
+            if inner.len() > 3 + str_len {
+                bail!(
+                    "CUSTOM mgmt frame has trailing bytes: {} bytes extra after string",
+                    inner.len() - (3 + str_len)
                 );
             }
             let s = std::str::from_utf8(&inner[3..3 + str_len])
@@ -229,8 +258,23 @@ fn set_keepalive_options(stream: &TcpStream) {
 }
 
 pub fn bind_listen(port: u16) -> Result<TcpListener> {
-    TcpListener::bind(("127.0.0.1", port))
-        .with_context(|| format!("failed to bind TCP listener on 127.0.0.1:{}", port))
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .with_context(|| format!("failed to create TCP socket for port {}", port))?;
+    socket
+        .set_reuse_address(true)
+        .with_context(|| format!("failed to set SO_REUSEADDR on port {}", port))?;
+    socket
+        .bind(&addr.into())
+        .with_context(|| format!("failed to bind TCP listener on 127.0.0.1:{}", port))?;
+    socket
+        .listen(1)
+        .with_context(|| format!("failed to listen on 127.0.0.1:{}", port))?;
+    Ok(std::net::TcpListener::from(socket))
 }
 
 pub fn accept_connection(listener: &TcpListener) -> Result<TcpStream> {
@@ -426,6 +470,57 @@ mod tests {
         assert_eq!(buf[4], TYPE_CUSTOM);
         assert_eq!(buf[5..7], [0, 2], "str len big-endian 2");
         assert_eq!(&buf[7..9], b"HI");
+    }
+
+    #[test]
+    fn packet_trailing_bytes_rejected() {
+        let pkt = Packet { call_id: 7, payload: b"ab".to_vec() };
+        let mut buf = Vec::new();
+        send_packet(&mut buf, &pkt).unwrap();
+        buf.push(0xFF);
+        buf[0..4].copy_from_slice(&(11u32).to_be_bytes());
+        let mut cursor = std::io::Cursor::new(buf);
+        assert!(
+            recv_packet(&mut cursor).is_err(),
+            "packet with trailing bytes must be rejected"
+        );
+    }
+
+    #[test]
+    fn mgmt_call_end_trailing_bytes_rejected() {
+        let inner = vec![TYPE_CALL_END, 0, 0, 0, 1, 0xFF];
+        assert!(
+            deserialize_mgmt(&inner).is_err(),
+            "CallEnd with trailing byte must be rejected"
+        );
+    }
+
+    #[test]
+    fn mgmt_ping_trailing_bytes_rejected() {
+        let inner = vec![TYPE_PING, 0xFF];
+        assert!(
+            deserialize_mgmt(&inner).is_err(),
+            "PING with trailing byte must be rejected"
+        );
+    }
+
+    #[test]
+    fn mgmt_custom_trailing_bytes_rejected() {
+        let inner = vec![TYPE_CUSTOM, 0, 2, b'H', b'I', 0xFF];
+        assert!(
+            deserialize_mgmt(&inner).is_err(),
+            "CUSTOM with trailing byte must be rejected"
+        );
+    }
+
+    #[test]
+    fn mgmt_custom_too_long_string_rejected_on_send() {
+        let long_str = "x".repeat(65536);
+        let msg = MgmtMsg::Custom(long_str);
+        assert!(
+            serialize_mgmt(&msg).is_err(),
+            "CUSTOM string > 65535 bytes must be rejected, not silently truncated"
+        );
     }
 
     #[test]

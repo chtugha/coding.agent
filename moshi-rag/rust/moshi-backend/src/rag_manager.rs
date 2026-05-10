@@ -38,8 +38,23 @@ fn process_reference_context(conversation_context: &str) -> String {
         s.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string()
     }
 
+    const BLOCK_OPEN: &str = "[Retrieved medical context]\n";
+    const BLOCK_END_MARKER: &str = "[End of retrieved context]\n\n";
+    let (retrieved_prefix, body) = if conversation_context.starts_with(BLOCK_OPEN) {
+        let search_from = BLOCK_OPEN.len();
+        if let Some(rel_pos) = conversation_context[search_from..].find(BLOCK_END_MARKER) {
+            let end_pos = search_from + rel_pos;
+            let after = end_pos + BLOCK_END_MARKER.len();
+            (&conversation_context[..after], &conversation_context[after..])
+        } else {
+            ("", conversation_context)
+        }
+    } else {
+        ("", conversation_context)
+    };
+
     let mut turns: Vec<Turn> = Vec::new();
-    for turn in conversation_context.split('\n') {
+    for turn in body.split('\n') {
         if let Some(rest) = turn.strip_prefix("user:") {
             let text = filter_printable(rest);
             turns.push(Turn { role: "Human", text });
@@ -57,6 +72,7 @@ fn process_reference_context(conversation_context: &str) -> String {
     }
 
     let mut out = String::new();
+    out.push_str(retrieved_prefix);
     for t in &turns {
         if !t.text.is_empty() {
             out.push_str(&format!("{}: {}\n", t.role, t.text));
@@ -140,6 +156,8 @@ struct SlotTask {
 /// Supports multiple in-flight requests keyed by slot (batch index) for batched inference.
 pub struct RagManager {
     retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
+    two_step_client: Option<Arc<crate::rag_two_step::TwoStepRagClient>>,
+    llm_client: reqwest::Client,
     /// Single-slot mode: one in-flight task (slot_id = 0).
     single_result_rx: Mutex<Option<Receiver<String>>>,
     single_join_handle: Mutex<Option<JoinHandle<()>>>,
@@ -152,6 +170,23 @@ impl RagManager {
     pub fn new(retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>) -> Self {
         Self {
             retrieval,
+            two_step_client: None,
+            llm_client: reqwest::Client::new(),
+            single_result_rx: Mutex::new(None),
+            single_join_handle: Mutex::new(None),
+            single_cancel: Arc::new(AtomicBool::new(false)),
+            batched_tasks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn new_with_two_step(
+        retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
+        rag_timeout: f32,
+    ) -> Self {
+        Self {
+            retrieval,
+            two_step_client: Some(crate::rag_two_step::new_client(rag_timeout)),
+            llm_client: reqwest::Client::new(),
             single_result_rx: Mutex::new(None),
             single_join_handle: Mutex::new(None),
             single_cancel: Arc::new(AtomicBool::new(false)),
@@ -170,6 +205,9 @@ impl RagManager {
         result_tx: Sender<String>,
         slot_id: Option<usize>,
         retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
+        two_step_client: Option<Arc<crate::rag_two_step::TwoStepRagClient>>,
+        patient_id: Option<i64>,
+        llm_client: reqwest::Client,
     ) -> JoinHandle<()>
     where
         F: FnOnce() -> String + Send + 'static,
@@ -198,13 +236,16 @@ impl RagManager {
                 slot_id,
                 rag_timeout,
                 retrieval.as_ref(),
+                two_step_client.as_deref(),
+                patient_id,
+                &llm_client,
             ) {
                 Ok(t) => t,
                 Err(e) => {
                     if let Some(sid) = slot_id {
-                        tracing::warn!("RAG API error for slot {}: {}", sid, e);
+                        tracing::warn!("[RET_FAILED] RAG API error for slot {}: {}", sid, e);
                     } else {
-                        tracing::warn!("RAG API error: {}", e);
+                        tracing::warn!("[RET_FAILED] RAG API error: {}", e);
                     }
                     String::new()
                 }
@@ -225,6 +266,18 @@ impl RagManager {
     ) where
         F: FnOnce() -> String + Send + 'static,
     {
+        self.trigger_background_generation_with_patient(wait_secs, rag_timeout, context_provider, None)
+    }
+
+    pub fn trigger_background_generation_with_patient<F>(
+        &self,
+        wait_secs: f64,
+        rag_timeout: f32,
+        context_provider: F,
+        patient_id: Option<i64>,
+    ) where
+        F: FnOnce() -> String + Send + 'static,
+    {
         self.cancel_pending();
 
         let (result_tx, result_rx) = std::sync::mpsc::channel();
@@ -238,6 +291,9 @@ impl RagManager {
             result_tx,
             None,
             Arc::clone(&self.retrieval),
+            self.two_step_client.clone(),
+            patient_id,
+            self.llm_client.clone(),
         );
         *self.single_join_handle.lock().unwrap() = Some(handle);
     }
@@ -249,6 +305,19 @@ impl RagManager {
         wait_secs: f64,
         rag_timeout: f32,
         context_provider: F,
+    ) where
+        F: FnOnce() -> String + Send + 'static,
+    {
+        self.trigger_background_generation_slot_with_patient(slot_id, wait_secs, rag_timeout, context_provider, None)
+    }
+
+    pub fn trigger_background_generation_slot_with_patient<F>(
+        &self,
+        slot_id: usize,
+        wait_secs: f64,
+        rag_timeout: f32,
+        context_provider: F,
+        patient_id: Option<i64>,
     ) where
         F: FnOnce() -> String + Send + 'static,
     {
@@ -265,6 +334,9 @@ impl RagManager {
             result_tx,
             Some(slot_id),
             Arc::clone(&self.retrieval),
+            self.two_step_client.clone(),
+            patient_id,
+            self.llm_client.clone(),
         );
 
         let mut tasks = self.batched_tasks.lock().unwrap();
@@ -277,6 +349,7 @@ impl RagManager {
 
     /// One OpenAI-compatible reference call. Returns `model_name\tcontent` for the client.
     async fn fetch_reference_http(
+        http_client: &reqwest::Client,
         base_url: String,
         model_name: String,
         api_key: String,
@@ -304,20 +377,14 @@ impl RagManager {
 
         let start = std::time::Instant::now();
 
-        let http_client = if rag_timeout > 0.0 {
-            let d = Duration::from_secs_f64(rag_timeout as f64);
-            reqwest::Client::builder()
-                .timeout(d)
-                .build()
-                .map_err(|e| -> Box<dyn Error + Send + Sync> { e.to_string().into() })?
-        } else {
-            reqwest::Client::new()
-        };
-        let response = http_client
+        let mut request = http_client
             .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
             .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
+            .json(&request_body);
+        if rag_timeout > 0.0 {
+            request = request.timeout(Duration::from_secs_f64(rag_timeout as f64));
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| -> Box<dyn Error + Send + Sync> {
@@ -341,35 +408,64 @@ impl RagManager {
 
         tracing::info!("RAG: LLM API call completed in {:.3}s", elapsed.as_secs_f64());
 
-        if let Some(choice) = custom_response.choices.first() {
-            if let Some(reasoning) = &choice.message.reasoning {
-                tracing::info!("RAG: LLM reasoning: {}", reasoning);
-            }
-            if let Some(tools) = &choice.message.executed_tools {
-                tracing::debug!("RAG: LLM executed {} tool(s)", tools.len());
-            }
-        }
-
         let content = custom_response
             .choices
             .first()
-            .map(|choice| choice.message.content.clone())
+            .map(|choice| {
+                if let Some(reasoning) = &choice.message.reasoning {
+                    tracing::info!("RAG: LLM reasoning: {}", reasoning);
+                }
+                if let Some(tools) = &choice.message.executed_tools {
+                    tracing::debug!("RAG: LLM executed {} tool(s)", tools.len());
+                }
+                choice.message.content.clone()
+            })
             .unwrap_or_default();
         Ok(format!("{model_name}\t{content}"))
     }
 
-    /// Fetch reference text from OpenAI-compatible API using async-openai client.
-    /// Runs in a Tokio runtime to support async calls.
     fn fetch_reference_text(
         context: &str,
         slot_id: Option<usize>,
         rag_timeout: f32,
         retrieval: &crate::rag_retrieval::RagRetrievalEndpoints,
+        two_step_client: Option<&crate::rag_two_step::TwoStepRagClient>,
+        patient_id: Option<i64>,
+        llm_client: &reqwest::Client,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
-        use tokio::runtime::Runtime;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
 
-        let rt = Runtime::new()?;
-        let ctx = context.to_string();
+        let llm_client = llm_client.clone();
+
+        let step_a_start = Instant::now();
+
+        let ctx = if let Some(client) = two_step_client {
+            let plain_ctx = context.to_string();
+            let pid = patient_id;
+            rt.block_on(client.retrieve_and_augment_context(&plain_ctx, pid))
+        } else {
+            context.to_string()
+        };
+
+        let step_b_timeout = if rag_timeout > 0.0 {
+            let elapsed = step_a_start.elapsed();
+            let total = Duration::from_secs_f64(rag_timeout as f64);
+            let remaining = total.saturating_sub(elapsed);
+            if remaining.is_zero() {
+                tracing::warn!(
+                    slot_id = ?slot_id,
+                    "RAG timeout budget ({:.1}s) exhausted after Step A; skipping LLM call",
+                    rag_timeout,
+                );
+                return Ok(String::new());
+            }
+            remaining.as_secs_f64() as f32
+        } else {
+            0.0
+        };
+
         let sid = slot_id.unwrap_or(0);
 
         if retrieval.len() < 2 {
@@ -380,11 +476,12 @@ impl RagManager {
             let idx = if retrieval.len() == 1 { 0 } else { retrieval.active_index_for_slot(sid) };
             let bundled = bundled_prompt_for_style(retrieval.prompt_style_at(idx));
             return rt.block_on(Self::fetch_reference_http(
+                &llm_client,
                 base_url,
                 model_name,
                 api_key,
                 ctx,
-                rag_timeout,
+                step_b_timeout,
                 bundled,
             ));
         }
@@ -397,11 +494,12 @@ impl RagManager {
                 .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
             let bundled = bundled_prompt_for_style(retrieval.prompt_style_at(ai));
             return rt.block_on(Self::fetch_reference_http(
+                &llm_client,
                 base_url,
                 model_name,
                 api_key,
                 ctx,
-                rag_timeout,
+                step_b_timeout,
                 bundled,
             ));
         }
@@ -417,8 +515,8 @@ impl RagManager {
 
         rt.block_on(async move {
             let (r_active, r_default) = tokio::join!(
-                Self::fetch_reference_http(bu_a, mn_a, ak_a, ctx.clone(), rag_timeout, bundled_a,),
-                Self::fetch_reference_http(bu_b, mn_b, ak_b, ctx, rag_timeout, bundled_b,),
+                Self::fetch_reference_http(&llm_client, bu_a, mn_a, ak_a, ctx.clone(), step_b_timeout, bundled_a,),
+                Self::fetch_reference_http(&llm_client, bu_b, mn_b, ak_b, ctx, step_b_timeout, bundled_b,),
             );
 
             if let Ok(ref s) = r_active {
@@ -500,5 +598,40 @@ impl RagManager {
             task.cancel.store(true, Ordering::SeqCst);
             let _ = task.join_handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_reference_context_no_retrieved_block() {
+        let ctx = "user: hello\nmoshi: hi there\nuser: how are you";
+        let result = process_reference_context(ctx);
+        assert!(result.starts_with("Human: hello\n"));
+        assert!(result.contains("Human: how are you\n"));
+        assert!(result.ends_with("Reference:"));
+        assert!(!result.contains("[Retrieved medical context]"));
+    }
+
+    #[test]
+    fn process_reference_context_preserves_retrieved_block() {
+        let ctx = "[Retrieved medical context]\n(1) Patient has diabetes.\n[End of retrieved context]\n\nuser: what medication?\nmoshi: let me check\nuser: please hurry";
+        let result = process_reference_context(ctx);
+        assert!(result.starts_with("[Retrieved medical context]\n"));
+        assert!(result.contains("(1) Patient has diabetes."));
+        assert!(result.contains("[End of retrieved context]\n\n"));
+        assert!(result.contains("Human: what medication?"));
+        assert!(result.contains("Human: please hurry"));
+        assert!(result.ends_with("Reference:"));
+    }
+
+    #[test]
+    fn process_reference_context_retrieved_block_no_terminator_falls_back() {
+        let ctx = "[Retrieved medical context]\n(1) chunk\nuser: hello";
+        let result = process_reference_context(ctx);
+        assert!(result.ends_with("Reference:"));
+        assert!(!result.contains("[Retrieved medical context]"), "no terminator: block should not be extracted (body is whole string, no user: lines found inside block)");
     }
 }

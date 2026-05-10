@@ -82,6 +82,7 @@ fn tracing_init(
     instance_name: &str,
     log_level: &str,
     silent: bool,
+    log_forwarder: Option<std::sync::Arc<log_forwarder::LogForwarder>>,
 ) -> Result<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::prelude::*;
 
@@ -98,7 +99,8 @@ fn tracing_init(
             tracing_subscriber::fmt::layer().with_writer(std::io::stdout).with_filter(filter),
         ))
     };
-    tracing_subscriber::registry().with(layers).init();
+    let udp_layer = log_forwarder.map(|fwd| log_forwarder::TracingLogLayer::new(fwd));
+    tracing_subscriber::registry().with(layers).with(udp_layer).init();
     tracing::info!(?build_info);
     Ok(guard)
 }
@@ -109,11 +111,13 @@ async fn main() -> Result<()> {
     match args.command {
         Command::Standalone(standalone_args) => {
             let mut config = standalone::Config::load(&args.config)?;
+            let fwd = std::sync::Arc::new(log_forwarder::LogForwarder::new("MOSHI_SERVICE"));
             let _guard = tracing_init(
                 &config.stream.log_dir,
                 &config.stream.instance_name,
                 &args.log_level,
                 args.silent,
+                Some(fwd),
             )?;
             tracing::info!("starting process with pid {}", std::process::id());
 
@@ -137,6 +141,7 @@ async fn main() -> Result<()> {
                     &config.instance_name,
                     &args.log_level,
                     args.silent,
+                    None,
                 )?;
                 let b: Box<dyn std::any::Any> = Box::new(guard);
                 b
