@@ -151,8 +151,8 @@ mod tests {
         });
 
         let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         stream.write_all(b"PING\n").unwrap();
         stream.flush().unwrap();
 

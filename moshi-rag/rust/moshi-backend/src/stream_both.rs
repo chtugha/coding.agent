@@ -371,7 +371,13 @@ impl BatchedState {
         let batch_size = inner.lm_model.batch_size();
         let device = inner.device.clone();
         let rag_manager = inner.config.rag_token_id.map(|rag_token_id| {
-            (crate::rag_manager::RagManager::new(rag_retrieval.clone()), rag_token_id)
+            (
+                crate::rag_manager::RagManager::new_with_two_step(
+                    rag_retrieval.clone(),
+                    inner.config.rag_timeout,
+                ),
+                rag_token_id,
+            )
         });
         let stt_wait_secs = inner.config.stt_wait_time.map(|t| t as f64).unwrap_or(0.0);
         let rag_timeout = inner.config.rag_timeout;
