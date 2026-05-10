@@ -4,8 +4,10 @@
 
 use anyhow::{bail, Context, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use socket2::{SockRef, TcpKeepalive};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 pub const UPSTREAM_MGMT_PORT: u16 = 13155;
 pub const UPSTREAM_DATA_PORT: u16 = 13156;
@@ -18,6 +20,10 @@ pub const OAP_DATA_PORT: u16 = 13151;
 pub const MAX_PAYLOAD_SIZE: u32 = 1024 * 1024;
 
 const MAX_FRAME_LEN: u32 = MAX_PAYLOAD_SIZE + 256;
+const CONNECT_TIMEOUT_MS: u64 = 2000;
+const KEEPALIVE_IDLE_SECS: u64 = 2;
+const KEEPALIVE_INTERVAL_SECS: u64 = 1;
+const KEEPALIVE_RETRIES: u32 = 2;
 
 const TYPE_CALL_END: u8 = 1;
 const TYPE_SPEECH_ACTIVE: u8 = 2;
@@ -79,10 +85,10 @@ fn recv_outer_frame<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
 }
 
 fn send_outer_frame<W: Write>(writer: &mut W, inner: &[u8]) -> Result<()> {
-    writer
-        .write_u32::<BigEndian>(inner.len() as u32)
-        .context("failed to write frame length")?;
-    writer.write_all(inner).context("failed to write frame body")?;
+    let mut frame = Vec::with_capacity(4 + inner.len());
+    frame.write_u32::<BigEndian>(inner.len() as u32)?;
+    frame.extend_from_slice(inner);
+    writer.write_all(&frame).context("failed to write frame")?;
     Ok(())
 }
 
@@ -90,10 +96,10 @@ pub fn send_packet<W: Write>(writer: &mut W, packet: &Packet) -> Result<()> {
     if packet.call_id == 0 {
         bail!("cannot send packet with call_id=0");
     }
-    let payload_size = packet.payload_size();
-    if payload_size > MAX_PAYLOAD_SIZE {
-        bail!("payload size {} exceeds MAX_PAYLOAD_SIZE {}", payload_size, MAX_PAYLOAD_SIZE);
+    if packet.payload.len() > MAX_PAYLOAD_SIZE as usize {
+        bail!("payload size {} exceeds MAX_PAYLOAD_SIZE {}", packet.payload.len(), MAX_PAYLOAD_SIZE);
     }
+    let payload_size = packet.payload_size();
     let mut inner = Vec::with_capacity(8 + payload_size as usize);
     inner.write_u32::<BigEndian>(packet.call_id)?;
     inner.write_u32::<BigEndian>(payload_size)?;
@@ -212,6 +218,16 @@ fn deserialize_mgmt(inner: &[u8]) -> Result<MgmtMsg> {
     }
 }
 
+fn set_keepalive_options(stream: &TcpStream) {
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(KEEPALIVE_IDLE_SECS))
+        .with_interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS))
+        .with_retries(KEEPALIVE_RETRIES);
+    if let Err(e) = SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+        tracing::warn!("failed to set TCP keepalive options: {}", e);
+    }
+}
+
 pub fn bind_listen(port: u16) -> Result<TcpListener> {
     TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("failed to bind TCP listener on 127.0.0.1:{}", port))
@@ -220,14 +236,22 @@ pub fn bind_listen(port: u16) -> Result<TcpListener> {
 pub fn accept_connection(listener: &TcpListener) -> Result<TcpStream> {
     let (stream, addr) = listener.accept().context("failed to accept TCP connection")?;
     stream.set_nodelay(true).context("failed to set TCP_NODELAY on accepted connection")?;
+    set_keepalive_options(&stream);
     tracing::debug!("accepted connection from {}", addr);
     Ok(stream)
 }
 
 pub fn connect_to(host: &str, port: u16) -> Result<TcpStream> {
-    let stream = TcpStream::connect((host, port))
-        .with_context(|| format!("failed to connect to {}:{}", host, port))?;
+    let addr = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve {}:{}", host, port))?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no addresses resolved for {}:{}", host, port))?;
+    let stream =
+        TcpStream::connect_timeout(&addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
+            .with_context(|| format!("failed to connect to {}:{}", host, port))?;
     stream.set_nodelay(true).context("failed to set TCP_NODELAY")?;
+    set_keepalive_options(&stream);
     Ok(stream)
 }
 
