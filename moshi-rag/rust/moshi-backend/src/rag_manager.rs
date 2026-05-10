@@ -579,7 +579,6 @@ impl RagManager {
         let mut tasks = self.batched_tasks.lock().unwrap();
         if let Some(task) = tasks.remove(&slot_id) {
             task.cancel.store(true, Ordering::SeqCst);
-            let _ = task.join_handle.join();
         }
     }
 
