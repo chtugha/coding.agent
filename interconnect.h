@@ -406,6 +406,13 @@ inline uint16_t service_engine_port(ServiceType type) {
     }
 }
 
+inline uint16_t service_text_port(ServiceType type) {
+    switch (type) {
+        case ServiceType::MOSHI_SERVICE: return service_base_port(type) + 3;
+        default: return 0;
+    }
+}
+
 struct Packet {
     static constexpr uint32_t MAX_PAYLOAD_SIZE = 1024 * 1024;
     
@@ -562,7 +569,9 @@ public:
         running_ = true;
 
         accept_thread_ = std::thread(&InterconnectNode::accept_loop, this);
-        downstream_connect_thread_ = std::thread(&InterconnectNode::downstream_connect_loop, this);
+        if (downstream_connections_.empty() && !connect_disabled_) {
+            downstream_connect_thread_ = std::thread(&InterconnectNode::downstream_connect_loop, this);
+        }
         mgmt_recv_thread_ = std::thread(&InterconnectNode::mgmt_recv_loop, this);
 
         std::fprintf(stderr, "[%s] Interconnect ready: mgmt=%u data=%u\n",
@@ -579,6 +588,15 @@ public:
         close_socket(downstream_data_sock_);
         close_socket(mgmt_listen_sock_);
         close_socket(data_listen_sock_);
+
+        for (auto& dc : downstream_connections_) {
+            close_socket(dc->data_sock);
+            close_socket(dc->mgmt_sock);
+        }
+
+        for (auto& dc : downstream_connections_) {
+            if (dc->reconnect_thread.joinable()) dc->reconnect_thread.join();
+        }
 
         if (accept_thread_.joinable()) accept_thread_.join();
         if (downstream_connect_thread_.joinable()) downstream_connect_thread_.join();
@@ -612,6 +630,7 @@ public:
     // If set_downstream_override() was called, connects to that service instead.
     bool connect_to_downstream() {
         if (!is_pipeline_service(type_)) return false;
+        if (connect_disabled_) return false;
 
         ServiceType ds;
         {
@@ -856,6 +875,109 @@ public:
         return std::string(reinterpret_cast<char*>(resp_plain.data() + 3), resp_len);
     }
 
+    void add_downstream_target(ServiceType target) {
+        downstream_connections_.push_back(std::make_unique<DownstreamConnection>(target));
+    }
+
+    void connect_all_downstreams() {
+        for (auto& dc : downstream_connections_) {
+            dc->reconnect_thread = std::thread(&InterconnectNode::connect_to_downstream_dc, this, std::ref(*dc));
+        }
+    }
+
+    bool send_to_downstream(const Packet& pkt, ServiceType target) {
+        for (auto& dc : downstream_connections_) {
+            if (dc->target != target) continue;
+            if (dc->state.load(std::memory_order_relaxed) != ConnectionState::CONNECTED) return false;
+
+            std::lock_guard<std::mutex> lock(dc->data_send_mutex);
+            int sock = dc->data_sock;
+            if (sock < 0) return false;
+
+            auto data = pkt.serialize();
+            if (!send_encrypted(sock, data.data(), data.size(), DATA_SEND_TIMEOUT_MS)) {
+                close_socket(dc->data_sock);
+                dc->state.store(ConnectionState::DISCONNECTED, std::memory_order_relaxed);
+                return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    void broadcast_mgmt_to_all_downstreams(MgmtMsgType msg_type, uint32_t call_id) {
+        send_mgmt_to_downstream(msg_type, call_id);
+    }
+
+    std::string send_custom_to_downstream(const std::string& msg, ServiceType target, int timeout_ms = CUSTOM_MSG_TIMEOUT_MS) {
+        for (auto& dc : downstream_connections_) {
+            if (dc->target != target) continue;
+            if (dc->state.load(std::memory_order_relaxed) != ConnectionState::CONNECTED) return "";
+
+            uint16_t len = static_cast<uint16_t>(std::min(msg.size(), (size_t)65535));
+            std::vector<uint8_t> buf(3 + len);
+            buf[0] = static_cast<uint8_t>(MgmtMsgType::CUSTOM);
+            uint16_t net_len = htons(len);
+            memcpy(buf.data() + 1, &net_len, 2);
+            memcpy(buf.data() + 3, msg.data(), len);
+
+            std::lock_guard<std::mutex> lock(dc->mgmt_send_mutex);
+            int sock = dc->mgmt_sock;
+            if (sock < 0) return "";
+            if (!send_encrypted(sock, buf.data(), buf.size(), timeout_ms)) {
+                close_socket(dc->mgmt_sock);
+                dc->state.store(ConnectionState::DISCONNECTED, std::memory_order_relaxed);
+                return "";
+            }
+
+            std::vector<uint8_t> resp_plain;
+            if (!recv_encrypted(sock, resp_plain, timeout_ms)) {
+                close_socket(dc->mgmt_sock);
+                dc->state.store(ConnectionState::DISCONNECTED, std::memory_order_relaxed);
+                return "";
+            }
+            if (resp_plain.size() < 3) return "";
+            if (resp_plain[0] != static_cast<uint8_t>(MgmtMsgType::CUSTOM)) return "";
+            uint16_t resp_len;
+            memcpy(&resp_len, resp_plain.data() + 1, 2);
+            resp_len = ntohs(resp_len);
+            if (resp_len == 0 || resp_plain.size() < (size_t)(3 + resp_len)) return "";
+            return std::string(reinterpret_cast<char*>(resp_plain.data() + 3), resp_len);
+        }
+        return "";
+    }
+
+    void disable_downstream_connect() {
+        connect_disabled_ = true;
+    }
+
+    uint32_t negotiated_sample_rate_for(ServiceType target) const {
+        for (const auto& dc : downstream_connections_) {
+            if (dc->target == target) {
+                uint32_t rate = dc->negotiated_sample_rate.load(std::memory_order_relaxed);
+                if (rate != 0) return rate;
+                if (target == ServiceType::VAD_SERVICE) return 16000;
+                if (target == ServiceType::MOSHI_SERVICE) return 24000;
+                return 0;
+            }
+        }
+        if (target == ServiceType::VAD_SERVICE) return 16000;
+        if (target == ServiceType::MOSHI_SERVICE) return 24000;
+        return 0;
+    }
+
+    std::vector<std::tuple<ServiceType, ConnectionState, uint32_t>> downstream_connection_states() const {
+        std::vector<std::tuple<ServiceType, ConnectionState, uint32_t>> result;
+        for (const auto& dc : downstream_connections_) {
+            result.emplace_back(
+                dc->target,
+                dc->state.load(std::memory_order_relaxed),
+                dc->negotiated_sample_rate.load(std::memory_order_relaxed)
+            );
+        }
+        return result;
+    }
+
 private:
     ServiceType type_;
     std::atomic<bool> running_;
@@ -910,6 +1032,22 @@ private:
     std::function<std::string(const std::string&)> custom_handler_;
     mutable std::mutex speech_mutex_;
     std::set<uint32_t> speech_active_calls_;
+
+    struct DownstreamConnection {
+        ServiceType target;
+        int mgmt_sock = -1;
+        int data_sock = -1;
+        std::atomic<ConnectionState> state{ConnectionState::DISCONNECTED};
+        std::atomic<uint32_t> negotiated_sample_rate{0};
+        std::mutex data_send_mutex;
+        std::mutex mgmt_send_mutex;
+        std::thread reconnect_thread;
+
+        explicit DownstreamConnection(ServiceType t) : target(t) {}
+    };
+
+    std::vector<std::unique_ptr<DownstreamConnection>> downstream_connections_;
+    bool connect_disabled_ = false;
 
     // Accept incoming connections from upstream on our mgmt + data listen ports.
     void accept_loop() {
@@ -1033,7 +1171,115 @@ private:
         }
     }
 
-    // Receive management messages from upstream neighbor.
+    void connect_to_downstream_dc(DownstreamConnection& dc) {
+        if (connect_disabled_) return;
+
+        uint16_t ds_mgmt = service_mgmt_port(dc.target);
+        uint16_t ds_data = service_data_port(dc.target);
+
+        while (running_) {
+            auto st = dc.state.load(std::memory_order_relaxed);
+
+            if (st == ConnectionState::DISCONNECTED || st == ConnectionState::FAILED) {
+                int mgmt_sock = connect_to_port_with_timeout("127.0.0.1", ds_mgmt, CONNECT_TIMEOUT_MS);
+                if (mgmt_sock < 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(DOWNSTREAM_RECONNECT_MS));
+                    continue;
+                }
+                int data_sock = connect_to_port_with_timeout("127.0.0.1", ds_data, CONNECT_TIMEOUT_MS);
+                if (data_sock < 0) {
+                    ::close(mgmt_sock);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(DOWNSTREAM_RECONNECT_MS));
+                    continue;
+                }
+
+                setup_socket_options(mgmt_sock);
+                setup_socket_options(data_sock);
+
+                {
+                    std::lock_guard<std::mutex> lock(dc.data_send_mutex);
+                    close_socket(dc.data_sock);
+                    dc.data_sock = data_sock;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(dc.mgmt_send_mutex);
+                    close_socket(dc.mgmt_sock);
+                    dc.mgmt_sock = mgmt_sock;
+                }
+
+                dc.state.store(ConnectionState::CONNECTED, std::memory_order_relaxed);
+
+                {
+                    std::lock_guard<std::mutex> lock(dc.mgmt_send_mutex);
+                    std::string query = "SAMPLE_RATE_QUERY";
+                    uint16_t len = static_cast<uint16_t>(query.size());
+                    std::vector<uint8_t> buf(3 + len);
+                    buf[0] = static_cast<uint8_t>(MgmtMsgType::CUSTOM);
+                    uint16_t net_len = htons(len);
+                    memcpy(buf.data() + 1, &net_len, 2);
+                    memcpy(buf.data() + 3, query.data(), len);
+
+                    if (send_encrypted(dc.mgmt_sock, buf.data(), buf.size(), CUSTOM_MSG_TIMEOUT_MS)) {
+                        std::vector<uint8_t> resp_plain;
+                        if (recv_encrypted(dc.mgmt_sock, resp_plain, CUSTOM_MSG_TIMEOUT_MS)) {
+                            if (resp_plain.size() >= 3 && resp_plain[0] == static_cast<uint8_t>(MgmtMsgType::CUSTOM)) {
+                                uint16_t resp_len;
+                                memcpy(&resp_len, resp_plain.data() + 1, 2);
+                                resp_len = ntohs(resp_len);
+                                if (resp_len > 0 && resp_plain.size() >= (size_t)(3 + resp_len)) {
+                                    std::string resp(reinterpret_cast<char*>(resp_plain.data() + 3), resp_len);
+                                    auto pos = resp.find("SAMPLE_RATE:");
+                                    if (pos != std::string::npos) {
+                                        try {
+                                            uint32_t rate = static_cast<uint32_t>(std::stoul(resp.substr(pos + 12)));
+                                            dc.negotiated_sample_rate.store(rate, std::memory_order_relaxed);
+                                        } catch (...) {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                std::fprintf(stderr, "[%s] Connected to downstream %s (mgmt=%u data=%u rate=%u)\n",
+                            service_type_to_string(type_),
+                            service_type_to_string(dc.target), ds_mgmt, ds_data,
+                            dc.negotiated_sample_rate.load(std::memory_order_relaxed));
+            } else {
+                bool data_dead = false;
+                bool mgmt_dead = false;
+                {
+                    std::lock_guard<std::mutex> lock(dc.data_send_mutex);
+                    if (dc.data_sock >= 0 && is_socket_dead(dc.data_sock)) {
+                        data_dead = true;
+                    }
+                }
+                if (!data_dead) {
+                    std::lock_guard<std::mutex> lock(dc.mgmt_send_mutex);
+                    if (dc.mgmt_sock >= 0 && is_socket_dead(dc.mgmt_sock)) {
+                        mgmt_dead = true;
+                    }
+                }
+                if (data_dead || mgmt_dead) {
+                    std::fprintf(stderr, "[%s] Downstream %s %s connection lost\n",
+                                service_type_to_string(type_), service_type_to_string(dc.target),
+                                data_dead ? "data" : "mgmt");
+                    {
+                        std::lock_guard<std::mutex> lock(dc.data_send_mutex);
+                        close_socket(dc.data_sock);
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(dc.mgmt_send_mutex);
+                        close_socket(dc.mgmt_sock);
+                    }
+                    dc.state.store(ConnectionState::DISCONNECTED, std::memory_order_relaxed);
+                }
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(DOWNSTREAM_RECONNECT_MS));
+        }
+    }
+
     void mgmt_recv_loop() {
         while (running_) {
             int sock;
@@ -1175,19 +1421,32 @@ private:
         }
     }
 
-    // Send a management message (type + 4-byte call_id) to downstream mgmt channel.
     void send_mgmt_to_downstream(MgmtMsgType msg_type, uint32_t call_id) {
+        uint8_t buf[5];
+        buf[0] = static_cast<uint8_t>(msg_type);
+        uint32_t net_cid = htonl(call_id);
+        memcpy(buf + 1, &net_cid, 4);
+
+        if (!downstream_connections_.empty()) {
+            for (auto& dc : downstream_connections_) {
+                if (dc->state.load(std::memory_order_relaxed) != ConnectionState::CONNECTED) continue;
+                std::lock_guard<std::mutex> lock(dc->mgmt_send_mutex);
+                int sock = dc->mgmt_sock;
+                if (sock < 0) continue;
+                if (!send_encrypted(sock, buf, 5, MGMT_SEND_TIMEOUT_MS)) {
+                    close_socket(dc->mgmt_sock);
+                    dc->state.store(ConnectionState::DISCONNECTED, std::memory_order_relaxed);
+                }
+            }
+            return;
+        }
+
         int sock;
         {
             std::lock_guard<std::mutex> lock(downstream_mutex_);
             sock = downstream_mgmt_sock_;
         }
         if (sock < 0) return;
-
-        uint8_t buf[5];
-        buf[0] = static_cast<uint8_t>(msg_type);
-        uint32_t net_cid = htonl(call_id);
-        memcpy(buf + 1, &net_cid, 4);
 
         std::lock_guard<std::mutex> lock(send_downstream_mgmt_mutex_);
         send_encrypted(sock, buf, 5, MGMT_SEND_TIMEOUT_MS);

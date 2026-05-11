@@ -2,7 +2,7 @@
 // This source code is licensed under the license found in the
 // LICENSE file in the root directory of this source tree.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::{stream_both, StandaloneArgs};
@@ -212,27 +212,64 @@ pub async fn run(
     config: &Config,
     log_forwarder: Arc<crate::log_forwarder::LogForwarder>,
 ) -> Result<()> {
-    let _state: Arc<stream_both::AppStateVariant> = if config.stream.batch_size > 1 {
-        let inner = Arc::new(stream_both::AppStateInner::new(args, &config.stream)?);
-        let batched_state = stream_both::BatchedState::new(inner)?;
-        Arc::new(stream_both::AppStateVariant::Batched(Arc::new(batched_state)))
-    } else if config.stream.use_rag() {
-        Arc::new(stream_both::AppStateVariant::Rag(Arc::new(stream_both::AppStateRag::new(
-            args,
-            &config.stream,
-        )?)))
+    let batch_size = if config.stream.batch_size > 1 {
+        config.stream.batch_size
     } else {
-        Arc::new(stream_both::AppStateVariant::Standard(Arc::new(stream_both::AppStateInner::new(
-            args,
-            &config.stream,
-        )?)))
+        anyhow::bail!("prodigy bridge requires batch_size > 1 in config");
     };
+
+    let whisper_queues = crate::whisper_receiver::new_whisper_text_queues(batch_size);
+
+    let inner = Arc::new(stream_both::AppStateInner::new(args, &config.stream)?);
+    let batched_state = stream_both::BatchedState::new(inner, whisper_queues.clone())?;
+    let batched_state = Arc::new(batched_state);
     tracing::info!(
         "model loaded (Batch size: {}, RAG: {})",
         config.stream.batch_size,
         config.stream.use_rag()
     );
-    let _ = log_forwarder;
-    tracing::info!("prodigy bridge will be wired in a future step");
+
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    crate::prodigy_bridge::install_signal_handler(running.clone());
+
+    let whisper_running = running.clone();
+    let wq = whisper_queues.clone();
+    let whisper_handle = crate::whisper_receiver::spawn_whisper_receiver(wq, whisper_running);
+
+    let cmd_listener = crate::interconnect::bind_listen(crate::interconnect::CMD_PORT)?;
+    let status_provider = crate::prodigy_bridge::run_prodigy_bridge(
+        batched_state.pool.clone(),
+        whisper_queues,
+        running.clone(),
+        batch_size,
+        config.stream.lm_model_file.clone(),
+        log_forwarder.clone(),
+    )?;
+
+    let cmd_running = running.clone();
+    let cmd_fwd = log_forwarder.clone();
+    let cmd_handle = std::thread::Builder::new()
+        .name("cmd-port".into())
+        .spawn(move || {
+            if let Err(e) =
+                crate::cmd_port::run_cmd_listener(cmd_listener, cmd_running, cmd_fwd, status_provider)
+            {
+                tracing::error!("CMD listener error: {}", e);
+            }
+        })
+        .context("failed to spawn cmd-port thread")?;
+
+    tracing::info!("moshi-rag-service running, waiting for shutdown signal");
+
+    while running.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    tracing::info!("shutdown signal received, stopping");
+    running.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let _ = cmd_handle.join();
+    drop(whisper_handle);
+
     Ok(())
 }

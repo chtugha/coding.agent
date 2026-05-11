@@ -84,9 +84,8 @@ impl LogForwarder {
         }
         let msg = truncate_to_char_boundary(message, MAX_MSG_LEN);
         let formatted = format!("{} {} {} {}", self.service_name, level.as_str(), call_id, msg);
-        let bytes = formatted.as_bytes();
-        let to_send = if bytes.len() > MAX_DATAGRAM_LEN { &bytes[..MAX_DATAGRAM_LEN] } else { bytes };
-        let _ = socket.send(to_send);
+        let to_send = truncate_to_char_boundary(&formatted, MAX_DATAGRAM_LEN);
+        let _ = socket.send(to_send.as_bytes());
     }
 }
 
