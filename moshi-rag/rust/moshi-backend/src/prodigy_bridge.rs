@@ -681,11 +681,8 @@ fn mgmt_receive_loop(
                     tracing::warn!("failed to send PONG to upstream: {}", e);
                     break;
                 }
-                forward_mgmt_to_oap(&oap, &MgmtMsg::Ping);
             }
-            MgmtMsg::Pong => {
-                forward_mgmt_to_oap(&oap, &MgmtMsg::Pong);
-            }
+            MgmtMsg::Pong => {}
             MgmtMsg::Custom(ref s) => {
                 if s == "SAMPLE_RATE_QUERY" {
                     let response = MgmtMsg::Custom("SAMPLE_RATE:24000".to_string());
@@ -696,22 +693,11 @@ fn mgmt_receive_loop(
                 } else {
                     tracing::debug!("received CUSTOM mgmt: {}", s);
                 }
-                forward_mgmt_to_oap(&oap, &msg);
             }
         }
     }
 
     tracing::info!("upstream mgmt receive loop stopped");
-}
-
-fn forward_mgmt_to_oap(oap: &Arc<Mutex<OapState>>, msg: &MgmtMsg) {
-    let mut oap_guard = oap.lock().unwrap();
-    if let Some(ref mut mgmt_stream) = oap_guard.mgmt_stream {
-        if send_mgmt(mgmt_stream, msg).is_err() {
-            tracing::warn!("OAP mgmt forward failed, disconnecting");
-            oap_guard.disconnect();
-        }
-    }
 }
 
 fn data_receive_loop(
