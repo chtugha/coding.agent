@@ -864,6 +864,13 @@ private:
             }
 
             if (name == "WHISPER_SERVICE" && args_override.empty()) {
+                std::string moshi_backends = get_setting("moshi_backends", "[]");
+                bool has_moshi = moshi_backends.find('{') != std::string::npos;
+                if (has_moshi && use_args.find("--moshi-rag-mode") == std::string::npos
+                              && use_args.find("-R") == std::string::npos) {
+                    use_args += " --moshi-rag-mode";
+                }
+
                 std::string lang = get_setting("pipeline_language", "");
                 if (!lang.empty()) {
                     auto valid_lang = [](const std::string& s) {
@@ -915,7 +922,12 @@ private:
             if (args_override.empty()) {
                 std::string ll_key = "log_level_" + name;
                 std::string ll = get_setting(ll_key, "");
-                if (!ll.empty() && ll.find(' ') == std::string::npos) use_args += " --log-level " + ll;
+                if (!ll.empty() && ll.find(' ') == std::string::npos) {
+                    if (name == "MOSHI_SERVICE")
+                        use_args += " --log " + ll;
+                    else
+                        use_args += " --log-level " + ll;
+                }
             }
 
             if (name == "TOMEDO_CRAWL_SERVICE" && args_override.empty()) {
@@ -942,9 +954,11 @@ private:
             }
 
             if (name == "MOSHI_SERVICE" && args_override.empty()
-                && use_args.find("--backend-config") == std::string::npos) {
+                && use_args.find("--config") == std::string::npos) {
                 std::string backends_json = get_setting("moshi_backends", "[]");
                 std::string default_lang  = get_setting("moshi_default_language", "en");
+                std::string selected_config;
+                std::string first_config;
                 size_t pos = 0;
                 while (pos < backends_json.size()) {
                     size_t obj_start = backends_json.find('{', pos);
@@ -965,19 +979,15 @@ private:
                     std::string obj = backends_json.substr(obj_start, obj_end - obj_start);
                     std::string lang   = extract_json_string(obj, "lang");
                     std::string config = extract_json_string(obj, "config");
-                    std::string binary = extract_json_string(obj, "binary");
-                    if (!lang.empty() && !config.empty() &&
-                        lang.find(' ') == std::string::npos &&
-                        config.find(' ') == std::string::npos) {
-                        std::string spec = lang + ":" + config;
-                        if (!binary.empty() && binary.find(' ') == std::string::npos)
-                            spec += ":" + binary;
-                        use_args += " --backend-config " + spec;
+                    if (!config.empty() && config.find(' ') == std::string::npos) {
+                        if (first_config.empty()) first_config = config;
+                        if (selected_config.empty() && lang == default_lang) selected_config = config;
                     }
                     pos = obj_end;
                 }
-                if (!default_lang.empty() && default_lang.find(' ') == std::string::npos)
-                    use_args += " --default-language " + default_lang;
+                if (selected_config.empty()) selected_config = first_config;
+                if (!selected_config.empty())
+                    use_args += " --config " + selected_config + " standalone";
             }
 
             auto argv_strings = split_args(use_args);

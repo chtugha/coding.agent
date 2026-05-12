@@ -200,6 +200,11 @@ public:
     }
 
     bool init() {
+        interconnect_.register_custom_negotiation_handler([](const std::string& msg) -> std::string {
+            if (msg == "SAMPLE_RATE_QUERY") return "SAMPLE_RATE:16000";
+            return "";
+        });
+
         if (!interconnect_.initialize()) {
             std::cerr << "Failed to initialize interconnect" << std::endl;
             return false;

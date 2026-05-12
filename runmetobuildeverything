@@ -568,8 +568,7 @@ verify_binaries() {
     OPTIONAL_SERVICES=(
         "bin/vits2-service"
         "bin/matcha-service"
-        "bin/moshi-service"
-        "bin/moshi-backend"
+        "bin/moshi-rag-service"
     )
 
     ALL_OK=true

@@ -104,7 +104,7 @@ else()
             IMPORTED_LOCATION "${OPUS_LIB}"
             INTERFACE_INCLUDE_DIRECTORIES "${OPUS_INC}")
     else()
-        message(WARNING "pkg-config not found and opus library not found via find_library — moshi-service will be DISABLED")
+        message(WARNING "pkg-config not found and opus library not found via find_library")
     endif()
 endif()
 
@@ -552,21 +552,22 @@ else()
     message(WARNING "Matcha-TTS Service: DISABLED (espeak-ng not found)")
 endif()
 
-# 7d. Moshi Service (full-duplex neural voice, bridges IAP↔moshi-backend via WebSocket+Opus)
-if(OPUS_FOUND)
-    add_executable(moshi-service moshi-service.cpp mongoose.c)
-    target_include_directories(moshi-service PRIVATE ${OPENSSL_INCLUDE_DIR})
-    target_compile_definitions(moshi-service PRIVATE MG_ENABLE_PACKED_FS=0)
-    target_link_libraries(moshi-service PRIVATE Threads::Threads
-        ${OPENSSL_STATIC_SSL} ${OPENSSL_STATIC_CRYPTO}
-        PkgConfig::OPUS)
-    if(APPLE)
-        target_link_libraries(moshi-service PRIVATE
-            "-framework CoreFoundation" "-framework Security")
-    endif()
-else()
-    message(WARNING "Moshi Service: DISABLED (opus not found)")
-endif()
+# 7d. Moshi RAG Service (full-duplex neural voice via Rust moshi-rag backend)
+set(MOSHI_RAG_CARGO_DIR "${CMAKE_SOURCE_DIR}/moshi-rag/rust")
+set(MOSHI_RAG_BINARY "${MOSHI_RAG_CARGO_DIR}/target/release/moshi-backend")
+add_custom_target(moshi-rag-service ALL
+    COMMAND cargo build --features metal --bin moshi-backend --release
+    WORKING_DIRECTORY "${MOSHI_RAG_CARGO_DIR}"
+    COMMENT "Building moshi-rag-service (Rust, Metal, release)"
+    BYPRODUCTS "${CMAKE_SOURCE_DIR}/bin/moshi-rag-service"
+)
+add_custom_command(TARGET moshi-rag-service POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${MOSHI_RAG_BINARY}"
+        "${CMAKE_SOURCE_DIR}/bin/moshi-rag-service"
+    COMMENT "Copying moshi-rag-service to bin/"
+)
+install(PROGRAMS "${CMAKE_SOURCE_DIR}/bin/moshi-rag-service" DESTINATION bin)
 
 # 8. Frontend (mongoose + SQLCipher)
 # Uses SQLCipher (${SQLCIPHER_DIR}/sqlite3.c) instead of the bundled sqlite3.c
@@ -625,9 +626,7 @@ endif()
 
 # Install
 set(INSTALL_TARGETS sip-client inbound-audio-processor vad-service outbound-audio-processor whisper-service llama-service tts-service frontend tomedo-crawl)
-if(TARGET moshi-service)
-    list(APPEND INSTALL_TARGETS moshi-service)
-endif()
+
 if(TARGET kokoro-service)
     list(APPEND INSTALL_TARGETS kokoro-service)
 endif()
