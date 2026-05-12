@@ -75,7 +75,7 @@ if isinstance(items, list):
 
 sync_source_files() {
     local sha="$1"
-    local skip_dirs="|bin|whisper-cpp|llama-cpp|third_party|moshi-rust|scripts|.git|.zenflow|"
+    local skip_dirs="|bin|whisper-cpp|llama-cpp|third_party|moshi-rust|moshi-rag|scripts|.git|.zenflow|"
     local contents_url="https://api.github.com/repos/chtugha/coding.agent/contents/?ref=${sha}"
     local api_response
     api_response=$(curl -fsSL --max-time 20 "$contents_url" 2>/dev/null)
@@ -204,8 +204,8 @@ while [[ $# -gt 0 ]]; do
             echo "Build order:"
             echo "  1. whisper.cpp (CoreML + Metal, static libs)"
             echo "  2. llama.cpp (Metal, static libs)"
-            echo "  3. SQLCipher (auto-updated from GitHub master)"
-            echo "  4. Moshi Rust backend (cargo build, Metal)"
+            echo "  3. moshi-rag-service (Rust, cargo build, Metal)"
+            echo "  4. SQLCipher (auto-updated from GitHub master)"
             echo "  5. Prodigy main project (all services)"
             echo ""
             echo "SQLCipher (database encryption):"
@@ -449,72 +449,51 @@ build_sqlcipher_amalgamation() {
     info "Output: ${out_dir}/sqlite3.c + sqlite3.h"
 }
 
-build_moshi_backend() {
-    step "Building Moshi Rust backend"
+build_moshi_rag_service() {
+    step "Building moshi-rag-service (Rust)"
 
-    local moshi_dir="$SCRIPT_DIR/moshi-rust"
+    local cargo_dir="$SCRIPT_DIR/moshi-rag/rust"
 
     if ! command -v cargo &> /dev/null; then
-        warn "Rust/Cargo not found — skipping moshi-backend build"
+        warn "Rust/Cargo not found — skipping moshi-rag-service build"
         warn "  Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
         warn "  Then re-run this script."
         return
     fi
 
-    if [ -d "$moshi_dir/.git" ]; then
-        info "Updating moshi Rust repo..."
-        git -C "$moshi_dir" pull --quiet origin main 2>/dev/null \
-            || warn "moshi-rust git pull failed — using cached version"
-    else
-        info "Cloning kyutai-labs/moshi Rust backend..."
-        git clone --depth=1 https://github.com/kyutai-labs/moshi.git "$moshi_dir"
+    if [ ! -d "$cargo_dir" ]; then
+        warn "$cargo_dir not found — skipping moshi-rag-service build"
+        return
     fi
 
-    local patch_file="$SCRIPT_DIR/patches/moshi-rust-metal-fixes.patch"
-    if [ -f "$patch_file" ]; then
-        info "Applying Metal/BF16 patches to moshi-rust..."
-        git -C "$moshi_dir" checkout -- . 2>/dev/null || true
-        if ! git -C "$moshi_dir" apply --check "$patch_file" 2>/dev/null; then
-            warn "Patch does not apply cleanly — may already be applied or upstream changed"
-        else
-            git -C "$moshi_dir" apply "$patch_file"
-            info "Patches applied successfully"
-        fi
-    fi
-
-    local bin_out="$SCRIPT_DIR/bin/moshi-backend"
+    local bin_out="$SCRIPT_DIR/bin/moshi-rag-service"
     if [ -f "$bin_out" ] && [ "$FORCE_REBUILD" != "1" ]; then
-        info "moshi-backend already built (use --force to rebuild)"
+        info "moshi-rag-service already built (use --force to rebuild)"
         return
     fi
 
-    if [ ! -d "$moshi_dir/rust" ]; then
-        warn "$moshi_dir/rust/ directory not found — skipping moshi-backend build"
-        return
-    fi
-
-    for _dep in pkg-config sentencepiece opus protobuf; do
+    for _dep in pkg-config sentencepiece; do
         if ! brew list "$_dep" &>/dev/null; then
-            info "Installing $_dep (required by moshi-backend)..."
+            info "Installing $_dep (required by moshi-rag-service)..."
             brew install "$_dep"
         fi
     done
-    info "Building moshi-backend (cargo build --release, Metal)..."
+    info "Building moshi-rag-service (cargo build --release, Metal)..."
     (
         export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
         export CMAKE_POLICY_VERSION_MINIMUM=3.5
-        cd "$moshi_dir/rust"
+        cd "$cargo_dir"
         cargo build --features metal --bin moshi-backend --release 2>&1
     )
 
-    local built="$moshi_dir/rust/target/release/moshi-backend"
+    local built="$cargo_dir/target/release/moshi-backend"
     if [ -f "$built" ]; then
         mkdir -p "$(dirname "$bin_out")"
         cp "$built" "$bin_out"
-        info "moshi-backend built: $bin_out ($(du -h "$bin_out" | cut -f1))"
+        info "moshi-rag-service built: $bin_out ($(du -h "$bin_out" | cut -f1))"
     else
-        warn "moshi-backend build failed — check Rust/Cargo output above"
-        warn "  To build manually: cd moshi-rust/rust && cargo build --features metal --bin moshi-backend --release"
+        warn "moshi-rag-service build failed — check Rust/Cargo output above"
+        warn "  To build manually: cd moshi-rag/rust && cargo build --features metal --bin moshi-backend --release"
     fi
 }
 
@@ -625,6 +604,6 @@ else
     info "Skipping dependency builds (--skip-deps)"
 fi
 
-build_moshi_backend
+build_moshi_rag_service
 build_main_project
 verify_binaries
