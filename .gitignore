@@ -147,3 +147,4 @@ embeddings.meta
 
 # Moshi-RAG Rust build artifacts
 moshi-rag/rust/target/
+.build_version
