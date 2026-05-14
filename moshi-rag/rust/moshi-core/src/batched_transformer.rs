@@ -392,7 +392,11 @@ impl StreamingTransformer {
             PositionalEmbedding::None | PositionalEmbedding::Sin => None,
         };
         let mut layers = Vec::with_capacity(cfg.num_layers);
-        let builder = KvCacheBuilder::new(batch_size, cfg.context, vb.dtype(), vb.device())?;
+        let cache_dtype = match &vb {
+            MaybeQuantizedVarBuilder::Quantized(_) => matmul_dtype(vb.device()),
+            MaybeQuantizedVarBuilder::Real(_) => vb.dtype(),
+        };
+        let builder = KvCacheBuilder::new(batch_size, cfg.context, cache_dtype, vb.device())?;
         for layer_idx in 0..cfg.num_layers {
             // Also send weights of first layer as only it contains the KQV proj weights
             // for shared cross-attention layers

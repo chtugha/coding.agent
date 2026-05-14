@@ -100,6 +100,7 @@ pub struct Mimi {
     upsample: conv::ConvTrUpsample1d,
     quantizer: quantization::SplitResidualVectorQuantizer,
     config: Config,
+    weight_dtype: DType,
 }
 
 impl Mimi {
@@ -112,6 +113,7 @@ impl Mimi {
     }
 
     fn new_(batch_size: Option<usize>, cfg: Config, vb: VarBuilder) -> Result<Self> {
+        let weight_dtype = vb.dtype();
         let dim = cfg.seanet.dimension;
         let encoder = seanet::SeaNetEncoder::new(&cfg.seanet, vb.pp("encoder"))?;
         let decoder = seanet::SeaNetDecoder::new(&cfg.seanet, vb.pp("decoder"))?;
@@ -164,11 +166,16 @@ impl Mimi {
             downsample,
             upsample,
             config: cfg,
+            weight_dtype,
         })
     }
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.weight_dtype
     }
 
     pub fn encode_pre_quantize(&mut self, xs: &Tensor) -> Result<Tensor> {
@@ -241,9 +248,18 @@ impl Mimi {
     }
 }
 
+fn mimi_dtype(dev: &Device) -> DType {
+    if dev.is_cuda() {
+        DType::BF16
+    } else {
+        DType::F32
+    }
+}
+
 pub fn load(model_file: &str, num_codebooks: Option<usize>, dev: &Device) -> Result<Mimi> {
+    let dtype = mimi_dtype(dev);
     let vb =
-        unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&[model_file], DType::F32, dev)? };
+        unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&[model_file], dtype, dev)? };
     let cfg = Config::v0_1(num_codebooks);
     let mimi = Mimi::new(cfg, vb)?;
     Ok(mimi)
@@ -255,8 +271,9 @@ pub fn load_b(
     num_codebooks: Option<usize>,
     dev: &Device,
 ) -> Result<Mimi> {
+    let dtype = mimi_dtype(dev);
     let vb =
-        unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&[model_file], DType::F32, dev)? };
+        unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&[model_file], dtype, dev)? };
     let cfg = Config::v0_1(num_codebooks);
     let mimi = Mimi::new_(batch_size, cfg, vb)?;
     Ok(mimi)

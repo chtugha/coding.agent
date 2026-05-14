@@ -107,6 +107,7 @@ pub struct BridgeStatusProvider {
     inner: Arc<Mutex<BridgeInner>>,
     oap: Arc<Mutex<OapState>>,
     model_path: String,
+    model_loop_ready: Arc<AtomicBool>,
 }
 
 impl crate::cmd_port::StatusProvider for BridgeStatusProvider {
@@ -114,13 +115,15 @@ impl crate::cmd_port::StatusProvider for BridgeStatusProvider {
         let inner = self.inner.lock().unwrap();
         let oap = self.oap.lock().unwrap();
         let oap_status = if oap.is_connected() { "CONNECTED" } else { "DISCONNECTED" };
+        let loop_ready = if self.model_loop_ready.load(Ordering::Relaxed) { "YES" } else { "NO" };
         format!(
-            "ACTIVE_CALLS:{}:MODEL:{}:BATCH:{}/{}:OAP:{}\n",
+            "ACTIVE_CALLS:{}:MODEL:{}:BATCH:{}/{}:OAP:{}:MODEL_LOOP_READY:{}\n",
             inner.active_calls(),
             self.model_path,
             inner.slots_used(),
             inner.batch_size,
-            oap_status
+            oap_status,
+            loop_ready
         )
     }
 }
@@ -132,6 +135,7 @@ pub fn run_prodigy_bridge(
     batch_size: usize,
     model_path: String,
     log_forwarder: Arc<crate::log_forwarder::LogForwarder>,
+    model_loop_ready: Arc<AtomicBool>,
 ) -> Result<Arc<dyn crate::cmd_port::StatusProvider>> {
     let inner = Arc::new(Mutex::new(BridgeInner::new(batch_size)));
     let (mgmt_drain_tx, mgmt_drain_rx) = std::sync::mpsc::sync_channel::<TcpStream>(1);
@@ -143,6 +147,7 @@ pub fn run_prodigy_bridge(
             inner: inner.clone(),
             oap: oap.clone(),
             model_path,
+            model_loop_ready,
         });
 
     let oap_c = oap.clone();

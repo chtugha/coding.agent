@@ -297,6 +297,7 @@ pub struct BatchedState {
     pub rag_retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
     _loop_handle: Option<std::thread::JoinHandle<()>>,
     pub whisper_queues: crate::whisper_receiver::WhisperTextQueues,
+    pub model_loop_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BatchedState {
@@ -321,14 +322,16 @@ impl BatchedState {
         let pool_clone = pool.clone();
         let rag_for_loop = rag_retrieval.clone();
         let wq = whisper_queues.clone();
+        let model_loop_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ready_flag = model_loop_ready.clone();
         let loop_handle = std::thread::spawn(move || {
-            if let Err(e) = Self::run_loop(inner_clone, pool_clone, rag_for_loop, wq) {
+            if let Err(e) = Self::run_loop(inner_clone, pool_clone, rag_for_loop, wq, ready_flag) {
                 if !e.to_string().contains("max step_idx reached") {
                     tracing::error!(err = %e, "batched model loop error");
                 }
             }
         });
-        Ok(Self { inner, pool, rag_retrieval, _loop_handle: Some(loop_handle), whisper_queues })
+        Ok(Self { inner, pool, rag_retrieval, _loop_handle: Some(loop_handle), whisper_queues, model_loop_ready })
     }
 
     fn run_loop(
@@ -336,6 +339,7 @@ impl BatchedState {
         pool: Arc<crate::batched_channels::BatchedStreamingChannels>,
         rag_retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
         whisper_queues: crate::whisper_receiver::WhisperTextQueues,
+        model_loop_ready: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<()> {
         let session_config = default_session_config_batched();
         let gen_config = inner
@@ -408,10 +412,27 @@ impl BatchedState {
                 })
                 .collect();
 
+        model_loop_ready.store(true, std::sync::atomic::Ordering::SeqCst);
         tracing::info!("batched model loop started");
+        let mut step_count: u64 = 0;
+        let mut text_token_count: u64 = 0;
+        let mut loop_count: u64 = 0;
+        let mut last_diag = std::time::Instant::now();
+        let mut last_pre_entry = std::time::Instant::now();
         loop {
-            // Reset LM instance if necessary. Main LM reset inside pre_process.
+            if last_pre_entry.elapsed().as_secs() >= 5 {
+                tracing::info!(loop_count, step_count, "model loop BEFORE pre_process");
+                last_pre_entry = std::time::Instant::now();
+            }
+            let t_pre = std::time::Instant::now();
             let (mut batch_pcm, mask, ref_channel_ids, reset_slots) = pool.pre_process(&mut state);
+            let pre_ms = t_pre.elapsed().as_millis();
+            loop_count += 1;
+            let any_active_now = mask.iter().any(|&b| b);
+            if last_diag.elapsed().as_secs() >= 5 || (any_active_now && loop_count % 50 == 0) || pre_ms > 100 {
+                tracing::info!(loop_count, step_count, text_token_count, pre_ms, any_active=any_active_now, reset_count=reset_slots.len(), active_mask=?mask.iter().enumerate().filter(|(_, &b)| b).map(|(i,_)| i).collect::<Vec<_>>(), "model loop diag");
+                last_diag = std::time::Instant::now();
+            }
 
             for &bid in &reset_slots {
                 if let Err(e) =
@@ -485,7 +506,13 @@ impl BatchedState {
                     &device,
                 )?;
                 let stream_mask = moshi::StreamMask::new(mask.clone(), &device)?;
+                let t_step = std::time::Instant::now();
                 let msgs = state.step_pcm(&pcm_tensor, &stream_mask)?;
+                let step_ms = t_step.elapsed().as_millis();
+                step_count += 1;
+                if step_count <= 5 || step_count % 100 == 0 {
+                    tracing::info!(step_count, step_ms, text_token_count, msg_count=msgs.len(), "model loop step");
+                }
 
                 if let Some((ref rag_mgr, rag_token_id)) = rag_manager {
                     for msg in &msgs {
@@ -528,6 +555,8 @@ impl BatchedState {
                                 if let Some(text) =
                                     decode_text_piece(&inner.text_tokenizer, *prev_token, *token, &gen_config)
                                 {
+                                    text_token_count += 1;
+                                    tracing::info!("Moshi transcription: {}", text);
                                     let b = *batch_idx;
                                     let outputs = turn_managers.get(b).unwrap().lock().unwrap().handle_spoken_text(
                                         Some(text.as_str()),

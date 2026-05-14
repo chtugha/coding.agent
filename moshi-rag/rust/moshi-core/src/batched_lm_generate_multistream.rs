@@ -319,7 +319,7 @@ impl State {
                 .and_then(|t| t.dims3().ok())
                 .ok_or_else(|| candle::Error::Msg("prepend shape".to_string()))?;
             let dev = self.model.device();
-            let empty = Tensor::zeros((1, t_len, dim), candle::DType::BF16, dev)?;
+            let empty = Tensor::zeros((1, t_len, dim), self.model.dtype(), dev)?;
             let batch_tensors: Vec<Tensor> = (0..batch_size)
                 .map(|b| {
                     prepend_mask[b] = prepend_list[b].is_some();
@@ -333,7 +333,12 @@ impl State {
 
         let mut codes = Vec::with_capacity(self.config.total_audio_codebooks());
 
-        let pcm_st = StreamTensor::from_tensor(pcm.clone());
+        let pcm_for_mimi = if pcm.dtype() != self.mimi.dtype() {
+            pcm.to_dtype(self.mimi.dtype())?
+        } else {
+            pcm.clone()
+        };
+        let pcm_st = StreamTensor::from_tensor(pcm_for_mimi);
         let input_audio_tokens = self.mimi.encode_step(&pcm_st, mask)?;
         let input_audio_tokens = match input_audio_tokens.as_option() {
             None => return Ok(out),
@@ -506,7 +511,13 @@ impl State {
                 if !need_decode.contains(&b) {
                     continue;
                 }
-                let pcm_vec = pcm_out.i((b, 0))?.to_vec1::<f32>()?;
+                let pcm_slice = pcm_out.i((b, 0))?;
+                let pcm_f32 = if pcm_slice.dtype() != candle::DType::F32 {
+                    pcm_slice.to_dtype(candle::DType::F32)?
+                } else {
+                    pcm_slice
+                };
+                let pcm_vec = pcm_f32.to_vec1::<f32>()?;
                 out.push(StreamingOutMsg::Pcm { batch_idx: b, pcm: pcm_vec });
             }
         }
@@ -519,7 +530,7 @@ impl State {
     pub fn warmup(&mut self, frame_len: usize) -> candle::Result<()> {
         let batch_size = self.batch_size();
         let dev = self.model.device().clone();
-        let pcm = candle::Tensor::zeros((batch_size, 1, frame_len), candle::DType::F32, &dev)?;
+        let pcm = candle::Tensor::zeros((batch_size, 1, frame_len), self.mimi.dtype(), &dev)?;
         let mask = StreamMask::new(vec![true; batch_size], &dev)?;
         let _ = self.step_pcm(&pcm, &mask)?;
         dev.synchronize()?;

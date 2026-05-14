@@ -1586,6 +1586,19 @@ private:
 </div>
 </aside>
 <main class="wt-main">
+<div class="wt-mobile-nav">
+<select onchange="if(this.value)showPage(this.value)" style="width:100%;padding:6px;background:var(--wt-card-bg);color:var(--wt-text);border:1px solid var(--wt-border);border-radius:var(--wt-radius);font-family:var(--wt-body);font-size:12px">
+<option value="dashboard">Dashboard</option>
+<option value="services">Services</option>
+<option value="logs">Logs</option>
+<option value="beta-testing">Beta Testing</option>
+<option value="models">Models</option>
+<option value="database">Database</option>
+<option value="credentials">Credentials</option>
+<option value="certificates">Certificates</option>
+<option value="login">Login</option>
+</select>
+</div>
 )WT";
         h += build_ui_pages();
         h += R"WT(</main></div>)WT";
@@ -2322,11 +2335,20 @@ private:
     // -------------------------------------------------------------------------
 
     // POST /api/tests/setup/start — Start the async pre-test setup procedure.
-    // Body: {"tts":"auto"|"kokoro"|"neutts"}
+    // Body: {"tts":"auto"|"kokoro"|"neutts"|"moshi"}
     // Returns: 202 {"task_id":N}
     void handle_test_setup_start(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string tts = extract_json_string(body, "tts");
+        if (tts == "moshi") {
+            int64_t task_id = create_async_task("test_setup_moshi");
+            std::thread([this, task_id]() {
+                run_moshi_test_setup_async(task_id);
+            }).detach();
+            mg_http_reply(c, 202, "Content-Type: application/json\r\n",
+                "{\"task_id\":%lld}", (long long)task_id);
+            return;
+        }
         if (tts != "kokoro" && tts != "neutts" && tts != "vits2" && tts != "matcha") tts = "auto";
 
         int64_t task_id = create_async_task("test_setup");
@@ -2577,6 +2599,151 @@ private:
             "{\"status\":\"done\",\"tts\":\"" + active_tts + "\"}");
     }
 
+    void run_moshi_test_setup_async(int64_t task_id) {
+        set_setup_progress(task_id, "A", "Checking service state for Moshi pipeline...");
+
+        static const std::vector<std::string> stop_order = {
+            "TOMEDO_CRAWL_SERVICE", "MATCHA_ENGINE", "VITS2_ENGINE", "NEUTTS_ENGINE", "KOKORO_ENGINE", "TTS_SERVICE",
+            "OUTBOUND_AUDIO_PROCESSOR", "LLAMA_SERVICE", "MOSHI_SERVICE", "WHISPER_SERVICE",
+            "VAD_SERVICE", "INBOUND_AUDIO_PROCESSOR", "SIP_CLIENT"
+        };
+        for (const auto& s : stop_order) {
+            if (is_service_running(s)) {
+                stop_service(s);
+                usleep(500000);
+            }
+        }
+
+        std::string sip_err;
+        http_post_localhost(TEST_SIP_PROVIDER_PORT, "/hangup", "{}", sip_err);
+
+        set_setup_progress(task_id, "B", "Starting Moshi pipeline services...");
+
+        struct StartStep { std::string name; int sleep_s; };
+        static const std::vector<StartStep> start_order = {
+            {"SIP_CLIENT",               3},
+            {"INBOUND_AUDIO_PROCESSOR",  3},
+            {"VAD_SERVICE",              3},
+            {"WHISPER_SERVICE",         10},
+            {"MOSHI_SERVICE",           60},
+            {"OUTBOUND_AUDIO_PROCESSOR", 3},
+        };
+        for (const auto& step : start_order) {
+            set_setup_progress(task_id, "B", "Starting " + step.name + "...");
+            if (!start_service(step.name, "")) {
+                finish_async_task(task_id,
+                    "{\"error\":\"Failed to start " + step.name + "\"}");
+                return;
+            }
+            if (step.name == "MOSHI_SERVICE") {
+                uint16_t moshi_cmd = whispertalk::service_cmd_port(whispertalk::ServiceType::MOSHI_SERVICE);
+                bool moshi_ready = false;
+                for (int i = 0; i < 240; i++) {
+                    set_setup_progress(task_id, "B",
+                        "Waiting for MOSHI_SERVICE model loop ready (" + std::to_string(i / 2) + "s)...");
+                    std::string err;
+                    std::string resp = tcp_command(moshi_cmd, "STATUS", err, 2);
+                    if (resp.find("MODEL_LOOP_READY:YES") != std::string::npos) { moshi_ready = true; break; }
+                    usleep(500000);
+                }
+                if (!moshi_ready) {
+                    finish_async_task(task_id, "{\"error\":\"MOSHI_SERVICE model loop did not become ready within 120s\"}");
+                    return;
+                }
+            } else {
+                for (int i = 0; i < step.sleep_s; i++) {
+                    usleep(1000000);
+                }
+            }
+        }
+
+        set_setup_progress(task_id, "C", "Verifying MOSHI_SERVICE status...");
+        {
+            uint16_t moshi_cmd = whispertalk::service_cmd_port(whispertalk::ServiceType::MOSHI_SERVICE);
+            std::string err;
+            std::string status = tcp_command(moshi_cmd, "STATUS", err, 2);
+            if (status.find("OAP:CONNECTED") == std::string::npos) {
+                set_setup_progress(task_id, "C", "Waiting for MOSHI_SERVICE OAP connection...");
+                for (int i = 0; i < 20; i++) {
+                    usleep(500000);
+                    status = tcp_command(moshi_cmd, "STATUS", err, 2);
+                    if (status.find("OAP:CONNECTED") != std::string::npos) break;
+                }
+            }
+        }
+
+        set_setup_progress(task_id, "D", "Starting Test SIP Provider...");
+
+        if (!is_service_running("TEST_SIP_PROVIDER")) {
+            if (!start_service("TEST_SIP_PROVIDER", "")) {
+                finish_async_task(task_id, "{\"error\":\"Failed to start TEST_SIP_PROVIDER\"}");
+                return;
+            }
+        }
+
+        bool provider_up = false;
+        for (int i = 0; i < 10; i++) {
+            std::string err;
+            std::string resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", err);
+            if (!resp.empty()) { provider_up = true; break; }
+            usleep(500000);
+        }
+        if (!provider_up) {
+            finish_async_task(task_id, "{\"error\":\"Test SIP provider did not become reachable within 5s\"}");
+            return;
+        }
+
+        set_setup_progress(task_id, "D", "Registering SIP lines (Alice + Bob)...");
+        send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "ADD_LINE alice 127.0.0.1");
+        usleep(500000);
+        send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "ADD_LINE bob 127.0.0.1");
+
+        bool lines_ready = false;
+        for (int i = 0; i < 20; i++) {
+            std::string err;
+            std::string resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/users", err);
+            if (resp.find("\"alice\"") != std::string::npos
+                && resp.find("\"bob\"") != std::string::npos) {
+                lines_ready = true;
+                break;
+            }
+            usleep(500000);
+        }
+        if (!lines_ready) {
+            finish_async_task(task_id, "{\"error\":\"SIP lines did not register within 10s\"}");
+            return;
+        }
+
+        set_setup_progress(task_id, "D", "Starting Alice+Bob conference...");
+        std::string conf_err;
+        std::string conf_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/conference",
+            "{\"users\":[\"alice\",\"bob\"]}", conf_err);
+        if (conf_resp.find("\"success\":true") == std::string::npos) {
+            finish_async_task(task_id, "{\"error\":\"Failed to start conference: "
+                + escape_json(conf_err.empty() ? conf_resp : conf_err) + "\"}");
+            return;
+        }
+
+        bool call_active = false;
+        for (int i = 0; i < 20; i++) {
+            std::string err;
+            std::string resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/status", err);
+            if (resp.find("\"call_active\":true") != std::string::npos) {
+                call_active = true;
+                break;
+            }
+            usleep(500000);
+        }
+        if (!call_active) {
+            finish_async_task(task_id, "{\"error\":\"Conference call did not become active within 10s\"}");
+            return;
+        }
+
+        set_setting("test_active_tts", "moshi");
+        finish_async_task(task_id,
+            "{\"status\":\"done\",\"tts\":\"moshi\"}");
+    }
+
     // POST /api/tests/teardown — Hang up conference, remove SIP lines, stop active TTS.
     void handle_test_teardown(struct mg_connection *c, struct mg_http_message *hm) {
         (void)hm;
@@ -2597,6 +2764,8 @@ private:
             stop_service("VITS2_ENGINE");
         } else if (active_tts == "matcha") {
             stop_service("MATCHA_ENGINE");
+        } else if (active_tts == "moshi") {
+            stop_service("MOSHI_SERVICE");
         }
         set_setting("test_active_tts", "");
 

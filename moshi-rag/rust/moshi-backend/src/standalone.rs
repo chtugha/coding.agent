@@ -74,7 +74,14 @@ impl stream_both::AppStateInner {
             device
         );
 
-        let dtype = if device.is_cuda() || device.is_metal() { candle::DType::BF16 } else { candle::DType::F32 };
+        let is_gguf = config.lm_model_file.ends_with(".gguf");
+        let dtype = if is_gguf {
+            candle::DType::F32
+        } else if device.is_cuda() || device.is_metal() {
+            candle::DType::BF16
+        } else {
+            candle::DType::F32
+        };
         let batch_size = if config.batch_size > 1 { config.batch_size } else { 1 };
         // Uses config.use_rag() to choose LM loader.
         let lm_model = if config.use_rag() {
@@ -148,8 +155,13 @@ impl stream_both::AppStateInner {
             let mut mimi_model = mimi_model.clone();
             let mimi_config = mimi_model.config();
             let frame_length = (mimi_config.sample_rate / mimi_config.frame_rate).ceil() as usize;
+            let mimi_dtype = if mimi_device.is_cuda() {
+                candle::DType::BF16
+            } else {
+                candle::DType::F32
+            };
             let fake_pcm =
-                candle::Tensor::zeros((1, 1, frame_length), candle::DType::F32, mimi_device)?;
+                candle::Tensor::zeros((1, 1, frame_length), mimi_dtype, mimi_device)?;
             let codes = mimi_model.encode_step(&fake_pcm.into(), &().into())?;
             let ys = mimi_model.decode_step(&codes, &().into())?;
             if ys.as_option().is_none() {
@@ -244,6 +256,7 @@ pub async fn run(
         batch_size,
         config.stream.lm_model_file.clone(),
         log_forwarder.clone(),
+        batched_state.model_loop_ready.clone(),
     )?;
 
     let cmd_running = running.clone();

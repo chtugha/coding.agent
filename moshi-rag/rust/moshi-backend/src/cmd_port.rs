@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub fn run_cmd_listener(
     tracing::info!("CMD listener on port {}", port);
 
     while running.load(Ordering::Relaxed) {
-        let stream = match listener.accept() {
+        let mut stream = match listener.accept() {
             Ok((s, _addr)) => s,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(CMD_POLL_TIMEOUT);
@@ -54,17 +54,17 @@ pub fn run_cmd_listener(
             continue;
         }
 
-        let mut reader = BufReader::with_capacity(CMD_BUF_SIZE, &stream);
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => continue,
-            Ok(_) => {}
-        }
-        let cmd = line.trim_end_matches(|c| c == '\n' || c == '\r');
+        let mut buf = [0u8; CMD_BUF_SIZE];
+        let n = match stream.read(&mut buf) {
+            Ok(0) => continue,
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let raw = std::str::from_utf8(&buf[..n]).unwrap_or("");
+        let cmd = raw.trim_end_matches(|c: char| c == '\n' || c == '\r');
         let response = handle_command(cmd, &log_forwarder, &*status_provider);
-        let mut writer = stream;
-        let _ = writer.write_all(response.as_bytes());
-        let _ = writer.flush();
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
     }
 
     tracing::info!("CMD listener shutting down");
@@ -92,6 +92,7 @@ fn handle_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
     use std::net::TcpStream;
 
     struct MockStatus;

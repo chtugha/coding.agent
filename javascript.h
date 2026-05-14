@@ -2281,20 +2281,8 @@ function runFullLoopTest(){
 }
 
 async function runMoshiWerTest(files,statusEl,resultsEl,btnEl){
-  if(btnEl){btnEl.disabled=true;btnEl._origText=btnEl.textContent;btnEl.textContent='Running...';}
-  try{
-    statusEl.innerHTML='<span style="color:var(--wt-accent)">\u23F3 Checking Moshi pipeline...</span>';
-    const health=await fetch('/api/pipeline/health').then(r=>r.json());
-    const moshiSvc=(health.services||[]).find(s=>s.name==='MOSHI_SERVICE');
-    if(!moshiSvc||!moshiSvc.reachable){
-      statusEl.innerHTML='<span style="color:var(--wt-danger)">MOSHI_SERVICE not reachable. Start it first.</span>';
-      return;
-    }
-    const sipStatus=await fetch(`http://localhost:${TSP_PORT}/status`).then(r=>r.json()).catch(()=>null);
-    if(!sipStatus||!sipStatus.call_active){
-      statusEl.innerHTML='<span style="color:var(--wt-danger)">No active call on test_sip_provider. Start a conference call first.</span>';
-      return;
-    }
+  runWithTestSetup(async({tts})=>{
+    statusEl.innerHTML='<span style="color:var(--wt-accent)">\u23F3 Moshi pipeline ready — starting WER test...</span>';
 
     const baselineLogs=await fetch('/api/logs?limit=500').then(r=>r.json()).catch(()=>({logs:[]}));
     const baselineKeys=new Set();
@@ -2362,11 +2350,10 @@ async function runMoshiWerTest(files,statusEl,resultsEl,btnEl){
     const warn=testResults.filter(r=>r.status==='WARN').length;
     const fail=testResults.filter(r=>r.status!=='PASS'&&r.status!=='WARN').length;
     statusEl.innerHTML=`<span style="color:${fail===0?'var(--wt-success)':'var(--wt-danger)'}">Moshi WER: ${pass} pass, ${warn} warn, ${fail} fail out of ${testResults.length}</span>`;
-  }catch(e){
+    return testResults;
+  },{statusEl:statusEl,btnEl:btnEl,ttsOverride:'moshi'}).catch(e=>{
     statusEl.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e&&e.message||e))}</span>`;
-  }finally{
-    if(btnEl){btnEl.disabled=false;btnEl.textContent=btnEl._origText||'Run WER Test';}
-  }
+  });
 }
 
 function _werSimilarity(a,b){

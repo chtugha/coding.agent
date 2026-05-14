@@ -161,5 +161,25 @@ body::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;point
 .pfu-path-label{font-size:9px;font-weight:700;letter-spacing:0.08em;font-family:var(--wt-font);margin-left:10px;white-space:nowrap;flex-shrink:0}
 .pfu-label-neural{color:var(--wt-accent-cyan);opacity:0.75}
 .pfu-label-classic{color:rgba(255,45,149,0.55)}
+.wt-mobile-nav{display:none}
+@media(max-width:400px){
+:root{--wt-sidebar-width:0px;--wt-sidebar-expanded:0px}
+.wt-sidebar{display:none}
+.wt-content{padding:8px 6px;max-width:100%}
+.wt-tab-bar{flex-wrap:wrap;gap:2px}
+.wt-tab-btn{font-size:10px;padding:4px 6px;flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wt-card{padding:8px;overflow-x:auto}
+.wt-card-header{padding:6px 8px;margin:-8px -8px 8px -8px;flex-wrap:wrap}
+.wt-page-title{font-size:16px;margin-bottom:10px}
+.wt-table{font-size:10px;display:block;overflow-x:auto}
+.wt-table th,.wt-table td{padding:4px 6px}
+.wt-btn{font-size:10px;padding:4px 8px}
+.wt-btn-sm{font-size:9px;padding:3px 6px}
+.wt-input,.wt-select{font-size:11px;padding:4px 6px;max-width:100%}
+.wt-main{overflow-y:auto;overflow-x:hidden}
+[style*="grid-template-columns"]{grid-template-columns:1fr!important}
+[style*="min-width:300px"]{min-width:0!important}
+.wt-mobile-nav{display:block;position:sticky;top:0;z-index:50;background:var(--wt-bg);border-bottom:1px solid var(--wt-border);padding:6px}
+}
 )CSS";
 }
