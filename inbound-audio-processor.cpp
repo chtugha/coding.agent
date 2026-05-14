@@ -1,6 +1,6 @@
 // inbound-audio-processor.cpp — G.711 μ-law decoder + multi-downstream upsampler.
 //
-// Pipeline position: SIP_CLIENT → [IAP] → VAD (classic) or VAD+MOSHI_SERVICE (moshi-rag)
+// Pipeline position: SIP_CLIENT → [IAP] → VAD (classic) or MOSHI_SERVICE (moshi-rag)
 //
 // Receives raw RTP packets (G.711 μ-law, 8kHz, 20ms frames = 160 bytes payload)
 // from the SIP_CLIENT via the interconnect data channel. For each packet:
@@ -10,8 +10,9 @@
 //      using the standard segment/quantization decode formula.
 //   3. For each registered downstream: upsample to the negotiated sample rate.
 //      Classic mode: 8kHz→16kHz (320 samples, 20ms) via 15-tap half-band FIR → VAD.
-//      Moshi-rag mode: also 8kHz→24kHz (480 samples, 20ms) via 3-phase polyphase FIR
-//      → MOSHI_SERVICE. FIR state (fir_history) is per-call and per-downstream to avoid
+//      Moshi-rag mode: 8kHz→24kHz (480 samples, 20ms) via 3-phase polyphase FIR
+//      → MOSHI_SERVICE only (no VAD/Whisper path). FIR state (fir_history) is per-call
+//      and per-downstream to avoid
 //      contamination between concurrent calls or between different upsamplers.
 //   4. Forward PCM to each downstream via send_to_downstream(pkt, target).
 //
@@ -81,7 +82,6 @@ public:
 
     bool init() {
         if (moshi_rag_mode_) {
-            interconnect_.add_downstream_target(whispertalk::ServiceType::VAD_SERVICE);
             interconnect_.add_downstream_target(whispertalk::ServiceType::MOSHI_SERVICE);
         } else {
             interconnect_.add_downstream_target(whispertalk::ServiceType::VAD_SERVICE);

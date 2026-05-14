@@ -41,10 +41,8 @@
 #include <string>
 #include <thread>
 #include <mutex>
-#include <map>
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <deque>
 #include <cmath>
 #include <signal.h>
@@ -71,8 +69,6 @@ static constexpr int REPETITION_MIN_LEN  = 20;
 static constexpr int CMD_POLL_TIMEOUT_MS = 200;
 static constexpr int CMD_RECV_TIMEOUT_S  = 10;
 static constexpr int CMD_BUF_SIZE        = 4096;
-static constexpr int MOSHI_TEXT_RECONNECT_MS = 200;
-static constexpr int MOSHI_TEXT_SEND_TIMEOUT_MS = 100;
 
 class WhisperService {
     static constexpr size_t MAX_BUFFER_PACKETS = 64;
@@ -135,10 +131,6 @@ public:
     void run() {
         std::thread receiver_thread(&WhisperService::receiver_loop, this);
         std::thread cmd_thread(&WhisperService::command_listener_loop, this);
-        if (moshi_rag_mode_) {
-            moshi_text_thread_ = std::thread(&WhisperService::moshi_text_connect_loop, this);
-        }
-
         while (running_ && g_running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -146,24 +138,8 @@ public:
 
         int sock = cmd_sock_.exchange(-1);
         if (sock >= 0) ::close(sock);
-        {
-            std::lock_guard<std::mutex> lock(moshi_text_sock_mutex_);
-            if (moshi_text_sock_ >= 0) {
-                ::shutdown(moshi_text_sock_, SHUT_RDWR);
-                ::close(moshi_text_sock_);
-                moshi_text_sock_ = -1;
-            }
-        }
         receiver_thread.join();
         cmd_thread.join();
-        if (moshi_text_thread_.joinable()) moshi_text_thread_.join();
-        {
-            std::lock_guard<std::mutex> lock(moshi_text_sock_mutex_);
-            if (moshi_text_sock_ >= 0) {
-                ::close(moshi_text_sock_);
-                moshi_text_sock_ = -1;
-            }
-        }
         interconnect_.shutdown();
     }
 
@@ -235,13 +211,7 @@ private:
             size_t slash = model_file.rfind('/');
             if (slash != std::string::npos) model_file = model_file.substr(slash + 1);
 
-            std::string ds_status;
-            if (moshi_rag_mode_) {
-                std::lock_guard<std::mutex> lock(moshi_text_sock_mutex_);
-                ds_status = (moshi_text_sock_ >= 0) ? "connected" : "disconnected";
-            } else {
-                ds_status = (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED) ? "connected" : "disconnected";
-            }
+            std::string ds_status = (interconnect_.downstream_state() == whispertalk::ConnectionState::CONNECTED) ? "connected" : "disconnected";
 
             return "MODEL:" + model_file
                 + ":UPSTREAM:" + (interconnect_.upstream_state() == whispertalk::ConnectionState::CONNECTED ? "connected" : "disconnected")
@@ -465,11 +435,7 @@ private:
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 0);
                 pkt.trace.record(whispertalk::ServiceType::WHISPER_SERVICE, 1);
 
-                if (moshi_rag_mode_) {
-                    send_or_buffer_moshi(pkt, call_id);
-                } else {
-                    send_or_buffer_llama(pkt, call_id);
-                }
+                send_or_buffer_llama(pkt, call_id);
             }
         } else {
             log_fwd_.forward(whispertalk::LogLevel::ERROR, call_id, "Whisper transcription failed");
@@ -521,209 +487,6 @@ private:
         }
     }
 
-    void send_or_buffer_moshi(whispertalk::Packet& pkt, uint32_t call_id) {
-        if (has_moshi_buffered_.load(std::memory_order_relaxed)) {
-            std::vector<whispertalk::Packet> to_drain;
-            {
-                std::lock_guard<std::mutex> buf_lock(moshi_buffer_mutex_);
-                to_drain.assign(std::make_move_iterator(moshi_buffered_packets_.begin()),
-                               std::make_move_iterator(moshi_buffered_packets_.end()));
-                moshi_buffered_packets_.clear();
-                has_moshi_buffered_.store(false, std::memory_order_relaxed);
-            }
-            size_t drained = 0;
-            for (auto& p : to_drain) {
-                if (!send_text_to_moshi(p)) break;
-                ++drained;
-            }
-            if (drained < to_drain.size()) {
-                std::lock_guard<std::mutex> buf_lock(moshi_buffer_mutex_);
-                for (size_t i = drained; i < to_drain.size(); ++i) {
-                    moshi_buffered_packets_.push_back(std::move(to_drain[i]));
-                }
-                if (moshi_buffered_packets_.size() >= MAX_BUFFER_PACKETS) {
-                    moshi_buffered_packets_.pop_front();
-                }
-                moshi_buffered_packets_.push_back(pkt);
-                has_moshi_buffered_.store(true, std::memory_order_relaxed);
-                log_fwd_.forward(whispertalk::LogLevel::WARN, call_id,
-                    "Moshi-rag disconnected, buffering transcription (%zu in queue)",
-                    moshi_buffered_packets_.size());
-                return;
-            }
-        }
-
-        if (!send_text_to_moshi(pkt)) {
-            std::lock_guard<std::mutex> buf_lock(moshi_buffer_mutex_);
-            if (moshi_buffered_packets_.size() >= MAX_BUFFER_PACKETS) {
-                moshi_buffered_packets_.pop_front();
-            }
-            moshi_buffered_packets_.push_back(pkt);
-            has_moshi_buffered_.store(true, std::memory_order_relaxed);
-            log_fwd_.forward(whispertalk::LogLevel::WARN, call_id,
-                "Moshi-rag disconnected, buffering transcription (%zu in queue)",
-                moshi_buffered_packets_.size());
-        }
-    }
-
-    void moshi_text_connect_loop() {
-        uint16_t port = whispertalk::service_text_port(whispertalk::ServiceType::MOSHI_SERVICE);
-
-        while (running_ && g_running) {
-            bool connected = false;
-            {
-                std::lock_guard<std::mutex> lock(moshi_text_sock_mutex_);
-                connected = (moshi_text_sock_ >= 0);
-            }
-
-            if (!connected) {
-                int sock = socket(AF_INET, SOCK_STREAM, 0);
-                if (sock >= 0) {
-                    struct sockaddr_in addr{};
-                    addr.sin_family = AF_INET;
-                    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                    addr.sin_port = htons(port);
-
-                    int flags = fcntl(sock, F_GETFL, 0);
-                    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-                    int ret = connect(sock, (struct sockaddr*)&addr, sizeof(addr));
-                    bool ok = false;
-                    if (ret == 0) {
-                        ok = true;
-                    } else if (errno == EINPROGRESS) {
-                        struct pollfd pfd{sock, POLLOUT, 0};
-                        if (poll(&pfd, 1, MOSHI_TEXT_RECONNECT_MS) > 0) {
-                            int error = 0;
-                            socklen_t errlen = sizeof(error);
-                            getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &errlen);
-                            if (error == 0) ok = true;
-                        }
-                    }
-                    fcntl(sock, F_SETFL, flags);
-
-                    if (ok) {
-                        int opt = 1;
-                        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-#ifdef SO_NOSIGPIPE
-                        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
-#endif
-                        {
-                            std::lock_guard<std::mutex> lock(moshi_text_sock_mutex_);
-                            moshi_text_sock_ = sock;
-                        }
-                        std::fprintf(stderr, "[WHISPER] Connected to moshi-rag text port %u\n", port);
-
-                        if (has_moshi_buffered_.load(std::memory_order_relaxed)) {
-                            std::vector<whispertalk::Packet> to_drain;
-                            {
-                                std::lock_guard<std::mutex> buf_lock(moshi_buffer_mutex_);
-                                to_drain.assign(std::make_move_iterator(moshi_buffered_packets_.begin()),
-                                               std::make_move_iterator(moshi_buffered_packets_.end()));
-                                moshi_buffered_packets_.clear();
-                                has_moshi_buffered_.store(false, std::memory_order_relaxed);
-                            }
-                            size_t drained = 0;
-                            for (auto& p : to_drain) {
-                                if (!send_text_to_moshi(p)) break;
-                                ++drained;
-                            }
-                            if (drained < to_drain.size()) {
-                                std::lock_guard<std::mutex> buf_lock(moshi_buffer_mutex_);
-                                for (size_t i = drained; i < to_drain.size(); ++i) {
-                                    moshi_buffered_packets_.push_back(std::move(to_drain[i]));
-                                }
-                                has_moshi_buffered_.store(true, std::memory_order_relaxed);
-                            }
-                        }
-                    } else {
-                        ::close(sock);
-                    }
-                }
-            } else {
-                bool dead = false;
-                {
-                    std::lock_guard<std::mutex> lock(moshi_text_sock_mutex_);
-                    if (moshi_text_sock_ >= 0) {
-                        struct pollfd pfd{moshi_text_sock_, POLLIN, 0};
-                        int ret = poll(&pfd, 1, 0);
-                        if (ret > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
-                            dead = true;
-                        } else if (ret > 0 && (pfd.revents & POLLIN)) {
-                            char probe;
-                            ssize_t r = recv(moshi_text_sock_, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
-                            if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) dead = true;
-                        }
-                        if (dead) {
-                            ::shutdown(moshi_text_sock_, SHUT_RDWR);
-                            ::close(moshi_text_sock_);
-                            moshi_text_sock_ = -1;
-                            std::fprintf(stderr, "[WHISPER] Moshi-rag text port connection lost\n");
-                        }
-                    }
-                }
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(MOSHI_TEXT_RECONNECT_MS));
-        }
-    }
-
-    bool send_all_with_timeout(int sock, const void* data, size_t len, int timeout_ms) {
-        const uint8_t* ptr = static_cast<const uint8_t*>(data);
-        size_t sent = 0;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-        while (sent < len) {
-            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now()).count();
-            if (remaining <= 0) return false;
-            struct pollfd pfd{sock, POLLOUT, 0};
-            int pr = poll(&pfd, 1, static_cast<int>(remaining));
-            if (pr <= 0) return false;
-            if (pfd.revents & (POLLERR | POLLHUP)) return false;
-            ssize_t n = ::send(sock, ptr + sent, len - sent, 0);
-            if (n <= 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-                return false;
-            }
-            sent += n;
-        }
-        return true;
-    }
-
-    bool send_text_to_moshi(whispertalk::Packet& pkt) {
-        std::lock_guard<std::mutex> lock(moshi_text_sock_mutex_);
-        if (moshi_text_sock_ < 0) return false;
-
-        auto data = pkt.serialize();
-        if (!prodigy_tls::ic_encryption_enabled()) {
-            std::vector<uint8_t> buf(4 + data.size());
-            uint32_t net_len = htonl(static_cast<uint32_t>(data.size()));
-            memcpy(buf.data(), &net_len, 4);
-            memcpy(buf.data() + 4, data.data(), data.size());
-            if (!send_all_with_timeout(moshi_text_sock_, buf.data(), buf.size(), MOSHI_TEXT_SEND_TIMEOUT_MS)) {
-                ::shutdown(moshi_text_sock_, SHUT_RDWR);
-                ::close(moshi_text_sock_);
-                moshi_text_sock_ = -1;
-                return false;
-            }
-            return true;
-        }
-        size_t enc_size = prodigy_tls::ic_encrypted_size(data.size());
-        std::vector<uint8_t> enc_buf(4 + enc_size);
-        size_t actual_enc_len = 0;
-        if (!prodigy_tls::ic_encrypt(data.data(), data.size(), enc_buf.data() + 4, actual_enc_len)) {
-            return false;
-        }
-        uint32_t net_len = htonl(static_cast<uint32_t>(actual_enc_len));
-        memcpy(enc_buf.data(), &net_len, 4);
-        if (!send_all_with_timeout(moshi_text_sock_, enc_buf.data(), 4 + actual_enc_len, MOSHI_TEXT_SEND_TIMEOUT_MS)) {
-            ::shutdown(moshi_text_sock_, SHUT_RDWR);
-            ::close(moshi_text_sock_);
-            moshi_text_sock_ = -1;
-            return false;
-        }
-        return true;
-    }
-
     void handle_call_end(uint32_t call_id) {
         {
             std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
@@ -737,20 +500,6 @@ private:
             }
             if (buffered_packets_.empty()) {
                 has_buffered_.store(false, std::memory_order_relaxed);
-            }
-        }
-        if (moshi_rag_mode_) {
-            std::lock_guard<std::mutex> buf_lock(moshi_buffer_mutex_);
-            auto it = moshi_buffered_packets_.begin();
-            while (it != moshi_buffered_packets_.end()) {
-                if (it->call_id == call_id) {
-                    it = moshi_buffered_packets_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-            if (moshi_buffered_packets_.empty()) {
-                has_moshi_buffered_.store(false, std::memory_order_relaxed);
             }
         }
         log_fwd_.forward(whispertalk::LogLevel::INFO, call_id, "Call ended, cleared buffered packets");
@@ -770,12 +519,6 @@ private:
     std::deque<whispertalk::Packet> buffered_packets_;
     std::atomic<bool> has_buffered_{false};
 
-    std::mutex moshi_text_sock_mutex_;
-    int moshi_text_sock_{-1};
-    std::thread moshi_text_thread_;
-    std::mutex moshi_buffer_mutex_;
-    std::deque<whispertalk::Packet> moshi_buffered_packets_;
-    std::atomic<bool> has_moshi_buffered_{false};
 };
 
 const char* WhisperService::hallucination_patterns_[] = {
