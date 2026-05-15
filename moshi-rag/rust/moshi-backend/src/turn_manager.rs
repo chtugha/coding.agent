@@ -69,6 +69,7 @@ impl TurnManager {
         &self.conversation_context
     }
 
+    #[allow(dead_code)]
     pub fn update_vad(&mut self, vad_value: f32) {
         self.step_count = self.step_count.saturating_add(1);
         self.wait_counter = self.wait_counter.saturating_sub(1);

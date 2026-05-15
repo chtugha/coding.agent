@@ -285,7 +285,7 @@ fn decode_text_piece(
     }
 }
 
-/// RAG state: main LM + Mimi (via inner). STT removed — VAD is now PCM-energy-based.
+/// RAG state: main LM + Mimi (via inner). PCM-energy VAD removed; STT in-process VAD re-wired in Step 4.
 pub struct AppStateRag {
     pub inner: AppState,
 }
@@ -471,20 +471,6 @@ impl BatchedState {
                             continue;
                         }
                         apply_power_threshold_frame(&mut batch_pcm[start..end], thresh_db);
-                    }
-                }
-
-                for (b, &active) in mask.iter().enumerate().take(batch_size) {
-                    if !active {
-                        continue;
-                    }
-                    let start = b * pool.frame_size;
-                    let end = start + pool.frame_size;
-                    if end <= batch_pcm.len() {
-                        let vad_value = crate::pcm_vad::compute_vad_probability(&batch_pcm[start..end]);
-                        if let Some(tm) = turn_managers.get(b) {
-                            tm.lock().unwrap().update_vad(vad_value);
-                        }
                     }
                 }
 

@@ -409,6 +409,7 @@ def generate_backend_config(output_path: Path, language: str, hf_repo: str, rank
         "log_dir": str(output_path.parent.resolve()),
         "mimi_model_file": mimi_model_file,
         "mimi_num_codebooks": mimi_num_codebooks,
+        "batch_size": 1,
         "addr": "127.0.0.1",
         "port": 8998,
         "cert_dir": "."

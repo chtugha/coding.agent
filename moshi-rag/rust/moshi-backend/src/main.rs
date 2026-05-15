@@ -13,7 +13,6 @@ mod cmd_port;
 mod hf_path;
 mod interconnect;
 mod log_forwarder;
-mod pcm_vad;
 mod prodigy_bridge;
 mod rag_manager;
 mod rag_retrieval;
