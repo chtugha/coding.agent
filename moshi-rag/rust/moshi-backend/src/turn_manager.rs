@@ -71,6 +71,7 @@ impl TurnManager {
 
     pub fn update_vad(&mut self, vad_value: f32) {
         self.step_count = self.step_count.saturating_add(1);
+        self.wait_counter = self.wait_counter.saturating_sub(1);
         if self.vad_history.len() >= self.vad_window_size {
             self.vad_history.pop_front();
         }
@@ -83,7 +84,6 @@ impl TurnManager {
             self.pending_speaker = None;
             return Some(pending);
         }
-        self.wait_counter = self.wait_counter.saturating_sub(1);
         None
     }
 

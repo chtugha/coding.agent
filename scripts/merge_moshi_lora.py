@@ -399,7 +399,7 @@ def write_safetensors_streaming(output_path: Path, base_paths: list, lora: dict,
 
 
 def generate_backend_config(output_path: Path, language: str, hf_repo: str, rank: int, scaling: float,
-                             mimi_model_file: str, text_tokenizer_file: str):
+                             mimi_model_file: str, text_tokenizer_file: str, mimi_num_codebooks: int = 8):
     config_path = output_path.parent / f"moshi-{language}-backend-config.json"
     config = {
         "instance_name": f"moshi-{language}-backend",
@@ -408,7 +408,7 @@ def generate_backend_config(output_path: Path, language: str, hf_repo: str, rank
         "text_tokenizer_file": text_tokenizer_file,
         "log_dir": str(output_path.parent.resolve()),
         "mimi_model_file": mimi_model_file,
-        "mimi_num_codebooks": 8,
+        "mimi_num_codebooks": mimi_num_codebooks,
         "addr": "127.0.0.1",
         "port": 8998,
         "cert_dir": "."
@@ -482,6 +482,12 @@ def main():
         help="Text tokenizer file path for the generated backend config.json",
     )
     parser.add_argument(
+        "--mimi-num-codebooks",
+        type=int,
+        default=8,
+        help="Number of Mimi RVQ codebooks fed to the model (default: 8 for full Moshi; use 32 for stt-1b)",
+    )
+    parser.add_argument(
         "--no-backend-config",
         action="store_true",
         help="Skip generating moshi-<lang>-backend-config.json next to the merged model",
@@ -529,6 +535,7 @@ def main():
             scaling=scaling,
             mimi_model_file=args.mimi_model_file,
             text_tokenizer_file=args.text_tokenizer_file,
+            mimi_num_codebooks=args.mimi_num_codebooks,
         )
 
     print(f"\n[DONE] Merged model ready: {output_path}")

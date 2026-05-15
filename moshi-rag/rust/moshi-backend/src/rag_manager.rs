@@ -576,8 +576,11 @@ impl RagManager {
 
     /// Cancel any pending RAG task for a slot (batched mode).
     pub fn cancel_pending_slot(&self, slot_id: usize) {
-        let mut tasks = self.batched_tasks.lock().unwrap();
-        if let Some(task) = tasks.remove(&slot_id) {
+        let task = {
+            let mut tasks = self.batched_tasks.lock().unwrap();
+            tasks.remove(&slot_id)
+        };
+        if let Some(task) = task {
             task.cancel.store(true, Ordering::SeqCst);
             let _ = task.join_handle.join();
         }
@@ -593,8 +596,10 @@ impl RagManager {
             }
         }
         self.single_cancel.store(false, Ordering::SeqCst);
-        let mut tasks = self.batched_tasks.lock().unwrap();
-        let drained: Vec<_> = tasks.drain().collect();
+        let drained: Vec<_> = {
+            let mut tasks = self.batched_tasks.lock().unwrap();
+            tasks.drain().collect()
+        };
         for (_, task) in &drained {
             task.cancel.store(true, Ordering::SeqCst);
         }
