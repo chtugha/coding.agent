@@ -296,16 +296,12 @@ pub struct BatchedState {
     pub pool: Arc<crate::batched_channels::BatchedStreamingChannels>,
     pub rag_retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
     _loop_handle: Option<std::thread::JoinHandle<()>>,
-    pub whisper_queues: crate::whisper_receiver::WhisperTextQueues,
     pub model_loop_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BatchedState {
     /// Create the pool and spawn the single model loop. Call when batch_size > 1.
-    pub fn new(
-        inner: Arc<AppStateInner>,
-        whisper_queues: crate::whisper_receiver::WhisperTextQueues,
-    ) -> Result<Self> {
+    pub fn new(inner: Arc<AppStateInner>) -> Result<Self> {
         let batch_size = inner.lm_model.batch_size();
         if batch_size <= 1 {
             anyhow::bail!("batch_size > 1 required");
@@ -321,24 +317,22 @@ impl BatchedState {
         let inner_clone = inner.clone();
         let pool_clone = pool.clone();
         let rag_for_loop = rag_retrieval.clone();
-        let wq = whisper_queues.clone();
         let model_loop_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ready_flag = model_loop_ready.clone();
         let loop_handle = std::thread::spawn(move || {
-            if let Err(e) = Self::run_loop(inner_clone, pool_clone, rag_for_loop, wq, ready_flag) {
+            if let Err(e) = Self::run_loop(inner_clone, pool_clone, rag_for_loop, ready_flag) {
                 if !e.to_string().contains("max step_idx reached") {
                     tracing::error!(err = %e, "batched model loop error");
                 }
             }
         });
-        Ok(Self { inner, pool, rag_retrieval, _loop_handle: Some(loop_handle), whisper_queues, model_loop_ready })
+        Ok(Self { inner, pool, rag_retrieval, _loop_handle: Some(loop_handle), model_loop_ready })
     }
 
     fn run_loop(
         inner: Arc<AppStateInner>,
         pool: Arc<crate::batched_channels::BatchedStreamingChannels>,
         rag_retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
-        whisper_queues: crate::whisper_receiver::WhisperTextQueues,
         model_loop_ready: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<()> {
         let session_config = default_session_config_batched();
@@ -380,13 +374,7 @@ impl BatchedState {
         let batch_size = inner.lm_model.batch_size();
         let device = inner.device.clone();
         let rag_manager = inner.config.rag_token_id.map(|rag_token_id| {
-            (
-                crate::rag_manager::RagManager::new_with_two_step(
-                    rag_retrieval.clone(),
-                    inner.config.rag_timeout,
-                ),
-                rag_token_id,
-            )
+            (crate::rag_manager::RagManager::new(rag_retrieval.clone()), rag_token_id)
         });
         let stt_wait_secs = inner.config.stt_wait_time.map(|t| t as f64).unwrap_or(0.0);
         let rag_timeout = inner.config.rag_timeout;
@@ -582,30 +570,6 @@ impl BatchedState {
                     }
                 }
 
-                for b in 0..batch_size {
-                    if !mask[b] {
-                        continue;
-                    }
-                    let texts = whisper_queues.lock().unwrap().drain_slot(b);
-                    if texts.is_empty() {
-                        continue;
-                    }
-                    let combined = texts.join(" ");
-                    if let Some(tm) = turn_managers.get(b) {
-                        let outputs =
-                            tm.lock().unwrap().handle_spoken_text(None, Some(&combined));
-                        for (text, role) in &outputs {
-                            pool.post_process(
-                                StreamOut::TextByRole {
-                                    text: text.clone(),
-                                    role: *role,
-                                },
-                                b,
-                                &ref_channel_ids,
-                            )?;
-                        }
-                    }
-                }
             } else {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }

@@ -579,6 +579,7 @@ impl RagManager {
         let mut tasks = self.batched_tasks.lock().unwrap();
         if let Some(task) = tasks.remove(&slot_id) {
             task.cancel.store(true, Ordering::SeqCst);
+            let _ = task.join_handle.join();
         }
     }
 
@@ -593,8 +594,12 @@ impl RagManager {
         }
         self.single_cancel.store(false, Ordering::SeqCst);
         let mut tasks = self.batched_tasks.lock().unwrap();
-        for (_, task) in tasks.drain() {
+        let drained: Vec<_> = tasks.drain().collect();
+        for (_, task) in &drained {
             task.cancel.store(true, Ordering::SeqCst);
+        }
+        for (_, task) in drained {
+            let _ = task.join_handle.join();
         }
     }
 }

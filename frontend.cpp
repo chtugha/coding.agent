@@ -864,13 +864,6 @@ private:
             }
 
             if (name == "WHISPER_SERVICE" && args_override.empty()) {
-                std::string moshi_backends = get_setting("moshi_backends", "[]");
-                bool has_moshi = moshi_backends.find('{') != std::string::npos;
-                if (has_moshi && use_args.find("--moshi-rag-mode") == std::string::npos
-                              && use_args.find("-R") == std::string::npos) {
-                    use_args += " --moshi-rag-mode";
-                }
-
                 std::string lang = get_setting("pipeline_language", "");
                 if (!lang.empty()) {
                     auto valid_lang = [](const std::string& s) {

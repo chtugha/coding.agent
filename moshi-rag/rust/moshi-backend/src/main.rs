@@ -23,7 +23,6 @@ mod standalone;
 mod stream_both;
 mod turn_manager;
 mod utils;
-mod whisper_receiver;
 
 #[derive(Parser, Debug)]
 #[clap(name = "server", about = "moshi-rag service")]

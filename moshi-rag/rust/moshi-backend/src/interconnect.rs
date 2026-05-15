@@ -12,7 +12,6 @@ use std::time::Duration;
 pub const UPSTREAM_MGMT_PORT: u16 = 13155;
 pub const UPSTREAM_DATA_PORT: u16 = 13156;
 pub const CMD_PORT: u16 = 13157;
-pub const TEXT_PORT: u16 = 13158;
 
 pub const OAP_MGMT_PORT: u16 = 13150;
 pub const OAP_DATA_PORT: u16 = 13151;
@@ -533,7 +532,6 @@ mod tests {
         assert_eq!(UPSTREAM_MGMT_PORT, 13155);
         assert_eq!(UPSTREAM_DATA_PORT, 13156);
         assert_eq!(CMD_PORT, 13157);
-        assert_eq!(TEXT_PORT, 13158);
         assert_eq!(OAP_MGMT_PORT, 13150);
         assert_eq!(OAP_DATA_PORT, 13151);
     }

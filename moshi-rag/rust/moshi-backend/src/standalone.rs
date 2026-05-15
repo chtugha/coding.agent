@@ -230,10 +230,8 @@ pub async fn run(
         anyhow::bail!("prodigy bridge requires batch_size > 1 in config");
     };
 
-    let whisper_queues = crate::whisper_receiver::new_whisper_text_queues(batch_size);
-
     let inner = Arc::new(stream_both::AppStateInner::new(args, &config.stream)?);
-    let batched_state = stream_both::BatchedState::new(inner, whisper_queues.clone())?;
+    let batched_state = stream_both::BatchedState::new(inner)?;
     let batched_state = Arc::new(batched_state);
     tracing::info!(
         "model loaded (Batch size: {}, RAG: {})",
@@ -244,14 +242,9 @@ pub async fn run(
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     crate::prodigy_bridge::install_signal_handler(running.clone());
 
-    let whisper_running = running.clone();
-    let wq = whisper_queues.clone();
-    let whisper_handle = crate::whisper_receiver::spawn_whisper_receiver(wq, whisper_running);
-
     let cmd_listener = crate::interconnect::bind_listen(crate::interconnect::CMD_PORT)?;
     let status_provider = crate::prodigy_bridge::run_prodigy_bridge(
         batched_state.pool.clone(),
-        whisper_queues,
         running.clone(),
         batch_size,
         config.stream.lm_model_file.clone(),
@@ -282,7 +275,6 @@ pub async fn run(
     running.store(false, std::sync::atomic::Ordering::SeqCst);
 
     let _ = cmd_handle.join();
-    drop(whisper_handle);
 
     Ok(())
 }

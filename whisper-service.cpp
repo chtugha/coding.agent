@@ -93,15 +93,7 @@ public:
         if (ctx_) whisper_free(ctx_);
     }
 
-    void set_moshi_rag_mode(bool m) {
-        moshi_rag_mode_ = m;
-    }
-
     bool init() {
-        if (moshi_rag_mode_) {
-            interconnect_.disable_downstream_connect();
-        }
-
         if (!interconnect_.initialize()) {
             std::cerr << "Failed to initialize interconnect" << std::endl;
             return false;
@@ -111,10 +103,8 @@ public:
 
         log_fwd_.init(whispertalk::FRONTEND_LOG_PORT, whispertalk::ServiceType::WHISPER_SERVICE);
 
-        if (!moshi_rag_mode_) {
-            if (!interconnect_.connect_to_downstream()) {
-                std::cout << "Downstream (LLaMA) not available yet - will auto-reconnect" << std::endl;
-            }
+        if (!interconnect_.connect_to_downstream()) {
+            std::cout << "Downstream (LLaMA) not available yet - will auto-reconnect" << std::endl;
         }
 
         interconnect_.register_call_end_handler([this](uint32_t call_id) {
@@ -507,7 +497,6 @@ private:
 
     std::atomic<bool> running_;
     std::atomic<int> cmd_sock_{-1};
-    bool moshi_rag_mode_{false};
     std::string model_path_;
     std::string language_;
     struct whisper_context* ctx_ = nullptr;
@@ -548,23 +537,20 @@ int main(int argc, char** argv) {
     std::string model_path;
     std::string language = "de";
     std::string log_level = "INFO";
-    bool moshi_rag_mode = false;
 
     static struct option long_opts[] = {
         {"language",       required_argument, 0, 'l'},
         {"model",          required_argument, 0, 'm'},
         {"log-level",      required_argument, 0, 'L'},
-        {"moshi-rag-mode", no_argument,       0, 'R'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "l:m:L:R", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "l:m:L:", long_opts, nullptr)) != -1) {
         switch (opt) {
             case 'l': language = optarg; break;
             case 'm': model_path = optarg; break;
             case 'L': log_level = optarg; break;
-            case 'R': moshi_rag_mode = true; break;
             default: break;
         }
     }
@@ -589,9 +575,6 @@ int main(int argc, char** argv) {
 
     try {
         WhisperService service(model_path, language);
-        if (moshi_rag_mode) {
-            service.set_moshi_rag_mode(true);
-        }
         if (!service.init()) {
             return 1;
         }

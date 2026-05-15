@@ -12,7 +12,6 @@ use crate::interconnect::{
     MgmtMsg, Packet, OAP_DATA_PORT, OAP_MGMT_PORT, UPSTREAM_DATA_PORT, UPSTREAM_MGMT_PORT,
 };
 use crate::stream_both::StreamOut;
-use crate::whisper_receiver::WhisperTextQueues;
 
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 const OAP_RECONNECT_INTERVAL: Duration = Duration::from_millis(200);
@@ -130,7 +129,6 @@ impl crate::cmd_port::StatusProvider for BridgeStatusProvider {
 
 pub fn run_prodigy_bridge(
     pool: Arc<BatchedStreamingChannels>,
-    whisper_queues: WhisperTextQueues,
     running: Arc<AtomicBool>,
     batch_size: usize,
     model_path: String,
@@ -172,12 +170,11 @@ pub fn run_prodigy_bridge(
         .context("failed to spawn output-drain thread")?;
 
     let inner_c = inner.clone();
-    let whisper_c = whisper_queues.clone();
     let output_tx_inact = output_event_tx.clone();
     let r = running.clone();
     let _inactivity_handle = std::thread::Builder::new()
         .name("inactivity-check".into())
-        .spawn(move || inactivity_check_loop(inner_c, whisper_c, output_tx_inact, r))
+        .spawn(move || inactivity_check_loop(inner_c, output_tx_inact, r))
         .context("failed to spawn inactivity-check thread")?;
 
     let inner_c = inner.clone();
@@ -186,14 +183,7 @@ pub fn run_prodigy_bridge(
     std::thread::Builder::new()
         .name("upstream-accept".into())
         .spawn(move || {
-            if let Err(e) = upstream_accept_loop(
-                pool,
-                inner_c,
-                oap.clone(),
-                whisper_queues,
-                output_event_tx,
-                r,
-            ) {
+            if let Err(e) = upstream_accept_loop(pool, inner_c, oap.clone(), output_event_tx, r) {
                 tracing::error!("upstream accept loop fatal: {}", e);
             }
         })
@@ -434,7 +424,6 @@ fn output_drain_loop(
 
 fn inactivity_check_loop(
     inner: Arc<Mutex<BridgeInner>>,
-    whisper_queues: WhisperTextQueues,
     output_event_tx: std::sync::mpsc::Sender<OutputEvent>,
     running: Arc<AtomicBool>,
 ) {
@@ -463,14 +452,8 @@ fn inactivity_check_loop(
         for (call_id, batch_idx) in timed_out {
             tracing::warn!(call_id, "inactivity timeout (60s), releasing slot");
             let _ = output_event_tx.send(OutputEvent::SlotInvalidated { batch_idx, call_id });
-            {
-                let mut guard = inner.lock().unwrap();
-                guard.release_slot(call_id);
-            }
-            {
-                let mut wq = whisper_queues.lock().unwrap();
-                wq.unregister_call(call_id);
-            }
+            let mut guard = inner.lock().unwrap();
+            guard.release_slot(call_id);
         }
     }
     tracing::info!("inactivity checker stopped");
@@ -490,7 +473,6 @@ fn upstream_accept_loop(
     pool: Arc<BatchedStreamingChannels>,
     inner: Arc<Mutex<BridgeInner>>,
     oap: Arc<Mutex<OapState>>,
-    whisper_queues: WhisperTextQueues,
     output_event_tx: std::sync::mpsc::Sender<OutputEvent>,
     running: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -558,28 +540,26 @@ fn upstream_accept_loop(
 
         let inner_m = inner.clone();
         let oap_m = oap.clone();
-        let whisper_m = whisper_queues.clone();
         let output_tx_m = output_event_tx.clone();
         let r_m = running.clone();
         let md = mgmt_dead.clone();
         let mgmt_handle = std::thread::Builder::new()
             .name("upstream-mgmt".into())
             .spawn(move || {
-                mgmt_receive_loop(mgmt_stream, inner_m, oap_m, whisper_m, output_tx_m, r_m);
+                mgmt_receive_loop(mgmt_stream, inner_m, oap_m, output_tx_m, r_m);
                 md.store(true, Ordering::SeqCst);
             })
             .context("failed to spawn mgmt receive thread")?;
 
         let inner_d = inner.clone();
         let pool_d = pool.clone();
-        let whisper_d = whisper_queues.clone();
         let r_d = running.clone();
         let dd = data_dead.clone();
         let output_tx = output_event_tx.clone();
         let data_handle = std::thread::Builder::new()
             .name("upstream-data".into())
             .spawn(move || {
-                data_receive_loop(data_stream, pool_d, inner_d, whisper_d, output_tx, r_d);
+                data_receive_loop(data_stream, pool_d, inner_d, output_tx, r_d);
                 dd.store(true, Ordering::SeqCst);
             })
             .context("failed to spawn data receive thread")?;
@@ -596,7 +576,7 @@ fn upstream_accept_loop(
         let _ = data_handle.join();
 
         tracing::info!("upstream session ended, cleaning up all active calls");
-        cleanup_all_calls(&inner, &oap, &whisper_queues, &output_event_tx);
+        cleanup_all_calls(&inner, &oap, &output_event_tx);
     }
 
     Ok(())
@@ -605,7 +585,6 @@ fn upstream_accept_loop(
 fn cleanup_all_calls(
     inner: &Arc<Mutex<BridgeInner>>,
     oap: &Arc<Mutex<OapState>>,
-    whisper_queues: &WhisperTextQueues,
     output_event_tx: &std::sync::mpsc::Sender<OutputEvent>,
 ) {
     let call_slots: Vec<(u32, usize)> = {
@@ -614,27 +593,16 @@ fn cleanup_all_calls(
     };
     for (call_id, batch_idx) in call_slots {
         let _ = output_event_tx.send(OutputEvent::SlotInvalidated { batch_idx, call_id });
-        {
-            let mut guard = inner.lock().unwrap();
-            guard.release_slot(call_id);
-        }
-        {
-            let mut wq = whisper_queues.lock().unwrap();
-            wq.unregister_call(call_id);
-        }
+        inner.lock().unwrap().release_slot(call_id);
         forward_call_end_to_oap(oap, call_id);
     }
-    {
-        let mut guard = inner.lock().unwrap();
-        guard.rejected.clear();
-    }
+    inner.lock().unwrap().rejected.clear();
 }
 
 fn mgmt_receive_loop(
     stream: TcpStream,
     inner: Arc<Mutex<BridgeInner>>,
     oap: Arc<Mutex<OapState>>,
-    whisper_queues: WhisperTextQueues,
     output_event_tx: std::sync::mpsc::Sender<OutputEvent>,
     running: Arc<AtomicBool>,
 ) {
@@ -670,14 +638,7 @@ fn mgmt_receive_loop(
                 if let Some(bid) = batch_idx {
                     let _ = output_event_tx.send(OutputEvent::SlotInvalidated { batch_idx: bid, call_id });
                 }
-                {
-                    let mut guard = inner.lock().unwrap();
-                    guard.release_slot(call_id);
-                }
-                {
-                    let mut wq = whisper_queues.lock().unwrap();
-                    wq.unregister_call(call_id);
-                }
+                inner.lock().unwrap().release_slot(call_id);
                 forward_call_end_to_oap(&oap, call_id);
             }
             MgmtMsg::SpeechActive(_) | MgmtMsg::SpeechIdle(_) => {}
@@ -709,7 +670,6 @@ fn data_receive_loop(
     stream: TcpStream,
     pool: Arc<BatchedStreamingChannels>,
     inner: Arc<Mutex<BridgeInner>>,
-    whisper_queues: WhisperTextQueues,
     output_event_tx: std::sync::mpsc::Sender<OutputEvent>,
     running: Arc<AtomicBool>,
 ) {
@@ -773,11 +733,6 @@ fn data_receive_loop(
                             in_tx: in_tx.clone(),
                             last_activity: Instant::now(),
                         });
-                    }
-
-                    {
-                        let mut wq = whisper_queues.lock().unwrap();
-                        wq.register_call(call_id, batch_idx);
                     }
 
                     let _ = output_event_tx.send(OutputEvent::NewSlot {
