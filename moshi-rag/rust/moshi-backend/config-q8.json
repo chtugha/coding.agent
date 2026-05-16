@@ -21,5 +21,9 @@
     "arc_encoder_model_file": "hf://kyutai/ARC4_Encoder_Llama/model.safetensors",
     "batch_size": 8,
     "use_https": true,
-    "moshi_gpu_id": 0
+    "moshi_gpu_id": 0,
+    "stt_gpu_id": 0,
+    "stt_lm_model_file": null,
+    "stt_text_tokenizer_file": null,
+    "stt_mimi_model_file": null
 }

@@ -321,7 +321,7 @@ impl RagManager {
     ) where
         F: FnOnce() -> String + Send + 'static,
     {
-        self.cancel_pending_slot(slot_id);
+        self.cancel_pending_slot_nonblocking(slot_id);
 
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -565,16 +565,23 @@ impl RagManager {
             }
         }
         if let Some((slot_id, text)) = done_slot {
-            if let Some(task) = tasks.remove(&slot_id) {
-                let _ = task.join_handle.join();
-            }
+            tasks.remove(&slot_id);
             Some((slot_id, text))
         } else {
             None
         }
     }
 
-    /// Cancel any pending RAG task for a slot (batched mode).
+    pub fn cancel_pending_slot_nonblocking(&self, slot_id: usize) {
+        let task = {
+            let mut tasks = self.batched_tasks.lock().unwrap();
+            tasks.remove(&slot_id)
+        };
+        if let Some(task) = task {
+            task.cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
     pub fn cancel_pending_slot(&self, slot_id: usize) {
         let task = {
             let mut tasks = self.batched_tasks.lock().unwrap();

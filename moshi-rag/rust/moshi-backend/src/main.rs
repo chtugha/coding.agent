@@ -97,7 +97,7 @@ fn tracing_init(
             tracing_subscriber::fmt::layer().with_writer(std::io::stdout).with_filter(filter),
         ))
     };
-    let udp_layer = log_forwarder.map(|fwd| log_forwarder::TracingLogLayer::new(fwd));
+    let udp_layer = log_forwarder.map(log_forwarder::TracingLogLayer::new);
     tracing_subscriber::registry().with(layers).with(udp_layer).init();
     tracing::info!(?build_info);
     Ok(guard)

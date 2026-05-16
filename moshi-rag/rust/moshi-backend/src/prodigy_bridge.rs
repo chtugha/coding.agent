@@ -769,7 +769,7 @@ fn data_receive_loop(
 }
 
 fn bytes_to_f32_le(bytes: &[u8]) -> Vec<f32> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         tracing::warn!(
             "PCM payload size {} is not a multiple of 4, truncating",
             bytes.len()

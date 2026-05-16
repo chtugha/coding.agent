@@ -40,6 +40,15 @@ impl Config {
         config.stream.mimi_model_file =
             crate::utils::replace_env_vars(&config.stream.mimi_model_file);
         config.stream.lm_model_file = crate::utils::replace_env_vars(&config.stream.lm_model_file);
+        if let Some(ref mut s) = config.stream.stt_lm_model_file {
+            *s = crate::utils::replace_env_vars(s);
+        }
+        if let Some(ref mut s) = config.stream.stt_text_tokenizer_file {
+            *s = crate::utils::replace_env_vars(s);
+        }
+        if let Some(ref mut s) = config.stream.stt_mimi_model_file {
+            *s = crate::utils::replace_env_vars(s);
+        }
         if let Some(ref mut s) = config.stream.arc_encoder_tokenizer_path {
             *s = crate::utils::replace_env_vars(s);
         }
@@ -73,6 +82,7 @@ impl stream_both::AppStateInner {
             config.moshi_gpu_id,
             device
         );
+        let stt_device = create_device(args.cpu, config.stt_gpu_id)?;
 
         let is_gguf = config.lm_model_file.ends_with(".gguf");
         let dtype = if is_gguf {
@@ -83,12 +93,12 @@ impl stream_both::AppStateInner {
             candle::DType::F32
         };
         let batch_size = if config.batch_size > 1 { config.batch_size } else { 1 };
-        // Uses config.use_rag() to choose LM loader.
-        let lm_model = if config.use_rag() {
+        // Uses config.use_arc() to choose LM loader (ARC encoder only loaded when explicitly enabled).
+        let lm_model = if config.use_arc() {
             let arc_encoder_tokenizer_path = config
                 .arc_encoder_tokenizer_path
                 .as_deref()
-                .expect("RAG config requires arc_encoder_tokenizer_path");
+                .expect("ARC config requires arc_encoder_tokenizer_path");
             let arc_encoder_weights =
                 config.arc_encoder_model_file.as_deref().map(std::path::Path::new);
             moshi::lm::load_streaming_rag_batched(
@@ -115,6 +125,41 @@ impl stream_both::AppStateInner {
         )?;
         let text_tokenizer =
             sentencepiece::SentencePieceProcessor::open(&config.text_tokenizer_file)?;
+
+        // Load in-process STT model when configured.
+        let (stt_asr, stt_tokenizer) = if config.use_stt() {
+            let stt_lm_file = config.stt_lm_model_file.as_deref().unwrap();
+            let stt_mimi_file = config.stt_mimi_model_file.as_deref().unwrap();
+            let stt_tok_file = config.stt_text_tokenizer_file.as_deref().unwrap();
+            tracing::info!(
+                "Loading STT-1b LM and Mimi on {:?} (stt_gpu_id={})",
+                stt_device,
+                config.stt_gpu_id
+            );
+            let stt_dtype = if stt_device.is_cuda() || stt_device.is_metal() {
+                candle::DType::BF16
+            } else {
+                candle::DType::F32
+            };
+            let stt_lm = moshi::lm::load_asr_stt_1b_en_fr(
+                batch_size,
+                stt_lm_file,
+                stt_dtype,
+                &stt_device,
+            )?;
+            let stt_mimi_device =
+                if config.use_cpu_for_mimi { &candle::Device::Cpu } else { &stt_device };
+            let stt_mimi =
+                moshi::mimi::load_b(Some(batch_size), stt_mimi_file, Some(32), stt_mimi_device)?;
+            let asr_delay = config.asr_delay_in_tokens.unwrap_or(0);
+            let stt_asr_state = moshi::asr::State::new(batch_size, asr_delay, 0.0, stt_mimi, stt_lm)?;
+            let stt_tok = sentencepiece::SentencePieceProcessor::open(stt_tok_file)?;
+            tracing::info!("STT-1b loaded successfully");
+            (Some(stt_asr_state), Some(stt_tok))
+        } else {
+            (None, None)
+        };
+
         // Warm-up code.
         {
             let mut lm_model = lm_model.clone();
@@ -175,6 +220,9 @@ impl stream_both::AppStateInner {
             mimi_model,
             text_tokenizer,
             device,
+            stt_device,
+            stt_asr: std::sync::Mutex::new(stt_asr),
+            stt_tokenizer: std::sync::Mutex::new(stt_tokenizer),
             config: config.clone(),
         })
     }
@@ -206,11 +254,22 @@ pub async fn download_from_hub(config: &mut stream_both::Config) -> Result<()> {
         crate::hf_path::resolve_model_file(&api, file_path, hf).await?;
     }
 
-    if config.use_rag() {
+    if config.use_stt() {
+        if let Some(ref mut path) = config.stt_lm_model_file {
+            crate::hf_path::resolve_model_file(&api, path, hf).await?;
+        }
+        if let Some(ref mut path) = config.stt_mimi_model_file {
+            crate::hf_path::resolve_model_file(&api, path, hf).await?;
+        }
+        if let Some(ref mut path) = config.stt_text_tokenizer_file {
+            crate::hf_path::resolve_model_file(&api, path, hf).await?;
+        }
+    }
+    if config.use_arc() {
         let arc_path = config
             .arc_encoder_tokenizer_path
             .as_mut()
-            .expect("RAG requires arc_encoder_tokenizer_path");
+            .expect("ARC requires arc_encoder_tokenizer_path");
         crate::hf_path::resolve_model_file(&api, arc_path, hf).await?;
         if let Some(ref mut path) = config.arc_encoder_model_file {
             crate::hf_path::resolve_model_file(&api, path, hf).await?;
