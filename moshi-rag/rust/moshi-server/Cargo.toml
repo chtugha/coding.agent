@@ -7,6 +7,8 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 license.workspace = true
+readme = false
+publish = false
 
 [dependencies]
 anyhow = { workspace = true }

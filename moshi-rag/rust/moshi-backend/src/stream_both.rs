@@ -747,10 +747,10 @@ impl SessionConfigReq {
         SessionConfig {
             text_temperature: self.text_temperature.unwrap_or(0.8),
             text_topk: self.text_topk.unwrap_or(250),
-            text_seed: self.text_seed.unwrap_or_else(|| rand::thread_rng().gen()),
+            text_seed: self.text_seed.unwrap_or_else(|| rand::rng().gen()),
             audio_temperature: self.audio_temperature.unwrap_or(0.8),
             audio_topk: self.audio_topk.unwrap_or(250),
-            audio_seed: self.audio_seed.unwrap_or_else(|| rand::thread_rng().gen()),
+            audio_seed: self.audio_seed.unwrap_or_else(|| rand::rng().gen()),
             email: self.email,
             user_feedback: None,
             max_steps: self.max_steps.unwrap_or(4500).min(4500),

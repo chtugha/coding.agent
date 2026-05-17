@@ -2771,8 +2771,8 @@ dependencies = [
  "libc",
  "log",
  "moshi",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.0",
+ "rand_chacha 0.9.0",
  "regex",
  "reqwest",
  "rubato",
@@ -2812,7 +2812,7 @@ dependencies = [
  "native-tls",
  "ogg",
  "opus",
- "rand 0.8.5",
+ "rand 0.9.0",
  "ratatui",
  "rubato",
  "rustls 0.23.26",
@@ -2826,6 +2826,25 @@ dependencies = [
  "tracing-chrome",
  "tracing-subscriber",
  "tui-logger",
+]
+
+[[package]]
+name = "moshi-rag-backend"
+version = "0.6.4"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -4508,6 +4527,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "symlink"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
+
+[[package]]
 name = "symphonia"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5213,12 +5238,13 @@ dependencies = [
 
 [[package]]
 name = "tracing-appender"
-version = "0.2.3"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3566e8ce28cc0a3fe42519fc80e6b4c943cc4c8cef275620eb8dac2d3d4e06cf"
+checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
 dependencies = [
  "crossbeam-channel",
- "thiserror 1.0.69",
+ "symlink",
+ "thiserror 2.0.12",
  "time",
  "tracing-subscriber",
 ]

@@ -4,6 +4,7 @@ members = [
     "moshi-backend",
     "moshi-cli",
     "moshi-core",
+    "moshi-rag-backend",
     "moshi-server",
 ]
 resolver = "2"
@@ -17,6 +18,53 @@ repository = "https://github.com/kyutai-labs/moshi"
 keywords = ["machine-learning", "audio"]
 categories = ["science"]
 
+# ---------------------------------------------------------------------------
+# Known unfixable `clippy::multiple_crate_versions` warnings
+# (cargo clippy -- -W clippy::cargo)
+#
+# DO NOT attempt to resolve these until the stated external prerequisites are
+# met.  All six warnings are caused by transitive dependency conflicts in
+# libraries we do not control; there is no Cargo.toml edit that can eliminate
+# them today.
+#
+# 1. `getrandom 0.2.x` vs `0.3.x`
+#    Root cause: `ring 0.17` (pulled by reqwest → rustls → ring) embeds a
+#    hard dependency on getrandom 0.2.  ring 0.17 cannot be upgraded because
+#    it is the version required by rustls 0.23 and tokio-rustls 0.24.
+#    Fix when: ring 0.18 is released and rustls / tokio-rustls are updated
+#    to consume it.  Tracking: https://github.com/briansmith/ring/issues/2103
+#
+# 2. `wasi 0.11.x` vs `0.14.x`
+#    Root cause: direct cascade from warning #1.  getrandom 0.2 requires
+#    wasi 0.11; getrandom 0.3 requires wasi 0.14.  Both are present because
+#    ring 0.17 forces getrandom 0.2 while modern crates use getrandom 0.3.
+#    Fix when: ring 0.18 lands (same prerequisite as #1).
+#
+# 3. `core-foundation 0.9.x` vs `0.10.x`
+# 4. `security-framework 2.x` vs `3.x`
+# 5. `openssl-probe 0.1.x` vs `0.2.x`
+#    Root cause: the workspace carries two TLS stacks simultaneously.
+#    `tokio-tungstenite 0.21` (used by moshi-cli and moshi-server) is built
+#    with both features = ["rustls", "native-tls"], pulling in both the old
+#    (security-framework 2 / core-foundation 0.9 / openssl-probe 0.1) and
+#    the new (security-framework 3 / core-foundation 0.10 / openssl-probe 0.2)
+#    macOS TLS libraries.  Additionally, `native-tls = "0.2.11"` is a direct
+#    workspace dep (used by moshi-backend for audio-stream TLS) which pins the
+#    older security-framework 2 variant.
+#    Fix when: tokio-tungstenite is upgraded to a version that uses a single
+#    unified TLS backend, AND native-tls is updated to align with it.
+#    Removing one of the two TLS features from tokio-tungstenite without
+#    breaking moshi-cli / moshi-server first requires verifying which
+#    platforms need which backend.
+#
+# 6. `windows_i686_gnullvm 0.52.x` vs `0.53.x`
+#    Root cause: different transitive consumers of `windows-sys` (0.52 vs
+#    0.53) coexist in the tree.  This is a Windows cross-compilation artifact
+#    and has zero effect on macOS or Linux builds.
+#    Fix when: the workspace's Windows-targeting crates converge on a single
+#    windows-sys minor version (happens automatically as those crates publish
+#    updates).
+# ---------------------------------------------------------------------------
 [workspace.dependencies]
 anyhow = "1"
 async-openai = { version = "0.32.4" , features = ["chat-completion"] }
@@ -51,12 +99,13 @@ opus = "0.3.0"
 prometheus = "0.13.4"
 pyo3 = "0.23.0"
 pyo3-ffi = "0.23.0"
-rand = { version = "0.8.5", features = ["getrandom"] }
-rand_chacha = "0.3.1"
+rand = "0.9"
+rand_chacha = "0.9"
 ratatui = "0.27.0"
 rayon = "1.8.1"
 rcgen = "0.13.1"
 regex = "1.10.3"
+reqwest = { version = "0.12", features = ["json"] }
 rmp-serde = "1.3.0"
 rubato = "0.15.0"
 rustls = "0.23.5"
@@ -74,9 +123,10 @@ toml = "0.8.19"
 tower = "0.4.13"
 tower-http = { version = "0.5", features = ["full"] }
 tracing = "0.1.40"
-tracing-appender = "0.2.3"
+tracing-appender = "0.2.5"
 tracing-chrome = "0.7.2"
 tracing-subscriber = "0.3.18"
+url = "2"
 tui-logger = "0.11.2"
 vergen = { version = "8.3.1", features = ["build", "cargo", "git", "gitcl", "rustc", "si"] }
 
