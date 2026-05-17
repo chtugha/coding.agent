@@ -19,57 +19,77 @@ keywords = ["machine-learning", "audio"]
 categories = ["science"]
 
 # ---------------------------------------------------------------------------
-# Known unfixable `clippy::multiple_crate_versions` warnings
+# TLS architecture note & known `clippy::multiple_crate_versions` warnings
 # (cargo clippy -- -W clippy::cargo)
 #
-# DO NOT attempt to resolve these until the stated external prerequisites are
-# met.  All six warnings are caused by transitive dependency conflicts in
-# libraries we do not control; there is no Cargo.toml edit that can eliminate
-# them today.
+# IMPORTANT — HOW THIS LINT WORKS:
+#   clippy::multiple_crate_versions scans the ENTIRE workspace Cargo.lock,
+#   not just the dep-tree of the crate being compiled.  Running it against any
+#   single package (e.g. -p moshi-rag-backend) still reports workspace-wide
+#   duplicates.  moshi-rag-backend itself has ZERO internal duplicate crates
+#   (`cargo tree -p moshi-rag-backend --duplicates` → nothing to print).
+#   All warnings listed below originate in OTHER workspace members.
+#
+# PREVIOUSLY FIXED — do not re-add these:
+#   The dead direct workspace deps `rustls = "0.23.5"`, `tokio-rustls =
+#   "0.24.1"`, and `axum-server` with `features = ["tls-rustls"]` were
+#   removed because they were unused weight copied from the upstream
+#   kyutai-labs repo but never actually imported in any source file.
+#   `rustls = { workspace = true }` was removed from moshi-cli/Cargo.toml
+#   for the same reason — every call site in moshi-cli/src/multistream.rs
+#   explicitly uses `native_tls::TlsConnector` / `Connector::NativeTls`,
+#   and no .rs file in moshi-cli ever imports the `rustls` crate.
+#   The `"rustls"` feature was also removed from the `tokio-tungstenite`
+#   workspace dep for the same reason — native-tls is the only TLS backend
+#   actually called by moshi-cli code.
+#
+# REMAINING UNFIXABLE WARNINGS — DO NOT attempt to resolve until the stated
+# external prerequisites are met.  All sources are in moshi-backend /
+# moshi-server / moshi-core, not in moshi-rag-backend:
 #
 # 1. `getrandom 0.2.x` vs `0.3.x`
-#    Root cause: `ring 0.17` (pulled by reqwest → rustls → ring) embeds a
-#    hard dependency on getrandom 0.2.  ring 0.17 cannot be upgraded because
-#    it is the version required by rustls 0.23 and tokio-rustls 0.24.
-#    Fix when: ring 0.18 is released and rustls / tokio-rustls are updated
-#    to consume it.  Tracking: https://github.com/briansmith/ring/issues/2103
+#    Three independent dep chains all pin getrandom 0.2; all three must be
+#    resolved simultaneously to eliminate the duplicate:
+#      a) hf-hub 0.4.3 features=["tokio"] internally enables reqwest's
+#         rustls-tls-native-roots, pulling hyper-rustls → rustls 0.23 →
+#         ring 0.17 → getrandom 0.2.  hf-hub is the HuggingFace model
+#         download client used by moshi-backend and moshi-server.
+#      b) async-openai 0.32.4 → backoff 0.4.0 → rand 0.8.5 → getrandom 0.2.
+#      c) moshi-core → tokenizers 0.15.2 → rand 0.8.5 → getrandom 0.2.
+#    Fix when: hf-hub publishes a version that supports native-tls for its
+#    async backend (eliminating path a); AND async-openai's backoff dep
+#    updates to rand 0.9 (eliminating path b); AND tokenizers updates to
+#    rand 0.9 (eliminating path c).
+#    Ring side tracking: https://github.com/briansmith/ring/issues/2103
 #
 # 2. `wasi 0.11.x` vs `0.14.x`
-#    Root cause: direct cascade from warning #1.  getrandom 0.2 requires
-#    wasi 0.11; getrandom 0.3 requires wasi 0.14.  Both are present because
-#    ring 0.17 forces getrandom 0.2 while modern crates use getrandom 0.3.
-#    Fix when: ring 0.18 lands (same prerequisite as #1).
+#    Direct cascade from #1: getrandom 0.2 requires wasi 0.11; getrandom 0.3
+#    requires wasi 0.14.  Same fix prerequisites as #1.
 #
 # 3. `core-foundation 0.9.x` vs `0.10.x`
 # 4. `security-framework 2.x` vs `3.x`
 # 5. `openssl-probe 0.1.x` vs `0.2.x`
-#    Root cause: the workspace carries two TLS stacks simultaneously.
-#    `tokio-tungstenite 0.21` (used by moshi-cli and moshi-server) is built
-#    with both features = ["rustls", "native-tls"], pulling in both the old
-#    (security-framework 2 / core-foundation 0.9 / openssl-probe 0.1) and
-#    the new (security-framework 3 / core-foundation 0.10 / openssl-probe 0.2)
-#    macOS TLS libraries.  Additionally, `native-tls = "0.2.11"` is a direct
-#    workspace dep (used by moshi-backend for audio-stream TLS) which pins the
-#    older security-framework 2 variant.
-#    Fix when: tokio-tungstenite is upgraded to a version that uses a single
-#    unified TLS backend, AND native-tls is updated to align with it.
-#    Removing one of the two TLS features from tokio-tungstenite without
-#    breaking moshi-cli / moshi-server first requires verifying which
-#    platforms need which backend.
+#    reqwest 0.12.15 bundles BOTH native-tls and rustls-based TLS internally:
+#      — native-tls 0.2.14 → security-framework 2.x → core-foundation 0.9.x
+#        (reqwest's default-tls for direct connections)
+#      — hyper-rustls 0.27 → rustls-native-certs → security-framework 3.x →
+#        core-foundation 0.10.x (activated by hf-hub's tokio feature, #1a)
+#    This means removing all explicit rustls workspace deps (already done)
+#    did NOT fix these warnings: reqwest itself still brings in both TLS
+#    stacks as long as hf-hub enables its rustls path.
+#    Fix when: same as #1a (hf-hub native-tls mode).
 #
 # 6. `windows_i686_gnullvm 0.52.x` vs `0.53.x`
-#    Root cause: different transitive consumers of `windows-sys` (0.52 vs
-#    0.53) coexist in the tree.  This is a Windows cross-compilation artifact
-#    and has zero effect on macOS or Linux builds.
-#    Fix when: the workspace's Windows-targeting crates converge on a single
-#    windows-sys minor version (happens automatically as those crates publish
-#    updates).
+#    Windows cross-compilation artifact: different windows-sys minor versions
+#    (0.52 vs 0.53) coexist via different transitive deps.  Zero effect on
+#    macOS or Linux builds.  Resolves automatically as upstream crates converge.
 # ---------------------------------------------------------------------------
+
 [workspace.dependencies]
 anyhow = "1"
 async-openai = { version = "0.32.4" , features = ["chat-completion"] }
 axum = { version = "0.8.1", features = ["ws"] }
-axum-server = { version = "0.6", features = ["tls-rustls"] }
+axum-server = "0.6"
 base64 = "0.21.7"
 base64ct = { version = "1.6.0", features = ["alloc"] }
 bincode = "1.3.3"
@@ -108,7 +128,6 @@ regex = "1.10.3"
 reqwest = { version = "0.12", features = ["json"] }
 rmp-serde = "1.3.0"
 rubato = "0.15.0"
-rustls = "0.23.5"
 sentencepiece = "0.11.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.115"
@@ -116,9 +135,8 @@ sha3 = "0.10.8"
 symphonia = { version = "0.5.3", features = ["all"] }
 tokenizers = "0.15.2"
 tokio = { version = "1.35.1", features = ["full"] }
-tokio-rustls = "0.24.1"
 tokio-stream = "0.1"
-tokio-tungstenite = { version = "0.21.0", features = ["rustls", "native-tls"] }
+tokio-tungstenite = { version = "0.21.0", features = ["native-tls"] }
 toml = "0.8.19"
 tower = "0.4.13"
 tower-http = { version = "0.5", features = ["full"] }
