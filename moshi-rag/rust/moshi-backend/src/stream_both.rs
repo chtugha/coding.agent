@@ -48,6 +48,10 @@ pub struct Config {
     pub arc_encoder_tokenizer_path: Option<String>,
     #[serde(default)]
     pub arc_encoder_model_file: Option<String>,
+    #[serde(default)]
+    pub backend_url: Option<String>,
+    #[serde(default)]
+    pub arc_mode_enabled: bool,
     #[serde(default = "default_zero_usize")]
     pub moshi_gpu_id: usize,
     #[serde(default = "default_zero_usize")]
@@ -201,6 +205,9 @@ impl Config {
         if let Some(ref mut s) = config.arc_encoder_model_file {
             *s = crate::utils::replace_env_vars(s);
         }
+        if let Some(ref mut s) = config.backend_url {
+            *s = crate::utils::replace_env_vars(s);
+        }
 
         parse_retrieval_llms_json(&mut config)?;
 
@@ -208,7 +215,7 @@ impl Config {
     }
 
     pub fn use_rag(&self) -> bool {
-        self.arc_encoder_tokenizer_path.is_some()
+        self.rag_token_id.is_some() && self.backend_url.is_some()
     }
 
     pub fn use_stt(&self) -> bool {
@@ -218,7 +225,7 @@ impl Config {
     }
 
     pub fn use_arc(&self) -> bool {
-        self.arc_encoder_tokenizer_path.is_some()
+        self.arc_mode_enabled && self.arc_encoder_tokenizer_path.is_some()
     }
 
     pub fn requires_model_download(&self) -> bool {
@@ -262,35 +269,14 @@ fn apply_power_threshold_frame(frame: &mut [f32], thresh_db: f32) {
     }
 }
 
-pub type AppState = Arc<AppStateInner>;
-
-/// Unified state for standalone: standard (single LM) or RAG (LM + ARC encoder) or batched (standard or RAG).
-pub enum AppStateVariant {
-    Standard(Arc<AppStateInner>),
-    Rag(Arc<AppStateRag>),
-    Batched(Arc<BatchedState>),
-}
-
 pub struct AppStateInner {
     pub lm_model: moshi::lm::LmModel,
     pub mimi_model: moshi::mimi::Mimi,
     pub text_tokenizer: sentencepiece::SentencePieceProcessor,
     pub device: candle::Device,
-    pub stt_device: candle::Device,
     pub stt_asr: Mutex<Option<moshi::asr::State>>,
     pub stt_tokenizer: Mutex<Option<sentencepiece::SentencePieceProcessor>>,
     pub config: Config,
-}
-
-impl AppStateInner {
-    fn text(
-        &self,
-        prev_text_token: u32,
-        text_token: u32,
-        config: &moshi::lm_generate_multistream::Config,
-    ) -> Option<String> {
-        decode_text_piece(&self.text_tokenizer, prev_text_token, text_token, config)
-    }
 }
 
 fn decode_text_piece(
@@ -323,21 +309,21 @@ fn decode_text_piece(
     }
 }
 
-/// RAG state: main LM + Mimi (via inner). PCM-energy VAD removed; STT in-process VAD re-wired in Step 4.
-pub struct AppStateRag {
-    pub inner: AppState,
-}
-
 /// Index of the VAD head in the STT model's probability output (AsrMsg::Step::prs).
 const BATCH_VAD_HEAD_INDEX: usize = 2;
 
 /// Batched state: one shared model loop & channel pool. Used when batch_size > 1.
 pub struct BatchedState {
+    /// Accessed in Step 9 (teacher-forcing tokenization uses inner.text_tokenizer).
+    #[allow(dead_code)]
     pub inner: Arc<AppStateInner>,
     pub pool: Arc<crate::batched_channels::BatchedStreamingChannels>,
+    /// Keeps the Arc alive so profile data is retained; also used by rag_manager via rag_for_loop.
+    #[allow(dead_code)]
     pub rag_retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
     _loop_handle: Option<std::thread::JoinHandle<()>>,
     pub model_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    _ws_client: Option<crate::backend_ws::BackendWsClient>,
 }
 
 impl BatchedState {
@@ -355,19 +341,47 @@ impl BatchedState {
             inner.config.rag_llm_profiles.clone(),
             inner.config.rag_llm_default_id.as_deref(),
         );
+
+        let (ws_client, ws_sender, ws_rx) = if let Some(ref backend_url) = inner.config.backend_url
+        {
+            let rt = tokio::runtime::Handle::current();
+            let (client, in_rx) = crate::backend_ws::BackendWsClient::new(
+                backend_url.clone(),
+                rt,
+            );
+            let sender = client.sender();
+            (Some(client), Some(sender), Some(in_rx))
+        } else {
+            (None, None, None)
+        };
+
         let inner_clone = inner.clone();
         let pool_clone = pool.clone();
         let rag_for_loop = rag_retrieval.clone();
         let model_loop_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ready_flag = model_loop_ready.clone();
         let loop_handle = std::thread::spawn(move || {
-            if let Err(e) = Self::run_loop(inner_clone, pool_clone, rag_for_loop, ready_flag) {
+            if let Err(e) = Self::run_loop(
+                inner_clone,
+                pool_clone,
+                rag_for_loop,
+                ready_flag,
+                ws_sender,
+                ws_rx,
+            ) {
                 if !e.to_string().contains("max step_idx reached") {
                     tracing::error!(err = %e, "batched model loop error");
                 }
             }
         });
-        Ok(Self { inner, pool, rag_retrieval, _loop_handle: Some(loop_handle), model_loop_ready })
+        Ok(Self {
+            inner,
+            pool,
+            rag_retrieval,
+            _loop_handle: Some(loop_handle),
+            model_loop_ready,
+            _ws_client: ws_client,
+        })
     }
 
     fn run_loop(
@@ -375,6 +389,8 @@ impl BatchedState {
         pool: Arc<crate::batched_channels::BatchedStreamingChannels>,
         rag_retrieval: Arc<crate::rag_retrieval::RagRetrievalEndpoints>,
         model_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+        ws_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::backend_ws::OutboundWsMsg>>,
+        ws_rx: Option<std::sync::mpsc::Receiver<crate::backend_ws::InboundWsMsg>>,
     ) -> Result<()> {
         let session_config = default_session_config_batched();
         let gen_config = inner
@@ -431,9 +447,17 @@ impl BatchedState {
             }
         };
         let device = inner.device.clone();
-        let rag_manager = inner.config.rag_token_id.map(|rag_token_id| {
-            (crate::rag_manager::RagManager::new(rag_retrieval.clone()), rag_token_id)
-        });
+        let rag_manager = match (inner.config.rag_token_id, inner.config.backend_url.as_ref()) {
+            (Some(rag_token_id), Some(backend_url)) => Some((
+                crate::rag_manager::RagManager::new(
+                    backend_url.clone(),
+                    rag_retrieval.clone(),
+                ),
+                rag_token_id,
+            )),
+            _ => None,
+        };
+        let arc_mode_enabled = inner.config.arc_mode_enabled;
         let stt_wait_secs = inner.config.stt_wait_time.map(|t| t as f64).unwrap_or(0.0);
         let rag_timeout = inner.config.rag_timeout;
         let vad_window = inner.config.vad_window_size.unwrap_or(4);
@@ -465,8 +489,20 @@ impl BatchedState {
             };
 
         tracing::info!("batched model loop started");
+        let mut prev_channel_ids: Vec<Option<crate::batched_channels::ChannelId>> =
+            vec![None; batch_size];
         loop {
             let (mut batch_pcm, mask, ref_channel_ids, reset_slots) = pool.pre_process(&mut state);
+
+            for (b, (prev, curr)) in prev_channel_ids.iter().zip(ref_channel_ids.iter()).enumerate()
+            {
+                if prev.is_some() && curr.is_none() {
+                    if let Some(ref ws) = ws_sender {
+                        let _ = ws.send(crate::backend_ws::OutboundWsMsg::CallEnd { slot_id: b });
+                    }
+                }
+            }
+            prev_channel_ids.clone_from(&ref_channel_ids);
 
             for &bid in &reset_slots {
                 if let Err(e) =
@@ -487,14 +523,46 @@ impl BatchedState {
                 if let Some((ref rag_mgr, _)) = rag_manager {
                     rag_mgr.cancel_pending_slot_nonblocking(bid);
                 }
+                if let Some(ref ws) = ws_sender {
+                    let _ = ws.send(crate::backend_ws::OutboundWsMsg::CallEnd { slot_id: bid });
+                    let _ = ws.send(crate::backend_ws::OutboundWsMsg::CallStart {
+                        slot_id: bid,
+                        caller_phone: None,
+                        call_id: None,
+                    });
+                }
             }
 
             if let Some((ref rag_mgr, _)) = rag_manager {
                 if let Some((slot_id, ref_text)) = rag_mgr.try_recv_result_slot() {
-                    if let Err(e) =
-                        state.set_streaming_sum_condition(slot_id, "reference_with_time", &ref_text)
-                    {
-                        tracing::warn!(?e, slot_id, "set_streaming_sum_condition");
+                    if !ref_text.trim().is_empty() {
+                        if arc_mode_enabled {
+                            if let Err(e) =
+                                state.set_streaming_sum_condition(slot_id, "reference_with_time", &ref_text)
+                            {
+                                tracing::warn!(?e, slot_id, "set_streaming_sum_condition");
+                            }
+                        } else {
+                            match inner.text_tokenizer.encode(&ref_text) {
+                                Ok(pieces) => {
+                                    let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id as u32).collect();
+                                    tracing::info!(slot_id, n_tokens = token_ids.len(), "rag: teacher-forcing inject queued");
+                                    state.queue_inject_tokens(slot_id, token_ids);
+                                    if let Some(ref turn_managers) = turn_managers {
+                                        if let Some(tm) = turn_managers.get(slot_id) {
+                                            let ctx_block = format!(
+                                                "[Injected reference]\n{}\n[End of injected reference]\n\n",
+                                                ref_text
+                                            );
+                                            tm.lock().unwrap().append_context(&ctx_block);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(slot_id, ?e, "rag: failed to tokenize ref_text for teacher-forcing");
+                                }
+                            }
+                        }
                     }
                     let out = if ref_text.trim().is_empty() {
                         StreamOut::TextByRole {
@@ -506,6 +574,58 @@ impl BatchedState {
                     };
                     if pool.send_to_slot(slot_id, out).is_err() {
                         tracing::debug!(slot_id, "failed to send RAG result to slot");
+                    }
+                }
+            }
+
+            if let Some(ref rx) = ws_rx {
+                while let Ok(inbound) = rx.try_recv() {
+                    match inbound {
+                        crate::backend_ws::InboundWsMsg::ReferenceInject { slot_id, text } => {
+                            tracing::info!(slot_id, text_len = text.len(), "ws: reference_inject received");
+                            if let Some(ref turn_managers) = turn_managers {
+                                if let Some(tm) = turn_managers.get(slot_id) {
+                                    let ctx_block = format!(
+                                        "[Injected reference]\n{}\n[End of injected reference]\n\n",
+                                        text
+                                    );
+                                    tm.lock().unwrap().append_context(&ctx_block);
+                                }
+                            }
+                            if !arc_mode_enabled {
+                                match inner.text_tokenizer.encode(&text) {
+                                    Ok(pieces) => {
+                                        let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id as u32).collect();
+                                        tracing::info!(slot_id, n_tokens = token_ids.len(), "ws: teacher-forcing inject queued");
+                                        state.queue_inject_tokens(slot_id, token_ids);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(slot_id, ?e, "ws: failed to tokenize reference_inject text");
+                                    }
+                                }
+                            }
+                            let out = StreamOut::ReferenceText { text };
+                            if pool.send_to_slot(slot_id, out).is_err() {
+                                tracing::debug!(slot_id, "failed to send ws reference_inject to slot");
+                            }
+                        }
+                        crate::backend_ws::InboundWsMsg::ArcInject { slot_id, reference_text } => {
+                            if arc_mode_enabled {
+                                let prefixed = format!("backend\t{}", reference_text);
+                                if let Err(e) = state.set_streaming_sum_condition(
+                                    slot_id,
+                                    "reference_with_time",
+                                    &prefixed,
+                                ) {
+                                    tracing::warn!(?e, slot_id, "ws arc_inject set_streaming_sum_condition");
+                                }
+                            } else {
+                                tracing::warn!(slot_id, "ws: arc_inject received but arc_mode_enabled=false, ignoring");
+                            }
+                        }
+                        crate::backend_ws::InboundWsMsg::TriggerFired { slot_id, label, action_type } => {
+                            tracing::info!(slot_id, %label, %action_type, "ws: trigger_fired");
+                        }
                     }
                 }
             }
@@ -583,7 +703,8 @@ impl BatchedState {
                 let stream_mask = moshi::StreamMask::new(mask, &device)?;
                 let msgs = state.step_pcm(&pcm_tensor, &stream_mask)?;
 
-                if let Some((ref rag_mgr, rag_token_id)) = rag_manager {
+                {
+                    let rag_token_id = rag_manager.as_ref().map(|(_, id)| *id);
                     for msg in &msgs {
                         if let moshi::batched_lm_generate_multistream::StreamingOutMsg::TextToken {
                             batch_idx,
@@ -592,27 +713,36 @@ impl BatchedState {
                             ..
                         } = msg
                         {
-                            if *token == rag_token_id {
-                                let bid = *batch_idx;
-                                if let Some(ref turn_managers) = turn_managers {
-                                    if let Some(tm_arc) = turn_managers.get(bid) {
-                                        let tm_ptr = Arc::clone(tm_arc);
-                                        rag_mgr.trigger_background_generation_slot(
-                                            bid,
-                                            stt_wait_secs,
-                                            rag_timeout,
-                                            move || -> String {
-                                                tm_ptr.lock().unwrap().get_context().to_string()
-                                            },
-                                        );
-                                        let _ = pool.send_to_slot(
-                                            bid,
-                                            StreamOut::TextByRole {
-                                                text: "[RET]".to_string(),
-                                                role: crate::turn_manager::TextRole::Model,
-                                            },
-                                        );
+                            if let Some(rag_tid) = rag_token_id {
+                                if *token == rag_tid {
+                                    let bid = *batch_idx;
+                                    if let Some(ref ws) = ws_sender {
+                                        let _ = ws.send(crate::backend_ws::OutboundWsMsg::RetToken {
+                                            slot_id: bid,
+                                        });
                                     }
+                                    if let Some((ref rag_mgr, _)) = rag_manager {
+                                        if let Some(ref turn_managers) = turn_managers {
+                                            if let Some(tm_arc) = turn_managers.get(bid) {
+                                                let tm_ptr = Arc::clone(tm_arc);
+                                                rag_mgr.trigger_background_generation_slot(
+                                                    bid,
+                                                    stt_wait_secs,
+                                                    rag_timeout,
+                                                    move || -> String {
+                                                        tm_ptr.lock().unwrap().get_context().to_string()
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+                                    let _ = pool.send_to_slot(
+                                        bid,
+                                        StreamOut::TextByRole {
+                                            text: "[RET]".to_string(),
+                                            role: crate::turn_manager::TextRole::Model,
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -671,6 +801,22 @@ impl BatchedState {
                                     &ref_channel_ids,
                                 )?;
                             }
+                        }
+                    }
+                    if let Some(ref ws) = ws_sender {
+                        if !model_text.is_empty() {
+                            let _ = ws.send(crate::backend_ws::OutboundWsMsg::Token {
+                                slot_id: b,
+                                role: "model".to_string(),
+                                text: model_text.clone(),
+                            });
+                        }
+                        if !user_text.is_empty() {
+                            let _ = ws.send(crate::backend_ws::OutboundWsMsg::Token {
+                                slot_id: b,
+                                role: "user".to_string(),
+                                text: user_text.clone(),
+                            });
                         }
                     }
                     if let Some(ref turn_managers) = turn_managers {
@@ -747,10 +893,10 @@ impl SessionConfigReq {
         SessionConfig {
             text_temperature: self.text_temperature.unwrap_or(0.8),
             text_topk: self.text_topk.unwrap_or(250),
-            text_seed: self.text_seed.unwrap_or_else(|| rand::rng().gen()),
+            text_seed: self.text_seed.unwrap_or_else(|| rand::rng().random()),
             audio_temperature: self.audio_temperature.unwrap_or(0.8),
             audio_topk: self.audio_topk.unwrap_or(250),
-            audio_seed: self.audio_seed.unwrap_or_else(|| rand::rng().gen()),
+            audio_seed: self.audio_seed.unwrap_or_else(|| rand::rng().random()),
             email: self.email,
             user_feedback: None,
             max_steps: self.max_steps.unwrap_or(4500).min(4500),
@@ -778,11 +924,15 @@ fn default_session_config_batched() -> SessionConfig {
     .into_session_config()
 }
 
+/// Serializable metadata for retrieval backend entries (legacy HTTP-WS metadata handshake).
+#[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct RetrievalBackendMeta {
     pub id: String,
 }
 
+/// Serializable session metadata (legacy HTTP-WS handshake; retained for protocol documentation).
+#[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct MetaData {
     text_temperature: f64,
@@ -808,29 +958,18 @@ pub use crate::turn_manager::TextRole;
 #[derive(Debug, Clone)]
 pub enum StreamOut {
     Ready,
-    InputPcm {
-        pcm_len: usize,
-    },
-    MetaData {
-        metadata: Box<MetaData>,
-    },
-    StepStart {
-        step: usize,
-    },
-    StepPostSampling {
-        step: usize,
-    },
-    #[allow(dead_code)]
-    Text {
-        text: String,
-    },
     /// For display of transcript with speaker (ColoredText: 0x07 + color_id + utf8).
+    /// Fields read when text output via interconnect text port is wired in a future step.
     TextByRole {
+        #[allow(dead_code)]
         text: String,
+        #[allow(dead_code)]
         role: TextRole,
     },
     /// Reference text from RAG (ColoredReferenceText: 0x09 + color_id 4 + utf8).
+    /// Field read when reference text output via interconnect text port is wired in a future step.
     ReferenceText {
+        #[allow(dead_code)]
         text: String,
     },
     Pcm {
@@ -838,6 +977,8 @@ pub enum StreamOut {
     },
 }
 
+/// WebSocket message type protocol constants (legacy HTTP-WS server mode; retained as protocol documentation).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum MsgType {
     Handshake,
@@ -852,6 +993,7 @@ pub enum MsgType {
     ColoredReferenceText,
 }
 
+#[allow(dead_code)]
 impl MsgType {
     pub fn from_u8(v: u8) -> Result<Self> {
         let s = match v {

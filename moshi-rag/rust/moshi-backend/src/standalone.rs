@@ -13,10 +13,16 @@ pub struct Config {
     cert_dir: String,
     #[serde(default)]
     pub static_dir: String,
+    /// Retained for backwards-compatible config file deserialization (legacy HTTP server mode).
+    #[allow(dead_code)]
     #[serde(default)]
     addr: String,
+    /// Retained for backwards-compatible config file deserialization (legacy HTTP server mode).
+    #[allow(dead_code)]
     #[serde(default)]
     port: u16,
+    /// Retained for backwards-compatible config file deserialization (legacy HTTP server mode).
+    #[allow(dead_code)]
     #[serde(default = "default_true")]
     use_https: bool,
 
@@ -53,6 +59,9 @@ impl Config {
             *s = crate::utils::replace_env_vars(s);
         }
         if let Some(ref mut s) = config.stream.arc_encoder_model_file {
+            *s = crate::utils::replace_env_vars(s);
+        }
+        if let Some(ref mut s) = config.stream.backend_url {
             *s = crate::utils::replace_env_vars(s);
         }
         crate::stream_both::parse_retrieval_llms_json(&mut config.stream)?;
@@ -220,20 +229,10 @@ impl stream_both::AppStateInner {
             mimi_model,
             text_tokenizer,
             device,
-            stt_device,
             stt_asr: std::sync::Mutex::new(stt_asr),
             stt_tokenizer: std::sync::Mutex::new(stt_tokenizer),
             config: config.clone(),
         })
-    }
-}
-
-impl stream_both::AppStateRag {
-    pub fn new(args: &StandaloneArgs, config: &stream_both::Config) -> Result<Self> {
-        let inner = stream_both::AppStateInner::new(args, config)?;
-        let inner = std::sync::Arc::new(inner);
-        tracing::info!("RAG models loaded (main LM + ARC encoder). Main device: {:?}", inner.device);
-        Ok(Self { inner })
     }
 }
 

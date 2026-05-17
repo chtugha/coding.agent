@@ -245,8 +245,8 @@ fn oap_reconnect_loop(
         let needs_connect = {
             let mut state = oap.lock().unwrap();
             if state.is_connected() {
-                let dd = state.data_stream.as_ref().map_or(true, is_socket_dead);
-                let md = state.mgmt_stream.as_ref().map_or(true, is_socket_dead);
+                let dd = state.data_stream.as_ref().is_none_or(is_socket_dead);
+                let md = state.mgmt_stream.as_ref().is_none_or(is_socket_dead);
                 if dd || md {
                     tracing::warn!("OAP connection dead (data_dead={}, mgmt_dead={}), disconnecting", dd, md);
                     state.disconnect();
@@ -361,7 +361,7 @@ fn output_drain_loop(
                     outputs.insert(batch_idx, ActiveOutput { out_rx, call_id });
                 }
                 OutputEvent::SlotInvalidated { batch_idx, call_id } => {
-                    if outputs.get(&batch_idx).map_or(false, |a| a.call_id == call_id) {
+                    if outputs.get(&batch_idx).is_some_and(|a| a.call_id == call_id) {
                         outputs.remove(&batch_idx);
                     }
                 }

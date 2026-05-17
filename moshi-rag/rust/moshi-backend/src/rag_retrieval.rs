@@ -53,6 +53,8 @@ pub struct RagRetrievalEndpoints {
     active_default: AtomicUsize,
     active_by_slot: Mutex<HashMap<usize, usize>>,
     /// Index of the fallback profile (always queried in parallel with the active profile when they differ).
+    /// Read by `default_index()` which is part of the UI profile-switching API (Step 10+).
+    #[allow(dead_code)]
     default_idx: usize,
 }
 
@@ -94,6 +96,8 @@ impl RagRetrievalEndpoints {
         })
     }
 
+    /// Returns the prompt style for the profile at `index` (used by retrieval LLM API in future steps).
+    #[allow(dead_code)]
     pub fn prompt_style_at(&self, index: usize) -> PromptStyle {
         if self.profiles.is_empty() {
             return PromptStyle::Original;
@@ -102,10 +106,14 @@ impl RagRetrievalEndpoints {
         self.profiles[i].prompt_style
     }
 
+    /// Returns the number of configured LLM profiles.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.profiles.len()
     }
 
+    /// Returns the active profile index for a given call slot (used by UI WebSocket switching).
+    #[allow(dead_code)]
     pub fn active_index_for_slot(&self, slot_id: usize) -> usize {
         if self.profiles.is_empty() {
             return 0;
@@ -119,6 +127,8 @@ impl RagRetrievalEndpoints {
         idx.min(self.profiles.len() - 1)
     }
 
+    /// Returns the index of the default (fallback) profile.
+    #[allow(dead_code)]
     pub fn default_index(&self) -> usize {
         if self.profiles.is_empty() {
             return 0;
@@ -126,6 +136,8 @@ impl RagRetrievalEndpoints {
         self.default_idx.min(self.profiles.len() - 1)
     }
 
+    /// Returns credentials (base_url, model, api_key) for the profile at `index` (used by retrieval LLM API).
+    #[allow(dead_code)]
     pub fn credentials_at(&self, index: usize) -> Result<(String, String, String), String> {
         if self.profiles.is_empty() {
             return Err("no rag_llm_profiles".to_string());
@@ -137,6 +149,8 @@ impl RagRetrievalEndpoints {
         Ok((p.base_url.clone(), p.model.clone(), key))
     }
 
+    /// Returns the active profile ID for UI display (slot 0 shorthand).
+    #[allow(dead_code)]
     pub fn default_id_for_ui(&self) -> Option<String> {
         self.default_id_for_ui_slot(0)
     }
@@ -149,10 +163,14 @@ impl RagRetrievalEndpoints {
         Some(self.profiles[i].id.clone())
     }
 
+    /// Sets the active profile by ID for slot 0 (used by UI WebSocket profile-switching).
+    #[allow(dead_code)]
     pub fn set_active_id(&self, id: &str) -> Result<(), String> {
         self.set_active_id_for_slot(0, id)
     }
 
+    /// Sets the active profile by ID for a specific call slot (used by UI WebSocket profile-switching).
+    #[allow(dead_code)]
     pub fn set_active_id_for_slot(&self, slot_id: usize, id: &str) -> Result<(), String> {
         if self.profiles.len() < 2 {
             return Err("retrieval switching disabled".to_string());
@@ -170,12 +188,16 @@ impl RagRetrievalEndpoints {
         Ok(())
     }
 
+    /// Clears per-slot active profile override, reverting to the global default.
+    #[allow(dead_code)]
     pub fn reset_active_slot(&self, slot_id: usize) {
         if let Ok(mut guard) = self.active_by_slot.lock() {
             guard.remove(&slot_id);
         }
     }
 
+    /// Returns LLM credentials for the active profile for a given slot (used by retrieval LLM API).
+    #[allow(dead_code)]
     pub fn resolve_llm_credentials_for_slot(
         &self,
         slot_id: usize,

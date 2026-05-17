@@ -69,6 +69,10 @@ impl TurnManager {
         &self.conversation_context
     }
 
+    pub fn append_context(&mut self, text: &str) {
+        self.conversation_context.push_str(text);
+    }
+
     pub fn update_vad(&mut self, vad_value: f32) {
         self.step_count = self.step_count.saturating_add(1);
         self.wait_counter = self.wait_counter.saturating_sub(1);

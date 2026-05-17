@@ -2,57 +2,8 @@
 // This source code is licensed under the license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::stream_both::{AppStateInner, Config, StreamOut};
+use crate::stream_both::{AppStateInner, Config};
 use anyhow::Result;
-
-#[derive(serde::Serialize)]
-#[serde(tag = "type")]
-enum Event {
-    InputPcm { pcm_len: usize, time: f64 },
-    Step { step: usize, time: f64 },
-    StepPostSampling { step: usize, time: f64 },
-    SendPcm { pcm_len: usize, time: f64 },
-}
-
-#[derive(serde::Serialize)]
-struct StatsTracker {
-    events: Vec<Event>,
-}
-
-fn system_time() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
-}
-
-impl StatsTracker {
-    fn new() -> Self {
-        Self { events: vec![] }
-    }
-
-    fn on_update(&mut self, out: StreamOut) {
-        match out {
-            StreamOut::Pcm { pcm } => {
-                self.events.push(Event::SendPcm { time: system_time(), pcm_len: pcm.len() });
-            }
-            StreamOut::MetaData { metadata } => {
-                tracing::info!(?metadata, "send-metadata");
-            }
-            StreamOut::Text { text } => {
-                tracing::info!(text, "send-text");
-            }
-            StreamOut::InputPcm { pcm_len } => {
-                self.events.push(Event::InputPcm { time: system_time(), pcm_len });
-            }
-            StreamOut::StepStart { step } => {
-                self.events.push(Event::Step { time: system_time(), step });
-            }
-            StreamOut::StepPostSampling { step } => {
-                self.events.push(Event::StepPostSampling { time: system_time(), step });
-            }
-            StreamOut::Ready => {}
-            StreamOut::TextByRole { .. } | StreamOut::ReferenceText { .. } => {}
-        }
-    }
-}
 
 pub async fn run(args: &crate::BenchmarkArgs, config: &Config) -> Result<()> {
     tracing::info!(

@@ -81,7 +81,8 @@ impl BatchedStreamingChannels {
         Self { channels: Arc::new(Mutex::new(channels)), batch_size, frame_size }
     }
 
-    /// Returns true if at least one slot in the batch is currently free.
+    /// Returns true if at least one slot in the batch is currently free (used for health/capacity checks).
+    #[allow(dead_code)]
     pub fn has_free_slot(&self) -> bool {
         let ch = self.channels.lock().unwrap();
         ch.iter().any(|slot| slot.is_none())

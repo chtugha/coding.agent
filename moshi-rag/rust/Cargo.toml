@@ -54,12 +54,11 @@ categories = ["science"]
 #         rustls-tls-native-roots, pulling hyper-rustls → rustls 0.23 →
 #         ring 0.17 → getrandom 0.2.  hf-hub is the HuggingFace model
 #         download client used by moshi-backend and moshi-server.
-#      b) async-openai 0.32.4 → backoff 0.4.0 → rand 0.8.5 → getrandom 0.2.
-#      c) moshi-core → tokenizers 0.15.2 → rand 0.8.5 → getrandom 0.2.
-#    Fix when: hf-hub publishes a version that supports native-tls for its
-#    async backend (eliminating path a); AND async-openai's backoff dep
-#    updates to rand 0.9 (eliminating path b); AND tokenizers updates to
-#    rand 0.9 (eliminating path c).
+#      b) moshi-core → tokenizers 0.15.2 → rand 0.8.5 → getrandom 0.2.
+#    Note: async-openai was removed from all workspace members (path b originally
+#    attributed to async-openai is now only tokenizers). Fix when: hf-hub
+#    publishes a version that supports native-tls for its async backend
+#    (eliminating path a); AND tokenizers updates to rand 0.9 (eliminating path b).
 #    Ring side tracking: https://github.com/briansmith/ring/issues/2103
 #
 # 2. `wasi 0.11.x` vs `0.14.x`
@@ -87,7 +86,6 @@ categories = ["science"]
 
 [workspace.dependencies]
 anyhow = "1"
-async-openai = { version = "0.32.4" , features = ["chat-completion"] }
 axum = { version = "0.8.1", features = ["ws"] }
 axum-server = "0.6"
 base64 = "0.21.7"

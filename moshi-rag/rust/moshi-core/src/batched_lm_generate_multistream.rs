@@ -4,6 +4,8 @@
 
 // Batched multi-stream streaming inference: N independent streams share one LM and one Mimi
 
+use std::collections::VecDeque;
+
 use candle::{IndexOp, Tensor};
 use candle_transformers::generation::LogitsProcessor;
 
@@ -20,6 +22,8 @@ pub struct SlotState {
     /// Last STT text token emitted for this slot; used as prev for the STT detokenization (slot-wise memory)
     pub(super) last_stt_text_token: Option<u32>,
     pub(super) forced_audio_tokens: ForcedAudioTokens,
+    pub(super) inject_queue: VecDeque<u32>,
+    pub(super) injecting: bool,
     /// RAG prepend condition (e.g. first_speaker LUT). Applied once at step 0.
     pub(super) prepend_condition: Option<Tensor>,
     /// Pending streaming_sum (1, T, dim). Consumed one step per generation step.
@@ -44,6 +48,8 @@ impl SlotState {
             text_tokens,
             last_stt_text_token: None,
             forced_audio_tokens,
+            inject_queue: VecDeque::new(),
+            injecting: false,
             prepend_condition: None,
             pending_streaming_sum: None,
             streaming_sum_index: 0,
@@ -57,6 +63,8 @@ impl SlotState {
         self.last_stt_text_token = None;
         self.forced_audio_tokens =
             ForcedAudioTokens::new(config.acoustic_delay, config.audio_pad_token(), &[8, 8]);
+        self.inject_queue.clear();
+        self.injecting = false;
         self.prepend_condition = None;
         self.pending_streaming_sum = None;
         self.streaming_sum_index = 0;
@@ -147,6 +155,16 @@ impl State {
         if let Some(slot) = self.slots.get_mut(batch_idx) {
             slot.last_stt_text_token = Some(token);
         }
+    }
+
+    pub fn queue_inject_tokens(&mut self, slot_id: usize, tokens: Vec<u32>) {
+        if let Some(slot) = self.slots.get_mut(slot_id) {
+            slot.inject_queue.extend(tokens);
+        }
+    }
+
+    pub fn is_injecting(&self, slot_id: usize) -> bool {
+        self.slots.get(slot_id).map(|s| s.injecting).unwrap_or(false)
     }
 
     fn audio_pad_token(&self) -> u32 {
@@ -394,16 +412,24 @@ impl State {
         }
 
         let mut text_vals = vec![self.config.text_start_token; batch_size];
+        let mut injecting_tokens: Vec<Option<u32>> = vec![None; batch_size];
         for (b, tv) in text_vals.iter_mut().enumerate().take(batch_size) {
             if !mask.is_active(b) {
                 continue;
             }
-            let slot = &self.slots[b];
-            *tv = if slot.step_idx == 0 {
-                self.config.text_start_token
+            let slot = &mut self.slots[b];
+            if let Some(inject_token) = slot.inject_queue.pop_front() {
+                *tv = inject_token;
+                slot.injecting = true;
+                injecting_tokens[b] = Some(inject_token);
             } else {
-                slot.text_tokens[slot.step_idx - 1]
-            };
+                slot.injecting = false;
+                *tv = if slot.step_idx == 0 {
+                    self.config.text_start_token
+                } else {
+                    slot.text_tokens[slot.step_idx - 1]
+                };
+            }
         }
         let text_token = Tensor::from_vec(text_vals, (batch_size, 1), &dev)?;
 
@@ -428,20 +454,27 @@ impl State {
                     }
                 }
             })?;
-            *st = token;
-            let step_idx_b = self.slots[b].step_idx;
-            let prev = if step_idx_b == 0 {
-                self.config.text_start_token
+
+            if let Some(inject_token) = injecting_tokens[b] {
+                *st = inject_token;
+                let step_idx_b = self.slots[b].step_idx;
+                self.slots[b].text_tokens[step_idx_b] = inject_token;
             } else {
-                self.slots[b].text_tokens[step_idx_b - 1]
-            };
-            self.slots[b].text_tokens[step_idx_b] = token;
-            out.push(StreamingOutMsg::TextToken {
-                batch_idx: b,
-                prev_token: prev,
-                token,
-                role: TextRole::Model,
-            });
+                *st = token;
+                let step_idx_b = self.slots[b].step_idx;
+                let prev = if step_idx_b == 0 {
+                    self.config.text_start_token
+                } else {
+                    self.slots[b].text_tokens[step_idx_b - 1]
+                };
+                self.slots[b].text_tokens[step_idx_b] = token;
+                out.push(StreamingOutMsg::TextToken {
+                    batch_idx: b,
+                    prev_token: prev,
+                    token,
+                    role: TextRole::Model,
+                });
+            }
         }
 
         let audio_pad = self.audio_pad_token();
@@ -507,18 +540,23 @@ impl State {
         )?;
         let pcm_out = self.mimi.decode_step(&decode_tensor.into(), &decode_mask)?;
         if let Some(pcm_out) = pcm_out.as_option() {
+            let frame_len = pcm_out.dim(2)?;
             for b in 0..batch_size {
                 if !need_decode.contains(&b) {
                     continue;
                 }
-                let pcm_slice = pcm_out.i((b, 0))?;
-                let pcm_f32 = if pcm_slice.dtype() != candle::DType::F32 {
-                    pcm_slice.to_dtype(candle::DType::F32)?
+                if self.slots[b].injecting {
+                    out.push(StreamingOutMsg::Pcm { batch_idx: b, pcm: vec![0.0f32; frame_len] });
                 } else {
-                    pcm_slice
-                };
-                let pcm_vec = pcm_f32.to_vec1::<f32>()?;
-                out.push(StreamingOutMsg::Pcm { batch_idx: b, pcm: pcm_vec });
+                    let pcm_slice = pcm_out.i((b, 0))?;
+                    let pcm_f32 = if pcm_slice.dtype() != candle::DType::F32 {
+                        pcm_slice.to_dtype(candle::DType::F32)?
+                    } else {
+                        pcm_slice
+                    };
+                    let pcm_vec = pcm_f32.to_vec1::<f32>()?;
+                    out.push(StreamingOutMsg::Pcm { batch_idx: b, pcm: pcm_vec });
+                }
             }
         }
         Ok(out)

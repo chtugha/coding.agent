@@ -15,6 +15,8 @@ pub trait StatusProvider: Send + Sync {
     fn status_string(&self) -> String;
 }
 
+/// Fallback status provider for non-prodigy-bridge modes (reserved for future non-batched entry points).
+#[allow(dead_code)]
 pub struct DefaultStatusProvider {
     pub model_path: String,
 }
@@ -61,7 +63,7 @@ pub fn run_cmd_listener(
             Err(_) => continue,
         };
         let raw = std::str::from_utf8(&buf[..n]).unwrap_or("");
-        let cmd = raw.trim_end_matches(|c: char| c == '\n' || c == '\r');
+        let cmd = raw.trim_end_matches(['\n', '\r']);
         let response = handle_command(cmd, &log_forwarder, &*status_provider);
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
