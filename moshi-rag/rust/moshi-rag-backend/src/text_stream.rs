@@ -105,10 +105,7 @@ fn trim_to_last_n_chars(s: &str, n: usize) -> String {
         return s.to_string();
     }
     let skip = total - n;
-    let byte_offset = s
-        .char_indices()
-        .nth(skip)
-        .map_or(0, |(i, _)| i);
+    let byte_offset = s.char_indices().nth(skip).map_or(0, |(i, _)| i);
     s[byte_offset..].to_string()
 }
 
@@ -117,10 +114,7 @@ fn window_from_end(s: &str, total_chars: usize, window_chars: usize) -> &str {
         return s;
     }
     let skip = total_chars - window_chars;
-    let start_byte = s
-        .char_indices()
-        .nth(skip)
-        .map_or(0, |(i, _)| i);
+    let start_byte = s.char_indices().nth(skip).map_or(0, |(i, _)| i);
     &s[start_byte..]
 }
 
@@ -218,6 +212,9 @@ struct WsCtx<'a> {
     response_tx: &'a mpsc::Sender<OutgoingMessage>,
     tomedo_client: &'a Option<Arc<TomedoClient>>,
     pid_tx: &'a mpsc::Sender<(usize, Option<i64>)>,
+    ret_action_type: &'a str,
+    ret_inject_result: bool,
+    ret_action_url: Option<&'a str>,
 }
 
 fn handle_call_start_msg(
@@ -246,7 +243,10 @@ fn handle_call_start_msg(
             match tomedo.resolve_caller(cid, &phone).await {
                 Ok(pid) => {
                     if pid_tx.send((slot_id, pid)).await.is_err() {
-                        tracing::debug!(slot_id, "pid update channel closed before patient_id arrived");
+                        tracing::debug!(
+                            slot_id,
+                            "pid update channel closed before patient_id arrived"
+                        );
                     }
                 }
                 Err(e) => tracing::warn!(slot_id, "resolve_caller failed: {e}"),
@@ -271,19 +271,22 @@ async fn handle_token_msg(
     slot.last_token_ts_ms = ts_ms;
     slot.append_token(&role, &token_text);
 
-    let window = window_from_end(&slot.context_buffer, slot.context_char_count, ctx.trigger_window_chars);
+    let window =
+        window_from_end(&slot.context_buffer, slot.context_char_count, ctx.trigger_window_chars);
     let fired = ctx.trigger_matcher.check_triggers(window, &mut slot.trigger_cooldowns);
 
     for trigger in fired {
         tracing::info!(slot_id, label = %trigger.label, action_type = %trigger.action_type, "trigger fired");
-        let _ = ctx.response_tx
+        let _ = ctx
+            .response_tx
             .send(OutgoingMessage::TriggerFired {
                 slot_id,
                 label: trigger.label.clone(),
                 action_type: trigger.action_type.clone(),
             })
             .await;
-        let _ = ctx.action_tx
+        let _ = ctx
+            .action_tx
             .send(ActionRequest {
                 slot_id,
                 action_type: trigger.action_type.clone(),
@@ -297,6 +300,44 @@ async fn handle_token_msg(
             })
             .await;
     }
+}
+
+async fn handle_ret_token_msg(slot_id: usize, slots: &HashMap<usize, SlotState>, ctx: &WsCtx<'_>) {
+    tracing::info!(
+        slot_id,
+        action_type = ctx.ret_action_type,
+        "ret_token received — dispatching configured action"
+    );
+
+    let (context_snippet, patient_id) = slots.get(&slot_id).map_or_else(
+        || {
+            tracing::warn!(slot_id, "ret_token for unknown slot — dispatching with empty context");
+            (String::new(), None)
+        },
+        |slot| {
+            let window = window_from_end(
+                &slot.context_buffer,
+                slot.context_char_count,
+                ctx.trigger_window_chars,
+            );
+            (window.to_string(), slot.patient_id)
+        },
+    );
+
+    let _ = ctx
+        .action_tx
+        .send(ActionRequest {
+            slot_id,
+            action_type: ctx.ret_action_type.to_string(),
+            action_url: ctx.ret_action_url.map(str::to_string),
+            context_snippet,
+            patient_id,
+            inject_result: ctx.ret_inject_result,
+            label: "[RET]".to_string(),
+            arc_mode: ctx.arc_mode,
+            response_tx: ctx.response_tx.clone(),
+        })
+        .await;
 }
 
 async fn handle_incoming(
@@ -316,7 +357,7 @@ async fn handle_incoming(
             handle_token_msg(slot_id, role, token_text, ts_ms, slots, ctx).await;
         }
         IncomingMessage::RetToken { slot_id } => {
-            tracing::info!(slot_id, "ret_token received");
+            handle_ret_token_msg(slot_id, slots, ctx).await;
         }
     }
 }
@@ -344,18 +385,33 @@ pub async fn handle_websocket(
     });
 
     let mut slots: HashMap<usize, SlotState> = HashMap::new();
-    // Intentionally cached at connection time — arc_mode and trigger_window_chars are
-    // restart-level settings, not mid-call toggles. Avoids per-token RwLock reads on the
-    // hot path. If these ever need to be dynamic, use AtomicBool/AtomicUsize instead.
+    // Intentionally cached at connection time — arc_mode, trigger_window_chars, and
+    // ret_* settings are restart-level settings, not mid-call toggles. Avoids per-token
+    // RwLock reads on the hot path. If these ever need to be dynamic, use
+    // AtomicBool/AtomicUsize instead.
     //
     // NOTE: trigger_matcher is also cached here. Triggers updated via POST /api/config
     // take effect only on the next WebSocket connection (frontend reconnect / service
     // restart). If hot-reload is needed, add an AtomicU64 generation counter to
     // SharedConfig, increment it in post_config_handler, and rebuild TriggerMatcher
     // when the generation changes (check once per token — single atomic load, O(1)).
-    let (trigger_matcher, trigger_window_chars, arc_mode) = {
+    let (
+        trigger_matcher,
+        trigger_window_chars,
+        arc_mode,
+        ret_action_type,
+        ret_inject_result,
+        ret_action_url,
+    ) = {
         let cfg = config.read();
-        (TriggerMatcher::from_config(&cfg), cfg.trigger_window_chars, cfg.arc_mode_enabled)
+        (
+            TriggerMatcher::from_config(&cfg),
+            cfg.trigger_window_chars,
+            cfg.arc_mode_enabled,
+            cfg.ret_action_type.clone(),
+            cfg.ret_inject_result,
+            cfg.ret_action_url.clone(),
+        )
     };
 
     // Channel for background patient-ID resolution results (slot_id, resolved patient_id).
@@ -371,6 +427,9 @@ pub async fn handle_websocket(
             response_tx: &response_tx,
             tomedo_client: &tomedo_client,
             pid_tx: &pid_tx,
+            ret_action_type: &ret_action_type,
+            ret_inject_result,
+            ret_action_url: ret_action_url.as_deref(),
         };
         loop {
             tokio::select! {
@@ -473,11 +532,7 @@ mod tests {
         assert!(buf.contains("user: hello world"), "user text missing: {buf:?}");
         assert!(buf.contains("moshi: hi there"), "moshi text missing: {buf:?}");
         assert!(buf.contains("\nuser: how are you"), "second user turn missing: {buf:?}");
-        assert_eq!(
-            buf.chars().count(),
-            slot.context_char_count,
-            "context_char_count out of sync"
-        );
+        assert_eq!(buf.chars().count(), slot.context_char_count, "context_char_count out of sync");
     }
 
     #[test]
@@ -488,5 +543,4 @@ mod tests {
         slot.append_token("model", "Ich verstehe.");
         assert_eq!(slot.context_buffer.chars().count(), slot.context_char_count);
     }
-
 }

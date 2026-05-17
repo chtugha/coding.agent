@@ -74,6 +74,12 @@ pub struct AppConfig {
     pub allowed_webhook_hosts: Vec<String>,
     #[serde(default)]
     pub allowed_script_dir: Option<String>,
+    #[serde(default = "default_ret_action_type")]
+    pub ret_action_type: String,
+    #[serde(default = "default_ret_inject_result")]
+    pub ret_inject_result: bool,
+    #[serde(default)]
+    pub ret_action_url: Option<String>,
 }
 
 fn default_listen_addr() -> String {
@@ -109,15 +115,21 @@ pub const fn default_max_tokens() -> usize {
     256
 }
 
+fn default_ret_action_type() -> String {
+    "tomedo-crawl-query".to_string()
+}
+
+const fn default_ret_inject_result() -> bool {
+    true
+}
+
 fn replace_env_vars(s: &str) -> String {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
         regex::Regex::new(r"\$([A-Za-z_][A-Za-z0-9_]*)").expect("env-var regex is valid")
     });
-    re.replace_all(s, |caps: &regex::Captures| {
-        std::env::var(&caps[1]).unwrap_or_default()
-    })
-    .into_owned()
+    re.replace_all(s, |caps: &regex::Captures| std::env::var(&caps[1]).unwrap_or_default())
+        .into_owned()
 }
 
 impl AppConfig {
@@ -127,6 +139,9 @@ impl AppConfig {
         config.log_dir = replace_env_vars(&config.log_dir);
         if let Some(ref mut url) = config.tomedo_crawl_url {
             *url = replace_env_vars(url);
+        }
+        if let Some(ref mut dir) = config.allowed_script_dir {
+            *dir = replace_env_vars(dir);
         }
         Ok(config)
     }

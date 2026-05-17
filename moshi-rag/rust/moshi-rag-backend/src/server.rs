@@ -69,6 +69,9 @@ async fn get_config_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
         "llm_profiles": config.llm_profiles,
         "default_timeout_secs": config.default_timeout_secs,
         "default_max_tokens": config.default_max_tokens,
+        "ret_action_type": config.ret_action_type,
+        "ret_inject_result": config.ret_inject_result,
+        "ret_action_url": config.ret_action_url,
     }))
 }
 
@@ -84,6 +87,12 @@ struct ConfigUpdate {
     tomedo_crawl_url: Option<String>,
     #[serde(default)]
     trigger_window_chars: Option<usize>,
+    #[serde(default)]
+    ret_action_type: Option<String>,
+    #[serde(default)]
+    ret_inject_result: Option<bool>,
+    #[serde(default)]
+    ret_action_url: Option<String>,
 }
 
 async fn post_config_handler(
@@ -106,6 +115,15 @@ async fn post_config_handler(
         }
         if let Some(w) = update.trigger_window_chars {
             config.trigger_window_chars = w;
+        }
+        if let Some(v) = update.ret_action_type {
+            config.ret_action_type = v;
+        }
+        if let Some(v) = update.ret_inject_result {
+            config.ret_inject_result = v;
+        }
+        if let Some(v) = update.ret_action_url {
+            config.ret_action_url = Some(v);
         }
     }
     Json(serde_json::json!({"status": "ok"}))
@@ -205,10 +223,7 @@ async fn action_handler(
     }
 }
 
-async fn ws_handler(
-    State(state): State<Arc<AppState>>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn ws_handler(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     let config = state.config.clone();
     let action_tx = state.action_tx.clone();
     let tomedo = state.tomedo_client.clone();

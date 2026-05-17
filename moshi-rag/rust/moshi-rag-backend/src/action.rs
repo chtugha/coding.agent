@@ -20,11 +20,7 @@ pub struct ActionResult {
 
 impl ActionDispatcher {
     pub fn new(config: SharedConfig, tomedo: Option<Arc<TomedoClient>>) -> Self {
-        Self {
-            config,
-            tomedo,
-            http: reqwest::Client::new(),
-        }
+        Self { config, tomedo, http: reqwest::Client::new() }
     }
 
     pub async fn dispatch(&self, req: &ActionRequest) -> Result<ActionResult> {
@@ -61,10 +57,7 @@ impl ActionDispatcher {
         let results = tomedo.query(&req.context_snippet, req.patient_id, 3).await?;
         let text = tomedo_client::format_query_results(&results);
 
-        Ok(ActionResult {
-            text,
-            action_type: "tomedo-crawl-query".into(),
-        })
+        Ok(ActionResult { text, action_type: "tomedo-crawl-query".into() })
     }
 
     async fn handle_webhook(&self, req: &ActionRequest) -> Result<ActionResult> {
@@ -106,10 +99,7 @@ impl ActionDispatcher {
             tracing::warn!(url, %status, "webhook returned non-success");
         }
 
-        Ok(ActionResult {
-            text: resp_text,
-            action_type: "webhook".into(),
-        })
+        Ok(ActionResult { text: resp_text, action_type: "webhook".into() })
     }
 
     async fn handle_calendar(&self, req: &ActionRequest) -> Result<ActionResult> {
@@ -151,10 +141,7 @@ impl ActionDispatcher {
             tracing::warn!(url, %status, "calendar webhook returned non-success");
         }
 
-        Ok(ActionResult {
-            text: resp_text,
-            action_type: "calendar".into(),
-        })
+        Ok(ActionResult { text: resp_text, action_type: "calendar".into() })
     }
 
     async fn handle_script(&self, req: &ActionRequest) -> Result<ActionResult> {
@@ -173,9 +160,7 @@ impl ActionDispatcher {
         if let Some(ref dir) = allowed_dir {
             validate_script_path(&script_path, dir)?;
         } else {
-            anyhow::bail!(
-                "script execution blocked: allowed_script_dir not configured"
-            );
+            anyhow::bail!("script execution blocked: allowed_script_dir not configured");
         }
 
         tracing::info!(
@@ -185,37 +170,64 @@ impl ActionDispatcher {
             "dispatching script execution"
         );
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            tokio::process::Command::new(&script_path)
-                .env("SLOT_ID", req.slot_id.to_string())
-                .env("LABEL", &req.label)
-                .env("CONTEXT_SNIPPET", &req.context_snippet)
-                .env(
-                    "PATIENT_ID",
-                    req.patient_id.map(|p| p.to_string()).unwrap_or_default(),
-                )
-                .output(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("script execution timed out after 30 seconds"))??;
+        let mut child = tokio::process::Command::new(&script_path)
+            .env("SLOT_ID", req.slot_id.to_string())
+            .env("LABEL", &req.label)
+            .env("CONTEXT_SNIPPET", &req.context_snippet)
+            .env("PATIENT_ID", req.patient_id.map(|p| p.to_string()).unwrap_or_default())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
 
-        if !output.status.success() {
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = child_stdout {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = child_stderr {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+            }
+            buf
+        });
+
+        let exit_status = if let Ok(result) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await
+        {
+            result?
+        } else {
+            let _ = child.kill().await;
+            anyhow::bail!("script execution timed out after 30 seconds");
+        };
+
+        let stdout_buf = stdout_task.await.unwrap_or_default();
+        let stderr_buf = stderr_task.await.unwrap_or_default();
+
+        let stdout = String::from_utf8_lossy(&stdout_buf).to_string();
+        let stderr = String::from_utf8_lossy(&stderr_buf).to_string();
+
+        if !exit_status.success() {
             tracing::warn!(
                 script = script_path_str,
-                exit_code = ?output.status.code(),
+                exit_code = ?exit_status.code(),
                 stderr = %stderr,
                 "script exited with non-zero status"
             );
+        } else if !stderr.is_empty() {
+            tracing::debug!(
+                script = script_path_str,
+                stderr = %stderr,
+                "script produced stderr output on successful exit"
+            );
         }
 
-        Ok(ActionResult {
-            text: stdout,
-            action_type: "script".into(),
-        })
+        Ok(ActionResult { text: stdout, action_type: "script".into() })
     }
 
     fn handle_llm_retrieval(&self, req: &ActionRequest) -> Result<ActionResult> {
@@ -231,10 +243,7 @@ impl ActionDispatcher {
             "dispatching llm-retrieval (delegated to retrieval module in Step 7)"
         );
 
-        Ok(ActionResult {
-            text: String::new(),
-            action_type: "llm-retrieval".into(),
-        })
+        Ok(ActionResult { text: String::new(), action_type: "llm-retrieval".into() })
     }
 
     async fn handle_retrieval_and_webhook(&self, req: &ActionRequest) -> Result<ActionResult> {
@@ -262,10 +271,8 @@ impl ActionDispatcher {
             response_tx: req.response_tx.clone(),
         };
 
-        let (tomedo_result, webhook_result) = tokio::join!(
-            self.handle_tomedo_query(&tomedo_req),
-            self.handle_webhook(&webhook_req),
-        );
+        let (tomedo_result, webhook_result) =
+            tokio::join!(self.handle_tomedo_query(&tomedo_req), self.handle_webhook(&webhook_req),);
 
         let mut combined_text = String::new();
 
@@ -284,10 +291,7 @@ impl ActionDispatcher {
             Err(e) => tracing::warn!("retrieval_and_webhook: webhook failed: {e}"),
         }
 
-        Ok(ActionResult {
-            text: combined_text,
-            action_type: "retrieval_and_webhook".into(),
-        })
+        Ok(ActionResult { text: combined_text, action_type: "retrieval_and_webhook".into() })
     }
 
     fn validate_webhook_host(&self, url: &str) -> Result<()> {
@@ -303,9 +307,8 @@ impl ActionDispatcher {
         let parsed = url::Url::parse(url)
             .map_err(|e| anyhow::anyhow!("invalid webhook URL '{url}': {e}"))?;
 
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("webhook URL '{url}' has no host"))?;
+        let host =
+            parsed.host_str().ok_or_else(|| anyhow::anyhow!("webhook URL '{url}' has no host"))?;
 
         if allowed_hosts.iter().any(|h| h == host) {
             Ok(())
@@ -318,12 +321,10 @@ impl ActionDispatcher {
             anyhow::bail!("webhook host '{host}' not in allowed_webhook_hosts")
         }
     }
-
 }
 
 fn validate_url_scheme(url: &str) -> Result<()> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| anyhow::anyhow!("invalid URL '{url}': {e}"))?;
+    let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL '{url}': {e}"))?;
 
     match parsed.scheme() {
         "http" | "https" => Ok(()),
@@ -342,17 +343,11 @@ fn validate_script_path(script_path: &Path, allowed_dir: &str) -> Result<()> {
     let allowed = PathBuf::from(allowed_dir);
 
     let canonical_allowed = allowed.canonicalize().map_err(|e| {
-        anyhow::anyhow!(
-            "allowed_script_dir '{}' cannot be resolved: {e}",
-            allowed_dir
-        )
+        anyhow::anyhow!("allowed_script_dir '{}' cannot be resolved: {e}", allowed_dir)
     })?;
 
     let canonical_script = script_path.canonicalize().map_err(|e| {
-        anyhow::anyhow!(
-            "script path '{}' cannot be resolved: {e}",
-            script_path.display()
-        )
+        anyhow::anyhow!("script path '{}' cannot be resolved: {e}", script_path.display())
     })?;
 
     if canonical_script.starts_with(&canonical_allowed) {
@@ -397,15 +392,9 @@ pub async fn run_action_loop(
 
                     if inject_result && !result.text.is_empty() {
                         let msg = if arc_mode {
-                            OutgoingMessage::ArcInject {
-                                slot_id,
-                                reference_text: result.text,
-                            }
+                            OutgoingMessage::ArcInject { slot_id, reference_text: result.text }
                         } else {
-                            OutgoingMessage::ReferenceInject {
-                                slot_id,
-                                text: result.text,
-                            }
+                            OutgoingMessage::ReferenceInject { slot_id, text: result.text }
                         };
                         let _ = response_tx.send(msg).await;
                     }
