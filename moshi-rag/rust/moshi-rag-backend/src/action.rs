@@ -29,7 +29,7 @@ impl ActionDispatcher {
             "webhook" => self.handle_webhook(req).await,
             "calendar" => self.handle_calendar(req).await,
             "script" => self.handle_script(req).await,
-            "llm-retrieval" => self.handle_llm_retrieval(req),
+            "llm-retrieval" => self.handle_llm_retrieval(req).await,
             "retrieval_and_webhook" => self.handle_retrieval_and_webhook(req).await,
             other => {
                 tracing::warn!(action_type = other, "unknown action type");
@@ -230,20 +230,29 @@ impl ActionDispatcher {
         Ok(ActionResult { text: stdout, action_type: "script".into() })
     }
 
-    fn handle_llm_retrieval(&self, req: &ActionRequest) -> Result<ActionResult> {
-        let cfg = self.config.read();
-        if !cfg.llm_mode_enabled {
-            anyhow::bail!("llm-retrieval action but llm_mode_enabled is false");
-        }
-        drop(cfg);
+    async fn handle_llm_retrieval(&self, req: &ActionRequest) -> Result<ActionResult> {
+        let (default_timeout_secs, default_max_tokens) = {
+            let cfg = self.config.read();
+            (cfg.default_timeout_secs, cfg.default_max_tokens)
+        };
+        let retrieval_req = crate::retrieval::RetrievalRequest {
+            context: req.context_snippet.clone(),
+            history: Vec::new(),
+            active_profile_id: None,
+            timeout_secs: default_timeout_secs,
+            max_tokens: default_max_tokens,
+        };
 
         tracing::info!(
             slot_id = req.slot_id,
             action_type = "llm-retrieval",
-            "dispatching llm-retrieval (delegated to retrieval module in Step 7)"
+            "dispatching llm-retrieval"
         );
 
-        Ok(ActionResult { text: String::new(), action_type: "llm-retrieval".into() })
+        let resp =
+            crate::retrieval::handle_retrieval(&self.config, &self.http, retrieval_req).await?;
+
+        Ok(ActionResult { text: resp.reference_text, action_type: "llm-retrieval".into() })
     }
 
     async fn handle_retrieval_and_webhook(&self, req: &ActionRequest) -> Result<ActionResult> {

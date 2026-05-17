@@ -129,27 +129,9 @@ async fn post_config_handler(
     Json(serde_json::json!({"status": "ok"}))
 }
 
-#[derive(serde::Deserialize)]
-struct RetrievalRequest {
-    #[allow(dead_code)]
-    context: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    history: Vec<serde_json::Value>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    active_profile_id: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default = "crate::config::default_timeout")]
-    timeout_secs: f64,
-    #[allow(dead_code)]
-    #[serde(default = "crate::config::default_max_tokens")]
-    max_tokens: usize,
-}
-
 async fn retrieval_handler(
     State(state): State<Arc<AppState>>,
-    Json(_request): Json<RetrievalRequest>,
+    Json(request): Json<crate::retrieval::RetrievalRequest>,
 ) -> impl IntoResponse {
     let llm_enabled = state.config.read().llm_mode_enabled;
     if !llm_enabled {
@@ -160,14 +142,29 @@ async fn retrieval_handler(
             })),
         );
     }
-    (
-        axum::http::StatusCode::OK,
-        Json(serde_json::json!({
-            "reference_text": "",
-            "lm_label": "",
-            "num_turns": 0
-        })),
-    )
+
+    match crate::retrieval::handle_retrieval(&state.config, &state.http_client, request).await {
+        Ok(resp) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "reference_text": resp.reference_text,
+                "lm_label": resp.lm_label,
+                "num_turns": resp.num_turns,
+            })),
+        ),
+        Err(e) => {
+            tracing::error!("retrieval error: {e}");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": e.to_string(),
+                    "reference_text": "",
+                    "lm_label": "",
+                    "num_turns": 0,
+                })),
+            )
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]

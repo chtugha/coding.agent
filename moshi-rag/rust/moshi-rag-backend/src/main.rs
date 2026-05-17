@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 mod action;
 mod config;
+mod prompts;
+mod retrieval;
 mod server;
 mod text_stream;
 mod tomedo_client;
@@ -30,14 +32,8 @@ fn tracing_init(
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let filter = tracing_subscriber::filter::LevelFilter::from_str(log_level)?;
     let layers = vec![
-        tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking)
-            .with_filter(filter)
-            .boxed(),
-        tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stdout)
-            .with_filter(filter)
-            .boxed(),
+        tracing_subscriber::fmt::layer().with_writer(non_blocking).with_filter(filter).boxed(),
+        tracing_subscriber::fmt::layer().with_writer(std::io::stdout).with_filter(filter).boxed(),
     ];
     tracing_subscriber::registry().with(layers).init();
     Ok(guard)
@@ -67,15 +63,10 @@ async fn main() -> Result<()> {
 
     let tomedo = {
         let cfg = shared_config.read();
-        cfg.tomedo_crawl_url.as_deref().map(|url| {
-            Arc::new(tomedo_client::TomedoClient::new(url))
-        })
+        cfg.tomedo_crawl_url.as_deref().map(|url| Arc::new(tomedo_client::TomedoClient::new(url)))
     };
 
-    let dispatcher = Arc::new(action::ActionDispatcher::new(
-        shared_config.clone(),
-        tomedo.clone(),
-    ));
+    let dispatcher = Arc::new(action::ActionDispatcher::new(shared_config.clone(), tomedo.clone()));
 
     let app_state = Arc::new(server::AppState {
         config: shared_config,

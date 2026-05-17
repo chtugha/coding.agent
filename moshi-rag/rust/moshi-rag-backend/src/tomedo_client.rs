@@ -27,10 +27,7 @@ struct CallerPollResponse {
 
 impl TomedoClient {
     pub fn new(base_url: &str) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            base_url: base_url.trim_end_matches('/').to_string(),
-        }
+        Self { http: reqwest::Client::new(), base_url: base_url.trim_end_matches('/').to_string() }
     }
 
     pub async fn resolve_caller(&self, call_id: u64, phone: &str) -> Result<Option<i64>> {
@@ -163,11 +160,8 @@ mod tests {
 
     #[test]
     fn format_single_result_no_source() {
-        let results = vec![QueryResult {
-            text: "Patient has diabetes.".into(),
-            score: 0.95,
-            source: None,
-        }];
+        let results =
+            vec![QueryResult { text: "Patient has diabetes.".into(), score: 0.95, source: None }];
         let formatted = format_query_results(&results);
         assert!(formatted.contains("[Retrieved medical context]"));
         assert!(formatted.contains("(1) Patient has diabetes."));
