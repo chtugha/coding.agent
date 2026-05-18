@@ -1,0 +1,14 @@
+{
+    "listen_addr": "127.0.0.1",
+    "listen_port": 8090,
+    "log_dir": "$HOME/tmp/moshi-rag-backend-logs",
+    "instance_name": "moshi-rag-backend",
+    "llm_mode_enabled": false,
+    "arc_mode_enabled": false,
+    "tomedo_crawl_url": "http://127.0.0.1:13181",
+    "trigger_window_chars": 200,
+    "llm_profiles": [],
+    "default_timeout_secs": 3.0,
+    "default_max_tokens": 256,
+    "triggers": []
+}

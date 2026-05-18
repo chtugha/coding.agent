@@ -19,7 +19,7 @@
     "rag_timeout": 3.0,
     "arc_encoder_tokenizer_path": "hf://meta-llama/Llama-3.2-3B-Instruct/tokenizer.json",
     "arc_encoder_model_file": "hf://kyutai/ARC4_Encoder_Llama/model.safetensors",
-    "backend_url": null,
+    "backend_url": "http://127.0.0.1:8090",
     "arc_mode_enabled": false,
     "batch_size": 8,
     "use_https": true,

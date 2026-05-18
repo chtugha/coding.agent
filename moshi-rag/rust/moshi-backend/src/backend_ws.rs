@@ -72,8 +72,26 @@ impl BackendWsClient {
 
         loop {
             tracing::info!("backend_ws: connecting to {}", ws_url);
-            match tokio_tungstenite::connect_async(&ws_url).await {
-                Ok((ws_stream, _)) => {
+            let connect_result = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio_tungstenite::connect_async(&ws_url),
+            )
+            .await;
+            match connect_result {
+                Err(_) => {
+                    tracing::warn!(
+                        "backend_ws: connection timed out after 5s. Retrying in {}ms",
+                        backoff_ms
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "backend_ws: connection failed: {}. Retrying in {}ms",
+                        e,
+                        backoff_ms
+                    );
+                }
+                Ok(Ok((ws_stream, _))) => {
                     tracing::info!("backend_ws: connected to {}", ws_url);
                     backoff_ms = 500;
                     let (mut write, mut read) = ws_stream.split();
@@ -139,13 +157,6 @@ impl BackendWsClient {
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "backend_ws: connection failed: {}. Retrying in {}ms",
-                        e,
-                        backoff_ms
-                    );
                 }
             }
 

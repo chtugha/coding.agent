@@ -535,6 +535,11 @@ impl BatchedState {
 
             if let Some((ref rag_mgr, _)) = rag_manager {
                 if let Some((slot_id, ref_text)) = rag_mgr.try_recv_result_slot() {
+                    let display_text = if let Some(idx) = ref_text.find('\t') {
+                        ref_text[idx + 1..].to_string()
+                    } else {
+                        ref_text.clone()
+                    };
                     if !ref_text.trim().is_empty() {
                         if arc_mode_enabled {
                             if let Err(e) =
@@ -543,16 +548,16 @@ impl BatchedState {
                                 tracing::warn!(?e, slot_id, "set_streaming_sum_condition");
                             }
                         } else {
-                            match inner.text_tokenizer.encode(&ref_text) {
+                            match inner.text_tokenizer.encode(&display_text) {
                                 Ok(pieces) => {
-                                    let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id as u32).collect();
+                                    let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id).collect();
                                     tracing::info!(slot_id, n_tokens = token_ids.len(), "rag: teacher-forcing inject queued");
                                     state.queue_inject_tokens(slot_id, token_ids);
                                     if let Some(ref turn_managers) = turn_managers {
                                         if let Some(tm) = turn_managers.get(slot_id) {
                                             let ctx_block = format!(
                                                 "[Injected reference]\n{}\n[End of injected reference]\n\n",
-                                                ref_text
+                                                display_text
                                             );
                                             tm.lock().unwrap().append_context(&ctx_block);
                                         }
@@ -570,7 +575,7 @@ impl BatchedState {
                             role: TextRole::Model,
                         }
                     } else {
-                        StreamOut::ReferenceText { text: ref_text }
+                        StreamOut::ReferenceText { text: display_text }
                     };
                     if pool.send_to_slot(slot_id, out).is_err() {
                         tracing::debug!(slot_id, "failed to send RAG result to slot");
@@ -583,19 +588,19 @@ impl BatchedState {
                     match inbound {
                         crate::backend_ws::InboundWsMsg::ReferenceInject { slot_id, text } => {
                             tracing::info!(slot_id, text_len = text.len(), "ws: reference_inject received");
-                            if let Some(ref turn_managers) = turn_managers {
-                                if let Some(tm) = turn_managers.get(slot_id) {
-                                    let ctx_block = format!(
-                                        "[Injected reference]\n{}\n[End of injected reference]\n\n",
-                                        text
-                                    );
-                                    tm.lock().unwrap().append_context(&ctx_block);
-                                }
-                            }
                             if !arc_mode_enabled {
+                                if let Some(ref turn_managers) = turn_managers {
+                                    if let Some(tm) = turn_managers.get(slot_id) {
+                                        let ctx_block = format!(
+                                            "[Injected reference]\n{}\n[End of injected reference]\n\n",
+                                            text
+                                        );
+                                        tm.lock().unwrap().append_context(&ctx_block);
+                                    }
+                                }
                                 match inner.text_tokenizer.encode(&text) {
                                     Ok(pieces) => {
-                                        let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id as u32).collect();
+                                        let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id).collect();
                                         tracing::info!(slot_id, n_tokens = token_ids.len(), "ws: teacher-forcing inject queued");
                                         state.queue_inject_tokens(slot_id, token_ids);
                                     }
@@ -603,10 +608,12 @@ impl BatchedState {
                                         tracing::warn!(slot_id, ?e, "ws: failed to tokenize reference_inject text");
                                     }
                                 }
-                            }
-                            let out = StreamOut::ReferenceText { text };
-                            if pool.send_to_slot(slot_id, out).is_err() {
-                                tracing::debug!(slot_id, "failed to send ws reference_inject to slot");
+                                let out = StreamOut::ReferenceText { text };
+                                if pool.send_to_slot(slot_id, out).is_err() {
+                                    tracing::debug!(slot_id, "failed to send ws reference_inject to slot");
+                                }
+                            } else {
+                                tracing::warn!(slot_id, "ws: reference_inject received but arc_mode_enabled=true — backend should send arc_inject; ignoring");
                             }
                         }
                         crate::backend_ws::InboundWsMsg::ArcInject { slot_id, reference_text } => {

@@ -483,7 +483,7 @@ impl State {
                 self.slots[b].forced_audio_tokens.forced_tokens(self.slots[b].step_idx).to_vec()
             })
             .collect();
-        let sampled_text: Vec<Option<u32>> = sampled_text.iter().copied().map(Some).collect();
+        let sampled_text: Vec<Option<u32>> = sampled_text.into_iter().map(Some).collect();
         let last_audio_per_batch = self.model.depformer_sample_batched(
             &ys,
             &sampled_text,
@@ -501,11 +501,7 @@ impl State {
                 None => continue,
             };
             for c_idx in 0..self.config.generated_audio_codebooks {
-                let delay = if c_idx == 0 || c_idx == self.config.generated_audio_codebooks {
-                    0
-                } else {
-                    self.config.acoustic_delay
-                };
+                let delay = if c_idx == 0 { 0 } else { self.config.acoustic_delay };
                 let pos = slot.step_idx.saturating_sub(delay);
                 let v = last_audio.get(c_idx).copied().unwrap_or(audio_pad);
                 slot.audio_tokens[pos][c_idx] = v;

@@ -335,10 +335,44 @@ Save incoming audio as WAV</label>
 <input class="wt-input" id="moshiDefaultLang" placeholder="en" title="Language code used when no language-specific backend is available. Must match one of the configured backend language codes." style="font-size:11px;width:80px">
 <span style="font-size:11px;color:var(--wt-text-secondary)">Falls back to this language if no backend matches the pipeline language.</span>
 </div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;margin-top:10px;color:var(--wt-text-secondary)">RAG Backend Connection</div>
+<p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:6px">The moshi-rag-backend-service receives the continuous text token stream and dispatches actions on trigger matches.</p>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;font-size:11px">
+<div><label style="font-size:11px">Backend URL</label><input class="wt-input" id="moshiBackendUrl" placeholder="http://127.0.0.1:8090" title="URL of the moshi-rag-backend-service WebSocket/HTTP endpoint." style="font-size:11px"></div>
+<div><label style="font-size:11px">tomedo-crawl URL</label><input class="wt-input" id="moshiTomedoCrawlUrl" placeholder="http://127.0.0.1:13181" title="URL of the tomedo-crawl service for patient lookup and semantic search." style="font-size:11px"></div>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;margin-top:10px;color:var(--wt-text-secondary)">Mode Toggles</div>
+<div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:10px;font-size:11px">
+<label style="cursor:pointer;display:flex;align-items:center;gap:4px" title="Enable ARC encoder for reference text injection. Uses ~6 GB additional GPU memory. When off (default), teacher-forcing injection is used instead (zero extra GPU memory)."><input type="checkbox" id="moshiArcMode" onchange="moshiToggleArcFields()" style="width:14px;height:14px;cursor:pointer"> ARC Mode</label>
+<label style="cursor:pointer;display:flex;align-items:center;gap:4px" title="Enable LLM-based retrieval via the backend. When off, only tomedo-crawl queries and action dispatch are available."><input type="checkbox" id="moshiLlmMode" onchange="moshiToggleLlmFields()" style="width:14px;height:14px;cursor:pointer"> LLM Retrieval Mode</label>
+</div>
+<div id="moshiArcFields" class="hidden" style="border:1px solid var(--wt-border);border-radius:4px;padding:8px;margin-bottom:10px;background:var(--wt-bg-tertiary)">
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">ARC Encoder Settings</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px">
+<div><label style="font-size:11px">ARC model file</label><input class="wt-input" id="moshiArcModelFile" placeholder="hf://kyutai/moshiko-pytorch-bf16/arc_encoder.safetensors" title="Path or HF URL for the ARC encoder model weights." style="font-size:11px"></div>
+<div><label style="font-size:11px">ARC tokenizer path</label><input class="wt-input" id="moshiArcTokenizerPath" placeholder="hf://kyutai/moshiko-pytorch-bf16/arc_tokenizer.model" title="Path or HF URL for the ARC encoder SentencePiece tokenizer." style="font-size:11px"></div>
+</div>
+</div>
+<div id="moshiLlmFields" class="hidden" style="border:1px solid var(--wt-border);border-radius:4px;padding:8px;margin-bottom:10px;background:var(--wt-bg-tertiary)">
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">LLM Retrieval Settings</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px">
+<div><label style="font-size:11px">LLM API URL</label><input class="wt-input" id="moshiLlmApiUrl" placeholder="http://127.0.0.1:11434/v1" title="OpenAI-compatible LLM API endpoint used for retrieval." style="font-size:11px"></div>
+<div><label style="font-size:11px">LLM API key (optional)</label><input class="wt-input" id="moshiLlmApiKey" type="password" placeholder="" title="API key for the LLM endpoint. Leave empty for local models." style="font-size:11px"></div>
+</div>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;margin-top:10px;color:var(--wt-text-secondary)">[RET] Token Action</div>
+<p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:6px">Action dispatched when the Moshi model emits a [RET] retrieval token.</p>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+<select class="wt-select" id="moshiRetAction" style="font-size:11px;width:200px" title="Default action for [RET] token events.">
+<option value="tomedo-crawl-query">tomedo-crawl-query</option>
+<option value="llm-retrieval">llm-retrieval</option>
+</select>
+<span style="font-size:11px;color:var(--wt-text-secondary)">Default action fired when [RET] is detected.</span>
+</div>
 <div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Retrieval Trigger Rules</div>
-<p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:6px">Triggers are evaluated by the retrieval shim (MoshiRAG integration). When a matching keyword or phrase is detected in the STT transcript the configured tomedo API action is fired and the result is injected into Moshi as reference context.</p>
+<p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:6px">Triggers are evaluated by the backend service. When a matching keyword or phrase is detected in the text stream, the configured action is dispatched and the result can be injected into Moshi as reference context.</p>
 <div id="moshiTriggerList" style="margin-bottom:8px"></div>
-<div style="display:grid;grid-template-columns:90px 1fr 1fr 1fr 80px;gap:4px;margin-bottom:4px;font-size:11px;align-items:end">
+<div style="display:grid;grid-template-columns:90px 1fr 120px 1fr 1fr 70px 50px 80px;gap:4px;margin-bottom:4px;font-size:11px;align-items:end">
 <div>
 <label style="font-size:11px">Type</label>
 <select class="wt-select" id="moshiNewTriggerType" style="font-size:11px">
@@ -347,9 +381,22 @@ Save incoming audio as WAV</label>
 <option value="command">Command</option>
 </select>
 </div>
-<div><label style="font-size:11px">Match (keyword/regex)</label><input class="wt-input" id="moshiNewTriggerMatch" placeholder="Medikament|medication" title="Keyword or regex to match against STT transcript. Leave empty for a command-only trigger that fires on every retrieval event." style="font-size:11px"></div>
-<div><label style="font-size:11px">Tomedo action / endpoint</label><input class="wt-input" id="moshiNewTriggerAction" placeholder="/api/patient/medication" title="Tomedo REST endpoint or command name to call when this trigger fires. The response is injected as reference text." style="font-size:11px"></div>
+<div><label style="font-size:11px">Match (keyword/regex)</label><input class="wt-input" id="moshiNewTriggerMatch" placeholder="Medikament|medication" title="Keyword or regex to match against the text stream. Leave empty for a command-only trigger." style="font-size:11px"></div>
+<div>
+<label style="font-size:11px">Action Type</label>
+<select class="wt-select" id="moshiNewTriggerActionType" onchange="moshiTriggerActionTypeChanged()" style="font-size:11px">
+<option value="tomedo-crawl-query">tomedo-crawl-query</option>
+<option value="webhook">webhook</option>
+<option value="llm-retrieval">llm-retrieval</option>
+<option value="calendar">calendar</option>
+<option value="script">script</option>
+<option value="retrieval_and_webhook">retrieval+webhook</option>
+</select>
+</div>
+<div id="moshiNewTriggerActionUrlWrap"><label style="font-size:11px">Action URL / path</label><input class="wt-input" id="moshiNewTriggerActionUrl" placeholder="https://..." title="URL for webhook/calendar, or script path. Not needed for tomedo-crawl-query / llm-retrieval." style="font-size:11px"></div>
 <div><label style="font-size:11px">Label</label><input class="wt-input" id="moshiNewTriggerLabel" placeholder="Medication query" title="Human-readable label for this trigger, shown in logs." style="font-size:11px"></div>
+<div><label style="font-size:11px">Cooldown</label><input class="wt-input" id="moshiNewTriggerCooldown" type="number" min="0" value="30" placeholder="30" title="Cooldown in seconds before this trigger can fire again." style="font-size:11px"></div>
+<div style="display:flex;align-items:center;gap:2px;padding-top:14px"><input type="checkbox" id="moshiNewTriggerInject" checked title="Inject the action result as reference text into the Moshi model." style="width:14px;height:14px"><label style="font-size:10px;cursor:pointer" for="moshiNewTriggerInject">Inject</label></div>
 <div style="display:flex;align-items:flex-end"><button class="wt-btn wt-btn-secondary" style="font-size:10px;height:32px;white-space:nowrap" onclick="moshiAddTrigger()">+ Add</button></div>
 </div>
 <div style="display:flex;gap:6px;align-items:center;margin-top:8px">

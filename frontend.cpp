@@ -7097,9 +7097,27 @@ private:
             std::string backends_json = get_setting("moshi_backends", "[]");
             std::string triggers_json = get_setting("moshi_triggers", "[]");
             std::string default_lang  = get_setting("moshi_default_language", "en");
+            std::string backend_url   = get_setting("moshi_backend_url", "http://127.0.0.1:8090");
+            std::string tomedo_crawl_url = get_setting("moshi_tomedo_crawl_url", "http://127.0.0.1:13181");
+            std::string arc_mode      = get_setting("moshi_arc_mode_enabled", "false");
+            std::string llm_mode      = get_setting("moshi_llm_mode_enabled", "false");
+            std::string arc_model     = get_setting("moshi_arc_model_file", "");
+            std::string arc_tok       = get_setting("moshi_arc_tokenizer_path", "");
+            std::string llm_url       = get_setting("moshi_llm_api_url", "");
+            std::string llm_key       = get_setting("moshi_llm_api_key", "");
+            std::string ret_action    = get_setting("moshi_ret_action", "tomedo-crawl-query");
             std::string resp = "{\"backends\":" + backends_json
                 + ",\"triggers\":" + triggers_json
-                + ",\"default_language\":\"" + escape_json(default_lang) + "\"}";
+                + ",\"default_language\":\"" + escape_json(default_lang) + "\""
+                + ",\"backend_url\":\"" + escape_json(backend_url) + "\""
+                + ",\"tomedo_crawl_url\":\"" + escape_json(tomedo_crawl_url) + "\""
+                + ",\"arc_mode_enabled\":" + (arc_mode == "true" ? "true" : "false")
+                + ",\"llm_mode_enabled\":" + (llm_mode == "true" ? "true" : "false")
+                + ",\"arc_model_file\":\"" + escape_json(arc_model) + "\""
+                + ",\"arc_tokenizer_path\":\"" + escape_json(arc_tok) + "\""
+                + ",\"llm_api_url\":\"" + escape_json(llm_url) + "\""
+                + ",\"llm_api_key\":\"" + escape_json(llm_key) + "\""
+                + ",\"ret_action\":\"" + escape_json(ret_action) + "\"}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
             return;
         }
@@ -7108,17 +7126,47 @@ private:
             auto extract = [&](const std::string& key) -> std::string {
                 auto pos = body.find("\"" + key + "\"");
                 if (pos == std::string::npos) return "";
-                auto colon = body.find(':', pos);
+                auto colon = body.find(':', pos + key.size() + 2);
                 if (colon == std::string::npos) return "";
                 auto start = colon + 1;
                 while (start < body.size() && body[start] == ' ') start++;
                 if (start >= body.size()) return "";
                 if (body[start] == '"') {
-                    auto end = body.find('"', start + 1);
-                    if (end == std::string::npos) return "";
-                    return body.substr(start + 1, end - start - 1);
+                    std::string result;
+                    size_t i = start + 1;
+                    while (i < body.size()) {
+                        if (body[i] == '\\' && i + 1 < body.size()) {
+                            char next = body[i + 1];
+                            if (next == '"') result += '"';
+                            else if (next == '\\') result += '\\';
+                            else if (next == '/') result += '/';
+                            else if (next == 'b') result += '\b';
+                            else if (next == 'f') result += '\f';
+                            else if (next == 'n') result += '\n';
+                            else if (next == 'r') result += '\r';
+                            else if (next == 't') result += '\t';
+                            else { result += '\\'; result += next; }
+                            i += 2;
+                            continue;
+                        }
+                        if (body[i] == '"') break;
+                        result += body[i];
+                        i++;
+                    }
+                    return result;
                 }
                 return "";
+            };
+            auto extract_bool = [&](const std::string& key) -> std::string {
+                auto pos = body.find("\"" + key + "\"");
+                if (pos == std::string::npos) return "false";
+                auto colon = body.find(':', pos);
+                if (colon == std::string::npos) return "false";
+                auto start = colon + 1;
+                while (start < body.size() && body[start] == ' ') start++;
+                if (start >= body.size()) return "false";
+                if (body.compare(start, 4, "true") == 0) return "true";
+                return "false";
             };
             auto extract_json_value = [&](const std::string& key) -> std::string {
                 auto pos = body.find("\"" + key + "\"");
@@ -7149,9 +7197,40 @@ private:
             std::string triggers = extract_json_value("triggers");
             std::string def_lang = extract("default_language");
             if (def_lang.empty()) def_lang = "en";
+            std::string backend_url    = extract("backend_url");
+            std::string tomedo_crawl   = extract("tomedo_crawl_url");
+            std::string arc_mode       = extract_bool("arc_mode_enabled");
+            std::string llm_mode       = extract_bool("llm_mode_enabled");
+            std::string arc_model      = extract("arc_model_file");
+            std::string arc_tok        = extract("arc_tokenizer_path");
+            std::string llm_url        = extract("llm_api_url");
+            std::string llm_key        = extract("llm_api_key");
+            std::string ret_action     = extract("ret_action");
+            if (backend_url.empty()) backend_url = "http://127.0.0.1:8090";
+            if (tomedo_crawl.empty()) tomedo_crawl = "http://127.0.0.1:13181";
+            if (ret_action.empty()) ret_action = "tomedo-crawl-query";
             set_setting("moshi_backends", backends);
             set_setting("moshi_triggers", triggers);
             set_setting("moshi_default_language", def_lang);
+            set_setting("moshi_backend_url", backend_url);
+            set_setting("moshi_tomedo_crawl_url", tomedo_crawl);
+            set_setting("moshi_arc_mode_enabled", arc_mode);
+            set_setting("moshi_llm_mode_enabled", llm_mode);
+            set_setting("moshi_arc_model_file", arc_model);
+            set_setting("moshi_arc_tokenizer_path", arc_tok);
+            set_setting("moshi_llm_api_url", llm_url);
+            set_setting("moshi_llm_api_key", llm_key);
+            set_setting("moshi_ret_action", ret_action);
+            std::string backend_config_body = "{\"llm_mode_enabled\":" + llm_mode
+                + ",\"arc_mode_enabled\":" + arc_mode
+                + ",\"tomedo_crawl_url\":\"" + escape_json(tomedo_crawl) + "\""
+                + ",\"triggers\":" + triggers
+                + ",\"ret_action\":\"" + escape_json(ret_action) + "\""
+                + ",\"llm_api_url\":\"" + escape_json(llm_url) + "\""
+                + ",\"llm_api_key\":\"" + escape_json(llm_key) + "\"}";
+            std::thread([backend_url, backend_config_body](){
+                ollama_http_request("POST", backend_url, "/api/config", backend_config_body, 5000);
+            }).detach();
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
             return;
         }
@@ -7328,8 +7407,11 @@ private:
         if (colon != std::string::npos) {
             host = trimmed.substr(0, colon);
             port_str = trimmed.substr(colon + 1);
+            auto slash = port_str.find('/');
+            if (slash != std::string::npos) port_str = port_str.substr(0, slash);
         } else if (!trimmed.empty()) {
-            host = trimmed;
+            auto slash = trimmed.find('/');
+            host = (slash != std::string::npos) ? trimmed.substr(0, slash) : trimmed;
         }
         struct addrinfo hints{}, *res = nullptr;
         hints.ai_family = AF_INET;
@@ -7348,9 +7430,12 @@ private:
             return "";
         }
         freeaddrinfo(res);
+        bool is_post = (method == "POST" || method == "PUT" || method == "PATCH");
         std::string req = method + " " + path + " HTTP/1.0\r\nHost: " + host + "\r\n";
         if (!body.empty()) {
             req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+        } else if (is_post) {
+            req += "Content-Length: 0\r\n";
         }
         req += "Connection: close\r\n\r\n";
         if (!body.empty()) req += body;
