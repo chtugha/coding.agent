@@ -421,7 +421,7 @@ impl State {
                     }
                 }
             }
-            let t = Tensor::from_vec(vals.clone(), (batch_size, 1), &dev)?;
+            let t = Tensor::from_vec(vals, (batch_size, 1), &dev)?;
             codes.push(Some(t));
         }
 
