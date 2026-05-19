@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
             standalone::run(&standalone_args, &config, fwd_for_cmd).await?;
         }
         Command::Benchmark(standalone_args) => {
-            let config = stream_both::Config::load(&args.config)?;
+            let mut config = standalone::Config::load(&args.config)?;
             let _guard = if standalone_args.chrome_tracing {
                 use tracing_chrome::ChromeLayerBuilder;
                 use tracing_subscriber::prelude::*;
@@ -136,8 +136,8 @@ async fn main() -> Result<()> {
                 b
             } else {
                 let guard = tracing_init(
-                    &config.log_dir,
-                    &config.instance_name,
+                    &config.stream.log_dir,
+                    &config.stream.instance_name,
                     &args.log_level,
                     args.silent,
                     None,
@@ -145,7 +145,10 @@ async fn main() -> Result<()> {
                 let b: Box<dyn std::any::Any> = Box::new(guard);
                 b
             };
-            benchmark::run(&standalone_args, &config).await?;
+            if config.stream.requires_model_download() {
+                standalone::download_from_hub(&mut config.stream).await?;
+            }
+            benchmark::run(&standalone_args, &config.stream).await?;
         }
     }
     Ok(())

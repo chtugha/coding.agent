@@ -14,7 +14,6 @@ publish = false
 anyhow = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
-bincode = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
 candle = { workspace = true }

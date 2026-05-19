@@ -183,6 +183,7 @@ pub(crate) fn parse_retrieval_llms_json(config: &mut Config) -> Result<()> {
 }
 
 impl Config {
+    #[allow(dead_code)]
     pub fn load<P: AsRef<std::path::Path>>(p: P) -> Result<Self> {
         let config = std::fs::read_to_string(p)?;
         let mut config: Self = serde_json::from_str(&config)?;
