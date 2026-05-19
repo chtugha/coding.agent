@@ -2,6 +2,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
+const MAX_QUERY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_CALLER_ERROR_BYTES: usize = 16 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct TomedoClient {
     http: reqwest::Client,
@@ -46,14 +49,22 @@ impl TomedoClient {
             .await?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.bytes().await.unwrap_or_default();
+            let body_str = String::from_utf8_lossy(
+                &body[..body.len().min(MAX_CALLER_ERROR_BYTES)],
+            );
             tracing::warn!(
                 call_id,
                 phone,
-                status = %resp.status(),
+                %status,
+                body = %body_str,
                 "tomedo-crawl POST /caller failed"
             );
             return Ok(None);
         }
+
+        drop(resp);
 
         let poll_url = format!("{}/caller/{}", self.base_url, call_id);
         let max_attempts = 10;
@@ -124,11 +135,30 @@ impl TomedoClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
+            let body = resp.bytes().await.unwrap_or_default();
+            let body_text = String::from_utf8_lossy(&body[..body.len().min(MAX_CALLER_ERROR_BYTES)]);
             anyhow::bail!("tomedo-crawl POST /query returned {status}: {body_text}");
         }
 
-        let results: Vec<QueryResult> = resp.json().await?;
+        if let Some(cl) = resp.content_length() {
+            if cl > MAX_QUERY_RESPONSE_BYTES as u64 {
+                anyhow::bail!(
+                    "tomedo-crawl POST /query response too large: content-length {cl} exceeds cap {}",
+                    MAX_QUERY_RESPONSE_BYTES
+                );
+            }
+        }
+
+        let bytes = resp.bytes().await?;
+        if bytes.len() > MAX_QUERY_RESPONSE_BYTES {
+            anyhow::bail!(
+                "tomedo-crawl POST /query response too large: {} bytes (max {})",
+                bytes.len(),
+                MAX_QUERY_RESPONSE_BYTES
+            );
+        }
+
+        let results: Vec<QueryResult> = serde_json::from_slice(&bytes)?;
         Ok(results)
     }
 }

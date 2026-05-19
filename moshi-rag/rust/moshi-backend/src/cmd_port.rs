@@ -67,6 +67,14 @@ pub fn run_cmd_listener(
         let response = handle_command(cmd, &log_forwarder, &*status_provider);
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut drain = [0u8; 256];
+        loop {
+            match stream.read(&mut drain) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
     }
 
     tracing::info!("CMD listener shutting down");
