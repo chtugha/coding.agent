@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
         app_config.arc_mode_enabled,
     );
 
+    action::warn_if_webhooks_unconstrained(&app_config);
     let shared_config = config::SharedConfig::new(app_config);
 
     let (action_tx, action_rx) = tokio::sync::mpsc::channel::<text_stream::ActionRequest>(256);

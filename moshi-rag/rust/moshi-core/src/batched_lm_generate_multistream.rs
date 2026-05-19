@@ -24,6 +24,7 @@ pub struct SlotState {
     pub(super) forced_audio_tokens: ForcedAudioTokens,
     pub(super) inject_queue: VecDeque<u32>,
     pub(super) injecting: bool,
+    pub(super) injection_history_buf: [bool; 8],
     /// RAG prepend condition (e.g. first_speaker LUT). Applied once at step 0.
     pub(super) prepend_condition: Option<Tensor>,
     /// Pending streaming_sum (1, T, dim). Consumed one step per generation step.
@@ -50,6 +51,7 @@ impl SlotState {
             forced_audio_tokens,
             inject_queue: VecDeque::new(),
             injecting: false,
+            injection_history_buf: [false; 8],
             prepend_condition: None,
             pending_streaming_sum: None,
             streaming_sum_index: 0,
@@ -65,6 +67,7 @@ impl SlotState {
             ForcedAudioTokens::new(config.acoustic_delay, config.audio_pad_token(), &[8, 8]);
         self.inject_queue.clear();
         self.injecting = false;
+        self.injection_history_buf = [false; 8];
         self.prepend_condition = None;
         self.pending_streaming_sum = None;
         self.streaming_sum_index = 0;
@@ -158,8 +161,19 @@ impl State {
     }
 
     pub fn queue_inject_tokens(&mut self, slot_id: usize, tokens: Vec<u32>) {
+        const MAX_INJECT_DEPTH: usize = 512;
         if let Some(slot) = self.slots.get_mut(slot_id) {
-            slot.inject_queue.extend(tokens);
+            let available = MAX_INJECT_DEPTH.saturating_sub(slot.inject_queue.len());
+            if available < tokens.len() {
+                tracing::warn!(
+                    slot_id,
+                    queued = slot.inject_queue.len(),
+                    attempted = tokens.len(),
+                    max = MAX_INJECT_DEPTH,
+                    "inject_queue near capacity — truncating to avoid unbounded growth"
+                );
+            }
+            slot.inject_queue.extend(tokens.into_iter().take(available));
         }
     }
 
@@ -265,7 +279,7 @@ impl State {
             Some((_, 1.0)) => return Ok(logits.clone()),
             Some((ctx, p)) => (ctx, p),
         };
-        let mut out = logits.to_dtype(candle::DType::F32)?.to_vec2::<f32>()?;
+        let mut out = logits.to_dtype(candle::DType::F32)?.squeeze(1)?.to_vec2::<f32>()?;
         for (b, out_row) in out.iter_mut().enumerate().take(batch_size) {
             if !mask.is_active(b) {
                 continue;
@@ -430,6 +444,7 @@ impl State {
                     slot.text_tokens[slot.step_idx - 1]
                 };
             }
+            slot.injection_history_buf[slot.step_idx % 8] = slot.injecting;
         }
         let text_token = Tensor::from_vec(text_vals, (batch_size, 1), &dev)?;
 
@@ -512,16 +527,22 @@ impl State {
             }
         }
 
-        let need_decode: Vec<usize> = (0..batch_size)
-            .filter(|&b| mask.is_active(b) && self.slots[b].step_idx > self.config.acoustic_delay)
-            .collect();
-        if need_decode.is_empty() {
+        let mut need_decode = vec![false; batch_size];
+        for b in 0..batch_size {
+            if mask.is_active(b) && self.slots[b].step_idx > self.config.acoustic_delay {
+                need_decode[b] = true;
+            }
+        }
+        if !need_decode.iter().any(|&x| x) {
             return Ok(out);
         }
         let mimi_cb = self.mimi.config().quantizer_n_q;
         let cb = self.config.generated_audio_codebooks.min(mimi_cb);
         let mut decode_codes = vec![0u32; batch_size * cb];
-        for &b in &need_decode {
+        for b in 0..batch_size {
+            if !need_decode[b] {
+                continue;
+            }
             let slot = &self.slots[b];
             let idx = slot.step_idx - self.config.acoustic_delay - 1;
             let row = &slot.audio_tokens[idx][..cb];
@@ -530,18 +551,19 @@ impl State {
             }
         }
         let decode_tensor = Tensor::from_vec(decode_codes, (batch_size, cb, 1), &dev)?;
-        let decode_mask = StreamMask::new(
-            (0..batch_size).map(|b| need_decode.contains(&b)).collect::<Vec<_>>(),
-            &dev,
-        )?;
+        let decode_mask = StreamMask::new(need_decode.clone(), &dev)?;
         let pcm_out = self.mimi.decode_step(&decode_tensor.into(), &decode_mask)?;
         if let Some(pcm_out) = pcm_out.as_option() {
             let frame_len = pcm_out.dim(2)?;
+            let acoustic_delay = self.config.acoustic_delay;
             for b in 0..batch_size {
-                if !need_decode.contains(&b) {
+                if !need_decode[b] {
                     continue;
                 }
-                if self.slots[b].injecting {
+                let slot = &self.slots[b];
+                let old_step = slot.step_idx.saturating_sub(acoustic_delay + 1);
+                let was_injecting_delayed = slot.injection_history_buf[old_step % 8];
+                if slot.injecting || was_injecting_delayed {
                     out.push(StreamingOutMsg::Pcm { batch_idx: b, pcm: vec![0.0f32; frame_len] });
                 } else {
                     let pcm_slice = pcm_out.i((b, 0))?;

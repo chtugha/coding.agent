@@ -111,16 +111,29 @@ enum MoshiMsgType : uint8_t {
     MT_COLORED_REF  = 9,
 };
 
+// Minimal JSON object validation: checks that s starts with '{' and ends with '}'
+// after stripping whitespace.  Rejects obviously invalid / non-JSON responses from
+// tomedo-crawl before forwarding them to the backend as MT_METADATA frames.
+static bool is_valid_json_object(const std::string& s) {
+    size_t lo = 0;
+    while (lo < s.size() && (unsigned char)s[lo] <= ' ') ++lo;
+    size_t hi = s.size();
+    while (hi > lo && (unsigned char)s[hi - 1] <= ' ') --hi;
+    return hi > lo && s[lo] == '{' && s[hi - 1] == '}';
+}
+
 // ─── OGG page builder (minimal, enough to wrap one Opus packet per page) ───
 // OGG capture pattern + header fields as per RFC 3533.
 // We produce one OGG page per Opus frame, which is what the moshi-backend does.
-static std::vector<uint8_t> ogg_opus_head() {
+static std::vector<uint8_t> ogg_opus_head(uint16_t pre_skip = 312) {
     // OpusHead identification header (19 bytes)
+    // pre_skip is in 48kHz samples (multiply encoder lookahead by 48000/sample_rate)
     std::vector<uint8_t> h = {
         'O','p','u','s','H','e','a','d',
         1,                                      // version
         1,                                      // channel count
-        0x00, 0x0B,                             // pre-skip (LE) = 2816
+        static_cast<uint8_t>(pre_skip & 0xFF),
+        static_cast<uint8_t>((pre_skip >> 8) & 0xFF), // pre-skip (LE, 48kHz samples)
         0xC0, 0x5D, 0x00, 0x00,                 // input sample rate = 24000 LE
         0x00, 0x00,                             // output gain
         0                                       // channel mapping family
@@ -222,13 +235,13 @@ static std::vector<uint8_t> build_ogg_page(OggPage& pg,
 }
 
 // Build a complete OGG/Opus stream prefix (identification + comment headers in BOS pages).
-static std::vector<uint8_t> build_ogg_opus_preamble(uint32_t serial) {
+static std::vector<uint8_t> build_ogg_opus_preamble(uint32_t serial, uint16_t pre_skip = 312) {
     OggPage pg;
     pg.serial = serial;
     pg.bos = true;
     pg.granule = 0;
 
-    auto head = ogg_opus_head();
+    auto head = ogg_opus_head(pre_skip);
     auto page0 = build_ogg_page(pg, head.data(), head.size());
 
     pg.granule = 0;
@@ -271,6 +284,7 @@ struct MoshiCallState {
     std::vector<float> input_accumulator;
     OpusEncoder* opus_enc{nullptr};
     OpusDecoder* opus_dec{nullptr};
+    int opus_lookahead{312};         // encoder lookahead in input samples (queried via OPUS_GET_LOOKAHEAD)
 
     // OGG state (per-call stream)
     OggPage ogg_out{};
@@ -426,8 +440,12 @@ private:
                     int err;
                     state->opus_enc = opus_encoder_create(MOSHI_SAMPLE_RATE, 1,
                                                           OPUS_APPLICATION_VOIP, &err);
-                    if (state->opus_enc)
+                    if (state->opus_enc) {
                         opus_encoder_ctl(state->opus_enc, OPUS_SET_BITRATE(OPUS_BITRATE));
+                        int lookahead = 0;
+                        if (opus_encoder_ctl(state->opus_enc, OPUS_GET_LOOKAHEAD(&lookahead)) == OPUS_OK)
+                            state->opus_lookahead = lookahead;
+                    }
                     state->opus_dec = opus_decoder_create(MOSHI_SAMPLE_RATE, 1, &err);
 
                     calls_[pkt.call_id] = state;
@@ -459,13 +477,16 @@ private:
                     std::thread([rag_state, ssl_copy, addr_copy, addrlen_copy]() {
                         std::string path = "/caller/" + std::to_string(rag_state->call_id);
                         std::string body = rag_http_get_static(path, addr_copy, addrlen_copy, ssl_copy);
-                        if (!body.empty()) {
-                            // Inject as MT=4 Metadata frame
+                        if (!body.empty() && is_valid_json_object(body)) {
+                            // Inject as MT=4 Metadata frame only when response is a JSON object
                             std::vector<uint8_t> frame;
                             frame.push_back(MT_METADATA);
                             frame.insert(frame.end(), body.begin(), body.end());
                             std::lock_guard<std::mutex> lock(rag_state->ws_outbound_mutex);
                             rag_state->ws_outbound_queue.push_back({std::move(frame)});
+                        } else if (!body.empty()) {
+                            std::cerr << "RAG response for call " << rag_state->call_id
+                                      << " is not a JSON object — skipping injection" << std::endl;
                         }
                         SSL_CTX_free(ssl_copy);
                     }).detach();
@@ -537,7 +558,10 @@ private:
 
             // Send OGG preamble (OpusHead + OpusTags) once per call
             if (!state->ogg_preamble_sent) {
-                auto preamble = build_ogg_opus_preamble(state->ogg_out.serial);
+                // Scale lookahead from input sample rate to 48kHz (OpusHead pre-skip is in 48kHz samples)
+                uint16_t pre_skip_48k = static_cast<uint16_t>(
+                    static_cast<int64_t>(state->opus_lookahead) * 48000 / MOSHI_SAMPLE_RATE);
+                auto preamble = build_ogg_opus_preamble(state->ogg_out.serial, pre_skip_48k);
                 std::vector<uint8_t> frame;
                 frame.push_back(MT_AUDIO);
                 frame.insert(frame.end(), preamble.begin(), preamble.end());
@@ -793,6 +817,8 @@ private:
         posix_spawn_file_actions_t actions;
         posix_spawn_file_actions_init(&actions);
         posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
 
         pid_t pid;
         int ret = posix_spawn(&pid, binary.c_str(), &actions, nullptr,
@@ -822,11 +848,14 @@ private:
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(SUBPROCESS_KILL_WAIT);
         int status;
         while (std::chrono::steady_clock::now() < deadline) {
-            if (waitpid(bp->pid, &status, WNOHANG) != 0) return;
+            pid_t r = waitpid(bp->pid, &status, WNOHANG);
+            if (r > 0) return;           // exited cleanly
+            if (r < 0 && errno != EINTR) return;  // unexpected error — give up gracefully
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         kill(bp->pid, SIGKILL);
-        waitpid(bp->pid, &status, 0);
+        // Block until the killed process is reaped, restarting on EINTR.
+        do { status = 0; } while (waitpid(bp->pid, &status, 0) < 0 && errno == EINTR);
     }
 
     // ── Call lifecycle ──────────────────────────────────────────────────────

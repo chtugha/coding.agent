@@ -143,6 +143,9 @@ impl AppConfig {
         if let Some(ref mut dir) = config.allowed_script_dir {
             *dir = replace_env_vars(dir);
         }
+        for host in config.allowed_webhook_hosts.iter_mut() {
+            *host = replace_env_vars(host);
+        }
         Ok(config)
     }
 }

@@ -255,7 +255,7 @@ fn handle_call_start_msg(
     }
 }
 
-async fn handle_token_msg(
+fn handle_token_msg(
     slot_id: usize,
     role: String,
     token_text: String,
@@ -277,32 +277,30 @@ async fn handle_token_msg(
 
     for trigger in fired {
         tracing::info!(slot_id, label = %trigger.label, action_type = %trigger.action_type, "trigger fired");
-        let _ = ctx
-            .response_tx
-            .send(OutgoingMessage::TriggerFired {
-                slot_id,
-                label: trigger.label.clone(),
-                action_type: trigger.action_type.clone(),
-            })
-            .await;
-        let _ = ctx
-            .action_tx
-            .send(ActionRequest {
-                slot_id,
-                action_type: trigger.action_type.clone(),
-                action_url: trigger.action_url.clone(),
-                context_snippet: window.to_string(),
-                patient_id: slot.patient_id,
-                inject_result: trigger.inject_result,
-                label: trigger.label.clone(),
-                arc_mode: ctx.arc_mode,
-                response_tx: ctx.response_tx.clone(),
-            })
-            .await;
+        if let Err(e) = ctx.response_tx.try_send(OutgoingMessage::TriggerFired {
+            slot_id,
+            label: trigger.label.clone(),
+            action_type: trigger.action_type.clone(),
+        }) {
+            tracing::warn!(slot_id, label = %trigger.label, error = %e, "dropped TriggerFired notification: response channel full");
+        }
+        if let Err(e) = ctx.action_tx.try_send(ActionRequest {
+            slot_id,
+            action_type: trigger.action_type.clone(),
+            action_url: trigger.action_url.clone(),
+            context_snippet: window.to_string(),
+            patient_id: slot.patient_id,
+            inject_result: trigger.inject_result,
+            label: trigger.label.clone(),
+            arc_mode: ctx.arc_mode,
+            response_tx: ctx.response_tx.clone(),
+        }) {
+            tracing::warn!(slot_id, label = %trigger.label, error = %e, "dropped action dispatch: action channel full");
+        }
     }
 }
 
-async fn handle_ret_token_msg(slot_id: usize, slots: &HashMap<usize, SlotState>, ctx: &WsCtx<'_>) {
+fn handle_ret_token_msg(slot_id: usize, slots: &HashMap<usize, SlotState>, ctx: &WsCtx<'_>) {
     tracing::info!(
         slot_id,
         action_type = ctx.ret_action_type,
@@ -324,23 +322,22 @@ async fn handle_ret_token_msg(slot_id: usize, slots: &HashMap<usize, SlotState>,
         },
     );
 
-    let _ = ctx
-        .action_tx
-        .send(ActionRequest {
-            slot_id,
-            action_type: ctx.ret_action_type.to_string(),
-            action_url: ctx.ret_action_url.map(str::to_string),
-            context_snippet,
-            patient_id,
-            inject_result: ctx.ret_inject_result,
-            label: "[RET]".to_string(),
-            arc_mode: ctx.arc_mode,
-            response_tx: ctx.response_tx.clone(),
-        })
-        .await;
+    if let Err(e) = ctx.action_tx.try_send(ActionRequest {
+        slot_id,
+        action_type: ctx.ret_action_type.to_string(),
+        action_url: ctx.ret_action_url.map(str::to_string),
+        context_snippet,
+        patient_id,
+        inject_result: ctx.ret_inject_result,
+        label: "[RET]".to_string(),
+        arc_mode: ctx.arc_mode,
+        response_tx: ctx.response_tx.clone(),
+    }) {
+        tracing::warn!(slot_id, error = %e, "dropped [RET] action dispatch: action channel full");
+    }
 }
 
-async fn handle_incoming(
+fn handle_incoming(
     incoming: IncomingMessage,
     slots: &mut HashMap<usize, SlotState>,
     ctx: &WsCtx<'_>,
@@ -354,10 +351,10 @@ async fn handle_incoming(
             slots.remove(&slot_id);
         }
         IncomingMessage::Token { slot_id, role, text: token_text, ts_ms } => {
-            handle_token_msg(slot_id, role, token_text, ts_ms, slots, ctx).await;
+            handle_token_msg(slot_id, role, token_text, ts_ms, slots, ctx);
         }
         IncomingMessage::RetToken { slot_id } => {
-            handle_ret_token_msg(slot_id, slots, ctx).await;
+            handle_ret_token_msg(slot_id, slots, ctx);
         }
     }
 }
@@ -416,7 +413,7 @@ pub async fn handle_websocket(
 
     // Channel for background patient-ID resolution results (slot_id, resolved patient_id).
     // Spawned tasks post here; the select! loop merges updates into SlotState.
-    let (pid_tx, mut pid_rx) = mpsc::channel::<(usize, Option<i64>)>(32);
+    let (pid_tx, mut pid_rx) = mpsc::channel::<(usize, Option<i64>)>(MAX_SLOTS);
 
     {
         let ctx = WsCtx {
@@ -445,7 +442,7 @@ pub async fn handle_websocket(
                         Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => continue,
                     };
                     match serde_json::from_str::<IncomingMessage>(&text) {
-                        Ok(incoming) => handle_incoming(incoming, &mut slots, &ctx).await,
+                        Ok(incoming) => handle_incoming(incoming, &mut slots, &ctx),
                         Err(e) => tracing::warn!("invalid websocket message: {} — {}", e, text),
                     }
                 }

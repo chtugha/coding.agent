@@ -159,13 +159,14 @@ impl State {
     where
         F: Fn(&[ItemState], &Tensor, &[Tensor]),
     {
-        let (batch_size, codebooks, steps) = audio_tokens.dims3()?;
+        let (batch_size, mimi_codebooks, steps) = audio_tokens.dims3()?;
         if batch_size != self.batch_size() {
             candle::bail!("batch size mismatch: {batch_size} != {}", self.batch_size());
         }
+        let codebooks = mimi_codebooks.min(self.lm.in_audio_codebooks());
         let mut words = vec![];
         for step in 0..steps {
-            let audio_tokens = audio_tokens.narrow(2, step, 1)?;
+            let audio_tokens = audio_tokens.narrow(2, step, 1)?.narrow(1, 0, codebooks)?;
             let audio_tokens = audio_tokens.reshape((batch_size, codebooks))?.to_vec2::<u32>()?;
             let audio_tokens = (0..codebooks)
                 .map(|codebook_idx| {

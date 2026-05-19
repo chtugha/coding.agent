@@ -93,7 +93,7 @@ impl ActionDispatcher {
             .await?;
 
         let status = resp.status();
-        let resp_text = resp.text().await.unwrap_or_default();
+        let resp_text = read_response_capped(resp, 1024 * 1024, url).await;
 
         if !status.is_success() {
             tracing::warn!(url, %status, "webhook returned non-success");
@@ -135,7 +135,7 @@ impl ActionDispatcher {
             .await?;
 
         let status = resp.status();
-        let resp_text = resp.text().await.unwrap_or_default();
+        let resp_text = read_response_capped(resp, 1024 * 1024, url).await;
 
         if !status.is_success() {
             tracing::warn!(url, %status, "calendar webhook returned non-success");
@@ -202,7 +202,9 @@ impl ActionDispatcher {
         {
             result?
         } else {
-            let _ = child.kill().await;
+            if let Err(e) = child.kill().await {
+                tracing::warn!(script = script_path_str, error = %e, "failed to kill timed-out script");
+            }
             anyhow::bail!("script execution timed out after 30 seconds");
         };
 
@@ -329,6 +331,38 @@ impl ActionDispatcher {
             );
             anyhow::bail!("webhook host '{host}' not in allowed_webhook_hosts")
         }
+    }
+}
+
+async fn read_response_capped(resp: reqwest::Response, max_bytes: usize, url: &str) -> String {
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(url, error = %e, "failed to read response body");
+            return String::new();
+        }
+    };
+    if bytes.len() > max_bytes {
+        tracing::warn!(
+            url,
+            size = bytes.len(),
+            max = max_bytes,
+            "response body truncated to max_bytes"
+        );
+    }
+    String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).into_owned()
+}
+
+pub fn warn_if_webhooks_unconstrained(config: &crate::config::AppConfig) {
+    let has_webhooks = config.triggers.iter().any(|t| {
+        matches!(t.action_type.as_str(), "webhook" | "calendar" | "retrieval_and_webhook")
+    });
+    if has_webhooks && config.allowed_webhook_hosts.is_empty() {
+        tracing::warn!(
+            "SECURITY: webhook/calendar triggers are configured but allowed_webhook_hosts is \
+             empty — all outbound webhook hosts are permitted. Set allowed_webhook_hosts in \
+             config.json to restrict outbound connections."
+        );
     }
 }
 

@@ -34,7 +34,10 @@ impl BuildInfo {
 }
 
 pub fn replace_env_vars(input: &str) -> String {
-    let re = regex::Regex::new(r"\$([A-Za-z_][A-Za-z0-9_]*)").unwrap();
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"\$([A-Za-z_][A-Za-z0-9_]*)").expect("env-var regex is valid")
+    });
     re.replace_all(input, |caps: &regex::Captures| {
         let var_name = &caps[1];
         std::env::var(var_name).unwrap_or_else(|_| "".to_string())

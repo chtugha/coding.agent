@@ -192,7 +192,7 @@ async fn action_handler(
         action_url: request.action_url,
         context_snippet: request.context_snippet.unwrap_or_default(),
         patient_id: request.patient_id,
-        inject_result: true,
+        inject_result: false,
         label: format!("http-api-{}", request.action_type),
         arc_mode,
         response_tx: discard_tx,
