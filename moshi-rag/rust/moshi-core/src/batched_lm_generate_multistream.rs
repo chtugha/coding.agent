@@ -412,13 +412,13 @@ impl State {
                 };
                 if mask.is_active(b) {
                     *val = t;
-                }
-                if *val == UNGENERATED {
-                    candle::bail!(
-                        "ungenerated token at step {} codebook {}",
-                        slot.step_idx,
-                        codebook
-                    );
+                    if *val == UNGENERATED {
+                        candle::bail!(
+                            "ungenerated token at step {} codebook {}",
+                            slot.step_idx,
+                            codebook
+                        );
+                    }
                 }
             }
             let t = Tensor::from_vec(vals.clone(), (batch_size, 1), &dev)?;
@@ -498,7 +498,11 @@ impl State {
                 self.slots[b].forced_audio_tokens.forced_tokens(self.slots[b].step_idx).to_vec()
             })
             .collect();
-        let sampled_text: Vec<Option<u32>> = sampled_text.into_iter().map(Some).collect();
+        let sampled_text: Vec<Option<u32>> = sampled_text
+            .into_iter()
+            .enumerate()
+            .map(|(b, t)| if mask.is_active(b) { Some(t) } else { None })
+            .collect();
         let last_audio_per_batch = self.model.depformer_sample_batched(
             &ys,
             &sampled_text,
@@ -528,9 +532,9 @@ impl State {
         }
 
         let mut need_decode = vec![false; batch_size];
-        for b in 0..batch_size {
+        for (b, nd) in need_decode.iter_mut().enumerate().take(batch_size) {
             if mask.is_active(b) && self.slots[b].step_idx > self.config.acoustic_delay {
-                need_decode[b] = true;
+                *nd = true;
             }
         }
         if !need_decode.iter().any(|&x| x) {
@@ -539,8 +543,8 @@ impl State {
         let mimi_cb = self.mimi.config().quantizer_n_q;
         let cb = self.config.generated_audio_codebooks.min(mimi_cb);
         let mut decode_codes = vec![0u32; batch_size * cb];
-        for b in 0..batch_size {
-            if !need_decode[b] {
+        for (b, &should_decode) in need_decode.iter().enumerate().take(batch_size) {
+            if !should_decode {
                 continue;
             }
             let slot = &self.slots[b];
@@ -556,14 +560,14 @@ impl State {
         if let Some(pcm_out) = pcm_out.as_option() {
             let frame_len = pcm_out.dim(2)?;
             let acoustic_delay = self.config.acoustic_delay;
-            for b in 0..batch_size {
-                if !need_decode[b] {
+            for (b, &should_decode) in need_decode.iter().enumerate().take(batch_size) {
+                if !should_decode {
                     continue;
                 }
                 let slot = &self.slots[b];
                 let old_step = slot.step_idx.saturating_sub(acoustic_delay + 1);
                 let was_injecting_delayed = slot.injection_history_buf[old_step % 8];
-                if slot.injecting || was_injecting_delayed {
+                if was_injecting_delayed {
                     out.push(StreamingOutMsg::Pcm { batch_idx: b, pcm: vec![0.0f32; frame_len] });
                 } else {
                     let pcm_slice = pcm_out.i((b, 0))?;

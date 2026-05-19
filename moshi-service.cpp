@@ -380,8 +380,21 @@ public:
         std::thread sender_thread(&MoshiService::sender_loop, this);
         std::thread cmd_thread(&MoshiService::command_listener_loop, this);
 
-        while (running_ && g_running)
+        while (running_ && g_running) {
+            for (auto& [lang, bp] : backend_processes_) {
+                if (bp->running.load() && bp->pid > 0) {
+                    int status = 0;
+                    pid_t r = waitpid(bp->pid, &status, WNOHANG);
+                    if (r > 0) {
+                        bp->running.store(false);
+                        std::cerr << "Backend for language '" << lang
+                                  << "' (pid=" << bp->pid << ") exited unexpectedly"
+                                  << std::endl;
+                    }
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
         running_ = false;
 
         {
@@ -478,12 +491,14 @@ private:
                         std::string path = "/caller/" + std::to_string(rag_state->call_id);
                         std::string body = rag_http_get_static(path, addr_copy, addrlen_copy, ssl_copy);
                         if (!body.empty() && is_valid_json_object(body)) {
-                            // Inject as MT=4 Metadata frame only when response is a JSON object
-                            std::vector<uint8_t> frame;
-                            frame.push_back(MT_METADATA);
-                            frame.insert(frame.end(), body.begin(), body.end());
                             std::lock_guard<std::mutex> lock(rag_state->ws_outbound_mutex);
-                            rag_state->ws_outbound_queue.push_back({std::move(frame)});
+                            if (!rag_state->rag_injected) {
+                                rag_state->rag_injected = true;
+                                std::vector<uint8_t> frame;
+                                frame.push_back(MT_METADATA);
+                                frame.insert(frame.end(), body.begin(), body.end());
+                                rag_state->ws_outbound_queue.push_back({std::move(frame)});
+                            }
                         } else if (!body.empty()) {
                             std::cerr << "RAG response for call " << rag_state->call_id
                                       << " is not a JSON object — skipping injection" << std::endl;
@@ -627,7 +642,7 @@ private:
                 decode_ogg_audio(state, payload, plen);
             } else if (mt == MT_ERROR && plen > 0) {
                 std::string err(reinterpret_cast<const char*>(payload), plen);
-                (void)err;
+                std::cerr << "Backend error for call " << state->call_id << ": " << err << std::endl;
             } else if ((mt == MT_REFERENCE || mt == MT_COLORED_REF) && plen > 0) {
                 std::string txt(reinterpret_cast<const char*>(payload), plen);
                 std::lock_guard<std::mutex> lock(state->text_mutex);
@@ -816,9 +831,13 @@ private:
 
         posix_spawn_file_actions_t actions;
         posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+        if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) != 0 ||
+            posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) != 0 ||
+            posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) != 0) {
+            std::cerr << "Failed to set up file actions for backend spawn" << std::endl;
+            posix_spawn_file_actions_destroy(&actions);
+            return false;
+        }
 
         pid_t pid;
         int ret = posix_spawn(&pid, binary.c_str(), &actions, nullptr,
@@ -908,8 +927,9 @@ private:
             ::close(sock); return "";
         }
         int conn_err = 0; socklen_t clen = sizeof(conn_err);
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, &conn_err, &clen);
-        if (conn_err != 0) { ::close(sock); return ""; }
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &conn_err, &clen) < 0 || conn_err != 0) {
+            ::close(sock); return "";
+        }
         fcntl(sock, F_SETFL, flags);
 
         if (!ssl_ctx) { ::close(sock); return ""; }
@@ -999,7 +1019,9 @@ private:
                 while (!cmd.empty() && (cmd.back() == '\n' || cmd.back() == '\r'))
                     cmd.pop_back();
                 std::string response = handle_command(cmd);
-                send(csock, response.c_str(), response.size(), 0);
+                if (send(csock, response.c_str(), response.size(), 0) < 0) {
+                    std::cerr << "Moshi cmd: send response failed: " << strerror(errno) << std::endl;
+                }
             }
             ::close(csock);
         }

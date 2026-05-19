@@ -182,17 +182,26 @@ impl ActionDispatcher {
         let child_stdout = child.stdout.take();
         let child_stderr = child.stderr.take();
 
+        const MAX_SCRIPT_OUTPUT: u64 = 1024 * 1024;
         let stdout_task = tokio::spawn(async move {
             let mut buf = Vec::new();
-            if let Some(mut out) = child_stdout {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+            if let Some(out) = child_stdout {
+                let _ = tokio::io::AsyncReadExt::read_to_end(
+                    &mut tokio::io::AsyncReadExt::take(out, MAX_SCRIPT_OUTPUT),
+                    &mut buf,
+                )
+                .await;
             }
             buf
         });
         let stderr_task = tokio::spawn(async move {
             let mut buf = Vec::new();
-            if let Some(mut err) = child_stderr {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+            if let Some(err) = child_stderr {
+                let _ = tokio::io::AsyncReadExt::read_to_end(
+                    &mut tokio::io::AsyncReadExt::take(err, MAX_SCRIPT_OUTPUT),
+                    &mut buf,
+                )
+                .await;
             }
             buf
         });
@@ -335,22 +344,38 @@ impl ActionDispatcher {
 }
 
 async fn read_response_capped(resp: reqwest::Response, max_bytes: usize, url: &str) -> String {
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(url, error = %e, "failed to read response body");
+    if let Some(cl) = resp.content_length() {
+        if cl > max_bytes as u64 {
+            tracing::warn!(
+                url,
+                content_length = cl,
+                max = max_bytes,
+                "response content-length exceeds cap — skipping body"
+            );
             return String::new();
         }
-    };
-    if bytes.len() > max_bytes {
-        tracing::warn!(
-            url,
-            size = bytes.len(),
-            max = max_bytes,
-            "response body truncated to max_bytes"
-        );
     }
-    String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]).into_owned()
+    let mut buf = Vec::with_capacity(max_bytes.min(65_536));
+    let mut stream = resp.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(b) => {
+                let remaining = max_bytes.saturating_sub(buf.len());
+                if remaining == 0 {
+                    tracing::warn!(url, max = max_bytes, "response body truncated to max_bytes");
+                    break;
+                }
+                let take = b.len().min(remaining);
+                buf.extend_from_slice(&b[..take]);
+            }
+            Err(e) => {
+                tracing::warn!(url, error = %e, "failed to read response chunk");
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 pub fn warn_if_webhooks_unconstrained(config: &crate::config::AppConfig) {
@@ -413,9 +438,12 @@ pub async fn run_action_loop(
     mut action_rx: tokio::sync::mpsc::Receiver<ActionRequest>,
     dispatcher: Arc<ActionDispatcher>,
 ) {
+    let sem = Arc::new(tokio::sync::Semaphore::new(32));
     while let Some(req) = action_rx.recv().await {
         let dispatcher = dispatcher.clone();
+        let permit = sem.clone().acquire_owned().await;
         tokio::spawn(async move {
+            let _permit = permit;
             let slot_id = req.slot_id;
             let inject_result = req.inject_result;
             let arc_mode = req.arc_mode;

@@ -94,6 +94,7 @@ impl BackendWsClient {
                 Ok(Ok((ws_stream, _))) => {
                     tracing::info!("backend_ws: connected to {}", ws_url);
                     backoff_ms = 500;
+                    while out_rx.try_recv().is_ok() {}
                     let (mut write, mut read) = ws_stream.split();
 
                     loop {

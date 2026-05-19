@@ -2,10 +2,47 @@ use std::fmt::Write as FmtWrite;
 use std::time::Duration;
 
 use anyhow::Result;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{LlmProfile, SharedConfig};
 use crate::prompts;
+
+const MAX_LLM_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_LLM_ERROR_BYTES: usize = 64 * 1024;
+
+async fn read_lm_body_capped(resp: reqwest::Response, max_bytes: usize) -> String {
+    if let Some(cl) = resp.content_length() {
+        if cl > max_bytes as u64 {
+            tracing::warn!(
+                content_length = cl,
+                max = max_bytes,
+                "LLM response content-length exceeds cap — skipping body"
+            );
+            return String::new();
+        }
+    }
+    let mut buf = Vec::with_capacity(max_bytes.min(65_536));
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(b) => {
+                let remaining = max_bytes.saturating_sub(buf.len());
+                if remaining == 0 {
+                    tracing::warn!(max = max_bytes, "LLM response body truncated to max_bytes");
+                    break;
+                }
+                let take = b.len().min(remaining);
+                buf.extend_from_slice(&b[..take]);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read LLM response chunk");
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
 
 const MAX_RETRIEVAL_CONTEXT_CHARS: usize = 50_000;
 
@@ -196,11 +233,15 @@ async fn fetch_reference_http(
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        anyhow::bail!("LLM API returned error {status} - {error_text}");
+        let error_text = read_lm_body_capped(response, MAX_LLM_ERROR_BYTES).await;
+        let error_display = if error_text.is_empty() { "Unknown error".to_string() } else { error_text };
+        anyhow::bail!("LLM API returned error {status} - {error_display}");
     }
 
-    let response_text = response.text().await?;
+    let response_text = read_lm_body_capped(response, MAX_LLM_RESPONSE_BYTES).await;
+    if response_text.is_empty() {
+        anyhow::bail!("LLM API response empty or truncated (exceeded size cap)");
+    }
     let parsed: ChatCompletionResponse = serde_json::from_str(&response_text)?;
 
     tracing::info!(elapsed_secs = elapsed.as_secs_f64(), "retrieval: LLM API call completed");

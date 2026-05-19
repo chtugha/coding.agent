@@ -77,12 +77,20 @@ async fn main() -> Result<()> {
         action_dispatcher: dispatcher.clone(),
     });
 
-    tokio::spawn(action::run_action_loop(action_rx, dispatcher));
+    let action_handle = tokio::spawn(action::run_action_loop(action_rx, dispatcher));
 
     let router = server::create_router(app_state);
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!("listening on {}", listen_addr);
-    axum::serve(listener, router).await?;
+    tokio::select! {
+        res = axum::serve(listener, router) => { res?; }
+        res = action_handle => {
+            if let Err(e) = res {
+                tracing::error!("action loop panicked: {}", e);
+                anyhow::bail!("action loop terminated unexpectedly: {}", e);
+            }
+        }
+    }
 
     Ok(())
 }

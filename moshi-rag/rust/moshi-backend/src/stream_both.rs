@@ -503,6 +503,7 @@ impl BatchedState {
                     }
                 }
             }
+            let had_prev: Vec<bool> = prev_channel_ids.iter().map(|c| c.is_some()).collect();
             prev_channel_ids.clone_from(&ref_channel_ids);
 
             for &bid in &reset_slots {
@@ -525,7 +526,9 @@ impl BatchedState {
                     rag_mgr.cancel_pending_slot_nonblocking(bid);
                 }
                 if let Some(ref ws) = ws_sender {
-                    let _ = ws.send(crate::backend_ws::OutboundWsMsg::CallEnd { slot_id: bid });
+                    if had_prev.get(bid).copied().unwrap_or(false) {
+                        let _ = ws.send(crate::backend_ws::OutboundWsMsg::CallEnd { slot_id: bid });
+                    }
                     let _ = ws.send(crate::backend_ws::OutboundWsMsg::CallStart {
                         slot_id: bid,
                         caller_phone: None,
@@ -535,7 +538,7 @@ impl BatchedState {
             }
 
             if let Some((ref rag_mgr, _)) = rag_manager {
-                if let Some((slot_id, ref_text)) = rag_mgr.try_recv_result_slot() {
+                while let Some((slot_id, ref_text)) = rag_mgr.try_recv_result_slot() {
                     let display_text = if let Some(idx) = ref_text.find('\t') {
                         ref_text[idx + 1..].to_string()
                     } else {
