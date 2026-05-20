@@ -555,8 +555,13 @@ impl BatchedState {
                             match inner.text_tokenizer.encode(&display_text) {
                                 Ok(pieces) => {
                                     let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id).collect();
-                                    tracing::info!(slot_id, n_tokens = token_ids.len(), "rag: teacher-forcing inject queued");
-                                    state.queue_inject_tokens(slot_id, token_ids);
+                                    tracing::info!(slot_id, n_tokens = token_ids.len(), "rag: teacher-forcing prefill inject");
+                                    match state.prefill_inject_text(slot_id, token_ids) {
+                                        Ok(()) => {}
+                                        Err(e) => {
+                                            tracing::warn!(slot_id, ?e, "ret: prefill_inject_text failed — injection skipped");
+                                        }
+                                    }
                                     if let Some(ref turn_managers) = turn_managers {
                                         if let Some(tm) = turn_managers.get(slot_id) {
                                             let ctx_block = format!(
@@ -605,8 +610,13 @@ impl BatchedState {
                                 match inner.text_tokenizer.encode(&text) {
                                     Ok(pieces) => {
                                         let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id).collect();
-                                        tracing::info!(slot_id, n_tokens = token_ids.len(), "ws: teacher-forcing inject queued");
-                                        state.queue_inject_tokens(slot_id, token_ids);
+                                        tracing::info!(slot_id, n_tokens = token_ids.len(), "ws: teacher-forcing prefill inject");
+                                        match state.prefill_inject_text(slot_id, token_ids) {
+                                            Ok(()) => {}
+                                            Err(e) => {
+                                                tracing::warn!(slot_id, ?e, "ws: prefill_inject_text failed — injection skipped");
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::warn!(slot_id, ?e, "ws: failed to tokenize reference_inject text");

@@ -1065,6 +1065,10 @@ impl LmModel {
         }
     }
 
+    pub fn embed_text_for_prefill(&self, token_ids: &Tensor) -> candle::Result<Tensor> {
+        token_ids.apply(&self.text_emb)
+    }
+
     pub fn device(&self) -> &Device {
         self.text_emb.embeddings().device()
     }
