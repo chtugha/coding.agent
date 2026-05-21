@@ -826,7 +826,7 @@ private:
         char buf[64];
         std::vector<pid_t> pids;
         while (fgets(buf, sizeof(buf), fp)) {
-            pid_t p = atoi(buf);
+            pid_t p = safe_stoi(std::string(buf));
             if (p > 0 && p != getpid()) pids.push_back(p);
         }
         pclose(fp);
@@ -1712,8 +1712,8 @@ private:
         mg_http_get_var(&hm->query, "limit", limit_str, sizeof(limit_str));
         mg_http_get_var(&hm->query, "offset", offset_str, sizeof(offset_str));
 
-        int limit = limit_str[0] ? atoi(limit_str) : 100;
-        int offset = offset_str[0] ? atoi(offset_str) : 0;
+        int limit = limit_str[0] ? safe_stoi(std::string(limit_str)) : 100;
+        int offset = offset_str[0] ? safe_stoi(std::string(offset_str)) : 0;
         if (limit < 1) limit = 1;
         if (limit > 1000) limit = 1000;
         if (offset < 0) offset = 0;
@@ -3059,8 +3059,8 @@ private:
             std::string server_s = fields.size() > 3 ? fields[3] : "";
             std::string port_s = fields.size() > 4 ? fields[4] : "5060";
             std::string local_ip_s = fields.size() > 5 ? fields[5] : "";
-            int idx_val = atoi(idx_s.c_str());
-            int port_val = atoi(port_s.c_str());
+            int idx_val = safe_stoi(idx_s);
+            int port_val = safe_stoi(port_s);
             if (port_val < 1 || port_val > 65535) port_val = 5060;
             if (!first) json << ",";
             json << "{\"index\":" << idx_val
@@ -3213,6 +3213,8 @@ private:
                 got_fmt = true;
             } else if (std::memcmp(chunk_id, "data", 4) == 0) {
                 if (!got_fmt) { result.error = "data before fmt"; return result; }
+                static constexpr uint32_t MAX_WAV_DATA = 256u * 1024u * 1024u;
+                if (chunk_size > MAX_WAV_DATA) { result.error = "WAV data chunk too large"; return result; }
                 raw_data.resize(chunk_size);
                 f.read(reinterpret_cast<char*>(raw_data.data()), chunk_size);
                 got_data = true;
@@ -3980,7 +3982,7 @@ private:
         char buf[128];
         int rss_kb = 0;
         if (fgets(buf, sizeof(buf), fp)) {
-            rss_kb = atoi(buf);
+            rss_kb = safe_stoi(std::string(buf));
         }
         pclose(fp);
         
@@ -5860,7 +5862,7 @@ private:
     void handle_async_status(struct mg_connection *c, struct mg_http_message *hm) {
         char id_buf[32] = {0};
         mg_http_get_var(&hm->query, "task_id", id_buf, sizeof(id_buf));
-        int64_t task_id = atoll(id_buf);
+        int64_t task_id = static_cast<int64_t>(safe_stol(std::string(id_buf)));
         if (task_id <= 0) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing task_id\"}");
             return;
@@ -6335,7 +6337,7 @@ private:
                 std::string limit_str = query.substr(limit_pos + 6);
                 size_t amp = limit_str.find('&');
                 if (amp != std::string::npos) limit_str = limit_str.substr(0, amp);
-                int parsed = atoi(limit_str.c_str());
+                int parsed = safe_stoi(limit_str);
                 if (parsed > 0 && parsed <= 1000) limit_val = parsed;
             }
         }
@@ -6782,7 +6784,7 @@ private:
                     if (metrics_safe.size() > 2) {
                         size_t lp = metrics_safe.find("\"latency_ms\":");
                         if (lp != std::string::npos) {
-                            double lat = std::atof(metrics_safe.c_str() + lp + 13);
+                            double lat = safe_stod(std::string(metrics_safe.c_str() + lp + 13));
                             if (lat > 0) { total_latency += lat; latency_count++; }
                         }
                     }
@@ -7173,8 +7175,7 @@ private:
                 return ",\"" + k + "\":\"" + escape_json(v) + "\"";
             };
             auto json_int = [](const std::string& k, const std::string& v, const std::string& def) -> std::string {
-                int val = 0;
-                try { val = safe_stoi(v.empty() ? def : v); } catch (...) { try { val = safe_stoi(def); } catch (...) {} }
+                int val = safe_stoi(v.empty() ? def : v);
                 return ",\"" + k + "\":" + std::to_string(val);
             };
             std::string resp = "{\"backends\":" + backends_json
@@ -7702,7 +7703,7 @@ private:
             if (fp) {
                 char buf[64];
                 while (fgets(buf, sizeof(buf), fp)) {
-                    pid_t kp = static_cast<pid_t>(atoi(buf));
+                    pid_t kp = static_cast<pid_t>(safe_stoi(std::string(buf)));
                     if (kp > 1) kill(kp, SIGTERM);
                 }
                 pclose(fp);
@@ -7985,7 +7986,7 @@ private:
             if (pos != std::string::npos) {
                 pos += 12;
                 while (pos < body.size() && (body[pos] == ' ' || body[pos] == ':')) ++pos;
-                patient_id = std::atoi(body.c_str() + pos);
+                patient_id = safe_stoi(std::string(body.c_str() + pos));
             }
         }
         if (text.empty()) {
@@ -8028,8 +8029,8 @@ private:
             mg_http_get_var(&hm->query, "top_k",      topk_buf, sizeof(topk_buf));
             mg_http_get_var(&hm->query, "patient_id", pid_buf,  sizeof(pid_buf));
             query_text = text_buf;
-            if (topk_buf[0]) top_k = std::atoi(topk_buf);
-            if (pid_buf[0])  patient_id_filter = std::atoi(pid_buf);
+            if (topk_buf[0]) top_k = safe_stoi(std::string(topk_buf));
+            if (pid_buf[0])  patient_id_filter = safe_stoi(std::string(pid_buf));
         } else {
             std::string body(hm->body.buf, hm->body.len);
             query_text = extract_json_string(body, "text");
@@ -8037,13 +8038,13 @@ private:
             if (tk != std::string::npos) {
                 tk += 7;
                 while (tk < body.size() && (body[tk] == ' ' || body[tk] == ':')) ++tk;
-                top_k = std::atoi(body.c_str() + tk);
+                top_k = safe_stoi(std::string(body.c_str() + tk));
             }
             auto pf = body.find("\"patient_id\"");
             if (pf != std::string::npos) {
                 pf += 12;
                 while (pf < body.size() && (body[pf] == ' ' || body[pf] == ':')) ++pf;
-                patient_id_filter = std::atoi(body.c_str() + pf);
+                patient_id_filter = safe_stoi(std::string(body.c_str() + pf));
             }
         }
         if (query_text.empty()) {
@@ -8624,7 +8625,7 @@ private:
             std::string body_str(body);
             size_t lp = body_str.find("\"limit\":");
             if (lp != std::string::npos) {
-                int lv = atoi(body_str.c_str() + lp + 8);
+                int lv = safe_stoi(std::string(body_str.c_str() + lp + 8));
                 if (lv > 0 && lv <= 100) limit_val = lv;
             }
         }
@@ -9408,7 +9409,7 @@ private:
                     for (char ch : head_resp) lower_head += tolower(ch);
                     size_t cl_pos = lower_head.find("content-length:");
                     if (cl_pos != std::string::npos) {
-                        int64_t cl = atoll(head_resp.c_str() + cl_pos + 15);
+                        int64_t cl = static_cast<int64_t>(safe_stol(std::string(head_resp.c_str() + cl_pos + 15)));
                         if (cl > 0) progress->total_bytes.store(cl);
                     }
                 }
@@ -9545,7 +9546,7 @@ private:
     void handle_models_download_progress(struct mg_connection *c, struct mg_http_message *hm) {
         char id_buf[32] = {0};
         mg_http_get_var(&hm->query, "id", id_buf, sizeof(id_buf));
-        int64_t dl_id = atoll(id_buf);
+        int64_t dl_id = static_cast<int64_t>(safe_stol(std::string(id_buf)));
         if (dl_id <= 0) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n", "{\"error\":\"Missing id\"}");
             return;
@@ -10248,6 +10249,12 @@ document.getElementById('f').onsubmit=async function(e){
         std::string ip(ip_buf);
 
         time_t now = time(nullptr);
+        if (login_failures_.size() > 10000) {
+            for (auto it = login_failures_.begin(); it != login_failures_.end(); ) {
+                if ((now - it->second.window_start) >= 60) it = login_failures_.erase(it);
+                else ++it;
+            }
+        }
         auto& fa = login_failures_[ip];
         if (fa.count >= 5 && (now - fa.window_start) < 60) {
             mg_http_reply(c, 429, "Content-Type: application/json\r\n",
@@ -10804,7 +10811,7 @@ int main(int argc, char* argv[]) {
     std::string db_mode;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
-            port = static_cast<uint16_t>(atoi(argv[++i]));
+            port = static_cast<uint16_t>(safe_stoi(std::string(argv[++i])));
         } else if (strcmp(argv[i], "--db") == 0 && i + 1 < argc) {
             db_mode = argv[++i];
         }
