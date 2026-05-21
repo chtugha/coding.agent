@@ -79,3 +79,10 @@ This is a C++17 project. Build with ninja to catch compilation errors. No separa
 - For moshi-backend: model warmup takes ~4 seconds with Q8 GGUF on Metal. If it hasn't finished in 2 minutes, something is wrong.
 - The moshi model (moshiko) is 7.7B params. On this 16GB M4 Mac, use the Q8 GGUF model (~8GB) with Metal. BF16 safetensors (15GB) causes swap thrashing. Steady-state LM step latency: ~101ms (1.26x real-time at 12.5Hz).
 - The `matmul_dtype` function in `moshi-core/src/nn.rs` MUST return BF16 for Metal (not just CUDA). This is critical for Q8 performance (30x speedup).
+
+## Browser Automation — MANDATORY RULE
+
+- ALWAYS use local Playwright (Python: `from playwright.sync_api import sync_playwright`) for ANY browser interaction, UI testing, or web automation.
+- NEVER use the embedded Zencoder browser tools (browser_click, browser_navigate, browser_screenshot, etc.).
+- This applies to ALL agents including subagents. When delegating browser tasks to subagents, explicitly instruct them to use Playwright.
+- Playwright is installed at: `python3 -c "from playwright.sync_api import sync_playwright"` (Python 3.9, user site-packages).

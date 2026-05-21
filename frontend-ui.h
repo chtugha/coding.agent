@@ -655,6 +655,8 @@ Save outgoing audio as WAV</label>
 <option value="neutts">NeuTTS only</option>
 <option value="vits2">VITS2 only</option>
 <option value="matcha">Matcha-TTS only</option>
+<option value="moshi">Moshi</option>
+<option value="moshi-rag">Moshi RAG</option>
 </select>
 </label>
 <button class="wt-btn wt-btn-sm wt-btn-secondary" onclick="toggleAllCollapsibles(true)">Expand All</button>

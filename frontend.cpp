@@ -963,41 +963,54 @@ private:
                     use_args += " --g2p " + g2p;
             }
 
-            if (name == "MOSHI_SERVICE" && args_override.empty()
-                && use_args.find("--config") == std::string::npos) {
-                std::string backends_json = get_setting("moshi_backends", "[]");
-                std::string default_lang  = get_setting("moshi_default_language", "en");
-                std::string selected_config;
-                std::string first_config;
-                size_t pos = 0;
-                while (pos < backends_json.size()) {
-                    size_t obj_start = backends_json.find('{', pos);
-                    if (obj_start == std::string::npos) break;
-                    int depth = 1;
-                    size_t obj_end = obj_start + 1;
-                    bool in_str = false;
-                    bool esc = false;
-                    for (; obj_end < backends_json.size() && depth > 0; obj_end++) {
-                        char ch = backends_json[obj_end];
-                        if (esc) { esc = false; continue; }
-                        if (ch == '\\' && in_str) { esc = true; continue; }
-                        if (ch == '"') { in_str = !in_str; continue; }
-                        if (in_str) continue;
-                        if (ch == '{') depth++;
-                        else if (ch == '}') depth--;
-                    }
-                    std::string obj = backends_json.substr(obj_start, obj_end - obj_start);
-                    std::string lang   = extract_json_string(obj, "lang");
-                    std::string config = extract_json_string(obj, "config");
-                    if (!config.empty() && config.find(' ') == std::string::npos) {
-                        if (first_config.empty()) first_config = config;
-                        if (selected_config.empty() && lang == default_lang) selected_config = config;
-                    }
-                    pos = obj_end;
+            if (name == "MOSHI_SERVICE" && args_override.empty()) {
+                std::vector<std::string> tokens = split_args(use_args);
+                std::string cleaned_args;
+                for (size_t i = 0; i < tokens.size(); i++) {
+                    if (tokens[i] == "--backend-config" || tokens[i] == "-B") { i++; continue; }
+                    if (tokens[i] == "--default-language" || tokens[i] == "-d") { i++; continue; }
+                    if (!cleaned_args.empty()) cleaned_args += " ";
+                    cleaned_args += tokens[i];
                 }
-                if (selected_config.empty()) selected_config = first_config;
-                if (!selected_config.empty())
-                    use_args += " --config " + selected_config + " standalone";
+                use_args = cleaned_args;
+
+                if (use_args.find("--config") == std::string::npos) {
+                    std::string backends_json = get_setting("moshi_backends", "[]");
+                    std::string default_lang  = get_setting("moshi_default_language", "en");
+                    std::string selected_config;
+                    std::string first_config;
+                    size_t pos = 0;
+                    while (pos < backends_json.size()) {
+                        size_t obj_start = backends_json.find('{', pos);
+                        if (obj_start == std::string::npos) break;
+                        int depth = 1;
+                        size_t obj_end = obj_start + 1;
+                        bool in_str = false;
+                        bool esc = false;
+                        for (; obj_end < backends_json.size() && depth > 0; obj_end++) {
+                            char ch = backends_json[obj_end];
+                            if (esc) { esc = false; continue; }
+                            if (ch == '\\' && in_str) { esc = true; continue; }
+                            if (ch == '"') { in_str = !in_str; continue; }
+                            if (in_str) continue;
+                            if (ch == '{') depth++;
+                            else if (ch == '}') depth--;
+                        }
+                        std::string obj = backends_json.substr(obj_start, obj_end - obj_start);
+                        std::string lang   = extract_json_string(obj, "lang");
+                        std::string config = extract_json_string(obj, "config");
+                        if (!config.empty() && config.find(' ') == std::string::npos) {
+                            if (first_config.empty()) first_config = config;
+                            if (selected_config.empty() && lang == default_lang) selected_config = config;
+                        }
+                        pos = obj_end;
+                    }
+                    if (selected_config.empty()) selected_config = first_config;
+                    if (!selected_config.empty()) {
+                        if (!use_args.empty()) use_args += " ";
+                        use_args += "--config " + selected_config + " standalone";
+                    }
+                }
             }
 
             auto argv_strings = split_args(use_args);
@@ -1046,38 +1059,50 @@ private:
 
     bool stop_service(const std::string& name) {
         pid_t pid_to_kill = 0;
+        std::string bin_name;
         {
             std::lock_guard<std::mutex> lock(services_mutex_);
             for (auto& svc : services_) {
                 if (svc.name != name) continue;
-                if (!svc.managed || svc.pid <= 0) return false;
+                bin_name = svc.binary_path;
+                size_t slash = bin_name.rfind('/');
+                if (slash != std::string::npos) bin_name = bin_name.substr(slash + 1);
+                if (!svc.managed || svc.pid <= 0) {
+                    svc.managed = false;
+                    svc.pid = 0;
+                    break;
+                }
                 pid_to_kill = svc.pid;
                 break;
             }
         }
-        if (pid_to_kill <= 0) return false;
-
-        kill(pid_to_kill, SIGTERM);
-        for (int i = 0; i < 50; i++) {
-            int status;
-            if (waitpid(pid_to_kill, &status, WNOHANG) == pid_to_kill) {
+        if (pid_to_kill > 0) {
+            kill(pid_to_kill, SIGTERM);
+            for (int i = 0; i < 50; i++) {
+                int status;
+                if (waitpid(pid_to_kill, &status, WNOHANG) == pid_to_kill) {
+                    std::lock_guard<std::mutex> lock(services_mutex_);
+                    for (auto& svc : services_) {
+                        if (svc.name == name) { svc.managed = false; svc.pid = 0; break; }
+                    }
+                    goto ghost_cleanup;
+                }
+                usleep(STOP_POLL_INTERVAL_US);
+            }
+            kill(pid_to_kill, SIGKILL);
+            waitpid(pid_to_kill, nullptr, 0);
+            {
                 std::lock_guard<std::mutex> lock(services_mutex_);
                 for (auto& svc : services_) {
                     if (svc.name == name) { svc.managed = false; svc.pid = 0; break; }
                 }
-                return true;
-            }
-            usleep(STOP_POLL_INTERVAL_US);
-        }
-        kill(pid_to_kill, SIGKILL);
-        waitpid(pid_to_kill, nullptr, 0);
-        {
-            std::lock_guard<std::mutex> lock(services_mutex_);
-            for (auto& svc : services_) {
-                if (svc.name == name) { svc.managed = false; svc.pid = 0; break; }
             }
         }
-        return true;
+        ghost_cleanup:
+        if (!bin_name.empty()) {
+            kill_ghost_processes(bin_name);
+        }
+        return pid_to_kill > 0 || !bin_name.empty();
     }
 
     void save_service_config(const std::string& name, const std::string& args) {
@@ -2425,7 +2450,7 @@ private:
             : "Stopping all services and starting core pipeline...");
 
         if (all_running) {
-            // Case 1: hang up any active call, remove SIP lines, stop TTS engines+dock+RAG
+            // Case 1: hang up any active call, remove SIP lines, stop TTS engines+dock+RAG+Moshi
             std::string sip_err;
             http_post_localhost(TEST_SIP_PROVIDER_PORT, "/hangup", "{}", sip_err);
             send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "REMOVE_ALL_LINES");
@@ -2434,20 +2459,19 @@ private:
             stop_service("VITS2_ENGINE");
             stop_service("MATCHA_ENGINE");
             stop_service("TTS_SERVICE");
+            stop_service("MOSHI_SERVICE");
             stop_service("TOMEDO_CRAWL_SERVICE");
             usleep(1000000); // 1s settling
         } else {
             // Case 2: stop everything, start core pipeline in order
             static const std::vector<std::string> stop_order = {
                 "TOMEDO_CRAWL_SERVICE", "MATCHA_ENGINE", "VITS2_ENGINE", "NEUTTS_ENGINE", "KOKORO_ENGINE", "TTS_SERVICE",
-                "OUTBOUND_AUDIO_PROCESSOR", "LLAMA_SERVICE", "WHISPER_SERVICE",
+                "MOSHI_SERVICE", "OUTBOUND_AUDIO_PROCESSOR", "LLAMA_SERVICE", "WHISPER_SERVICE",
                 "VAD_SERVICE", "INBOUND_AUDIO_PROCESSOR", "SIP_CLIENT"
             };
             for (const auto& s : stop_order) {
-                if (is_service_running(s)) {
-                    stop_service(s);
-                    usleep(500000);
-                }
+                stop_service(s);
+                usleep(200000);
             }
 
             // Hang up and clear lines too, in case TEST_SIP_PROVIDER is still running
@@ -2638,10 +2662,8 @@ private:
             "VAD_SERVICE", "INBOUND_AUDIO_PROCESSOR", "SIP_CLIENT"
         };
         for (const auto& s : stop_order) {
-            if (is_service_running(s)) {
-                stop_service(s);
-                usleep(500000);
-            }
+            stop_service(s);
+            usleep(200000);
         }
 
         std::string sip_err;

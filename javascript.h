@@ -61,13 +61,13 @@ async function runWithTestSetup(testFn,opts){
   const ttsOverride=opts.ttsOverride||null;
   function setStatus(html){if(statusEl)statusEl.innerHTML=html;}
   if(_testSetupActive){
-    const _activeTts=['neutts','vits2','matcha'].includes(_ttsPreference)?_ttsPreference:'kokoro';
+    const _activeTts=['neutts','vits2','matcha','moshi','moshi-rag'].includes(_ttsPreference)?_ttsPreference:'kokoro';
     try{return await testFn({tts:_activeTts,runIndex:0});}finally{}
   }
   if(btnEl){btnEl.disabled=true;btnEl._origText=btnEl.textContent;btnEl.textContent='Setting up...';}
 
   const ttsOrder=ttsOverride?[ttsOverride]:
-    (['kokoro','neutts','vits2','matcha'].includes(_ttsPreference)?[_ttsPreference]:
+    (['kokoro','neutts','vits2','matcha','moshi','moshi-rag'].includes(_ttsPreference)?[_ttsPreference]:
     ['kokoro','neutts']);
 
   const runResults=[];
