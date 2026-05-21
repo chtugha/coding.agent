@@ -30,9 +30,10 @@ const fn default_cooldown() -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmProfile {
     pub id: String,
+    #[serde(alias = "url")]
     pub base_url: String,
     pub model: String,
-    #[serde(default)]
+    #[serde(default, alias = "api_key")]
     pub api_key_env: Option<String>,
     #[serde(default = "default_prompt_style")]
     pub prompt_style: String,

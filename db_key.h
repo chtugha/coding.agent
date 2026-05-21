@@ -244,7 +244,9 @@ static const std::string& get_db_key()
 // On SQLITE_OK the caller owns *db and must call sqlite3_close() when done.
 static inline int db_open_encrypted(const char* path, sqlite3** db)
 {
-    int rc = sqlite3_open(path, db);
+    int rc = sqlite3_open_v2(path, db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+        nullptr);
     if (rc != SQLITE_OK) return rc;
 
     const std::string& key = get_db_key();
@@ -271,7 +273,9 @@ static inline int db_open_encrypted(const char* path, sqlite3** db)
     sqlite3_close(*db);
     *db = nullptr;
 
-    rc = sqlite3_open(path, db);
+    rc = sqlite3_open_v2(path, db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+        nullptr);
     if (rc != SQLITE_OK) return rc;
 
     stmt = nullptr;

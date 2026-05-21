@@ -19,43 +19,95 @@ inline std::string FrontendServer::build_ui_pages() {
 </div>
 <div id="dashHealthBadge" style="padding:6px 16px;border-radius:var(--wt-radius);font-size:11px;font-weight:700;font-family:var(--wt-font);background:rgba(0,0,0,0.4);color:var(--wt-accent-cyan);border:1px solid rgba(0,255,245,0.3);letter-spacing:0.05em">CHECKING...</div>
 </div>
-<div class="pfu-grid">
-<div class="pfu-left-stem">
-<div class="wt-pipeline-node" id="pipeline-node-SIP_CLIENT"><span class="node-label">SIP</span><span class="node-status offline" id="pipeline-status-SIP_CLIENT"></span></div>
-<div class="wt-pipeline-connector"></div>
-<div class="wt-pipeline-node" id="pipeline-node-INBOUND_AUDIO_PROCESSOR"><span class="node-label">IAP</span><span class="node-status offline" id="pipeline-status-INBOUND_AUDIO_PROCESSOR"></span></div>
+<div class="pfu-topo-badges">
+<span style="font-size:8px;padding:2px 8px;border-radius:10px;font-family:var(--wt-font);color:rgba(0,255,245,0.7);background:rgba(0,255,245,0.07);border:1px solid rgba(0,255,245,0.25);letter-spacing:0.08em" id="pfu-badge-neural">&#x26A1; NEURAL &bull; MOSHI-RAG</span>
+<span style="font-size:8px;padding:2px 8px;border-radius:10px;font-family:var(--wt-font);color:rgba(255,45,149,0.5);background:rgba(255,45,149,0.05);border:1px solid rgba(255,45,149,0.2);letter-spacing:0.08em" id="pfu-badge-classic">CLASSIC &bull; HALF-DUPLEX</span>
 </div>
-<div class="pfu-fork-top"></div>
-<div class="pfu-path pfu-path-neural" id="pfu-path-neural">
-<div class="wt-pipeline-connector wt-pipeline-connector-neural" style="max-width:28px"></div>
-<div class="wt-pipeline-node wt-pipeline-node-neural" id="pipeline-node-MOSHI_SERVICE" title="Moshi Full-Duplex Neural Voice — ~80ms end-to-end. Replaces VAD &#x2192; ASR &#x2192; LLM &#x2192; TTS."><span class="node-label">MSH</span><span class="node-status offline" id="pipeline-status-MOSHI_SERVICE"></span><span class="node-sub">~80ms</span></div>
-<div class="wt-pipeline-connector wt-pipeline-connector-neural" style="max-width:28px"></div>
-<span class="pfu-path-label pfu-label-neural">&#x26A1; NEURAL &bull; FULL-DUPLEX &bull; ~80ms</span>
+<div class="pfu-topo-wrap">
+<svg class="pfu-topo-svg" viewBox="0 0 860 340" preserveAspectRatio="xMidYMid meet">
+<defs>
+<marker id="pfu-arr-n" markerWidth="8" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="rgba(0,255,245,0.85)"/></marker>
+<marker id="pfu-arr-n2" markerWidth="8" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="rgba(0,255,245,0.6)"/></marker>
+<marker id="pfu-arr-c" markerWidth="8" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="rgba(255,45,149,0.7)"/></marker>
+<marker id="pfu-arr-v" markerWidth="8" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="rgba(176,38,255,0.8)"/></marker>
+<marker id="pfu-arr-o" markerWidth="8" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="rgba(255,184,0,0.6)"/></marker>
+<filter id="pfu-gln" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+<filter id="pfu-glv" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="1.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<line x1="37" y1="112" x2="37" y2="155" stroke="rgba(176,38,255,0.45)" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#pfu-arr-v)"/>
+<text x="42" y="137" fill="rgba(176,38,255,0.35)" font-size="8" font-family="Space Mono,monospace">G.711</text>
+<line x1="71" y1="178" x2="261" y2="116" stroke="rgba(0,255,245,0.75)" stroke-width="2" filter="url(#pfu-gln)" marker-end="url(#pfu-arr-n)"/>
+<text x="140" y="133" fill="rgba(0,255,245,0.45)" font-size="8" font-family="Space Mono,monospace">PCM 16kHz</text>
+<line x1="68" y1="196" x2="210" y2="248" stroke="rgba(255,45,149,0.45)" stroke-width="1.5" stroke-dasharray="5,2" marker-end="url(#pfu-arr-c)"/>
+<text x="106" y="235" fill="rgba(255,45,149,0.32)" font-size="8" font-family="Space Mono,monospace">PCM</text>
+<path d="M 329 102 Q 418 62 476 80" stroke="rgba(176,38,255,0.8)" stroke-width="1.5" fill="none" filter="url(#pfu-glv)" marker-end="url(#pfu-arr-v)"/>
+<text x="378" y="60" fill="rgba(176,38,255,0.6)" font-size="8" font-family="Space Mono,monospace">text &#x2192;</text>
+<path d="M 476 90 Q 418 128 329 122" stroke="rgba(0,255,245,0.55)" stroke-width="1.5" fill="none" filter="url(#pfu-gln)" marker-end="url(#pfu-arr-n2)"/>
+<text x="368" y="134" fill="rgba(0,255,245,0.38)" font-size="8" font-family="Space Mono,monospace">&#x2190; inject</text>
+<line x1="329" y1="120" x2="745" y2="152" stroke="rgba(0,255,245,0.65)" stroke-width="2" filter="url(#pfu-gln)" marker-end="url(#pfu-arr-n)"/>
+<text x="512" y="124" fill="rgba(0,255,245,0.38)" font-size="8" font-family="Space Mono,monospace">PCM</text>
+<line x1="274" y1="253" x2="348" y2="253" stroke="rgba(255,45,149,0.55)" stroke-width="1.5" marker-end="url(#pfu-arr-c)"/>
+<line x1="416" y1="253" x2="493" y2="253" stroke="rgba(255,45,149,0.55)" stroke-width="1.5" marker-end="url(#pfu-arr-c)"/>
+<line x1="561" y1="253" x2="638" y2="253" stroke="rgba(255,45,149,0.55)" stroke-width="1.5" marker-end="url(#pfu-arr-c)"/>
+<line x1="706" y1="246" x2="779" y2="166" stroke="rgba(255,45,149,0.5)" stroke-width="1.5" marker-end="url(#pfu-arr-c)"/>
+<line x1="510" y1="108" x2="520" y2="268" stroke="rgba(176,38,255,0.38)" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#pfu-arr-v)"/>
+<text x="527" y="196" fill="rgba(176,38,255,0.6)" font-size="7" font-family="Space Mono,monospace">query</text>
+<path d="M 648 283 Q 605 268 561 263" stroke="rgba(255,184,0,0.4)" stroke-width="1.2" fill="none" stroke-dasharray="3,3" marker-end="url(#pfu-arr-o)"/>
+<path d="M 660 270 Q 592 198 518 106" stroke="rgba(255,184,0,0.3)" stroke-width="1" fill="none" stroke-dasharray="3,4" marker-end="url(#pfu-arr-o)"/>
+<text x="607" y="200" fill="rgba(255,184,0,0.6)" font-size="7" font-family="Space Mono,monospace">opt.</text>
+<line x1="783" y1="130" x2="71" y2="80" stroke="rgba(176,38,255,0.2)" stroke-width="1" stroke-dasharray="3,5"/>
+</svg>
+<div class="pfu-topo-zone" style="left:0.5%;top:1%">&#x26A1; NEURAL</div>
+<div class="pfu-topo-zone" style="left:0.5%;bottom:1%">CLASSIC</div>
+<div class="pfu-topo-zone" style="right:0.5%;bottom:1%">EXTERNAL</div>
+<div class="pfu-topo-node pfu-topo-shared" id="pipeline-node-SIP_CLIENT" style="left:4.3%;top:24.1%" title="SIP Client — G.711 telephony in/out">
+<span class="node-label">SIP</span><span class="node-sub">G.711</span><span class="node-status offline" id="pipeline-status-SIP_CLIENT"></span>
 </div>
-<div class="pfu-merge-top"></div>
-<div class="pfu-right-stem">
-<div class="wt-pipeline-node" id="pipeline-node-OUTBOUND_AUDIO_PROCESSOR"><span class="node-label">OAP</span><span class="node-status offline" id="pipeline-status-OUTBOUND_AUDIO_PROCESSOR"></span></div>
+<div class="pfu-topo-node pfu-topo-shared" id="pipeline-node-INBOUND_AUDIO_PROCESSOR" style="left:4.3%;top:54.4%" title="Inbound Audio Processor — decodes G.711 to PCM 16kHz">
+<span class="node-label">IAP</span><span class="node-sub">PCM 16kHz</span><span class="node-status offline" id="pipeline-status-INBOUND_AUDIO_PROCESSOR"></span>
 </div>
-<div class="pfu-fork-bot"></div>
-<div class="pfu-path pfu-path-classic" id="pfu-path-classic">
-<div class="wt-pipeline-connector" style="max-width:28px"></div>
-<div class="wt-pipeline-node" id="pipeline-node-VAD_SERVICE"><span class="node-label">VAD</span><span class="node-status offline" id="pipeline-status-VAD_SERVICE"></span></div>
-<div class="wt-pipeline-connector"></div>
-<div class="wt-pipeline-node" id="pipeline-node-WHISPER_SERVICE"><span class="node-label">ASR</span><span class="node-status offline" id="pipeline-status-WHISPER_SERVICE"></span></div>
-<div class="wt-pipeline-connector"></div>
-<div class="wt-pipeline-node" id="pipeline-node-LLAMA_SERVICE"><span class="node-label">LLM</span><span class="node-status offline" id="pipeline-status-LLAMA_SERVICE"></span></div>
-<div class="wt-pipeline-connector"></div>
-<div class="wt-pipeline-node" id="pipeline-node-TTS_SERVICE"><span class="node-label">TTS</span><span class="node-status offline" id="pipeline-status-TTS_SERVICE"></span><span class="node-status-sub" id="pipeline-tts-engine" style="display:block;font-size:9px;margin-top:2px;color:rgba(255,255,255,0.7);letter-spacing:0.05em">no engine</span></div>
-<div class="wt-pipeline-connector" style="max-width:28px"></div>
-<span class="pfu-path-label pfu-label-classic">CLASSIC &bull; HALF-DUPLEX &bull; ~1.4s+</span>
+<div class="pfu-topo-node pfu-topo-neural" id="pipeline-node-MOSHI_SERVICE" style="left:34.3%;top:32.4%;width:80px;height:74px" title="Moshi Full-Duplex Neural Voice — ~80ms end-to-end. Replaces VAD &#x2192; ASR &#x2192; LLM &#x2192; TTS.">
+<span class="node-label">MSH</span>
+<div class="pfu-topo-msh-chips"><span class="pfu-topo-chip pfu-topo-chip-stt">STT</span><span class="pfu-topo-chip pfu-topo-chip-lm">LM</span></div>
+<span class="node-sub" id="mosh-stt-badge">LM</span>
+<span class="pfu-topo-swap">or PersonaPlex</span>
+<span class="node-status offline" id="pipeline-status-MOSHI_SERVICE"></span>
 </div>
-<div class="pfu-merge-bot"></div>
+<div id="pfu-rag-backend-row" style="position:absolute;left:59.3%;top:22.9%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:2px;z-index:2">
+<span style="font-size:6px;color:rgba(176,38,255,0.55);letter-spacing:0.07em;font-family:var(--wt-font)">&#x21C4; WS</span>
+<div class="pfu-topo-node pfu-topo-ragbe" id="pipeline-node-MOSHI_RAG_BACKEND" style="position:static;transform:scale(1)" title="moshi-rag-backend-service — receives text token stream via WebSocket, dispatches triggers and returns reference injections.">
+<span class="node-label">RAG-BE</span><span class="node-sub">WS :8090</span><span class="node-status offline" id="pipeline-status-MOSHI_RAG_BACKEND"></span>
 </div>
-<div style="display:flex;align-items:center;gap:8px;margin-top:8px;justify-content:center">
-<div class="wt-pipeline-node" id="pipeline-node-TOMEDO_CRAWL_SERVICE" style="border-color:rgba(176,38,255,0.5)"><span class="node-label">RAG</span><span class="node-status offline" id="pipeline-status-TOMEDO_CRAWL_SERVICE"></span></div>
-<div class="wt-pipeline-connector" style="width:12px"></div>
-<div class="wt-pipeline-node" id="pipeline-node-OLLAMA" style="border-color:rgba(255,159,10,0.5)"><span class="node-label">Ollama</span><span class="node-status offline" id="pipeline-status-OLLAMA"></span></div>
-<span style="font-size:10px;color:rgba(255,255,255,0.3);letter-spacing:0.05em" id="ragDashInfo"></span>
+</div>
+<div class="pfu-topo-node pfu-topo-shared" id="pipeline-node-OUTBOUND_AUDIO_PROCESSOR" style="left:91%;top:47.1%" title="Outbound Audio Processor — encodes PCM to G.711 for SIP">
+<span class="node-label">OAP</span><span class="node-sub">PCM&#x2192;G.711</span><span class="node-status offline" id="pipeline-status-OUTBOUND_AUDIO_PROCESSOR"></span>
+</div>
+<div class="pfu-topo-node pfu-topo-classic" id="pipeline-node-VAD_SERVICE" style="left:27.9%;top:74.4%" title="Voice Activity Detection">
+<span class="node-label">VAD</span><span class="node-sub">silence det.</span><span class="node-status offline" id="pipeline-status-VAD_SERVICE"></span>
+</div>
+<div class="pfu-topo-node pfu-topo-classic" id="pipeline-node-WHISPER_SERVICE" style="left:44.8%;top:74.4%" title="Automatic Speech Recognition — Whisper">
+<span class="node-label">ASR</span><span class="node-sub">Whisper</span><span class="node-status offline" id="pipeline-status-WHISPER_SERVICE"></span>
+</div>
+<div class="pfu-topo-node pfu-topo-classic" id="pipeline-node-LLAMA_SERVICE" style="left:61.6%;top:74.4%" title="Large Language Model — LLaMA">
+<span class="node-label">LLM</span><span class="node-sub">LLaMA</span><span class="node-status offline" id="pipeline-status-LLAMA_SERVICE"></span>
+</div>
+<div class="pfu-topo-node pfu-topo-classic" id="pipeline-node-TTS_SERVICE" style="left:78.5%;top:74.4%" title="Text-to-Speech synthesis">
+<span class="node-label">TTS</span><span class="node-status-sub" id="pipeline-tts-engine" style="display:block;font-size:7px;margin-top:1px;color:rgba(255,255,255,0.65);letter-spacing:0.04em">no engine</span><span class="node-status offline" id="pipeline-status-TTS_SERVICE"></span>
+</div>
+<div class="pfu-topo-node pfu-topo-crawl" id="pipeline-node-TOMEDO_CRAWL_SERVICE" style="left:60.5%;top:88.2%" title="Tomedo crawl — semantic patient data search">
+<span class="node-label" style="font-size:8px">crawl</span><span class="node-sub">:13181</span><span class="node-status offline" id="pipeline-status-TOMEDO_CRAWL_SERVICE"></span>
+</div>
+<div class="pfu-topo-node pfu-topo-ext" id="pipeline-node-OLLAMA" style="left:79.1%;top:88.2%" title="Ollama — local LLM for RAG retrieval, TTS embeddings, classic LLM inference">
+<span class="node-label">Ollama</span><span class="node-sub">:11434</span><span class="node-status offline" id="pipeline-status-OLLAMA"></span>
+</div>
+<span id="ragDashInfo" style="position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:8px;color:rgba(255,255,255,0.28);letter-spacing:0.05em;white-space:nowrap;z-index:1;pointer-events:none"></span>
+</div>
+<div class="pfu-topo-legend">
+<div class="pfu-topo-legend-item"><div class="pfu-topo-leg-line" style="background:rgba(0,255,245,0.7)"></div><span>Neural PCM/audio</span></div>
+<div class="pfu-topo-legend-item"><div class="pfu-topo-leg-line" style="background:rgba(255,45,149,0.6)"></div><span>Classic pipeline</span></div>
+<div class="pfu-topo-legend-item"><div class="pfu-topo-leg-line" style="background:rgba(176,38,255,0.7)"></div><span>Text/WS stream</span></div>
+<div class="pfu-topo-legend-item"><div class="pfu-topo-leg-dash" style="border-color:rgba(255,184,0,0.5)"></div><span>Ollama (optional)</span></div>
+<div class="pfu-topo-legend-item"><div class="pfu-topo-leg-dash" style="border-color:rgba(255,255,255,0.2)"></div><span>Shared / async</span></div>
 </div>
 </div>
 </div>
@@ -321,6 +373,59 @@ Save incoming audio as WAV</label>
 </div>
 <div id="moshiConfig" class="hidden" style="border:1px solid var(--wt-border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--wt-bg-secondary)">
 <div style="font-size:12px;font-weight:600;margin-bottom:6px">Moshi Voice Configuration</div>
+<details open style="border:1px solid var(--wt-border);border-radius:4px;padding:8px;margin-bottom:10px;background:var(--wt-bg-tertiary)">
+<summary style="font-size:11px;font-weight:600;color:var(--wt-text-secondary);cursor:pointer;margin-bottom:6px">Moshi Frontend Model Files</summary>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Model Files (Moshi LM)</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;font-size:11px">
+<div><label style="font-size:11px">LM model file</label><input class="wt-input" id="moshiLmModelFile" placeholder="hf://kyutai/moshika-pytorch-bf16/model.safetensors" title="Path or HF URL for the Moshi LM model weights." style="font-size:11px"></div>
+<div><label style="font-size:11px">Mimi model file</label><input class="wt-input" id="moshiMimiModelFile" placeholder="hf://kyutai/moshika-pytorch-bf16/tokenizer-e351c8d8-checkpoint125.safetensors" title="Path or HF URL for the Mimi tokenizer model." style="font-size:11px"></div>
+</div>
+<div style="margin-bottom:8px;font-size:11px">
+<label style="font-size:11px">Text tokenizer file</label><input class="wt-input" id="moshiTextTokenizerFile" placeholder="hf://kyutai/moshika-pytorch-bf16/tokenizer_spm_32k_3.model" title="Path or HF URL for the SentencePiece text tokenizer." style="font-size:11px;width:100%">
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Batch &amp; GPU</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;font-size:11px">
+<div><label style="font-size:11px">Batch size</label><input class="wt-input" id="moshiBatchSize" type="number" min="1" value="8" title="Number of simultaneous call slots per backend process." style="font-size:11px"></div>
+<div><label style="font-size:11px">Moshi GPU ID</label><input class="wt-input" id="moshiGpuId" type="number" min="0" value="0" title="GPU device index for the main Moshi LM." style="font-size:11px"></div>
+<div><label style="font-size:11px">STT GPU ID</label><input class="wt-input" id="moshiSttGpuId" type="number" min="0" value="0" title="GPU device index for the in-process STT model." style="font-size:11px"></div>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">In-Process Streaming STT</div>
+<div style="margin-bottom:8px">
+<label style="cursor:pointer;display:flex;align-items:center;gap:4px;font-size:11px" title="Enable in-process streaming STT (Speech-to-Text) using the STT-1b model. Requires ~2 GB additional GPU memory."><input type="checkbox" id="moshiSttEnabled" onchange="moshiToggleSttFields()" style="width:14px;height:14px;cursor:pointer"> In-process Streaming STT</label>
+</div>
+<div id="moshiSttFields" class="hidden">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;font-size:11px">
+<div><label style="font-size:11px">STT LM model file</label><input class="wt-input" id="moshiSttLmModelFile" placeholder="hf://kyutai/stt-1b-en_fr-pytorch/model.safetensors" title="Path or HF URL for the STT LM model weights." style="font-size:11px"></div>
+<div><label style="font-size:11px">STT Mimi model file</label><input class="wt-input" id="moshiSttMimiModelFile" placeholder="hf://kyutai/stt-1b-en_fr-pytorch/tokenizer-e351c8d8-checkpoint125.safetensors" title="Path or HF URL for the STT Mimi tokenizer model." style="font-size:11px"></div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 100px;gap:8px;margin-bottom:8px;font-size:11px">
+<div><label style="font-size:11px">STT text tokenizer file</label><input class="wt-input" id="moshiSttTextTokenizerFile" placeholder="hf://kyutai/stt-1b-en_fr-pytorch/tokenizer_spm_32k_3.model" title="Path or HF URL for the STT SentencePiece text tokenizer." style="font-size:11px"></div>
+<div><label style="font-size:11px">ASR delay (tokens)</label><input class="wt-input" id="moshiAsrDelayInTokens" type="number" min="0" value="0" title="ASR delay in tokens before text output begins." style="font-size:11px"></div>
+</div>
+</div>
+</details>
+<details style="border:1px solid var(--wt-border);border-radius:4px;padding:8px;margin-bottom:10px;background:var(--wt-bg-tertiary)">
+<summary style="font-size:11px;font-weight:600;color:var(--wt-text-secondary);cursor:pointer;margin-bottom:6px">Moshi RAG Backend Settings</summary>
+<p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:6px">Settings for the moshi-rag-backend-service. Read-only fields require a service restart to change.</p>
+<div style="display:grid;grid-template-columns:1fr 100px;gap:8px;margin-bottom:8px;font-size:11px">
+<div><label style="font-size:11px">Listen address</label><input class="wt-input" id="moshiBeListenAddr" placeholder="127.0.0.1" readonly title="Backend listen address (read-only — requires service restart)." style="font-size:11px;opacity:0.6"></div>
+<div><label style="font-size:11px">Listen port</label><input class="wt-input" id="moshiBeListenPort" type="number" placeholder="8090" readonly title="Backend listen port (read-only — requires service restart)." style="font-size:11px;opacity:0.6"></div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;font-size:11px">
+<div><label style="font-size:11px">Trigger window (chars)</label><input class="wt-input" id="moshiBeTriggerWindowChars" type="number" min="0" value="200" title="Number of trailing characters to check for trigger keyword matches." style="font-size:11px"></div>
+<div><label style="font-size:11px">Default timeout (s)</label><input class="wt-input" id="moshiBeDefaultTimeoutSecs" type="number" min="0.5" step="0.5" value="3.0" title="Default timeout in seconds for LLM retrieval and action requests." style="font-size:11px"></div>
+<div><label style="font-size:11px">Default max tokens</label><input class="wt-input" id="moshiBeDefaultMaxTokens" type="number" min="1" value="256" title="Maximum tokens for LLM retrieval responses." style="font-size:11px"></div>
+</div>
+<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">LLM Profiles</div>
+<div id="moshiBeLlmProfiles" style="margin-bottom:8px"></div>
+<div style="display:grid;grid-template-columns:100px 1fr 120px 120px 60px;gap:4px;margin-bottom:4px;font-size:11px;align-items:end">
+<div><label style="font-size:11px">ID</label><input class="wt-input" id="moshiBeNewProfileId" placeholder="default" style="font-size:11px"></div>
+<div><label style="font-size:11px">URL</label><input class="wt-input" id="moshiBeNewProfileUrl" placeholder="http://localhost:11434/v1" style="font-size:11px"></div>
+<div><label style="font-size:11px">Model</label><input class="wt-input" id="moshiBeNewProfileModel" placeholder="llama3" style="font-size:11px"></div>
+<div><label style="font-size:11px">API key</label><input class="wt-input" id="moshiBeNewProfileApiKey" type="password" placeholder="" style="font-size:11px"></div>
+<div style="display:flex;align-items:flex-end"><button class="wt-btn wt-btn-secondary" style="font-size:10px;height:32px;white-space:nowrap" onclick="moshiBeAddProfile()">+</button></div>
+</div>
+</details>
 <div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--wt-text-secondary)">Language Backends</div>
 <p style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:6px">Each backend is a persistent Rust moshi-backend process. One process per language. Slots in each process handle multiple simultaneous calls (batch_size in config.json).</p>
 <div id="moshiBackendList" style="margin-bottom:8px"></div>
@@ -453,6 +558,7 @@ Save outgoing audio as WAV</label>
 <option value="MATCHA_ENGINE">Matcha Engine</option>
 <option value="OUTBOUND_AUDIO_PROCESSOR">Outbound Audio</option>
 <option value="MOSHI_SERVICE">Moshi Voice</option>
+<option value="MOSHI_RAG_BACKEND">Moshi RAG Backend</option>
 <option value="TOMEDO_CRAWL">Tomedo RAG</option>
 <option value="FRONTEND">Frontend</option>
 </select>
@@ -564,7 +670,7 @@ Save outgoing audio as WAV</label>
 <div class="wt-tab-pane active" id="beta-component" role="tabpanel" aria-labelledby="tab-beta-component">
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span><span id="prereq-sip-rtp" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 1: SIP Client RTP Routing</span><span id="prereq-sip-rtp" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px">Test SIP Client RTP packet routing and TCP connection handling with IAP service.</p>
@@ -608,7 +714,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: IAP Codec Quality</span><span id="prereq-iap" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-success);color:#000">Ready</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 2: IAP Codec Quality</span><span id="prereq-iap" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-success);color:#000">Ready</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:12px"><strong>Codec algorithm test</strong> (does not require IAP service). Runs the exact G.711 mu-law encode/decode + 15-tap FIR half-band 8kHz&#x2192;16kHz upsample pipeline offline, measuring SNR and RMS Error per-packet. Service connectivity is tested in Test 1 above.</p>
@@ -653,7 +759,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Whisper Accuracy Test</span><span id="prereq-whisper" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Whisper Accuracy Test</span><span id="prereq-whisper" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <div class="wt-field">
@@ -751,7 +857,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: LLaMA Response Quality</span><span id="prereq-llama" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 4: LLaMA Response Quality</span><span id="prereq-llama" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -787,7 +893,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span><span id="prereq-kokoro" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 5: Kokoro TTS Quality</span><span id="prereq-kokoro" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -826,7 +932,7 @@ Save outgoing audio as WAV</label>
 <div class="wt-tab-pane" id="beta-pipeline" role="tabpanel" aria-labelledby="tab-beta-pipeline">
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 1: Shut-Up Mechanism (Pipeline)</span><span id="prereq-shutup-pipeline" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 1: Shut-Up Mechanism (Pipeline)</span><span id="prereq-shutup-pipeline" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -854,7 +960,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 2: Full Pipeline Round-Trip</span><span id="prereq-roundtrip" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 2: Full Pipeline Round-Trip</span><span id="prereq-roundtrip" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -876,7 +982,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 3: Full Loop File Test (WER)</span><span id="prereq-fullloop" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 3: Full Loop File Test (WER)</span><span id="prereq-fullloop" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p id="fullLoopDesc" style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -891,6 +997,7 @@ Save outgoing audio as WAV</label>
 <option value="kokoro">Kokoro</option>
 <option value="neutts">NeuTTS</option>
 <option value="moshi">Moshi</option>
+<option value="moshi-rag">Moshi RAG</option>
 </select>
 </div>
 </div>
@@ -916,9 +1023,10 @@ Save outgoing audio as WAV</label>
 </div>
 </div>
 </div>
+</div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 4: Pipeline Resilience Health Check</span><span id="prereq-health" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-success);color:#000">Ready</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 4: Pipeline Resilience Health Check</span><span id="prereq-health" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-success);color:#000">Ready</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -936,7 +1044,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 5: Multi-Line Command Stress Test</span><span id="prereq-multiline" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 5: Multi-Line Command Stress Test</span><span id="prereq-multiline" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">
@@ -955,7 +1063,7 @@ Save outgoing audio as WAV</label>
 </div>
 
 <div class="wt-card">
-<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)"><span class="wt-card-title">Test 6: Full Pipeline Stress Test</span><span id="prereq-stress" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
+<div class="wt-card-header" style="cursor:pointer" role="button" tabindex="0" aria-expanded="false" onclick="toggleCollapsible(this)" onkeydown="if(event.key==='Enter'||event.key===' ')toggleCollapsible(this)"><span class="wt-card-title">Test 6: Full Pipeline Stress Test</span><span id="prereq-stress" style="margin-left:8px;font-size:10px;padding:2px 6px;border-radius:4px;background:var(--wt-text-secondary);color:#fff">...</span><span style="margin-left:auto;font-size:12px;color:var(--wt-text-secondary)">&#x25B6;</span></div>
 <div class="wt-collapsible">
 <div style="padding:0 20px 16px">
 <p style="font-size:12px;color:var(--wt-text-secondary);margin-bottom:10px">

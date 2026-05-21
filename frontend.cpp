@@ -166,6 +166,22 @@ static constexpr uint16_t MATCHA_ENGINE_CMD_PORT = whispertalk::tts::kMatchaEngi
 
 using namespace whispertalk;
 
+static inline double safe_stod(const std::string& s, double def = 0.0) noexcept {
+    try { return std::stod(s); } catch (...) { return def; }
+}
+static inline long safe_stol(const std::string& s, long def = 0) noexcept {
+    try { return std::stol(s); } catch (...) { return def; }
+}
+static inline int safe_stoi(const std::string& s, int def = 0) noexcept {
+    try { return std::stoi(s); } catch (...) { return def; }
+}
+static inline float safe_stof(const std::string& s, float def = 0.0f) noexcept {
+    try { return std::stof(s); } catch (...) { return def; }
+}
+static inline unsigned long long safe_stoull(const std::string& s, unsigned long long def = 0) noexcept {
+    try { return std::stoull(s); } catch (...) { return def; }
+}
+
 static std::atomic<bool> s_sigint_received(false);
 static SSL_CTX* s_rag_ssl_ctx = nullptr;
 static void cleanup_rag_ssl_ctx() {
@@ -501,7 +517,8 @@ private:
     InterconnectNode interconnect_;
     sqlite3* db_;
     bool db_ok_ = false;
-    bool db_write_mode_ = false;
+    std::atomic<bool> db_write_mode_{false};
+    std::recursive_mutex db_mutex_;
     std::string project_root_;
     std::string db_path_;
     std::string rag_db_path_;
@@ -538,7 +555,7 @@ private:
     std::queue<EmbeddingJob> emb_queue_;
     std::mutex emb_queue_mutex_;
     std::condition_variable emb_queue_cv_;
-    bool emb_pool_stop_ = false;
+    std::atomic<bool> emb_pool_stop_{false};
     std::vector<std::thread> emb_workers_;
     
     std::mutex tests_mutex_;
@@ -1028,28 +1045,39 @@ private:
     }
 
     bool stop_service(const std::string& name) {
-        std::lock_guard<std::mutex> lock(services_mutex_);
-        for (auto& svc : services_) {
-            if (svc.name != name) continue;
-            if (!svc.managed || svc.pid <= 0) return false;
-
-            kill(svc.pid, SIGTERM);
-            for (int i = 0; i < 50; i++) {
-                int status;
-                if (waitpid(svc.pid, &status, WNOHANG) == svc.pid) {
-                    svc.managed = false;
-                    svc.pid = 0;
-                    return true;
-                }
-                usleep(STOP_POLL_INTERVAL_US);
+        pid_t pid_to_kill = 0;
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            for (auto& svc : services_) {
+                if (svc.name != name) continue;
+                if (!svc.managed || svc.pid <= 0) return false;
+                pid_to_kill = svc.pid;
+                break;
             }
-            kill(svc.pid, SIGKILL);
-            waitpid(svc.pid, nullptr, 0);
-            svc.managed = false;
-            svc.pid = 0;
-            return true;
         }
-        return false;
+        if (pid_to_kill <= 0) return false;
+
+        kill(pid_to_kill, SIGTERM);
+        for (int i = 0; i < 50; i++) {
+            int status;
+            if (waitpid(pid_to_kill, &status, WNOHANG) == pid_to_kill) {
+                std::lock_guard<std::mutex> lock(services_mutex_);
+                for (auto& svc : services_) {
+                    if (svc.name == name) { svc.managed = false; svc.pid = 0; break; }
+                }
+                return true;
+            }
+            usleep(STOP_POLL_INTERVAL_US);
+        }
+        kill(pid_to_kill, SIGKILL);
+        waitpid(pid_to_kill, nullptr, 0);
+        {
+            std::lock_guard<std::mutex> lock(services_mutex_);
+            for (auto& svc : services_) {
+                if (svc.name == name) { svc.managed = false; svc.pid = 0; break; }
+            }
+        }
+        return true;
     }
 
     void save_service_config(const std::string& name, const std::string& args) {
@@ -1066,6 +1094,7 @@ private:
 
     std::string get_setting(const std::string& key, const std::string& default_val = "") {
         if (!db_) return default_val;
+        std::lock_guard<std::recursive_mutex> lock(db_mutex_);
         sqlite3_stmt* stmt;
         const char* sql = "SELECT value FROM settings WHERE key = ?";
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return default_val;
@@ -1081,6 +1110,7 @@ private:
 
     void set_setting(const std::string& key, const std::string& value) {
         if (!db_) return;
+        std::lock_guard<std::recursive_mutex> lock(db_mutex_);
         sqlite3_stmt* stmt;
         const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -1093,6 +1123,7 @@ private:
 
     void save_test_run(const TestInfo& test) {
         if (!db_) return;
+        std::lock_guard<std::recursive_mutex> lock(db_mutex_);
         sqlite3_stmt* stmt;
         const char* sql = "INSERT INTO test_runs (test_name, start_time, end_time, exit_code, arguments, log_file) VALUES (?, ?, ?, ?, ?, ?)";
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -1475,6 +1506,10 @@ private:
                 handle_ollama_install(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/moshi/config")) == 0) {
                 handle_moshi_config(c, hm);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/moshi/backend-config")) == 0) {
+                handle_moshi_backend_config(c);
+            } else if (mg_strcmp(hm->uri, mg_str("/api/moshi/backend-health")) == 0) {
+                handle_moshi_backend_health(c);
             } else if (mg_strcmp(hm->uri, mg_str("/api/rag/wipe_vectors")) == 0) {
                 handle_rag_wipe_vectors(c, hm);
             } else if (mg_strcmp(hm->uri, mg_str("/api/embeddings/upsert")) == 0) {
@@ -2333,10 +2368,11 @@ private:
     void handle_test_setup_start(struct mg_connection *c, struct mg_http_message *hm) {
         std::string body(hm->body.buf, hm->body.len);
         std::string tts = extract_json_string(body, "tts");
-        if (tts == "moshi") {
+        if (tts == "moshi" || tts == "moshi-rag") {
             int64_t task_id = create_async_task("test_setup_moshi");
-            std::thread([this, task_id]() {
-                run_moshi_test_setup_async(task_id);
+            bool rag_mode = (tts == "moshi-rag");
+            std::thread([this, task_id, rag_mode]() {
+                run_moshi_test_setup_async(task_id, rag_mode);
             }).detach();
             mg_http_reply(c, 202, "Content-Type: application/json\r\n",
                 "{\"task_id\":%lld}", (long long)task_id);
@@ -2592,8 +2628,9 @@ private:
             "{\"status\":\"done\",\"tts\":\"" + active_tts + "\"}");
     }
 
-    void run_moshi_test_setup_async(int64_t task_id) {
-        set_setup_progress(task_id, "A", "Checking service state for Moshi pipeline...");
+    void run_moshi_test_setup_async(int64_t task_id, bool rag_mode = false) {
+        std::string mode_label = rag_mode ? "Moshi RAG" : "Moshi";
+        set_setup_progress(task_id, "A", "Checking service state for " + mode_label + " pipeline...");
 
         static const std::vector<std::string> stop_order = {
             "TOMEDO_CRAWL_SERVICE", "MATCHA_ENGINE", "VITS2_ENGINE", "NEUTTS_ENGINE", "KOKORO_ENGINE", "TTS_SERVICE",
@@ -2610,7 +2647,17 @@ private:
         std::string sip_err;
         http_post_localhost(TEST_SIP_PROVIDER_PORT, "/hangup", "{}", sip_err);
 
-        set_setup_progress(task_id, "B", "Starting Moshi pipeline services...");
+        set_setup_progress(task_id, "B", "Starting " + mode_label + " pipeline services...");
+
+        if (rag_mode) {
+            std::string backends = get_setting("moshi_backends", "[]");
+            if (backends.find('{') == std::string::npos) {
+                finish_async_task(task_id,
+                    "{\"error\":\"Moshi RAG mode requires at least one backend configured in Moshi Config. "
+                    "Go to Moshi tab and add a backend first.\"}");
+                return;
+            }
+        }
 
         struct StartStep { std::string name; int sleep_s; };
         static const std::vector<StartStep> start_order = {
@@ -2732,9 +2779,10 @@ private:
             return;
         }
 
-        set_setting("test_active_tts", "moshi");
+        std::string tts_label = rag_mode ? "moshi-rag" : "moshi";
+        set_setting("test_active_tts", tts_label);
         finish_async_task(task_id,
-            "{\"status\":\"done\",\"tts\":\"moshi\"}");
+            "{\"status\":\"done\",\"tts\":\"" + tts_label + "\"}");
     }
 
     // POST /api/tests/teardown — Hang up conference, remove SIP lines, stop active TTS.
@@ -2757,7 +2805,7 @@ private:
             stop_service("VITS2_ENGINE");
         } else if (active_tts == "matcha") {
             stop_service("MATCHA_ENGINE");
-        } else if (active_tts == "moshi") {
+        } else if (active_tts == "moshi" || active_tts == "moshi-rag") {
             stop_service("MOSHI_SERVICE");
         }
         set_setting("test_active_tts", "");
@@ -2921,7 +2969,7 @@ private:
 
         int port_val = 5060;
         if (!port_str.empty()) {
-            try { port_val = std::stoi(port_str); } catch (...) { port_val = 5060; }
+            try { port_val = safe_stoi(port_str); } catch (...) { port_val = 5060; }
             if (port_val < 1 || port_val > 65535) port_val = 5060;
         }
 
@@ -3071,16 +3119,16 @@ private:
             if (parts.size() >= 7) {
                 SipCallInfo ci;
                 try {
-                    ci.call_id = static_cast<uint32_t>(std::stoul(parts[0]));
-                    ci.line_index = std::stoi(parts[1]);
-                    ci.rtp_rx = std::stoull(parts[2]);
-                    ci.rtp_tx = std::stoull(parts[3]);
-                    ci.rx_bytes = std::stoull(parts[4]);
-                    ci.tx_bytes = std::stoull(parts[5]);
-                    ci.duration = std::stoull(parts[6]);
+                    ci.call_id = static_cast<uint32_t>(safe_stoull(parts[0]));
+                    ci.line_index = safe_stoi(parts[1]);
+                    ci.rtp_rx = safe_stoull(parts[2]);
+                    ci.rtp_tx = safe_stoull(parts[3]);
+                    ci.rx_bytes = safe_stoull(parts[4]);
+                    ci.tx_bytes = safe_stoull(parts[5]);
+                    ci.duration = safe_stoull(parts[6]);
                     if (parts.size() >= 9) {
-                        ci.fwd = std::stoull(parts[7]);
-                        ci.discard = std::stoull(parts[8]);
+                        ci.fwd = safe_stoull(parts[7]);
+                        ci.discard = safe_stoull(parts[8]);
                     }
                     result.calls.push_back(ci);
                 } catch (...) {}
@@ -3785,7 +3833,7 @@ private:
                     size_t text_start = paren_close + 2;
                     if (text_start >= msg.size()) continue;
 
-                    double chunk_latency = std::stod(msg.substr(ms_start, ms_end - ms_start));
+                    double chunk_latency = safe_stod(msg.substr(ms_start, ms_end - ms_start));
                     std::string chunk_text = msg.substr(text_start);
                     while (!chunk_text.empty() && (chunk_text.front() == ' ' || chunk_text.front() == ':'))
                         chunk_text.erase(chunk_text.begin());
@@ -3853,7 +3901,7 @@ private:
                     if (ms_end == std::string::npos) continue;
 
                     try {
-                        result.gen_ms = std::stod(msg.substr(ms_start, ms_end - ms_start));
+                        result.gen_ms = safe_stod(msg.substr(ms_start, ms_end - ms_start));
                     } catch (...) {}
 
                     size_t text_start = ms_end + 5;
@@ -4068,7 +4116,7 @@ private:
             if (resp.rfind("RESPONSE:", 0) == 0) {
                 size_t ms_end = resp.find("ms:", 9);
                 if (ms_end != std::string::npos) {
-                    latency_ms = std::stod(resp.substr(9, ms_end - 9));
+                    latency_ms = safe_stod(resp.substr(9, ms_end - 9));
                     response_text = resp.substr(ms_end + 3);
                 }
             } else {
@@ -4163,10 +4211,10 @@ private:
         if (resp.rfind("SHUTUP_RESULT:", 0) == 0) {
             size_t p1 = resp.find("ms:", 14);
             if (p1 != std::string::npos) {
-                interrupt_ms = std::stod(resp.substr(14, p1 - 14));
+                interrupt_ms = safe_stod(resp.substr(14, p1 - 14));
                 size_t p2 = resp.find("ms", p1 + 3);
                 if (p2 != std::string::npos) {
-                    total_ms = std::stod(resp.substr(p1 + 3, p2 - (p1 + 3)));
+                    total_ms = safe_stod(resp.substr(p1 + 3, p2 - (p1 + 3)));
                 }
             }
         }
@@ -4321,10 +4369,10 @@ private:
         try {
             size_t p1 = resp.find("ms:", 14);
             if (p1 != std::string::npos) {
-                interrupt_ms = std::stod(resp.substr(14, p1 - 14));
+                interrupt_ms = safe_stod(resp.substr(14, p1 - 14));
                 size_t p2 = resp.find("ms", p1 + 3);
                 if (p2 != std::string::npos) {
-                    total_ms = std::stod(resp.substr(p1 + 3, p2 - (p1 + 3)));
+                    total_ms = safe_stod(resp.substr(p1 + 3, p2 - (p1 + 3)));
                 }
             }
         } catch (...) {}
@@ -4492,7 +4540,7 @@ private:
                 if (resp.rfind("RESPONSE:", 0) == 0) {
                     size_t ms_end = resp.find("ms:", 9);
                     if (ms_end != std::string::npos) {
-                        latency_ms = std::stod(resp.substr(9, ms_end - 9));
+                        latency_ms = safe_stod(resp.substr(9, ms_end - 9));
                         response_text = resp.substr(ms_end + 3);
                     }
                 }
@@ -4512,7 +4560,7 @@ private:
             if (resp.rfind("SHUTUP_RESULT:", 0) == 0) {
                 size_t p1 = resp.find("ms:", 14);
                 if (p1 != std::string::npos) {
-                    interrupt_latency = std::stod(resp.substr(14, p1 - 14));
+                    interrupt_latency = safe_stod(resp.substr(14, p1 - 14));
                 }
             }
         }
@@ -4660,28 +4708,28 @@ private:
                 size_t p = 13;
                 size_t ms_end = resp.find("ms:", p);
                 if (ms_end != std::string::npos) {
-                    latency_ms = std::stod(resp.substr(p, ms_end - p));
+                    latency_ms = safe_stod(resp.substr(p, ms_end - p));
                     p = ms_end + 3;
                 }
                 size_t c1 = resp.find(':', p);
-                if (c1 != std::string::npos) { samples = std::stol(resp.substr(p, c1 - p)); p = c1 + 1; }
+                if (c1 != std::string::npos) { samples = safe_stol(resp.substr(p, c1 - p)); p = c1 + 1; }
                 size_t c2 = resp.find(':', p);
-                if (c2 != std::string::npos) { sample_rate = std::stoi(resp.substr(p, c2 - p)); p = c2 + 1; }
+                if (c2 != std::string::npos) { sample_rate = safe_stoi(resp.substr(p, c2 - p)); p = c2 + 1; }
                 size_t c3 = resp.find("s:", p);
-                if (c3 != std::string::npos) { duration_s = std::stod(resp.substr(p, c3 - p)); p = c3 + 2; }
+                if (c3 != std::string::npos) { duration_s = safe_stod(resp.substr(p, c3 - p)); p = c3 + 2; }
                 size_t rtf_pos = resp.find("rtf=", p);
                 if (rtf_pos != std::string::npos) {
                     size_t rtf_end = resp.find(':', rtf_pos + 4);
-                    rtf = std::stod(resp.substr(rtf_pos + 4, rtf_end - rtf_pos - 4));
+                    rtf = safe_stod(resp.substr(rtf_pos + 4, rtf_end - rtf_pos - 4));
                 }
                 size_t peak_pos = resp.find("peak=", p);
                 if (peak_pos != std::string::npos) {
                     size_t peak_end = resp.find(':', peak_pos + 5);
-                    peak = std::stof(resp.substr(peak_pos + 5, peak_end - peak_pos - 5));
+                    peak = safe_stof(resp.substr(peak_pos + 5, peak_end - peak_pos - 5));
                 }
                 size_t rms_pos = resp.find("rms=", p);
                 if (rms_pos != std::string::npos) {
-                    rms = std::stod(resp.substr(rms_pos + 4));
+                    rms = safe_stod(resp.substr(rms_pos + 4));
                 }
             }
 
@@ -4794,26 +4842,26 @@ private:
 
         size_t p = 13;
         size_t c1 = resp.find("ms:", p);
-        if (c1 != std::string::npos) { avg_ms = std::stoi(resp.substr(p, c1 - p)); p = c1 + 3; }
+        if (c1 != std::string::npos) { avg_ms = safe_stoi(resp.substr(p, c1 - p)); p = c1 + 3; }
         size_t c2 = resp.find("ms:", p);
-        if (c2 != std::string::npos) { p50_ms = std::stoi(resp.substr(p, c2 - p)); p = c2 + 3; }
+        if (c2 != std::string::npos) { p50_ms = safe_stoi(resp.substr(p, c2 - p)); p = c2 + 3; }
         size_t c3 = resp.find("ms:", p);
-        if (c3 != std::string::npos) { p95_ms = std::stoi(resp.substr(p, c3 - p)); p = c3 + 3; }
+        if (c3 != std::string::npos) { p95_ms = safe_stoi(resp.substr(p, c3 - p)); p = c3 + 3; }
         size_t slash = resp.find('/', p);
         if (slash != std::string::npos) {
-            success = std::stoi(resp.substr(p, slash - p));
+            success = safe_stoi(resp.substr(p, slash - p));
             size_t c4 = resp.find(':', slash + 1);
-            if (c4 != std::string::npos) { total = std::stoi(resp.substr(slash + 1, c4 - slash - 1)); p = c4 + 1; }
+            if (c4 != std::string::npos) { total = safe_stoi(resp.substr(slash + 1, c4 - slash - 1)); p = c4 + 1; }
         }
         size_t at = resp.find('@', p);
         if (at != std::string::npos) {
-            total_samples = std::stol(resp.substr(p, at - p));
+            total_samples = safe_stol(resp.substr(p, at - p));
             size_t c5 = resp.find(':', at + 1);
-            if (c5 != std::string::npos) { sample_rate = std::stoi(resp.substr(at + 1, c5 - at - 1)); p = c5 + 1; }
+            if (c5 != std::string::npos) { sample_rate = safe_stoi(resp.substr(at + 1, c5 - at - 1)); p = c5 + 1; }
         }
         size_t rtf_pos = resp.find("rtf=", p);
         if (rtf_pos != std::string::npos) {
-            rtf = std::stod(resp.substr(rtf_pos + 4));
+            rtf = safe_stod(resp.substr(rtf_pos + 4));
         }
 
         double duration_s = sample_rate > 0 ? (double)total_samples / sample_rate : 0;
@@ -5304,7 +5352,7 @@ private:
                                 size_t ms_end = msg.find("ms)", rpos + 10);
                                 if (ms_end != std::string::npos) {
                                     try {
-                                        double ms_val = std::stod(msg.substr(rpos + 10, ms_end - (rpos + 10)));
+                                        double ms_val = safe_stod(msg.substr(rpos + 10, ms_end - (rpos + 10)));
                                         total_llama_ms += ms_val;
                                         llama_count++;
                                     } catch (...) {}
@@ -7046,7 +7094,9 @@ private:
                 if (SSL_CTX_load_verify_locations(s_rag_ssl_ctx, ca.c_str(), nullptr) == 1) {
                     SSL_CTX_set_verify(s_rag_ssl_ctx, SSL_VERIFY_PEER, nullptr);
                 } else {
-                    SSL_CTX_set_verify(s_rag_ssl_ctx, SSL_VERIFY_NONE, nullptr);
+                    std::fprintf(stderr, "RAG TLS: failed to load CA from %s — disabling TLS context\n", ca.c_str());
+                    SSL_CTX_free(s_rag_ssl_ctx);
+                    s_rag_ssl_ctx = nullptr;
                 }
             }
         });
@@ -7106,6 +7156,27 @@ private:
             std::string llm_url       = get_setting("moshi_llm_api_url", "");
             std::string llm_key       = get_setting("moshi_llm_api_key", "");
             std::string ret_action    = get_setting("moshi_ret_action", "tomedo-crawl-query");
+            std::string lm_model      = get_setting("moshi_lm_model_file", "");
+            std::string mimi_model    = get_setting("moshi_mimi_model_file", "");
+            std::string text_tok      = get_setting("moshi_text_tokenizer_file", "");
+            std::string batch_size    = get_setting("moshi_batch_size", "8");
+            std::string moshi_gpu     = get_setting("moshi_gpu_id", "0");
+            std::string stt_gpu       = get_setting("moshi_stt_gpu_id", "0");
+            std::string stt_lm        = get_setting("moshi_stt_lm_model_file", "");
+            std::string stt_mimi      = get_setting("moshi_stt_mimi_model_file", "");
+            std::string stt_tok       = get_setting("moshi_stt_text_tokenizer_file", "");
+            std::string asr_delay     = get_setting("moshi_asr_delay_in_tokens", "0");
+            std::string rag_token_id  = get_setting("moshi_rag_token_id", "");
+            std::string rag_timeout   = get_setting("moshi_rag_timeout", "");
+            auto json_str_or_null = [](const std::string& k, const std::string& v) -> std::string {
+                if (v.empty()) return ",\"" + k + "\":null";
+                return ",\"" + k + "\":\"" + escape_json(v) + "\"";
+            };
+            auto json_int = [](const std::string& k, const std::string& v, const std::string& def) -> std::string {
+                int val = 0;
+                try { val = safe_stoi(v.empty() ? def : v); } catch (...) { try { val = safe_stoi(def); } catch (...) {} }
+                return ",\"" + k + "\":" + std::to_string(val);
+            };
             std::string resp = "{\"backends\":" + backends_json
                 + ",\"triggers\":" + triggers_json
                 + ",\"default_language\":\"" + escape_json(default_lang) + "\""
@@ -7116,8 +7187,22 @@ private:
                 + ",\"arc_model_file\":\"" + escape_json(arc_model) + "\""
                 + ",\"arc_tokenizer_path\":\"" + escape_json(arc_tok) + "\""
                 + ",\"llm_api_url\":\"" + escape_json(llm_url) + "\""
-                + ",\"llm_api_key\":\"" + escape_json(llm_key) + "\""
-                + ",\"ret_action\":\"" + escape_json(ret_action) + "\"}";
+                + ",\"llm_api_key\":\"" + (llm_key.empty() ? "" : "********") + "\""
+                + ",\"llm_api_key_set\":" + (llm_key.empty() ? "false" : "true")
+                + ",\"ret_action\":\"" + escape_json(ret_action) + "\""
+                + json_str_or_null("lm_model_file", lm_model)
+                + json_str_or_null("mimi_model_file", mimi_model)
+                + json_str_or_null("text_tokenizer_file", text_tok)
+                + json_int("batch_size", batch_size, "8")
+                + json_int("moshi_gpu_id", moshi_gpu, "0")
+                + json_int("stt_gpu_id", stt_gpu, "0")
+                + json_str_or_null("stt_lm_model_file", stt_lm)
+                + json_str_or_null("stt_mimi_model_file", stt_mimi)
+                + json_str_or_null("stt_text_tokenizer_file", stt_tok)
+                + json_int("asr_delay_in_tokens", asr_delay, "0")
+                + json_str_or_null("rag_token_id", rag_token_id)
+                + json_str_or_null("rag_timeout", rag_timeout)
+                + "}";
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
             return;
         }
@@ -7193,6 +7278,32 @@ private:
                 }
                 return body.substr(start, i - start);
             };
+            auto extract_number = [&](const std::string& key) -> std::string {
+                auto pos = body.find("\"" + key + "\"");
+                if (pos == std::string::npos) return "";
+                auto colon = body.find(':', pos + key.size() + 2);
+                if (colon == std::string::npos) return "";
+                auto start = colon + 1;
+                while (start < body.size() && body[start] == ' ') start++;
+                if (start >= body.size()) return "";
+                if (body.compare(start, 4, "null") == 0) return "";
+                std::string result;
+                while (start < body.size() && (std::isdigit(body[start]) || body[start] == '.' || body[start] == '-')) {
+                    result += body[start++];
+                }
+                return result;
+            };
+            auto extract_string_or_null = [&](const std::string& key) -> std::string {
+                auto pos = body.find("\"" + key + "\"");
+                if (pos == std::string::npos) return "\x01";
+                auto colon = body.find(':', pos + key.size() + 2);
+                if (colon == std::string::npos) return "\x01";
+                auto start = colon + 1;
+                while (start < body.size() && body[start] == ' ') start++;
+                if (start >= body.size()) return "\x01";
+                if (body.compare(start, 4, "null") == 0) return "";
+                return extract(key);
+            };
             std::string backends = extract_json_value("backends");
             std::string triggers = extract_json_value("triggers");
             std::string def_lang = extract("default_language");
@@ -7221,13 +7332,49 @@ private:
             set_setting("moshi_llm_api_url", llm_url);
             set_setting("moshi_llm_api_key", llm_key);
             set_setting("moshi_ret_action", ret_action);
+            auto save_if_present_str = [&](const std::string& json_key, const std::string& setting_key) {
+                std::string v = extract_string_or_null(json_key);
+                if (v != "\x01") set_setting(setting_key, v);
+            };
+            auto save_if_present_num = [&](const std::string& json_key, const std::string& setting_key) {
+                std::string v = extract_number(json_key);
+                if (!v.empty()) set_setting(setting_key, v);
+                else {
+                    std::string check = extract_string_or_null(json_key);
+                    if (check != "\x01") set_setting(setting_key, "");
+                }
+            };
+            save_if_present_str("lm_model_file", "moshi_lm_model_file");
+            save_if_present_str("mimi_model_file", "moshi_mimi_model_file");
+            save_if_present_str("text_tokenizer_file", "moshi_text_tokenizer_file");
+            save_if_present_num("batch_size", "moshi_batch_size");
+            save_if_present_num("moshi_gpu_id", "moshi_gpu_id");
+            save_if_present_num("stt_gpu_id", "moshi_stt_gpu_id");
+            save_if_present_str("stt_lm_model_file", "moshi_stt_lm_model_file");
+            save_if_present_str("stt_mimi_model_file", "moshi_stt_mimi_model_file");
+            save_if_present_str("stt_text_tokenizer_file", "moshi_stt_text_tokenizer_file");
+            save_if_present_num("asr_delay_in_tokens", "moshi_asr_delay_in_tokens");
+            save_if_present_str("rag_token_id", "moshi_rag_token_id");
+            save_if_present_str("rag_timeout", "moshi_rag_timeout");
+            std::string be_llm_profiles = extract_json_value("be_llm_profiles");
+            std::string be_trigger_window = extract_number("be_trigger_window_chars");
+            std::string be_timeout = extract_number("be_default_timeout_secs");
+            std::string be_max_tokens = extract_number("be_default_max_tokens");
             std::string backend_config_body = "{\"llm_mode_enabled\":" + llm_mode
                 + ",\"arc_mode_enabled\":" + arc_mode
                 + ",\"tomedo_crawl_url\":\"" + escape_json(tomedo_crawl) + "\""
                 + ",\"triggers\":" + triggers
                 + ",\"ret_action\":\"" + escape_json(ret_action) + "\""
                 + ",\"llm_api_url\":\"" + escape_json(llm_url) + "\""
-                + ",\"llm_api_key\":\"" + escape_json(llm_key) + "\"}";
+                + ",\"llm_api_key\":\"" + escape_json(llm_key) + "\"";
+            if (!be_trigger_window.empty())
+                backend_config_body += ",\"trigger_window_chars\":" + be_trigger_window;
+            if (!be_timeout.empty())
+                backend_config_body += ",\"default_timeout_secs\":" + be_timeout;
+            if (!be_max_tokens.empty())
+                backend_config_body += ",\"default_max_tokens\":" + be_max_tokens;
+            backend_config_body += ",\"llm_profiles\":" + be_llm_profiles;
+            backend_config_body += "}";
             std::thread([backend_url, backend_config_body](){
                 ollama_http_request("POST", backend_url, "/api/config", backend_config_body, 5000);
             }).detach();
@@ -7235,6 +7382,38 @@ private:
             return;
         }
         mg_http_reply(c, 405, "", "Method Not Allowed\n");
+    }
+
+    void handle_moshi_backend_config(struct mg_connection *c) {
+        std::string backend_url = get_setting("moshi_backend_url", "");
+        if (backend_url.empty()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"error\":\"backend_url not set\"}");
+            return;
+        }
+        std::string resp = ollama_http_request("GET", backend_url, "/api/config");
+        if (resp.empty()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"error\":\"backend unreachable\"}");
+            return;
+        }
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
+    }
+
+    void handle_moshi_backend_health(struct mg_connection *c) {
+        std::string backend_url = get_setting("moshi_backend_url", "");
+        if (backend_url.empty()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"status\":\"offline\",\"error\":\"backend_url not set\"}");
+            return;
+        }
+        std::string resp = ollama_http_request("GET", backend_url, "/api/health");
+        if (resp.empty()) {
+            mg_http_reply(c, 200, "Content-Type: application/json\r\n",
+                "{\"status\":\"offline\",\"error\":\"backend unreachable\"}");
+            return;
+        }
+        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", resp.c_str());
     }
 
     void handle_rag_health(struct mg_connection *c) {
@@ -10102,7 +10281,6 @@ document.getElementById('f').onsubmit=async function(e){
 
         if (!auth_ok) {
             fa.count++;
-            fa.window_start = now;
             mg_http_reply(c, 401, "Content-Type: application/json\r\n",
                           "{\"error\":\"Invalid credentials\"}");
             return;
@@ -10114,7 +10292,7 @@ document.getElementById('f').onsubmit=async function(e){
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: application/json\r\n"
             "Set-Cookie: prodigy_session=%s; HttpOnly; Secure; SameSite=Strict; Path=/\r\n"
-            "Content-Length: 12\r\n"
+            "Content-Length: 11\r\n"
             "\r\n"
             "{\"ok\":true}", token.c_str());
     }
@@ -10126,7 +10304,7 @@ document.getElementById('f').onsubmit=async function(e){
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: application/json\r\n"
             "Set-Cookie: prodigy_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0\r\n"
-            "Content-Length: 12\r\n"
+            "Content-Length: 11\r\n"
             "\r\n"
             "{\"ok\":true}");
     }
@@ -10169,9 +10347,9 @@ document.getElementById('f').onsubmit=async function(e){
         std::string username = extract_json_string(body, "username");
         std::string password = extract_json_string(body, "password");
 
-        if (username.empty() || password.size() < 4) {
+        if (username.empty() || password.size() < 8) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n",
-                          "{\"error\":\"username required and password must be at least 4 characters\"}");
+                          "{\"error\":\"username required and password must be at least 8 characters\"}");
             return;
         }
         if (!db_) {
@@ -10213,9 +10391,9 @@ document.getElementById('f').onsubmit=async function(e){
         std::string current_pw = extract_json_string(body, "current_password");
         std::string new_pw = extract_json_string(body, "new_password");
 
-        if (username.empty() || new_pw.size() < 4) {
+        if (username.empty() || new_pw.size() < 8) {
             mg_http_reply(c, 400, "Content-Type: application/json\r\n",
-                          "{\"error\":\"username required and new password must be at least 4 characters\"}");
+                          "{\"error\":\"username required and new password must be at least 8 characters\"}");
             return;
         }
         if (!db_) {

@@ -70,11 +70,12 @@ import argparse, json, sys, time, re, urllib.request, os
 FRONTEND = "http://127.0.0.1:8080"
 SIP_PROVIDER = "http://127.0.0.1:22011"
 
-VALID_ENGINES = ("kokoro", "neutts", "moshi")
+VALID_ENGINES = ("kokoro", "neutts", "moshi", "moshi-rag")
 ENGINE_SERVICE_MAP = {
     "kokoro": "KOKORO_ENGINE",
     "neutts": "NEUTTS_ENGINE",
     "moshi": "MOSHI_SERVICE",
+    "moshi-rag": "MOSHI_SERVICE",
 }
 
 def parse_args():

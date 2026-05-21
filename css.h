@@ -41,7 +41,7 @@ body::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;point
 .wt-status-dot.running{background:var(--wt-success);animation:neonPulse 2s infinite}
 .wt-status-dot.failed{background:var(--wt-danger);box-shadow:var(--wt-shadow-glow-danger)}
 @keyframes neonPulse{0%,100%{opacity:1;box-shadow:0 0 6px var(--wt-success)}50%{opacity:0.5;box-shadow:0 0 16px var(--wt-success)}}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+
 .wt-btn{display:inline-flex;align-items:center;gap:5px;padding:6px 14px;border-radius:var(--wt-radius);border:1px solid var(--wt-border);font-size:12px;font-weight:500;cursor:pointer;transition:all 0.2s;font-family:var(--wt-body);letter-spacing:0.02em;background:transparent;color:var(--wt-text)}
 .wt-btn-primary{background:rgba(255,45,149,0.15);color:var(--wt-accent);border-color:var(--wt-accent)}
 .wt-btn-primary:hover{background:var(--wt-accent);color:#fff;box-shadow:0 0 20px rgba(255,45,149,0.4)}
@@ -137,7 +137,7 @@ body::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;point
 .model-upload-zone{border:2px dashed var(--wt-border);border-radius:var(--wt-radius);padding:24px;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s;color:var(--wt-text-secondary);user-select:none}
 .model-upload-zone:hover,.model-upload-zone.drag-over{border-color:var(--wt-accent);background:rgba(255,45,149,0.05);color:var(--wt-text)}
 @keyframes cyanPulse{0%,100%{box-shadow:0 0 8px rgba(0,255,245,0.35),0 0 16px rgba(0,255,245,0.15)}50%{box-shadow:0 0 20px rgba(0,255,245,0.7),0 0 40px rgba(0,255,245,0.3)}}
-@keyframes neuralScan{0%{background-position:0% 0%}100%{background-position:0% 200%}}
+
 .wt-pipeline-node-neural{border-color:rgba(0,255,245,0.6)!important;background:linear-gradient(160deg,rgba(0,255,245,0.08) 0%,rgba(0,0,0,0.6) 60%)!important;animation:cyanPulse 2.8s ease-in-out infinite}
 .wt-pipeline-node-neural:hover{box-shadow:0 0 28px rgba(0,255,245,0.55)!important;border-color:rgba(0,255,245,1)!important;transform:scale(1.1)}
 .wt-pipeline-node-neural .node-label{color:var(--wt-accent-cyan)!important;text-shadow:0 0 12px rgba(0,255,245,0.8)}
@@ -181,5 +181,40 @@ body::before{content:"";position:fixed;top:0;left:0;width:100%;height:100%;point
 [style*="min-width:300px"]{min-width:0!important}
 .wt-mobile-nav{display:block;position:sticky;top:0;z-index:50;background:var(--wt-bg);border-bottom:1px solid var(--wt-border);padding:6px}
 }
+.pfu-topo-wrap{position:relative;width:100%;height:340px;margin-top:4px}
+.pfu-topo-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0}
+.pfu-topo-node{position:absolute;transform:translate(-50%,-50%);width:68px;height:62px;background:rgba(0,0,0,.65);border:1px solid var(--wt-border);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:transform .2s,box-shadow .2s;z-index:2}
+.pfu-topo-node:hover{transform:translate(-50%,-50%) scale(1.1);box-shadow:0 0 20px rgba(255,45,149,.3)}
+.pfu-topo-node .node-label{font-size:10px;font-weight:700;letter-spacing:1px;font-family:var(--wt-font);color:var(--wt-accent-cyan)}
+.pfu-topo-node .node-status{width:10px;height:10px;border-radius:50%;margin-top:5px}
+.pfu-topo-node .node-status.online{background:var(--wt-success);box-shadow:var(--wt-shadow-glow-success)}
+.pfu-topo-node .node-status.offline{background:var(--wt-text-secondary)}
+.pfu-topo-node .node-status.error{background:var(--wt-danger);box-shadow:var(--wt-shadow-glow-danger)}
+.pfu-topo-node .node-sub{font-size:7px;margin-top:1px;color:rgba(255,255,255,.3);letter-spacing:.05em;font-family:var(--wt-mono);text-align:center}
+.pfu-topo-neural{border-color:rgba(0,255,245,.6)!important;background:linear-gradient(160deg,rgba(0,255,245,.09),rgba(0,0,0,.65))!important;animation:cyanPulse 2.8s ease-in-out infinite}
+.pfu-topo-neural .node-label{color:var(--wt-accent-cyan)!important;text-shadow:0 0 10px rgba(0,255,245,.7)}
+.pfu-topo-classic .node-label{color:var(--wt-accent)!important}
+.pfu-topo-classic{border-color:rgba(255,45,149,.35)!important}
+.pfu-topo-ragbe{border-color:rgba(176,38,255,.55)!important;background:rgba(176,38,255,.06)!important;animation:violetPulse 3s ease-in-out infinite}
+.pfu-topo-ragbe .node-label{color:var(--wt-accent-violet)!important}
+#pipeline-node-MOSHI_RAG_BACKEND:hover{transform:scale(1.08)!important;box-shadow:0 0 20px rgba(176,38,255,.4)}
+@keyframes violetPulse{0%,100%{box-shadow:0 0 6px rgba(176,38,255,.2)}50%{box-shadow:0 0 16px rgba(176,38,255,.45)}}
+.pfu-topo-ext .node-label{color:var(--wt-warning)!important}
+.pfu-topo-ext{border-color:rgba(255,184,0,.35)!important;background:rgba(255,184,0,.04)!important}
+.pfu-topo-crawl .node-label{color:rgba(0,255,245,.75)!important}
+.pfu-topo-crawl{border-color:rgba(0,255,245,.25)!important}
+.pfu-topo-shared .node-label{color:var(--wt-accent-violet)!important}
+.pfu-topo-shared{border-color:rgba(176,38,255,.35)!important}
+.pfu-topo-zone{position:absolute;font-size:8px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;font-family:var(--wt-body);color:#8a8aa0;z-index:1;pointer-events:none}
+.pfu-topo-msh-chips{display:flex;gap:3px;margin-top:2px}
+.pfu-topo-chip{font-size:6px;padding:1px 4px;border-radius:3px;font-family:var(--wt-font);letter-spacing:.04em}
+.pfu-topo-chip-stt{background:rgba(0,255,245,.12);color:rgba(0,255,245,.8);border:1px solid rgba(0,255,245,.3)}
+.pfu-topo-chip-lm{background:rgba(176,38,255,.12);color:rgba(176,38,255,.9);border:1px solid rgba(176,38,255,.3)}
+.pfu-topo-swap{font-size:5px;padding:1px 4px;border-radius:8px;background:rgba(255,184,0,.08);color:rgba(255,184,0,.55);border:1px solid rgba(255,184,0,.2);font-family:var(--wt-body);margin-top:1px;letter-spacing:.03em;white-space:nowrap}
+.pfu-topo-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;padding-top:6px;border-top:1px solid rgba(26,26,46,.7);font-size:8px;color:#8a8aa0;letter-spacing:.04em;position:relative;z-index:1}
+.pfu-topo-legend-item{display:flex;align-items:center;gap:5px}
+.pfu-topo-leg-line{height:2px;width:18px;border-radius:1px}
+.pfu-topo-leg-dash{height:0;width:18px;border-top:2px dashed}
+.pfu-topo-badges{display:flex;gap:8px;margin-bottom:8px;position:relative;z-index:1}
 )CSS";
 }

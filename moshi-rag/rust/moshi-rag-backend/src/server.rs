@@ -93,6 +93,12 @@ struct ConfigUpdate {
     ret_inject_result: Option<bool>,
     #[serde(default)]
     ret_action_url: Option<String>,
+    #[serde(default)]
+    llm_profiles: Option<Vec<crate::config::LlmProfile>>,
+    #[serde(default)]
+    default_timeout_secs: Option<f64>,
+    #[serde(default)]
+    default_max_tokens: Option<usize>,
 }
 
 async fn post_config_handler(
@@ -124,6 +130,15 @@ async fn post_config_handler(
         }
         if let Some(v) = update.ret_action_url {
             config.ret_action_url = Some(v);
+        }
+        if let Some(v) = update.llm_profiles {
+            config.llm_profiles = v;
+        }
+        if let Some(v) = update.default_timeout_secs {
+            config.default_timeout_secs = v;
+        }
+        if let Some(v) = update.default_max_tokens {
+            config.default_max_tokens = v;
         }
     }
     Json(serde_json::json!({"status": "ok"}))

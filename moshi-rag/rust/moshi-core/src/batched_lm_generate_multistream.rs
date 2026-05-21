@@ -196,14 +196,36 @@ impl State {
             );
         }
 
+        let start = self.slots[slot_id].step_idx;
+        let available_text = self.slots[slot_id].text_tokens.len().saturating_sub(start);
+        let available_audio = self.slots[slot_id].audio_tokens.len().saturating_sub(start);
+        let effective_n = n.min(available_text).min(available_audio);
+        if effective_n == 0 {
+            tracing::warn!(
+                slot_id,
+                requested = n,
+                "prefill_inject_text: no capacity — slot at max_step_idx"
+            );
+            return Ok(());
+        }
+        if effective_n < n {
+            tracing::warn!(
+                slot_id,
+                requested = n,
+                effective = effective_n,
+                "prefill_inject_text: truncated — slot near max_step_idx capacity"
+            );
+        }
+
         let dev = self.model.device().clone();
         let dtype = self.model.dtype();
 
-        let tok_tensor = Tensor::from_vec(tokens.clone(), (1usize, n), &dev)?;
+        let clamped_tokens: Vec<u32> = tokens.iter().take(effective_n).copied().collect();
+        let tok_tensor = Tensor::from_vec(clamped_tokens, (1usize, effective_n), &dev)?;
         let slot_emb = self.model.embed_text_for_prefill(&tok_tensor)?;
         let d_model = slot_emb.dim(2)?;
 
-        let zero_emb = Tensor::zeros((1usize, n, d_model), dtype, &dev)?;
+        let zero_emb = Tensor::zeros((1usize, effective_n, d_model), dtype, &dev)?;
         let mut batch_embs: Vec<Tensor> = Vec::with_capacity(batch_size);
         for b in 0..batch_size {
             batch_embs.push(if b == slot_id { slot_emb.clone() } else { zero_emb.clone() });
@@ -217,19 +239,6 @@ impl State {
         self.model.forward_prepend(&batch_emb, Some(&prefill_mask))?;
 
         let slot = &mut self.slots[slot_id];
-        let start = slot.step_idx;
-
-        let available_text = slot.text_tokens.len().saturating_sub(start);
-        let available_audio = slot.audio_tokens.len().saturating_sub(start);
-        let effective_n = n.min(available_text).min(available_audio);
-        if effective_n < n {
-            tracing::warn!(
-                slot_id,
-                requested = n,
-                effective = effective_n,
-                "prefill_inject_text: truncated — slot near max_step_idx capacity"
-            );
-        }
 
         for (i, &tok) in tokens.iter().take(effective_n).enumerate() {
             slot.text_tokens[start + i] = tok;

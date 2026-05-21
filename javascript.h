@@ -10,6 +10,7 @@ inline std::string FrontendServer::build_ui_js() {
     std::string js = R"JS(
 let currentPage='dashboard',currentSvc=null;
 let logSSE=null,svcLogSSE=null;
+let _logSseReconnectTimer=null,_svcLogSseReconnectTimer=null;
 const TSP_PORT=)JS" + tsp_port_str + R"JS(;
 // JS named constants — all setInterval/setTimeout delays and limits.
 // POLL_*  = recurring poll intervals.  DELAY_* = one-shot timeouts.
@@ -73,7 +74,7 @@ async function runWithTestSetup(testFn,opts){
   try{
     for(let ri=0;ri<ttsOrder.length;ri++){
       const tts=ttsOrder[ri];
-      const _engineLabels={kokoro:'Kokoro',neutts:'NeuTTS',vits2:'VITS2',matcha:'Matcha'};
+      const _engineLabels={kokoro:'Kokoro',neutts:'NeuTTS',vits2:'VITS2',matcha:'Matcha',moshi:'Moshi','moshi-rag':'Moshi RAG'};
       const runLabel=ttsOrder.length>1?`Run ${ri+1}/${ttsOrder.length} (${_engineLabels[tts]||tts})`:'';
 
 
@@ -204,6 +205,8 @@ e.classList.toggle('active',e.dataset.page===p);
   currentPage=p;
   if(p!=='dashboard')stopDashboardPoll();
   if(p!=='beta-testing')stopTestResultsPoll();
+  if(p!=='logs'){if(_logSseReconnectTimer){clearTimeout(_logSseReconnectTimer);_logSseReconnectTimer=null;}if(logSSE){logSSE.close();logSSE=null;}}
+  if(p!=='services'){if(_svcLogSseReconnectTimer){clearTimeout(_svcLogSseReconnectTimer);_svcLogSseReconnectTimer=null;}if(svcLogSSE){svcLogSSE.close();svcLogSSE=null;}}
   if(p==='dashboard'){fetchDashboard();fetchRagHealthDash();startDashboardPoll();dashLoadPipelineLanguage();}
   if(p==='services'){showServicesOverview();fetchServices();}
   if(p==='beta-testing'){
@@ -275,7 +278,8 @@ function formatUptime(s){
 
 function fetchDashboard(){
   fetch('/api/dashboard').then(r=>r.json()).then(d=>{
-animateCountUp(document.getElementById('dashMetricServicesOnline'),d.services_online);
+var ragBeExtra=(_moshiBackendUrl&&window._moshiRagBeHealthData&&window._moshiRagBeHealthData.status==='ok')?1:0;
+animateCountUp(document.getElementById('dashMetricServicesOnline'),d.services_online+ragBeExtra);
 animateCountUp(document.getElementById('dashMetricRunningTests'),d.running_tests);
 animateCountUp(document.getElementById('dashMetricTestPass'),d.test_pass);
 const failEl=document.getElementById('dashMetricTestFail');
@@ -396,7 +400,8 @@ c.innerHTML=d.services.map(s=>{
     'KOKORO_ENGINE':'Kokoro TTS Engine','NEUTTS_ENGINE':'NeuTTS Nano German Engine',
     'OUTBOUND_AUDIO_PROCESSOR':'Audio Encode & RTP',
     'TOMEDO_CRAWL_SERVICE':'Tomedo RAG — Patient Context','TEST_SIP_PROVIDER':'SIP B2BUA Test Provider',
-    'MOSHI_SERVICE':'Moshi Full-Duplex Neural Voice'};
+    'MOSHI_SERVICE':'Moshi Full-Duplex Neural Voice',
+    'MOSHI_RAG_BACKEND':'Moshi RAG Backend Service'};
   const eName=escapeHtml(s.name),eDesc=escapeHtml(desc[s.name]||s.description),ePath=escapeHtml(s.binary_path);
   const svcAttr=escapeHtml(s.name);
   let btns='<div style="margin-top:6px;display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">';
@@ -415,6 +420,21 @@ c.innerHTML=d.services.map(s=>{
     +(s.name==='SIP_CLIENT'?'<div id="sipOverviewLines" style="font-size:11px;margin-top:4px;color:var(--wt-text-secondary)"></div>':'')
     +btns+'</div>';
 }).join('');
+if(_moshiBackendUrl){
+  var ragBeOnline=!!(window._moshiRagBeHealthData&&window._moshiRagBeHealthData.status==='ok');
+  var ragBeStatus=ragBeOnline?'<span class="wt-badge wt-badge-success"><span class="wt-status-dot online"></span>Online</span>'
+    :'<span class="wt-badge wt-badge-secondary"><span class="wt-status-dot offline"></span>Offline</span>';
+  var ragBeHealth=window._moshiRagBeHealthData?JSON.stringify(window._moshiRagBeHealthData):'not reachable';
+  c.innerHTML+=`<div class="wt-card" style="cursor:pointer" onclick="showSvcDetail('MOSHI_SERVICE')">`
+    +`<div class="wt-card-header"><span class="wt-card-title">`
+    +`<span class="wt-status-dot ${ragBeOnline?'online':'offline'}"></span>`
+    +`MOSHI_RAG_BACKEND</span>${ragBeStatus}</div>`
+    +`<div style="font-size:12px;color:var(--wt-text-secondary)">Moshi RAG Backend Service</div>`
+    +`<div style="font-size:11px;color:var(--wt-text-secondary);margin-top:4px;font-family:var(--wt-mono)">${escapeHtml(ragBeHealth)}</div>`
+    +`<div style="margin-top:6px;display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">`
+    +`<button class="wt-btn wt-btn-secondary" style="font-size:11px;padding:2px 8px" onclick="showSvcDetail('MOSHI_SERVICE')">&#x2699; Config</button>`
+    +`</div></div>`;
+}
 if(currentSvc){
   const s=d.services.find(x=>x.name===currentSvc);
   if(s)updateSvcDetail(s);
@@ -715,6 +735,9 @@ function saveMatchaConfig(){
 let _moshiBackends=[];
 let _moshiTriggers=[];
 let _moshiDirty=false;
+let _moshiBeLlmProfiles=[];
+let _moshiBackendUrl='';
+let _moshiRagBeHealthTimer=null;
 function loadMoshiConfig(){
   fetch('/api/moshi/config').then(r=>r.json()).then(d=>{
     _moshiBackends=d.backends||[];
@@ -723,6 +746,7 @@ function loadMoshiConfig(){
     if(dl)dl.value=d.default_language||'en';
     const bu=document.getElementById('moshiBackendUrl');
     if(bu)bu.value=d.backend_url||'http://127.0.0.1:8090';
+    _moshiBackendUrl=d.backend_url||'';
     const tcu=document.getElementById('moshiTomedoCrawlUrl');
     if(tcu)tcu.value=d.tomedo_crawl_url||'http://127.0.0.1:13181';
     const arc=document.getElementById('moshiArcMode');
@@ -739,11 +763,113 @@ function loadMoshiConfig(){
     if(lak)lak.value=d.llm_api_key||'';
     const ra=document.getElementById('moshiRetAction');
     if(ra)ra.value=d.ret_action||'tomedo-crawl-query';
+    var setVal=function(id,v){var e=document.getElementById(id);if(e)e.value=v!=null?v:'';};
+    setVal('moshiLmModelFile',d.lm_model_file);
+    setVal('moshiMimiModelFile',d.mimi_model_file);
+    setVal('moshiTextTokenizerFile',d.text_tokenizer_file);
+    setVal('moshiBatchSize',d.batch_size!=null?d.batch_size:8);
+    setVal('moshiGpuId',d.moshi_gpu_id!=null?d.moshi_gpu_id:0);
+    setVal('moshiSttGpuId',d.stt_gpu_id!=null?d.stt_gpu_id:0);
+    setVal('moshiSttLmModelFile',d.stt_lm_model_file);
+    setVal('moshiSttMimiModelFile',d.stt_mimi_model_file);
+    setVal('moshiSttTextTokenizerFile',d.stt_text_tokenizer_file);
+    setVal('moshiAsrDelayInTokens',d.asr_delay_in_tokens!=null?d.asr_delay_in_tokens:0);
+    var sttCb=document.getElementById('moshiSttEnabled');
+    if(sttCb){
+      var hasStt=!!(d.stt_lm_model_file&&d.stt_mimi_model_file&&d.stt_text_tokenizer_file);
+      sttCb.checked=hasStt;
+      moshiToggleSttFields();
+    }
+    var sttBadge=document.getElementById('mosh-stt-badge');
+    if(sttBadge){
+      var hasStt2=!!(d.stt_lm_model_file&&d.stt_mimi_model_file&&d.stt_text_tokenizer_file);
+      sttBadge.textContent=hasStt2?'STT+LM':'LM';
+    }
+    var ragRow=document.getElementById('pfu-rag-backend-row');
+    if(ragRow)ragRow.style.display=_moshiBackendUrl?'flex':'none';
     renderMoshiBackendList();
     renderMoshiTriggerList();
     buildMoshiArgs();
     moshiTriggerActionTypeChanged();
+    moshiLoadBackendConfig();
+    moshiStartRagBeHealthPoll();
   }).catch(()=>{});
+}
+function moshiToggleSttFields(){
+  var f=document.getElementById('moshiSttFields');
+  var c=document.getElementById('moshiSttEnabled');
+  if(f&&c){if(c.checked)f.classList.remove('hidden');else f.classList.add('hidden');}
+}
+function moshiLoadBackendConfig(){
+  if(!_moshiBackendUrl)return;
+  fetch('/api/moshi/backend-config').then(r=>r.json()).then(d=>{
+    if(d.error)return;
+    var setVal=function(id,v){var e=document.getElementById(id);if(e&&v!=null)e.value=v;};
+    setVal('moshiBeListenAddr',d.listen_addr);
+    setVal('moshiBeListenPort',d.listen_port);
+    setVal('moshiBeTriggerWindowChars',d.trigger_window_chars);
+    setVal('moshiBeDefaultTimeoutSecs',d.default_timeout_secs);
+    setVal('moshiBeDefaultMaxTokens',d.default_max_tokens);
+    _moshiBeLlmProfiles=d.llm_profiles||[];
+    renderMoshiBeLlmProfiles();
+  }).catch(()=>{});
+}
+function renderMoshiBeLlmProfiles(){
+  var el=document.getElementById('moshiBeLlmProfiles');
+  if(!el)return;
+  if(_moshiBeLlmProfiles.length===0){el.innerHTML='<div style="font-size:11px;color:var(--wt-text-secondary);margin-bottom:4px">No LLM profiles configured.</div>';return;}
+  var h='<table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:4px">'
+    +'<tr style="color:var(--wt-text-secondary)"><th style="text-align:left;padding:2px 4px">ID</th><th style="text-align:left;padding:2px 4px">URL</th><th style="text-align:left;padding:2px 4px">Model</th><th style="text-align:left;padding:2px 4px">Key</th><th></th></tr>';
+  _moshiBeLlmProfiles.forEach(function(p,i){
+    h+='<tr><td style="padding:2px 4px">'+escapeHtml(p.id||'')+'</td>'
+      +'<td style="padding:2px 4px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escapeHtml(p.url||'')+'">'+escapeHtml(p.url||'')+'</td>'
+      +'<td style="padding:2px 4px">'+escapeHtml(p.model||'')+'</td>'
+      +'<td style="padding:2px 4px">'+(p.api_key?'****':'')+'</td>'
+      +'<td style="padding:2px 4px"><button class="wt-btn wt-btn-sm wt-btn-danger" style="font-size:10px;padding:1px 6px" onclick="moshiBeRemoveProfile('+i+')">✕</button></td></tr>';
+  });
+  el.innerHTML=h+'</table>';
+}
+function moshiBeAddProfile(){
+  var id=(document.getElementById('moshiBeNewProfileId')||{}).value||'';
+  var url=(document.getElementById('moshiBeNewProfileUrl')||{}).value||'';
+  var model=(document.getElementById('moshiBeNewProfileModel')||{}).value||'';
+  var api_key=(document.getElementById('moshiBeNewProfileApiKey')||{}).value||'';
+  if(!id||!url){alert('Profile ID and URL are required.');return;}
+  if(_moshiBeLlmProfiles.some(function(p){return p.id===id;})){alert('Profile ID must be unique.');return;}
+  _moshiBeLlmProfiles.push({id:id,url:url,model:model,api_key:api_key});
+  _moshiDirty=true;
+  renderMoshiBeLlmProfiles();
+  document.getElementById('moshiBeNewProfileId').value='';
+  document.getElementById('moshiBeNewProfileUrl').value='';
+  document.getElementById('moshiBeNewProfileModel').value='';
+  document.getElementById('moshiBeNewProfileApiKey').value='';
+}
+function moshiBeRemoveProfile(i){
+  _moshiBeLlmProfiles.splice(i,1);
+  _moshiDirty=true;
+  renderMoshiBeLlmProfiles();
+}
+function moshiStartRagBeHealthPoll(){
+  if(_moshiRagBeHealthTimer)clearInterval(_moshiRagBeHealthTimer);
+  moshiPollRagBeHealth();
+  _moshiRagBeHealthTimer=setInterval(moshiPollRagBeHealth,5000);
+}
+function moshiPollRagBeHealth(){
+  var dot=document.getElementById('pipeline-status-MOSHI_RAG_BACKEND');
+  if(!_moshiBackendUrl){
+    if(dot)dot.className='node-status offline';
+    return;
+  }
+  var _hCtrl=new AbortController();var _hTid=setTimeout(function(){_hCtrl.abort();},3000);
+  fetch('/api/moshi/backend-health',{signal:_hCtrl.signal}).then(function(r){return r.json();}).then(function(d){
+    clearTimeout(_hTid);
+    if(dot)dot.className='node-status '+(d.status==='ok'?'online':'offline');
+    window._moshiRagBeHealthData=d;
+  }).catch(function(){
+    clearTimeout(_hTid);
+    if(dot)dot.className='node-status offline';
+    window._moshiRagBeHealthData=null;
+  });
 }
 function moshiToggleArcFields(){
   const f=document.getElementById('moshiArcFields');
@@ -874,27 +1000,51 @@ function saveMoshiConfig(){
   const st=document.getElementById('moshiConfigStatus');
   if(st)st.textContent='Saving...';
   buildMoshiArgs();
+  var getVal=function(id){return(document.getElementById(id)||{}).value||'';};
+  var getNum=function(id,def){var v=parseInt((document.getElementById(id)||{}).value);return isNaN(v)?def:v;};
+  var getFloat=function(id,def){var v=parseFloat((document.getElementById(id)||{}).value);return isNaN(v)?def:v;};
+  var sttEnabled=!!(document.getElementById('moshiSttEnabled')||{}).checked;
   const payload={
     backends:_moshiBackends,
     triggers:_moshiTriggers,
     default_language:dl,
-    backend_url:(document.getElementById('moshiBackendUrl')||{}).value||'http://127.0.0.1:8090',
-    tomedo_crawl_url:(document.getElementById('moshiTomedoCrawlUrl')||{}).value||'http://127.0.0.1:13181',
+    backend_url:getVal('moshiBackendUrl')||'http://127.0.0.1:8090',
+    tomedo_crawl_url:getVal('moshiTomedoCrawlUrl')||'http://127.0.0.1:13181',
     arc_mode_enabled:!!(document.getElementById('moshiArcMode')||{}).checked,
     llm_mode_enabled:!!(document.getElementById('moshiLlmMode')||{}).checked,
-    arc_model_file:(document.getElementById('moshiArcModelFile')||{}).value||'',
-    arc_tokenizer_path:(document.getElementById('moshiArcTokenizerPath')||{}).value||'',
-    llm_api_url:(document.getElementById('moshiLlmApiUrl')||{}).value||'',
-    llm_api_key:(document.getElementById('moshiLlmApiKey')||{}).value||'',
-    ret_action:(document.getElementById('moshiRetAction')||{}).value||'tomedo-crawl-query'
+    arc_model_file:getVal('moshiArcModelFile'),
+    arc_tokenizer_path:getVal('moshiArcTokenizerPath'),
+    llm_api_url:getVal('moshiLlmApiUrl'),
+    llm_api_key:getVal('moshiLlmApiKey'),
+    ret_action:getVal('moshiRetAction')||'tomedo-crawl-query',
+    lm_model_file:getVal('moshiLmModelFile')||null,
+    mimi_model_file:getVal('moshiMimiModelFile')||null,
+    text_tokenizer_file:getVal('moshiTextTokenizerFile')||null,
+    batch_size:getNum('moshiBatchSize',8),
+    moshi_gpu_id:getNum('moshiGpuId',0),
+    stt_gpu_id:getNum('moshiSttGpuId',0),
+    stt_lm_model_file:sttEnabled?getVal('moshiSttLmModelFile')||null:null,
+    stt_mimi_model_file:sttEnabled?getVal('moshiSttMimiModelFile')||null:null,
+    stt_text_tokenizer_file:sttEnabled?getVal('moshiSttTextTokenizerFile')||null:null,
+    asr_delay_in_tokens:getNum('moshiAsrDelayInTokens',0),
+    be_llm_profiles:_moshiBeLlmProfiles,
+    be_trigger_window_chars:getNum('moshiBeTriggerWindowChars',200),
+    be_default_timeout_secs:getFloat('moshiBeDefaultTimeoutSecs',3.0),
+    be_default_max_tokens:getNum('moshiBeDefaultMaxTokens',256)
   };
   fetch('/api/moshi/config',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(payload)
   }).then(r=>r.json()).then(d=>{
     _moshiDirty=false;
+    _moshiBackendUrl=payload.backend_url;
     if(st)st.textContent='Saved';
     setTimeout(()=>{if(st)st.textContent='';},2000);
     saveSvcConfig();
+    var sttBadge=document.getElementById('mosh-stt-badge');
+    if(sttBadge)sttBadge.textContent=sttEnabled?'STT+LM':'LM';
+    var ragRow=document.getElementById('pfu-rag-backend-row');
+    if(ragRow)ragRow.style.display=_moshiBackendUrl?'flex':'none';
+    moshiStartRagBeHealthPoll();
   }).catch(()=>{if(st)st.textContent='Error';setTimeout(()=>{if(st)st.textContent='';},3000);});
 }
 function toggleHallucinationFilter(enabled){
@@ -1466,7 +1616,8 @@ try{
   };
   svcLogSSE.onerror=()=>{
 svcLogSSE.close();
-setTimeout(()=>{if(currentSvc===name)connectSvcSSE(name);},SSE_RECONNECT_MS);
+if(_svcLogSseReconnectTimer)clearTimeout(_svcLogSseReconnectTimer);
+_svcLogSseReconnectTimer=setTimeout(()=>{if(currentSvc===name)connectSvcSSE(name);},SSE_RECONNECT_MS);
   };
 }
 
@@ -1520,7 +1671,8 @@ try{
   };
   logSSE.onerror=()=>{
 logSSE.close();
-setTimeout(reconnectLogSSE,SSE_RECONNECT_MS);
+if(_logSseReconnectTimer)clearTimeout(_logSseReconnectTimer);
+_logSseReconnectTimer=setTimeout(reconnectLogSSE,SSE_RECONNECT_MS);
   };
 }
 
@@ -2305,10 +2457,12 @@ function updateFullLoopEngineUI(){
   const eng=(document.getElementById('fullLoopEngine')||{}).value||'kokoro';
   const desc=document.getElementById('fullLoopDesc');
   if(!desc)return;
-  if(eng==='moshi'){
-    desc.innerHTML='Injects test audio files through the <strong>Moshi</strong> pipeline (SIP \u2192 IAP \u2192 MOSHI_SERVICE \u2192 OAP). '
+  if(eng==='moshi'||eng==='moshi-rag'){
+    const ragLabel=eng==='moshi-rag'?' with <strong>RAG</strong> context injection':'';
+    desc.innerHTML='Injects test audio files through the <strong>Moshi</strong> pipeline'+ragLabel+' (SIP \u2192 IAP \u2192 MOSHI_SERVICE \u2192 OAP). '
       +'Captures Moshi reference text (what it heard) from logs and compares against ground truth. '
-      +'Requires: SIP, IAP, MOSHI_SERVICE, OAP running + active call.';
+      +'Requires: SIP, IAP, MOSHI_SERVICE, OAP running + active call.'
+      +(eng==='moshi-rag'?' Also requires moshi-rag-backend configured and reachable.':'');
   }else{
     const label=eng==='neutts'?'NeuTTS':'Kokoro';
     desc.innerHTML='Injects test audio files through the Classic pipeline with 2 SIP lines using <strong>'+label+'</strong>. '
@@ -2328,8 +2482,8 @@ function runFullLoopTest(){
   const files=Array.from(sel.options).filter(o=>o.selected).map(o=>o.value);
   if(files.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one test file</span>';return;}
   results.innerHTML='';
-  if(engine==='moshi'){
-    runMoshiWerTest(files,status,results,btn);
+  if(engine==='moshi'||engine==='moshi-rag'){
+    runMoshiWerTest(files,status,results,btn,engine);
     return;
   }
   const perEngine=[];
@@ -2347,9 +2501,11 @@ function runFullLoopTest(){
   });
 }
 
-async function runMoshiWerTest(files,statusEl,resultsEl,btnEl){
+async function runMoshiWerTest(files,statusEl,resultsEl,btnEl,engine){
+  engine=engine||'moshi';
   runWithTestSetup(async({tts})=>{
-    statusEl.innerHTML='<span style="color:var(--wt-accent)">\u23F3 Moshi pipeline ready — starting WER test...</span>';
+    const modeLabel=engine==='moshi-rag'?'Moshi RAG':'Moshi';
+    statusEl.innerHTML='<span style="color:var(--wt-accent)">\u23F3 '+modeLabel+' pipeline ready — starting WER test...</span>';
 
     const baselineLogs=await fetch('/api/logs?limit=500').then(r=>r.json()).catch(()=>({logs:[]}));
     const baselineKeys=new Set();
@@ -2416,9 +2572,9 @@ async function runMoshiWerTest(files,statusEl,resultsEl,btnEl){
     const pass=testResults.filter(r=>r.status==='PASS').length;
     const warn=testResults.filter(r=>r.status==='WARN').length;
     const fail=testResults.filter(r=>r.status!=='PASS'&&r.status!=='WARN').length;
-    statusEl.innerHTML=`<span style="color:${fail===0?'var(--wt-success)':'var(--wt-danger)'}">Moshi WER: ${pass} pass, ${warn} warn, ${fail} fail out of ${testResults.length}</span>`;
+    statusEl.innerHTML=`<span style="color:${fail===0?'var(--wt-success)':'var(--wt-danger)'}">${modeLabel} WER: ${pass} pass, ${warn} warn, ${fail} fail out of ${testResults.length}</span>`;
     return testResults;
-  },{statusEl:statusEl,btnEl:btnEl,ttsOverride:'moshi'}).catch(e=>{
+  },{statusEl:statusEl,btnEl:btnEl,ttsOverride:engine==='moshi-rag'?'moshi-rag':'moshi'}).catch(e=>{
     statusEl.innerHTML=`<span style="color:var(--wt-danger)">Error: ${escapeHtml(String(e&&e.message||e))}</span>`;
   });
 }
@@ -2778,10 +2934,10 @@ function compareSelectedResults(){
     const metricKeys=new Set();
     items.forEach(r=>{if(r.metrics)Object.keys(r.metrics).forEach(k=>{if(k!=='latency_ms')metricKeys.add(k);});});
     metricKeys.forEach(k=>{
-      html+=`<tr><td style="font-weight:600">${k}</td>`;
+      html+=`<tr><td style="font-weight:600">${escapeHtml(k)}</td>`;
       items.forEach(r=>{
         const v=r.metrics?r.metrics[k]:null;
-        html+=`<td style="font-family:var(--wt-mono)">${v!==null&&v!==undefined?String(v):'—'}</td>`;
+        html+=`<td style="font-family:var(--wt-mono)">${v!==null&&v!==undefined?escapeHtml(String(v)):'—'}</td>`;
       });
       html+='</tr>';
     });
@@ -2891,7 +3047,7 @@ function exportTestResultsPage(){
 
 setInterval(fetchStatus,POLL_STATUS_MS);
 setInterval(fetchServices,POLL_SERVICES_MS);
-fetchStatus();fetchServices();loadTtsPreference();showPage('dashboard');
+fetchStatus();fetchServices();loadTtsPreference();loadMoshiConfig();showPage('dashboard');
 document.getElementById('statusText').textContent='Port )JS" + port_str + R"JS(';
 
 document.getElementById('sqlQuery').addEventListener('keydown',e=>{
