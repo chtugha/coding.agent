@@ -874,7 +874,9 @@ private:
             if (name == "INBOUND_AUDIO_PROCESSOR" && args_override.empty()) {
                 std::string moshi_backends = get_setting("moshi_backends", "[]");
                 bool has_moshi = moshi_backends.find('{') != std::string::npos;
-                if (has_moshi && use_args.find("--moshi-rag-mode") == std::string::npos
+                std::string pipeline_mode = get_setting("pipeline_mode", "classic");
+                bool moshi_pipeline = (pipeline_mode == "moshi");
+                if ((has_moshi || moshi_pipeline) && use_args.find("--moshi-rag-mode") == std::string::npos
                               && use_args.find("-M") == std::string::npos) {
                     use_args += " --moshi-rag-mode";
                 }
@@ -2444,6 +2446,8 @@ private:
         }
         bool all_running = (running_count == (int)all_svcs.size());
 
+        set_setting("pipeline_mode", "classic");
+
         // ---- Step B: normalise service state ----
         set_setup_progress(task_id, "B", all_running
             ? "All services running — stopping TTS and RAG for clean restart..."
@@ -2671,6 +2675,8 @@ private:
 
         set_setup_progress(task_id, "B", "Starting " + mode_label + " pipeline services...");
 
+        set_setting("pipeline_mode", "moshi");
+
         if (rag_mode) {
             std::string backends = get_setting("moshi_backends", "[]");
             if (backends.find('{') == std::string::npos) {
@@ -2682,11 +2688,9 @@ private:
         }
 
         struct StartStep { std::string name; int sleep_s; };
-        static const std::vector<StartStep> start_order = {
+        std::vector<StartStep> start_order = {
             {"SIP_CLIENT",               3},
             {"INBOUND_AUDIO_PROCESSOR",  3},
-            {"VAD_SERVICE",              3},
-            {"WHISPER_SERVICE",         10},
             {"MOSHI_SERVICE",           60},
             {"OUTBOUND_AUDIO_PROCESSOR", 3},
         };
@@ -2831,6 +2835,7 @@ private:
             stop_service("MOSHI_SERVICE");
         }
         set_setting("test_active_tts", "");
+        set_setting("pipeline_mode", "classic");
 
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{\"ok\":true}");
     }

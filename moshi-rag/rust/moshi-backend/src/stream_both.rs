@@ -429,7 +429,23 @@ impl BatchedState {
             gen_config.clone(),
         )?;
         state.warmup(pool.frame_size)?;
-        model_loop_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        tracing::info!("main model warmup done, warming up reset_batch_idx...");
+        for bid in 0..inner.lm_model.batch_size() {
+            state.reset_batch_idx(bid)?;
+        }
+        {
+            let dev = inner.device.clone();
+            dev.synchronize()?;
+        }
+        tracing::info!("reset_batch_idx warmup done, running post-reset step warmup...");
+        {
+            let dev = inner.device.clone();
+            let pcm = candle::Tensor::zeros((inner.lm_model.batch_size(), 1, pool.frame_size), candle::DType::F32, &dev)?;
+            let mask = moshi::StreamMask::new(vec![true; inner.lm_model.batch_size()], &dev)?;
+            let _ = state.step_pcm(&pcm, &mask)?;
+            dev.synchronize()?;
+        }
+        tracing::info!("post-reset step warmup done");
         let batch_size = inner.lm_model.batch_size();
         let mut stt_state: Option<(moshi::asr::State, sentencepiece::SentencePieceProcessor)> = {
             let taken_asr = inner.stt_asr.lock().unwrap().take();
@@ -489,10 +505,22 @@ impl BatchedState {
                 None
             };
 
-        tracing::info!("batched model loop started");
+        if let Some((ref mut stt_asr, _)) = stt_state {
+            tracing::info!("warming up STT model...");
+            let stt_dev = stt_asr.device().clone();
+            let stt_pcm = candle::Tensor::zeros((batch_size, 1, pool.frame_size), candle::DType::F32, &stt_dev)?;
+            let stt_mask = moshi::StreamMask::new(vec![true; batch_size], &stt_dev)?;
+            let _ = stt_asr.step_pcm(stt_pcm, None, &stt_mask, |_, _, _| ())?;
+            stt_dev.synchronize()?;
+            tracing::info!("STT warmup done");
+        }
+        model_loop_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        tracing::info!("batched model loop started (all warmup complete)");
         let mut prev_channel_ids: Vec<Option<crate::batched_channels::ChannelId>> =
             vec![None; batch_size];
+        let mut loop_counter: u64 = 0;
         loop {
+            loop_counter += 1;
             let (mut batch_pcm, mask, ref_channel_ids, reset_slots) = pool.pre_process(&mut state);
 
             for (b, (prev, curr)) in prev_channel_ids.iter().zip(ref_channel_ids.iter()).enumerate()
@@ -652,6 +680,11 @@ impl BatchedState {
             }
 
             let any_active = mask.iter().any(|&b| b);
+            if loop_counter % 500 == 0 || (loop_counter < 50 && loop_counter % 10 == 0) {
+                let active_slots: Vec<usize> = mask.iter().enumerate().filter(|(_, &b)| b).map(|(i, _)| i).collect();
+                let has_channels: Vec<usize> = ref_channel_ids.iter().enumerate().filter(|(_, c)| c.is_some()).map(|(i, _)| i).collect();
+                tracing::info!(loop_counter, any_active, ?active_slots, ?has_channels, "model loop pre_process result");
+            }
             let mut msgs_for_pools: Vec<moshi::batched_lm_generate_multistream::StreamingOutMsg> =
                 Vec::new();
             if any_active {
@@ -722,7 +755,12 @@ impl BatchedState {
                     &device,
                 )?;
                 let stream_mask = moshi::StreamMask::new(mask, &device)?;
+                let t_step_start = std::time::Instant::now();
                 let msgs = state.step_pcm(&pcm_tensor, &stream_mask)?;
+                let step_ms = t_step_start.elapsed().as_millis();
+                if step_ms > 200 || loop_counter < 20 || loop_counter % 100 == 0 {
+                    tracing::info!(step_ms, loop_counter, batch_size, "step_pcm timing");
+                }
 
                 {
                     let rag_token_id = rag_manager.as_ref().map(|(_, id)| *id);
@@ -770,7 +808,21 @@ impl BatchedState {
                     }
                 }
 
+                let text_tokens_from_step: Vec<(usize, u32, u32)> = msgs.iter().filter_map(|m| {
+                    if let moshi::batched_lm_generate_multistream::StreamingOutMsg::TextToken { batch_idx, prev_token, token, .. } = m {
+                        Some((*batch_idx, *prev_token, *token))
+                    } else { None }
+                }).collect();
+                let pcm_from_step = msgs.iter().filter(|m| matches!(m, moshi::batched_lm_generate_multistream::StreamingOutMsg::Pcm { .. })).count();
+                if !text_tokens_from_step.is_empty() || pcm_from_step > 0 || loop_counter % 100 == 0 {
+                    tracing::info!(?text_tokens_from_step, pcm_from_step, loop_counter, "step output");
+                }
                 msgs_for_pools.extend(msgs);
+                let text_token_total = msgs_for_pools.iter().filter(|m| matches!(m, moshi::batched_lm_generate_multistream::StreamingOutMsg::TextToken { .. })).count();
+                let pcm_total = msgs_for_pools.iter().filter(|m| matches!(m, moshi::batched_lm_generate_multistream::StreamingOutMsg::Pcm { .. })).count();
+                if loop_counter % 100 == 0 {
+                    tracing::info!(text_token_total, pcm_total, loop_counter, "model loop iteration stats");
+                }
                 for b in 0..batch_size {
                     let msgs_this_batch: Vec<
                         &moshi::batched_lm_generate_multistream::StreamingOutMsg,
@@ -849,6 +901,15 @@ impl BatchedState {
                         for (text, role) in &outputs {
                             pool.post_process(
                                 StreamOut::TextByRole { text: text.clone(), role: *role },
+                                b,
+                                &ref_channel_ids,
+                            )?;
+                        }
+                    } else {
+                        if !model_text.is_empty() {
+                            tracing::info!(batch_idx=b, text=%model_text, "emitting TextByRole for model (no TM)");
+                            pool.post_process(
+                                StreamOut::TextByRole { text: model_text.clone(), role: crate::turn_manager::TextRole::Model },
                                 b,
                                 &ref_channel_ids,
                             )?;

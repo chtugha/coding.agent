@@ -164,9 +164,10 @@ pub fn run_prodigy_bridge(
     let oap_c = oap.clone();
     let inner_c = inner.clone();
     let r = running.clone();
+    let fwd_c = log_forwarder.clone();
     let _output_handle = std::thread::Builder::new()
         .name("output-drain".into())
-        .spawn(move || output_drain_loop(output_event_rx, oap_c, inner_c, r))
+        .spawn(move || output_drain_loop(output_event_rx, oap_c, inner_c, r, fwd_c))
         .context("failed to spawn output-drain thread")?;
 
     let inner_c = inner.clone();
@@ -340,6 +341,7 @@ fn output_drain_loop(
     oap: Arc<Mutex<OapState>>,
     inner: Arc<Mutex<BridgeInner>>,
     running: Arc<AtomicBool>,
+    log_forwarder: Arc<crate::log_forwarder::LogForwarder>,
 ) {
     tracing::info!("output drain thread started");
 
@@ -401,6 +403,15 @@ fn output_drain_loop(
                         had_output = true;
                     }
                     Ok(StreamOut::Ready) => {}
+                    Ok(StreamOut::TextByRole { text, role }) => {
+                        if role == crate::turn_manager::TextRole::Model && !text.is_empty() {
+                            log_forwarder.forward(
+                                crate::log_forwarder::LogLevel::Info,
+                                active.call_id,
+                                &format!("Moshi transcription: {}", text),
+                            );
+                        }
+                    }
                     Ok(_) => {}
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -715,10 +726,16 @@ fn data_receive_loop(
             continue;
         }
 
+        static AUDIO_PKT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let pkt_num = AUDIO_PKT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if pkt_num < 20 || pkt_num % 500 == 0 {
+            tracing::info!(call_id, known, pcm_len = pcm.len(), pkt_num, payload_bytes = packet.payload.len(), "upstream_data: audio packet received");
+        }
+
         if !known {
             match pool.take_slot() {
                 Some((batch_idx, in_tx, out_rx)) => {
-                    tracing::info!(call_id, batch_idx, "new call, assigned batch slot");
+                    tracing::info!(call_id, batch_idx, pcm_len = pcm.len(), "new call, assigned batch slot");
 
                     if in_tx.send(InMsg::Init).is_err() {
                         tracing::error!(call_id, batch_idx, "failed to send Init to channel");

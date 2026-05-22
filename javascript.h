@@ -2535,8 +2535,9 @@ async function runMoshiWerTest(files,statusEl,resultsEl,btnEl,engine){
       }
 
       const allChunks=[];
-      const maxWait=30000;
-      const idleTimeout=6000;
+      const isMoshi=engine.startsWith('moshi');
+      const maxWait=isMoshi?600000:30000;
+      const idleTimeout=isMoshi?30000:6000;
       let lastChunkTime=null;
       const pollStart=Date.now();
       while(Date.now()-pollStart<maxWait){
@@ -2561,7 +2562,7 @@ async function runMoshiWerTest(files,statusEl,resultsEl,btnEl,engine){
         continue;
       }
 
-      const fullText=allChunks.join(' ');
+      const fullText=allChunks.join('');
       const sim=groundTruth?_werSimilarity(groundTruth,fullText):0;
       const st=sim>=99.5?'PASS':sim>=90?'WARN':'FAIL';
       testResults.push({file,status:st,ground_truth:groundTruth,transcription:fullText,similarity:sim,chunks:allChunks.length});

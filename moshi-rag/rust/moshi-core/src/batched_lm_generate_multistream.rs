@@ -457,6 +457,7 @@ impl State {
 
         let mut codes = Vec::with_capacity(self.config.total_audio_codebooks());
 
+        let t0 = std::time::Instant::now();
         let pcm_for_mimi = if pcm.dtype() != self.mimi.dtype() {
             pcm.to_dtype(self.mimi.dtype())?
         } else {
@@ -649,6 +650,10 @@ impl State {
         let decode_tensor = Tensor::from_vec(decode_codes, (batch_size, cb, 1), &dev)?;
         let decode_mask = StreamMask::new(need_decode.clone(), &dev)?;
         let pcm_out = self.mimi.decode_step(&decode_tensor.into(), &decode_mask)?;
+        let total_ms = t0.elapsed().as_millis();
+        if total_ms > 200 && self.slots.iter().any(|s| s.step_idx < 20 || s.step_idx % 100 == 0) {
+            tracing::warn!(total_ms, "step_pcm slow");
+        }
         if let Some(pcm_out) = pcm_out.as_option() {
             let frame_len = pcm_out.dim(2)?;
             let acoustic_delay = self.config.acoustic_delay;

@@ -21,7 +21,7 @@
     "arc_encoder_model_file": "hf://kyutai/ARC4_Encoder_Llama/model.safetensors",
     "backend_url": "http://127.0.0.1:8090",
     "arc_mode_enabled": false,
-    "batch_size": 8,
+    "batch_size": 2,
     "use_https": true,
     "moshi_gpu_id": 0,
     "stt_gpu_id": 0,

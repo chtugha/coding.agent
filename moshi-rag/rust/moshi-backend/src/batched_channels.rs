@@ -73,12 +73,13 @@ pub struct BatchedStreamingChannels {
     pub channels: Channels,
     pub batch_size: usize,
     pub frame_size: usize,
+    take_slot_count: std::sync::atomic::AtomicU64,
 }
 
 impl BatchedStreamingChannels {
     pub fn new(batch_size: usize, frame_size: usize) -> Self {
         let channels = (0..batch_size).map(|_| None).collect::<Vec<_>>();
-        Self { channels: Arc::new(Mutex::new(channels)), batch_size, frame_size }
+        Self { channels: Arc::new(Mutex::new(channels)), batch_size, frame_size, take_slot_count: std::sync::atomic::AtomicU64::new(0) }
     }
 
     /// Returns true if at least one slot in the batch is currently free (used for health/capacity checks).
@@ -100,9 +101,12 @@ impl BatchedStreamingChannels {
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
         let channel = Channel::new(in_rx, out_tx);
         let mut ch = self.channels.lock().unwrap();
+        let channels_ptr = &*ch as *const Vec<Option<Channel>> as usize;
         for (bid, slot) in ch.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(channel);
+                let count = self.take_slot_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                tracing::info!(bid, count, channels_ptr, "take_slot: assigned slot");
                 return Some((bid, in_tx, out_rx));
             }
         }
@@ -130,6 +134,12 @@ impl BatchedStreamingChannels {
         let mut mask = vec![false; self.batch_size];
         let mut batch_pcm = vec![0f32; self.batch_size * frame_size];
         let mut channels = self.channels.lock().unwrap();
+        let channels_ptr = &*channels as *const Vec<Option<Channel>> as usize;
+        let take_count = self.take_slot_count.load(std::sync::atomic::Ordering::Relaxed);
+        let occupied: Vec<usize> = channels.iter().enumerate().filter(|(_, c)| c.is_some()).map(|(i, _)| i).collect();
+        if take_count > 0 || !occupied.is_empty() {
+            tracing::debug!(channels_ptr, take_count, ?occupied, "pre_process: lock acquired");
+        }
         let channel_ids: Vec<Option<ChannelId>> =
             channels.iter().map(|c| c.as_ref().map(|c| c.id)).collect();
 
@@ -141,31 +151,43 @@ impl BatchedStreamingChannels {
             .filter_map(|(bid, ((out_pcm, slot), mask_elem))| {
                 let c = slot.as_mut()?;
                 if c.out_tx.is_closed() {
+                    tracing::warn!(bid, "pre_process: removing channel — out_tx closed");
                     *slot = None;
                     return None;
                 }
                 match c.in_rx.try_recv() {
                     Ok(InMsg::Init) => {
+                        tracing::info!(bid, "pre_process: received Init, clearing buffer");
                         let _ = c.out_tx.send(StreamOut::Ready);
                         c.data.clear();
                         *mask_elem = false;
                         Some(Todo::Reset(bid))
                     }
                     Ok(InMsg::Audio { pcm }) => {
+                        let pcm_len = pcm.len();
+                        let buf_before = c.data.len();
                         if let Some(frame) = c.extend_data(frame_size, pcm) {
+                            tracing::info!(bid, pcm_len, buf_before, frame_size, "pre_process: FRAME READY from Audio");
                             out_pcm.copy_from_slice(&frame);
                             *mask_elem = true;
+                        } else {
+                            let buf_after = c.data.len();
+                            if buf_before == 0 || (buf_after / 480 != buf_before / 480) {
+                                tracing::info!(bid, pcm_len, buf_before, buf_after, frame_size, "pre_process: Audio accumulated (need more)");
+                            }
                         }
                         None
                     }
                     Err(TryRecvError::Empty) => {
                         if let Some(frame) = c.extend_data(frame_size, vec![]) {
+                            tracing::info!(bid, frame_size, buf_was=c.data.len()+frame_size, "pre_process: FRAME READY from buffer drain");
                             out_pcm.copy_from_slice(&frame);
                             *mask_elem = true;
                         }
                         None
                     }
                     Err(TryRecvError::Disconnected) => {
+                        tracing::warn!(bid, "pre_process: removing channel — in_tx disconnected");
                         *slot = None;
                         None
                     }
