@@ -217,6 +217,9 @@ impl State {
                 )?
             };
             let text_tokens = text_tokens.to_vec1::<u32>()?;
+            if self.model_step_idx % 5 == 0 || text_tokens.iter().any(|&t| t != 3 && t != 0) {
+                tracing::info!(step_idx=self.model_step_idx, ?text_tokens, "ASR text_tokens");
+            }
             for (batch_idx, (text_token, item)) in
                 text_tokens.into_iter().zip(self.batch.iter_mut()).enumerate()
             {

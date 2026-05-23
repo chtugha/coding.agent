@@ -714,6 +714,18 @@ impl BatchedState {
                     let stt_msgs =
                         stt_asr.step_pcm(batch_stt_pcm, None, &stt_mask, |_, _, _| ())?;
 
+                    let stt_word_count = stt_msgs.iter().filter(|m| matches!(m, moshi::asr::AsrMsg::Word { .. })).count();
+                    let stt_step_count = stt_msgs.iter().filter(|m| matches!(m, moshi::asr::AsrMsg::Step { .. })).count();
+                    let stt_end_count = stt_msgs.iter().filter(|m| matches!(m, moshi::asr::AsrMsg::EndWord { .. })).count();
+                    if stt_word_count > 0 || stt_end_count > 0 || loop_counter % 5 == 0 {
+                        tracing::info!(loop_counter, stt_word_count, stt_step_count, stt_end_count, stt_delay=stt_asr.asr_delay_in_tokens(), "STT step_pcm result");
+                    }
+                    for msg in &stt_msgs {
+                        if let moshi::asr::AsrMsg::Word { tokens, batch_idx, .. } = msg {
+                            tracing::info!(loop_counter, batch_idx, ?tokens, "STT Word event");
+                        }
+                    }
+
                     for msg in &stt_msgs {
                         if let moshi::asr::AsrMsg::Step { prs, .. } = msg {
                             if let Some(ref turn_managers) = turn_managers {
@@ -892,6 +904,13 @@ impl BatchedState {
                             });
                         }
                     }
+                    if !user_text.is_empty() {
+                        pool.post_process(
+                            StreamOut::TextByRole { text: user_text.clone(), role: crate::turn_manager::TextRole::User },
+                            b,
+                            &ref_channel_ids,
+                        )?;
+                    }
                     if let Some(ref turn_managers) = turn_managers {
                         let outputs: Vec<(String, crate::turn_manager::TextRole)> =
                             turn_managers.get(b).unwrap().lock().unwrap().handle_spoken_text(
@@ -899,17 +918,27 @@ impl BatchedState {
                                 Some(user_text.as_str()),
                             );
                         for (text, role) in &outputs {
-                            pool.post_process(
-                                StreamOut::TextByRole { text: text.clone(), role: *role },
-                                b,
-                                &ref_channel_ids,
-                            )?;
+                            if *role == crate::turn_manager::TextRole::Model {
+                                pool.post_process(
+                                    StreamOut::TextByRole { text: text.clone(), role: *role },
+                                    b,
+                                    &ref_channel_ids,
+                                )?;
+                            }
                         }
                     } else {
                         if !model_text.is_empty() {
                             tracing::info!(batch_idx=b, text=%model_text, "emitting TextByRole for model (no TM)");
                             pool.post_process(
                                 StreamOut::TextByRole { text: model_text.clone(), role: crate::turn_manager::TextRole::Model },
+                                b,
+                                &ref_channel_ids,
+                            )?;
+                        }
+                        if !user_text.is_empty() {
+                            tracing::info!(batch_idx=b, text=%user_text, "emitting TextByRole for user (no TM)");
+                            pool.post_process(
+                                StreamOut::TextByRole { text: user_text.clone(), role: crate::turn_manager::TextRole::User },
                                 b,
                                 &ref_channel_ids,
                             )?;

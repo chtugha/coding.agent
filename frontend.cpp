@@ -5260,17 +5260,27 @@ private:
         }
 
         std::string active_tts = get_setting("test_active_tts", "kokoro");
-        (void)active_tts;
+        bool is_moshi_mode = (active_tts == "moshi" || active_tts == "moshi-rag");
 
-        std::vector<std::pair<whispertalk::ServiceType, const char*>> required_services = {
-            {whispertalk::ServiceType::SIP_CLIENT, "SIP Client"},
-            {whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, "IAP"},
-            {whispertalk::ServiceType::VAD_SERVICE, "VAD"},
-            {whispertalk::ServiceType::WHISPER_SERVICE, "Whisper"},
-            {whispertalk::ServiceType::LLAMA_SERVICE, "LLaMA"},
-            {whispertalk::ServiceType::TTS_SERVICE, "TTS"},
-            {whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
-        };
+        std::vector<std::pair<whispertalk::ServiceType, const char*>> required_services;
+        if (is_moshi_mode) {
+            required_services = {
+                {whispertalk::ServiceType::SIP_CLIENT, "SIP Client"},
+                {whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, "IAP"},
+                {whispertalk::ServiceType::MOSHI_SERVICE, "Moshi"},
+                {whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
+            };
+        } else {
+            required_services = {
+                {whispertalk::ServiceType::SIP_CLIENT, "SIP Client"},
+                {whispertalk::ServiceType::INBOUND_AUDIO_PROCESSOR, "IAP"},
+                {whispertalk::ServiceType::VAD_SERVICE, "VAD"},
+                {whispertalk::ServiceType::WHISPER_SERVICE, "Whisper"},
+                {whispertalk::ServiceType::LLAMA_SERVICE, "LLaMA"},
+                {whispertalk::ServiceType::TTS_SERVICE, "TTS"},
+                {whispertalk::ServiceType::OUTBOUND_AUDIO_PROCESSOR, "OAP"},
+            };
+        }
         for (const auto& [svc, name] : required_services) {
             uint16_t cmd_port = whispertalk::service_cmd_port(svc);
             std::string err;
@@ -5292,14 +5302,29 @@ private:
         int processed = 0;
 
         static constexpr int FULL_LOOP_CONV_DURATION_MS = 180000;
+        static constexpr int FULL_LOOP_MOSHI_CONV_DURATION_MS = 3600000;
+        const int conv_duration_ms = is_moshi_mode ? FULL_LOOP_MOSHI_CONV_DURATION_MS : FULL_LOOP_CONV_DURATION_MS;
 
         for (size_t fi = 0; fi < files.size(); fi++) {
             const auto& file = files[fi];
+            std::string ground_truth;
+            {
+                std::lock_guard<std::mutex> lock(testfiles_mutex_);
+                for (const auto& tf : testfiles_) {
+                    if (tf.name == file) {
+                        ground_truth = tf.ground_truth;
+                        break;
+                    }
+                }
+            }
+
             uint64_t seq_before = current_log_seq();
             auto e2e_start = std::chrono::steady_clock::now();
-            auto conv_deadline = e2e_start + std::chrono::milliseconds(FULL_LOOP_CONV_DURATION_MS);
+            auto conv_deadline = e2e_start + std::chrono::milliseconds(conv_duration_ms);
 
-            std::string inject_body = "{\"file\":\"" + escape_json(file) + "\",\"leg\":\"a\",\"no_silence\":true}";
+            std::string inject_body = is_moshi_mode
+                ? "{\"file\":\"" + escape_json(file) + "\",\"leg\":\"a\"}"
+                : "{\"file\":\"" + escape_json(file) + "\",\"leg\":\"a\",\"no_silence\":true}";
             std::string inject_err;
             std::string inject_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/inject", inject_body, inject_err);
 
@@ -5336,7 +5361,27 @@ private:
             int llama_count = 0;
             uint64_t scan_seq = seq_before;
 
+            auto last_log_time = std::chrono::steady_clock::now();
+            bool received_any_moshi = false;
+            auto last_progress_time = std::chrono::steady_clock::now();
+            int moshi_log_count = 0;
+
             while (std::chrono::steady_clock::now() < conv_deadline) {
+                if (is_moshi_mode) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_progress_time).count() >= 15) {
+                        last_progress_time = now;
+                        int elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - e2e_start).count();
+                        int remaining_s = (conv_duration_ms / 1000) - elapsed_s;
+                        std::string prog = "{\"status\":\"running\",\"detail\":\"Moshi WER ["
+                            + std::to_string(elapsed_s) + "s/" + std::to_string(conv_duration_ms / 1000) + "s] "
+                            + "logs=" + std::to_string(moshi_log_count)
+                            + " stt=" + std::to_string((int)whisper_l1_all.size()) + "ch"
+                            + " model=" + std::to_string(llama_count) + " turns"
+                            + " (~" + std::to_string(remaining_s / 60) + "m remaining)\"}";
+                        update_async_task_progress(task_id, prog);
+                    }
+                }
                 {
                     std::lock_guard<std::mutex> lock(logs_mutex_);
                     for (const auto& entry : recent_logs_) {
@@ -5398,15 +5443,57 @@ private:
                                     }
                                 }
                             }
+                        } else if (entry.service == "MOSHI_SERVICE") {
+                            moshi_log_count++;
+                            size_t tpos = msg.find("Moshi transcription: ");
+                            size_t rpos = msg.find("Moshi response: ");
+                            if (tpos != std::string::npos) {
+                                std::string chunk = msg.substr(tpos + 21);
+                                while (!chunk.empty() && (chunk.back() == ' ' || chunk.back() == '\n'))
+                                    chunk.pop_back();
+                                if (!chunk.empty()) {
+                                    if (!whisper_l1_all.empty()) whisper_l1_all += " ";
+                                    whisper_l1_all += chunk;
+                                    last_log_time = std::chrono::steady_clock::now();
+                                    received_any_moshi = true;
+                                }
+                            } else if (rpos != std::string::npos) {
+                                std::string resp = msg.substr(rpos + 16);
+                                while (!resp.empty() && (resp.back() == ' ' || resp.back() == '\n'))
+                                    resp.pop_back();
+                                if (!resp.empty()) {
+                                    last_llama = resp;
+                                    if (!llama_text_all.empty()) llama_text_all += " ";
+                                    llama_text_all += resp;
+                                    llama_count++;
+                                    last_log_time = std::chrono::steady_clock::now();
+                                    received_any_moshi = true;
+                                }
+                            }
                         }
                     }
                 }
+
+                if (!is_moshi_mode && received_any_moshi && 
+                    std::chrono::steady_clock::now() - last_log_time > std::chrono::seconds(8)) {
+                    break;
+                }
+                if (is_moshi_mode && !whisper_l1_all.empty() &&
+                    std::chrono::steady_clock::now() - last_log_time > std::chrono::seconds(120)) {
+                    break;
+                }
+
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
 
             auto e2e_end = std::chrono::steady_clock::now();
             double e2e_ms = std::chrono::duration_cast<std::chrono::milliseconds>(e2e_end - e2e_start).count();
             double avg_llama_ms = llama_count > 0 ? total_llama_ms / llama_count : 0.0;
+
+            if (is_moshi_mode) {
+                llama_text_all = ground_truth;
+                whisper_l2_all = whisper_l1_all;
+            }
 
             double wer = 100.0;
             double similarity = 0.0;

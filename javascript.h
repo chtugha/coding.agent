@@ -34,7 +34,7 @@ const STATUS_CLEAR_MS=5000,POLL_LLAMA_BENCH_MS=2000;
 const POLL_PIPELINE_STRESS_MS=2000,POLL_DOWNLOAD_MS=1000;
 const TOAST_FADE_MS=300,DELAY_DEBOUNCE_MS=300;
 const COUNTUP_STEP_MS=20,COUNTUP_DURATION_MS=400;
-const TEST_SETUP_POLL_MS=1000,TEST_TIMEOUT_MS=1800000;
+const TEST_SETUP_POLL_MS=1000,TEST_TIMEOUT_MS=5400000;
 
 let _ttsPreference='auto';
 let _testSetupActive=false;
@@ -172,6 +172,23 @@ function _waitForTask(taskId,intervalMs){
     const iv=setInterval(()=>{
       fetch(`/api/async/status?task_id=${taskId}`).then(r=>r.json()).then(d=>{
         if(d.status==='running')return;
+        clearInterval(iv);
+        if(d.error)reject(new Error(d.error));else resolve(d);
+      }).catch(e=>{clearInterval(iv);reject(e);});
+    },intervalMs||2000);
+  });
+}
+
+function _waitForTaskWithProgress(taskId,intervalMs,statusEl,tts){
+  return new Promise((resolve,reject)=>{
+    const iv=setInterval(()=>{
+      fetch(`/api/async/status?task_id=${taskId}`).then(r=>r.json()).then(d=>{
+        if(d.status==='running'){
+          if(d.detail&&statusEl){
+            statusEl.innerHTML=`<span style="color:var(--wt-accent)">\u23F3 ${escapeHtml(d.detail)} [${tts||''}]</span>`;
+          }
+          return;
+        }
         clearInterval(iv);
         if(d.error)reject(new Error(d.error));else resolve(d);
       }).catch(e=>{clearInterval(iv);reject(e);});
@@ -2482,17 +2499,13 @@ function runFullLoopTest(){
   const files=Array.from(sel.options).filter(o=>o.selected).map(o=>o.value);
   if(files.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one test file</span>';return;}
   results.innerHTML='';
-  if(engine==='moshi'||engine==='moshi-rag'){
-    runMoshiWerTest(files,status,results,btn,engine);
-    return;
-  }
   const perEngine=[];
   runWithTestSetup(async({tts})=>{
     const r=await fetch('/api/full_loop_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files})});
     if(r.status!==202){const e=await r.json();throw new Error(e.error||`HTTP ${r.status}`);}
     const d=await r.json();
     status.innerHTML=`<span style="color:var(--wt-accent)">Full loop test running (task ${d.task_id})... [${tts}] This may take several minutes.</span>`;
-    const final=await _waitForTask(d.task_id,POLL_FULL_LOOP_MS);
+    const final=await _waitForTaskWithProgress(d.task_id,POLL_FULL_LOOP_MS,status,tts);
     perEngine.push({tts,data:final});
     renderFullLoopMultiEngine(perEngine);
     return final;
