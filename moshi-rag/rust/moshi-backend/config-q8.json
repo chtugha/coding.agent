@@ -25,7 +25,7 @@
     "use_https": true,
     "moshi_gpu_id": 0,
     "stt_gpu_id": 0,
-    "stt_lm_model_file": null,
-    "stt_text_tokenizer_file": null,
-    "stt_mimi_model_file": null
+    "stt_lm_model_file": "hf://kyutai/stt-1b-en_fr-candle/model.safetensors",
+    "stt_text_tokenizer_file": "hf://kyutai/stt-1b-en_fr-candle/tokenizer_en_fr_audio_8000.model",
+    "stt_mimi_model_file": "hf://kyutai/stt-1b-en_fr-candle/mimi-pytorch-e351c8d8@125.safetensors"
 }

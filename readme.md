@@ -571,30 +571,31 @@ Alternative TTS engine based on [Matcha-TTS](https://github.com/shivammehta25/Ma
 
 ---
 
-### 7. Moshi Service (`bin/moshi-service` + `bin/moshi-backend`)
+### 7. Moshi Service (`bin/moshi-rag-service` — Pure Rust Standalone Architecture)
 
-Real-time speech-to-speech conversation using the [Moshi](https://github.com/kyutai-labs/moshi) model. Two-component architecture: `moshi-service` (C++) handles WebSocket transport, OGG/Opus encoding/decoding, and integration with the frontend pipeline; `moshi-backend` (Rust) runs the neural model inference on Metal GPU.
+**WARNING: The old C++ `moshi-service.cpp` and two-component architecture (`bin/moshi-service` + WebSocket/Opus) are fully DEPRECATED, disabled, and removed from the active pipeline. All features are consolidated in the pure Rust standalone service (`bin/moshi-rag-service`).**
+
+Real-time speech-to-speech conversation using the [MoshiRAG](https://github.com/kyutai-labs/moshi-rag) and Moshi models. Pure Rust implementation integrates directly with the G.711 / RTP pipeline via the custom Prodigy Bridge protocol without any WebSocket, Opus encoding/decoding, or double-buffering overhead.
 
 **Architecture:**
-- `moshi-service` connects to `moshi-backend` via WebSocket (localhost, plain HTTP)
-- Input audio: OGG/Opus encoded, sent as WebSocket binary frames
-- Output: interleaved audio (OGG/Opus) and text tokens
-- Multi-language support via backend pool (one backend per language, routed by `--backend-config` args)
+- **Single-Component**: Run entirely within `bin/moshi-rag-service` (built from `moshi-rag/rust/moshi-backend`).
+- **Direct Pipeline Integration**: Custom Prodigy Bridge listens for OAP/IAP and SIP commands, converting audio sample rates (24kHz model Mono <-> 8kHz G.711 PCMU) and routing caller logs directly.
+- **Asynchronous RAG Retrieval**: Fully supports asynchronous patient/knowledge context injection from `TOMEDO_CRAWL_SERVICE` when a query requires factual grounding.
+- **Multi-language Support**: Fully automated and configured via the database and `--backend-config` args routing to language-specific JSON configuration files.
 
-**Key fixes applied (via `patches/moshi-rust-metal-fixes.patch`):**
-- `matmul_dtype()` returns BF16 on Metal (30× speedup for Q8 models)
-- Model loading uses BF16 dtype on Metal (not just CUDA)
-- TLS removed for localhost backend (plain HTTP WebSocket)
-- HuggingFace download skipped for local model files
-- Enhanced logging in processing loop and OGG decoder
+**Key fixes applied:**
+- `matmul_dtype()` returns BF16 on Metal (30× speedup for Q8 GGUF models on Apple Silicon).
+- Highly-optimized streaming step intervals with Metal Warm-up caching.
+- Custom ASR/STT diagnostic logging inside the Rust engine (`asr.rs` and `stream_both.rs`).
+- Long-session conversation timeout handling (up to 60 minutes) to prevent premature disconnection on slow hardware.
 
-**Command-Line Parameters (moshi-service):**
+**Command-Line Parameters:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--backend-config <lang>:<config>[:<binary>]` | (none) | Backend language, config JSON path, optional binary path |
+| `--backend-config <lang>:<config>` | (none) | Backend language mapping to config JSON path |
 | `--default-language <lang>` | `en` | Default language when no preference is specified |
-| `--log-level <LEVEL>` | `INFO` | Log verbosity |
+| `--log <LEVEL>` | `info` | Log verbosity (supports error, warn, info, debug, trace) |
 
 ---
 

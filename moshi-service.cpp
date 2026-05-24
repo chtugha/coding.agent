@@ -1,5 +1,13 @@
-// moshi-service.cpp — Moshi full-duplex neural voice service.
+// moshi-service.cpp — DEPRECATED — DO NOT USE
 //
+// This C++ moshi-service is FULLY DEPRECATED and replaced by the pure Rust
+// standalone service: bin/moshi-rag-service (built from moshi-rag/rust/).
+// The database migration in database.h automatically redirects MOSHI_SERVICE
+// to bin/moshi-rag-service. This file is kept only for historical reference.
+//
+// ==========================================================================
+//
+// Original description (historical):
 // Pipeline position (moshi mode): IAP → [MOSHI_SERVICE] → OAP
 //
 // Replaces the entire VAD → Whisper → LLaMA → TTS chain with a single
@@ -1076,6 +1084,15 @@ private:
 
 // ─── main ────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
+    std::cerr << "\n"
+              << "╔══════════════════════════════════════════════════════════════╗\n"
+              << "║  DEPRECATED: This C++ moshi-service is no longer supported. ║\n"
+              << "║  Use bin/moshi-rag-service (Rust) instead.                  ║\n"
+              << "║  This binary will now exit.                                 ║\n"
+              << "╚══════════════════════════════════════════════════════════════╝\n"
+              << std::endl;
+    return 1;
+
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);

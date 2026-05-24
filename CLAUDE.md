@@ -73,6 +73,18 @@ cd build && ninja -j$(sysctl -n hw.ncpu)
 
 This is a C++17 project. Build with ninja to catch compilation errors. No separate lint command.
 
+## DEPRECATED: C++ moshi-service (bin/moshi-service)
+
+The old C++ `moshi-service` (`moshi-service.cpp`, binary `bin/moshi-service`) is **FULLY DEPRECATED**.
+It has been replaced by the pure Rust standalone service `bin/moshi-rag-service` (built from `moshi-rag/rust/`).
+
+- **NEVER** start, reference, or configure `bin/moshi-service` — it will refuse to run (exits immediately with a deprecation notice).
+- The `MOSHI_SERVICE` service type in `interconnect.h` now exclusively maps to `bin/moshi-rag-service`.
+- The database migration in `database.h` automatically redirects any existing `bin/moshi-service` → `bin/moshi-rag-service`.
+- The CMakeLists.txt does NOT build the old C++ binary. Only the Rust service is built.
+- `moshi-service.cpp` is kept for historical reference only.
+- The two pipelines (classic VAD→Whisper→LLaMA→TTS and Moshi) **cannot run simultaneously** — stop one before starting the other.
+
 ## Agent Rules
 
 - NEVER wait/sleep/poll for more than 15 minutes in a single action. If a process takes longer (model loading, builds, etc.), use short polls (30-60s) with a timeout counter and bail out with a status report if the limit is reached. This prevents the agent from going idle/unresponsive.

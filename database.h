@@ -390,6 +390,7 @@ inline bool FrontendServer::init_database() {
             ('MATCHA_ENGINE', 'bin/matcha-service', '', 'Matcha-TTS engine (CoreML) — docks into TTS_SERVICE');
         UPDATE service_config SET default_args='--language de --model bin/models/ggml-large-v3-turbo-q5_0.bin', description='Whisper ASR (Metal)' WHERE service='WHISPER_SERVICE' AND default_args LIKE '%models/ggml%' AND default_args NOT LIKE '%bin/models%';
         UPDATE service_config SET default_args='' WHERE service='SIP_CLIENT' AND (default_args='--lines 1 alice 127.0.0.1 5060' OR default_args='--lines 2 alice 127.0.0.1 5060');
+        UPDATE service_config SET binary_path='bin/moshi-rag-service', description='Moshi RAG full-duplex neural voice service' WHERE service='MOSHI_SERVICE' AND binary_path='bin/moshi-service';
     )";
     sqlite3_exec(db_, seed, nullptr, nullptr, nullptr);
 

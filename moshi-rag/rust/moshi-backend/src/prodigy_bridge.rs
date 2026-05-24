@@ -404,12 +404,23 @@ fn output_drain_loop(
                     }
                     Ok(StreamOut::Ready) => {}
                     Ok(StreamOut::TextByRole { text, role }) => {
-                        if role == crate::turn_manager::TextRole::Model && !text.is_empty() {
-                            log_forwarder.forward(
-                                crate::log_forwarder::LogLevel::Info,
-                                active.call_id,
-                                &format!("Moshi transcription: {}", text),
-                            );
+                        if !text.is_empty() {
+                            match role {
+                                crate::turn_manager::TextRole::Model => {
+                                    log_forwarder.forward(
+                                        crate::log_forwarder::LogLevel::Info,
+                                        active.call_id,
+                                        &format!("Moshi response: {}", text),
+                                    );
+                                }
+                                crate::turn_manager::TextRole::User => {
+                                    log_forwarder.forward(
+                                        crate::log_forwarder::LogLevel::Info,
+                                        active.call_id,
+                                        &format!("Moshi transcription: {}", text),
+                                    );
+                                }
+                            }
                         }
                     }
                     Ok(_) => {}
