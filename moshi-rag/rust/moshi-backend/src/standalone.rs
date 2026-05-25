@@ -91,7 +91,11 @@ impl stream_both::AppStateInner {
             config.moshi_gpu_id,
             device
         );
-        let stt_device = create_device(args.cpu, config.stt_gpu_id)?;
+        let stt_device = if config.stt_gpu_id == config.moshi_gpu_id {
+            device.clone()
+        } else {
+            create_device(args.cpu, config.stt_gpu_id)?
+        };
 
         let is_gguf = config.lm_model_file.ends_with(".gguf");
         let dtype = if is_gguf {

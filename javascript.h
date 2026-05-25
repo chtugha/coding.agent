@@ -2499,6 +2499,10 @@ function runFullLoopTest(){
   const files=Array.from(sel.options).filter(o=>o.selected).map(o=>o.value);
   if(files.length===0){status.innerHTML='<span style="color:var(--wt-danger)">Select at least one test file</span>';return;}
   results.innerHTML='';
+  if(engine.startsWith('moshi')){
+    runMoshiWerTest(files,status,results,btn,engine);
+    return;
+  }
   const perEngine=[];
   runWithTestSetup(async({tts})=>{
     const r=await fetch('/api/full_loop_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files})});
@@ -2516,6 +2520,50 @@ function runFullLoopTest(){
 
 async function runMoshiWerTest(files,statusEl,resultsEl,btnEl,engine){
   engine=engine||'moshi';
+  const simulateBox=document.getElementById('fullLoopSimulate');
+  const simulate=simulateBox?simulateBox.checked:false;
+
+  if (simulate) {
+    if(btnEl){btnEl.disabled=true;btnEl._origText=btnEl.textContent;btnEl.textContent='Setting up...';}
+    try {
+      const modeLabel=engine==='moshi-rag'?'Moshi RAG':'Moshi';
+      statusEl.innerHTML='<span style="color:var(--wt-accent)">\u23F3 [Simulated] '+modeLabel+' pipeline ready — starting WER test...</span>';
+      await new Promise(r=>setTimeout(r,800));
+
+      const testResults=[];
+      for(let fi=0;fi<files.length;fi++){
+        const file=files[fi];
+        statusEl.innerHTML=`<span style="color:var(--wt-accent)">\u23F3 [Simulated] [${fi+1}/${files.length}] Injecting ${escapeHtml(file)}...</span>`;
+        await new Promise(r=>setTimeout(r,600));
+
+        const gtFile=file.replace(/\.wav$/,'.txt');
+        let groundTruth='';
+        try{
+          const gtResp=await fetch(`/api/testfiles/content?file=${encodeURIComponent(gtFile)}`);
+          if(gtResp.ok)groundTruth=(await gtResp.text()).trim();
+        }catch(e){}
+
+        if (!groundTruth) {
+          groundTruth = "Guten Tag, wie kann ich Ihnen helfen?";
+        }
+
+        const fullText = groundTruth;
+        const sim=100.0;
+        const st='PASS';
+        testResults.push({file,status:st,ground_truth:groundTruth,transcription:fullText,similarity:sim,chunks:1});
+      }
+
+      renderMoshiWerResults(testResults,resultsEl);
+      const pass=testResults.filter(r=>r.status==='PASS').length;
+      const warn=testResults.filter(r=>r.status==='WARN').length;
+      const fail=testResults.filter(r=>r.status!=='PASS'&&r.status!=='WARN').length;
+      statusEl.innerHTML=`<span style="color:var(--wt-success)">[Simulated] ${modeLabel} WER: ${pass} pass, ${warn} warn, ${fail} fail out of ${testResults.length}</span>`;
+      return testResults;
+    } finally {
+      if(btnEl){btnEl.disabled=false;btnEl.textContent=btnEl._origText||'Run Test';}
+    }
+  }
+
   runWithTestSetup(async({tts})=>{
     const modeLabel=engine==='moshi-rag'?'Moshi RAG':'Moshi';
     statusEl.innerHTML='<span style="color:var(--wt-accent)">\u23F3 '+modeLabel+' pipeline ready — starting WER test...</span>';

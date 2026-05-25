@@ -1002,6 +1002,10 @@ Save outgoing audio as WAV</label>
 <option value="moshi-rag">Moshi RAG</option>
 </select>
 </div>
+<div class="wt-field" style="margin-bottom:0; display:flex; align-items:center; gap:6px; margin-top:14px">
+<input type="checkbox" id="fullLoopSimulate" checked style="width:14px; height:14px; margin:0; cursor:pointer">
+<label for="fullLoopSimulate" style="font-size:12px; cursor:pointer; color:var(--wt-accent-cyan)">Simulate (No slow GPU wait)</label>
+</div>
 </div>
 <div class="wt-field">
 <label>Select Test Files (hold Ctrl/Cmd for multiple)</label>

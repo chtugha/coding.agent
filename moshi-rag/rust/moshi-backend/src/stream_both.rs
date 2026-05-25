@@ -428,25 +428,40 @@ impl BatchedState {
             session_config.repetition_penalty,
             gen_config.clone(),
         )?;
-        state.warmup(pool.frame_size)?;
-        tracing::info!("main model warmup done, warming up reset_batch_idx...");
-        for bid in 0..inner.lm_model.batch_size() {
-            state.reset_batch_idx(bid)?;
-        }
-        {
-            let dev = inner.device.clone();
-            dev.synchronize()?;
-        }
-        tracing::info!("reset_batch_idx warmup done, running post-reset step warmup...");
-        {
-            let dev = inner.device.clone();
-            let pcm = candle::Tensor::zeros((inner.lm_model.batch_size(), 1, pool.frame_size), candle::DType::F32, &dev)?;
-            let mask = moshi::StreamMask::new(vec![true; inner.lm_model.batch_size()], &dev)?;
-            let _ = state.step_pcm(&pcm, &mask)?;
-            dev.synchronize()?;
-        }
-        tracing::info!("post-reset step warmup done");
         let batch_size = inner.lm_model.batch_size();
+        let device = inner.device.clone();
+
+        // Comprehensive JIT shader warmup on Metal/GPU
+        tracing::info!("Comprehensive JIT shader warmup on Metal/GPU starting...");
+        let masks_to_warmup = vec![
+            vec![true, true],
+            vec![true, false],
+        ];
+
+        // 1. Warm up the main model for all mask combinations (including prepend conditioning)
+        for mask_vec in &masks_to_warmup {
+            tracing::info!("Warming up main model with mask: {:?}", mask_vec);
+            
+            // Set prepend condition to trigger and warm up the forward_prepend JIT compilation path
+            for bid in 0..batch_size {
+                if mask_vec[bid] {
+                    let _ = state.set_prepend_condition_lut(bid, "first_speaker", Some("user"));
+                }
+            }
+
+            let pcm = candle::Tensor::zeros((batch_size, 1, pool.frame_size), candle::DType::F32, &device)?;
+            let mask = moshi::StreamMask::new(mask_vec.clone(), &device)?;
+            let _ = state.step_pcm(&pcm, &mask)?;
+            let _ = device.synchronize();
+
+            // Reset slots back to step 0 for the next warmup iteration
+            for bid in 0..batch_size {
+                state.reset_batch_idx(bid)?;
+            }
+        }
+
+        let _ = device.synchronize();
+        tracing::info!("Main model JIT warmup completed.");
         let mut stt_state: Option<(moshi::asr::State, sentencepiece::SentencePieceProcessor)> = {
             let taken_asr = inner.stt_asr.lock().unwrap().take();
             let taken_tok = inner.stt_tokenizer.lock().unwrap().take();
@@ -463,6 +478,23 @@ impl BatchedState {
                 }
             }
         };
+
+        // 2. Warm up STT-1b (asr_state) if available
+        if let Some((ref mut asr_state, _)) = stt_state {
+            tracing::info!("Warming up STT-1b (asr_state) on GPU for all mask combinations...");
+            for mask_vec in &masks_to_warmup {
+                tracing::info!("Warming up STT-1b with mask: {:?}", mask_vec);
+                let pcm = candle::Tensor::zeros((batch_size, 1, pool.frame_size), candle::DType::F32, &device)?;
+                let mask = moshi::StreamMask::new(mask_vec.clone(), &device)?;
+                let _ = asr_state.step_pcm(pcm, None, &mask, |_, _, _| {})?;
+                let _ = device.synchronize();
+            }
+            // Reset the STT state to start completely clean at step 0
+            asr_state.reset()?;
+            let _ = device.synchronize();
+            tracing::info!("STT-1b JIT warmup completed.");
+        }
+
         let device = inner.device.clone();
         let rag_manager = match (inner.config.rag_token_id, inner.config.backend_url.as_ref()) {
             (Some(rag_token_id), Some(backend_url)) => Some((
