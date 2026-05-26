@@ -155,43 +155,69 @@ impl BatchedStreamingChannels {
                     *slot = None;
                     return None;
                 }
-                match c.in_rx.try_recv() {
-                    Ok(InMsg::Init) => {
-                        tracing::info!(bid, "pre_process: received Init, clearing buffer");
-                        let _ = c.out_tx.send(StreamOut::Ready);
-                        c.data.clear();
-                        *mask_elem = false;
-                        Some(Todo::Reset(bid))
-                    }
-                    Ok(InMsg::Audio { pcm }) => {
-                        let pcm_len = pcm.len();
-                        let buf_before = c.data.len();
-                        if let Some(frame) = c.extend_data(frame_size, pcm) {
-                            tracing::info!(bid, pcm_len, buf_before, frame_size, "pre_process: FRAME READY from Audio");
-                            out_pcm.copy_from_slice(&frame);
-                            *mask_elem = true;
-                        } else {
-                            let buf_after = c.data.len();
-                            if buf_before == 0 || (buf_after / 480 != buf_before / 480) {
-                                tracing::info!(bid, pcm_len, buf_before, buf_after, frame_size, "pre_process: Audio accumulated (need more)");
+                let mut frame_to_yield = None;
+                let mut got_init = false;
+                let mut is_disconnected = false;
+                loop {
+                    match c.in_rx.try_recv() {
+                        Ok(InMsg::Init) => {
+                            tracing::info!(bid, "pre_process: received Init, clearing buffer");
+                            let _ = c.out_tx.send(StreamOut::Ready);
+                            c.data.clear();
+                            got_init = true;
+                            frame_to_yield = None;
+                        }
+                        Ok(InMsg::Audio { pcm }) => {
+                            if !got_init {
+                                if frame_to_yield.is_none() {
+                                    let pcm_len = pcm.len();
+                                    let buf_before = c.data.len();
+                                    if let Some(frame) = c.extend_data(frame_size, pcm) {
+                                        tracing::info!(bid, pcm_len, buf_before, frame_size, "pre_process: FRAME READY from Audio");
+                                        frame_to_yield = Some(frame);
+                                    } else {
+                                        let buf_after = c.data.len();
+                                        if buf_before == 0 || (buf_after / 480 != buf_before / 480) {
+                                            tracing::info!(bid, pcm_len, buf_before, buf_after, frame_size, "pre_process: Audio accumulated (need more)");
+                                        }
+                                    }
+                                } else {
+                                    c.data.extend(pcm);
+                                }
                             }
                         }
-                        None
-                    }
-                    Err(TryRecvError::Empty) => {
-                        if let Some(frame) = c.extend_data(frame_size, vec![]) {
-                            tracing::info!(bid, frame_size, buf_was=c.data.len()+frame_size, "pre_process: FRAME READY from buffer drain");
-                            out_pcm.copy_from_slice(&frame);
-                            *mask_elem = true;
+                        Err(TryRecvError::Empty) => {
+                            break;
                         }
-                        None
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        tracing::warn!(bid, "pre_process: removing channel — in_tx disconnected");
-                        *slot = None;
-                        None
+                        Err(TryRecvError::Disconnected) => {
+                            is_disconnected = true;
+                            break;
+                        }
                     }
                 }
+
+                if is_disconnected {
+                    tracing::warn!(bid, "pre_process: removing channel — in_tx disconnected");
+                    *slot = None;
+                    return None;
+                }
+
+                if got_init {
+                    *mask_elem = false;
+                    return Some(Todo::Reset(bid));
+                }
+
+                if let Some(frame) = frame_to_yield {
+                    out_pcm.copy_from_slice(&frame);
+                    *mask_elem = true;
+                } else {
+                    if let Some(frame) = c.extend_data(frame_size, vec![]) {
+                        tracing::info!(bid, frame_size, buf_was=c.data.len()+frame_size, "pre_process: FRAME READY from buffer drain");
+                        out_pcm.copy_from_slice(&frame);
+                        *mask_elem = true;
+                    }
+                }
+                None
             })
             .collect();
 

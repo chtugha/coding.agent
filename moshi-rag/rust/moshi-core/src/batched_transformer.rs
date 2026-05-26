@@ -107,7 +107,12 @@ impl StreamingMultiheadAttention {
         let xs = {
             let pre_ws = q.matmul(&k.t()?)?; // b,h,t,k
             let pre_ws = (pre_ws * (head_dim as f64).powf(-0.5))?;
-            let pre_ws = pre_ws.broadcast_add(iam.mask())?;
+            let mask = if iam.mask().dtype() != pre_ws.dtype() {
+                iam.mask().to_dtype(pre_ws.dtype())?
+            } else {
+                iam.mask().clone()
+            };
+            let pre_ws = pre_ws.broadcast_add(&mask)?;
             let ws = candle_nn::ops::softmax_last_dim(&pre_ws)?; // b,h,t,k
             ws.matmul(&v)? // b,h,t,d
         };

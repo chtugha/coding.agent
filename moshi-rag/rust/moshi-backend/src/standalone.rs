@@ -91,10 +91,15 @@ impl stream_both::AppStateInner {
             config.moshi_gpu_id,
             device
         );
-        let stt_device = if config.stt_gpu_id == config.moshi_gpu_id {
-            device.clone()
+        let stt_device = if let Some(stt_gpu_id) = config.stt_gpu_id {
+            if stt_gpu_id == config.moshi_gpu_id {
+                device.clone()
+            } else {
+                create_device(args.cpu, stt_gpu_id)?
+            }
         } else {
-            create_device(args.cpu, config.stt_gpu_id)?
+            tracing::warn!("stt_gpu_id is missing/None in configuration, falling back to moshi_gpu_id: {}", config.moshi_gpu_id);
+            device.clone()
         };
 
         let is_gguf = config.lm_model_file.ends_with(".gguf");
@@ -145,7 +150,7 @@ impl stream_both::AppStateInner {
             let stt_mimi_file = config.stt_mimi_model_file.as_deref().unwrap();
             let stt_tok_file = config.stt_text_tokenizer_file.as_deref().unwrap();
             tracing::info!(
-                "Loading STT-1b LM and Mimi on {:?} (stt_gpu_id={})",
+                "Loading STT-1b LM and Mimi on {:?} (stt_gpu_id={:?})",
                 stt_device,
                 config.stt_gpu_id
             );
@@ -286,10 +291,10 @@ pub async fn run(
     config: &Config,
     log_forwarder: Arc<crate::log_forwarder::LogForwarder>,
 ) -> Result<()> {
-    let batch_size = if config.stream.batch_size > 1 {
+    let batch_size = if config.stream.batch_size > 0 {
         config.stream.batch_size
     } else {
-        anyhow::bail!("prodigy bridge requires batch_size > 1 in config");
+        anyhow::bail!("prodigy bridge requires batch_size > 0 in config");
     };
 
     let inner = Arc::new(stream_both::AppStateInner::new(args, &config.stream)?);

@@ -330,7 +330,14 @@ impl StreamingMultiheadCrossAttention {
 
         let pre_ws = match mask {
             None => pre_ws,
-            Some(mask) => pre_ws.broadcast_add(mask)?,
+            Some(mask) => {
+                let mask = if mask.dtype() != pre_ws.dtype() {
+                    mask.to_dtype(pre_ws.dtype())?
+                } else {
+                    mask.clone()
+                };
+                pre_ws.broadcast_add(&mask)?
+            }
         };
 
         let ws = candle_nn::ops::softmax_last_dim(&pre_ws)?; // b,h,t,k
@@ -497,7 +504,14 @@ impl StreamingMultiheadAttention {
 
             let pre_ws = match mask {
                 None => pre_ws,
-                Some(mask) => pre_ws.broadcast_add(mask)?,
+                Some(mask) => {
+                    let mask = if mask.dtype() != pre_ws.dtype() {
+                        mask.to_dtype(pre_ws.dtype())?
+                    } else {
+                        mask.clone()
+                    };
+                    pre_ws.broadcast_add(&mask)?
+                }
             };
 
             let ws = candle_nn::ops::softmax_last_dim(&pre_ws)?; // b,h,t,k

@@ -16,8 +16,8 @@ def run_wer_test():
         try:
             page.goto("https://127.0.0.1:8080/", timeout=15000)
         except Exception as e:
-            print(f"Failed to navigate via HTTPS, trying plain HTTP: {e}")
-            page.goto("http://127.0.0.1:8081/", timeout=15000)
+            print(f"Failed to navigate via HTTPS: {e}, retrying...")
+            page.goto("https://127.0.0.1:8080/", timeout=15000)
 
         page.wait_for_timeout(2000)
         page.screenshot(path="/tmp/pw_wer_login.png")
@@ -32,6 +32,37 @@ def run_wer_test():
             page.wait_for_timeout(3000)
             page.screenshot(path="/tmp/pw_wer_dashboard.png")
             print("Dashboard screenshot saved to /tmp/pw_wer_dashboard.png")
+
+        # 1b. Navigate to Services detail for MOSHI_SERVICE to configure backend
+        print("Navigating to MOSHI_SERVICE config detail...")
+        page.evaluate("showPage('services')")
+        page.evaluate("showSvcDetail('MOSHI_SERVICE')")
+        page.wait_for_timeout(3000)
+        page.screenshot(path="/tmp/pw_wer_services_detail.png")
+
+        # Check if de backend is configured
+        print("Checking configured Moshi backends...")
+        backend_lang = page.locator("#moshiNewLang")
+        if backend_lang.count() > 0:
+            # Check if backend list is empty or doesn't have de
+            if "No backends configured." in page.content() or page.locator("button:has-text('Remove')").count() == 0:
+                print("No backends configured. Adding 'de' backend...")
+                page.fill("#moshiNewLang", "de")
+                page.fill("#moshiNewConfig", "moshi-rag/rust/moshi-backend/config-q8.json")
+                page.click("button:has-text('+ Add')")
+                page.wait_for_timeout(1000)
+                
+            page.fill("#moshiDefaultLang", "de")
+            page.fill("#moshiBackendUrl", "http://127.0.0.1:8090")
+            
+            print("Saving Moshi config...")
+            save_btn = page.locator("#moshiConfig button:has-text('Save Config')")
+            if save_btn.count() > 0:
+                save_btn.first.click()
+            else:
+                page.click("button:has-text('Save Config')")
+            page.wait_for_timeout(2000)
+            page.screenshot(path="/tmp/pw_wer_moshi_configured.png")
 
         # 2. Navigate to Tests tab
         print("Navigating to Tests tab...")

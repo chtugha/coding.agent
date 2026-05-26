@@ -117,6 +117,23 @@ impl State {
         Ok(())
     }
 
+    pub fn flush_remaining_words(&mut self) -> Vec<AsrMsg> {
+        let mut words = vec![];
+        for (batch_idx, item) in self.batch.iter_mut().enumerate() {
+            if !item.word_tokens.is_empty() {
+                let mut tokens = vec![];
+                std::mem::swap(&mut item.word_tokens, &mut tokens);
+                words.push(AsrMsg::Word {
+                    tokens,
+                    start_time: item.last_stop_time,
+                    batch_idx,
+                });
+                item.unended_word = true;
+            }
+        }
+        words
+    }
+
     pub fn step_pcm<F>(
         &mut self,
         pcm: Tensor,

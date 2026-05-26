@@ -410,7 +410,7 @@ public:
                     if (bind(probe, (struct sockaddr*)&pa, sizeof(pa)) == 0) {
                         port_free = true;
                     } else if (attempt == 0) {
-                        std::cerr << "[startup] Log port " << log_port_ << " in use; waiting for previous instance to exit...\n";
+                        std::cerr << "[startup] Log port " << log_port_ << " in use (" << strerror(errno) << "); waiting for previous instance to exit...\n";
                     }
                     close(probe);
                 } else {
@@ -2662,7 +2662,7 @@ private:
 
         static const std::vector<std::string> stop_order = {
             "TOMEDO_CRAWL_SERVICE", "MATCHA_ENGINE", "VITS2_ENGINE", "NEUTTS_ENGINE", "KOKORO_ENGINE", "TTS_SERVICE",
-            "OUTBOUND_AUDIO_PROCESSOR", "LLAMA_SERVICE", "MOSHI_SERVICE", "WHISPER_SERVICE",
+            "OUTBOUND_AUDIO_PROCESSOR", "LLAMA_SERVICE", "MOSHI_SERVICE", "MOSHI_RAG_BACKEND", "WHISPER_SERVICE",
             "VAD_SERVICE", "INBOUND_AUDIO_PROCESSOR", "SIP_CLIENT"
         };
         for (const auto& s : stop_order) {
@@ -2688,12 +2688,16 @@ private:
         }
 
         struct StartStep { std::string name; int sleep_s; };
-        std::vector<StartStep> start_order = {
-            {"SIP_CLIENT",               3},
-            {"INBOUND_AUDIO_PROCESSOR",  3},
-            {"MOSHI_SERVICE",           60},
-            {"OUTBOUND_AUDIO_PROCESSOR", 3},
-        };
+        std::vector<StartStep> start_order;
+        start_order.push_back({"SIP_CLIENT", 3});
+        start_order.push_back({"INBOUND_AUDIO_PROCESSOR", 3});
+        if (rag_mode) {
+            start_order.push_back({"TOMEDO_CRAWL_SERVICE", 3});
+            start_order.push_back({"MOSHI_RAG_BACKEND", 3});
+        }
+        start_order.push_back({"MOSHI_SERVICE", 60});
+        start_order.push_back({"OUTBOUND_AUDIO_PROCESSOR", 3});
+
         for (const auto& step : start_order) {
             set_setup_progress(task_id, "B", "Starting " + step.name + "...");
             if (!start_service(step.name, "")) {
@@ -2759,31 +2763,28 @@ private:
             return;
         }
 
-        set_setup_progress(task_id, "D", "Registering SIP lines (Alice + Bob)...");
+        set_setup_progress(task_id, "D", "Registering SIP line (Alice)...");
         send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "ADD_LINE alice 127.0.0.1");
-        usleep(500000);
-        send_negotiation_command(whispertalk::ServiceType::SIP_CLIENT, "ADD_LINE bob 127.0.0.1");
 
         bool lines_ready = false;
         for (int i = 0; i < 20; i++) {
             std::string err;
             std::string resp = http_get_localhost(TEST_SIP_PROVIDER_PORT, "/users", err);
-            if (resp.find("\"alice\"") != std::string::npos
-                && resp.find("\"bob\"") != std::string::npos) {
+            if (resp.find("\"alice\"") != std::string::npos) {
                 lines_ready = true;
                 break;
             }
             usleep(500000);
         }
         if (!lines_ready) {
-            finish_async_task(task_id, "{\"error\":\"SIP lines did not register within 10s\"}");
+            finish_async_task(task_id, "{\"error\":\"SIP line did not register within 10s\"}");
             return;
         }
 
-        set_setup_progress(task_id, "D", "Starting Alice+Bob conference...");
+        set_setup_progress(task_id, "D", "Starting Alice call...");
         std::string conf_err;
         std::string conf_resp = http_post_localhost(TEST_SIP_PROVIDER_PORT, "/conference",
-            "{\"users\":[\"alice\",\"bob\"]}", conf_err);
+            "{\"users\":[\"alice\"]}", conf_err);
         if (conf_resp.find("\"success\":true") == std::string::npos) {
             finish_async_task(task_id, "{\"error\":\"Failed to start conference: "
                 + escape_json(conf_err.empty() ? conf_resp : conf_err) + "\"}");
@@ -2833,6 +2834,7 @@ private:
             stop_service("MATCHA_ENGINE");
         } else if (active_tts == "moshi" || active_tts == "moshi-rag") {
             stop_service("MOSHI_SERVICE");
+            stop_service("MOSHI_RAG_BACKEND");
         }
         set_setting("test_active_tts", "");
         set_setting("pipeline_mode", "classic");
@@ -7259,6 +7261,37 @@ private:
     }
 
     void handle_moshi_config(struct mg_connection *c, struct mg_http_message *hm) {
+        auto find_json_key = [](const std::string& json, const std::string& key) -> size_t {
+            std::string needle = "\"" + key + "\"";
+            size_t pos = 0;
+            while (true) {
+                pos = json.find(needle, pos);
+                if (pos == std::string::npos) return std::string::npos;
+                int depth = 0;
+                bool in_str = false;
+                bool esc = false;
+                for (size_t i = 0; i < pos; ++i) {
+                    char ch = json[i];
+                    if (esc) { esc = false; continue; }
+                    if (ch == '\\' && in_str) { esc = true; continue; }
+                    if (ch == '"') { in_str = !in_str; continue; }
+                    if (in_str) continue;
+                    if (ch == '{' || ch == '[') depth++;
+                    else if (ch == '}' || ch == ']') depth--;
+                }
+                bool valid = false;
+                if (pos == 0) { valid = true; }
+                else {
+                    size_t pre = pos - 1;
+                    while (pre > 0 && (json[pre] == ' ' || json[pre] == '\t' || json[pre] == '\n' || json[pre] == '\r')) pre--;
+                    char c = json[pre];
+                    valid = (c == '{' || c == ',' || (pre == 0 && (c == ' ' || c == '\t' || c == '\n' || c == '\r')));
+                }
+                if (valid && depth == 1) return pos;
+                pos += needle.size();
+            }
+        };
+
         if (mg_strcmp(hm->method, mg_str("GET")) == 0) {
             std::string backends_json = get_setting("moshi_backends", "[]");
             std::string triggers_json = get_setting("moshi_triggers", "[]");
@@ -7284,6 +7317,206 @@ private:
             std::string asr_delay     = get_setting("moshi_asr_delay_in_tokens", "0");
             std::string rag_token_id  = get_setting("moshi_rag_token_id", "");
             std::string rag_timeout   = get_setting("moshi_rag_timeout", "");
+
+            std::string selected_config;
+            std::string first_config;
+            size_t temp_pos = 0;
+            while (temp_pos < backends_json.size()) {
+                size_t obj_start = backends_json.find('{', temp_pos);
+                if (obj_start == std::string::npos) break;
+                int depth = 1;
+                size_t obj_end = obj_start + 1;
+                bool in_str = false;
+                bool esc = false;
+                for (; obj_end < backends_json.size() && depth > 0; obj_end++) {
+                    char ch = backends_json[obj_end];
+                    if (esc) { esc = false; continue; }
+                    if (ch == '\\' && in_str) { esc = true; continue; }
+                    if (ch == '"') { in_str = !in_str; continue; }
+                    if (in_str) continue;
+                    if (ch == '{') depth++;
+                    else if (ch == '}') depth--;
+                }
+                std::string obj = backends_json.substr(obj_start, obj_end - obj_start);
+                std::string lang   = extract_json_string(obj, "lang");
+                std::string config = extract_json_string(obj, "config");
+                if (!config.empty() && config.find(' ') == std::string::npos) {
+                    if (first_config.empty()) first_config = config;
+                    if (selected_config.empty() && lang == default_lang) selected_config = config;
+                }
+                temp_pos = obj_end;
+            }
+            if (selected_config.empty()) selected_config = first_config;
+
+            if (selected_config.empty()) {
+                char* env_path = getenv("MOSHI_CONFIG_PATH");
+                if (env_path) {
+                    selected_config = env_path;
+                } else {
+                    selected_config = "moshi-rag/rust/moshi-backend/config-q8.json";
+                }
+            }
+
+            std::string file_content;
+            if (!selected_config.empty()) {
+                std::ifstream f(selected_config);
+                if (f.is_open()) {
+                    std::stringstream ss;
+                    ss << f.rdbuf();
+                    file_content = ss.str();
+                    f.close();
+                }
+            }
+
+            auto file_extract = [&](const std::string& key) -> std::string {
+                return extract_json_string(file_content, key);
+            };
+            auto file_extract_bool = [&](const std::string& key) -> std::string {
+                size_t key_pos = find_json_key(file_content, key);
+                if (key_pos == std::string::npos) return "false";
+                size_t colon = file_content.find(':', key_pos + key.size() + 2);
+                if (colon == std::string::npos) return "false";
+                size_t start = colon + 1;
+                while (start < file_content.size() && (file_content[start] == ' ' || file_content[start] == '\t' || file_content[start] == '\n' || file_content[start] == '\r')) start++;
+                if (start >= file_content.size()) return "false";
+                if (file_content.compare(start, 4, "true") == 0) return "true";
+                return "false";
+            };
+            auto file_extract_number = [&](const std::string& key) -> std::string {
+                size_t key_pos = find_json_key(file_content, key);
+                if (key_pos == std::string::npos) return "";
+                size_t colon = file_content.find(':', key_pos + key.size() + 2);
+                if (colon == std::string::npos) return "";
+                size_t start = colon + 1;
+                while (start < file_content.size() && (file_content[start] == ' ' || file_content[start] == '\t' || file_content[start] == '\n' || file_content[start] == '\r')) start++;
+                if (start >= file_content.size()) return "";
+                if (file_content.compare(start, 4, "null") == 0) return "";
+                std::string result;
+                while (start < file_content.size() && (std::isdigit(file_content[start]) || file_content[start] == '.' || file_content[start] == '-')) {
+                    result += file_content[start++];
+                }
+                return result;
+            };
+
+            if (!file_content.empty()) {
+                std::string fe_backend_url = file_extract("backend_url");
+                if (!fe_backend_url.empty()) backend_url = fe_backend_url;
+
+                std::string fe_arc_mode = file_extract_bool("arc_mode_enabled");
+                if (!fe_arc_mode.empty()) arc_mode = fe_arc_mode;
+
+                std::string fe_arc_model = file_extract("arc_encoder_model_file");
+                if (!fe_arc_model.empty()) arc_model = fe_arc_model;
+
+                std::string fe_arc_tok = file_extract("arc_encoder_tokenizer_path");
+                if (!fe_arc_tok.empty()) arc_tok = fe_arc_tok;
+
+                std::string fe_lm_model = file_extract("lm_model_file");
+                if (!fe_lm_model.empty()) lm_model = fe_lm_model;
+
+                std::string fe_mimi_model = file_extract("mimi_model_file");
+                if (!fe_mimi_model.empty()) mimi_model = fe_mimi_model;
+
+                std::string fe_text_tok = file_extract("text_tokenizer_file");
+                if (!fe_text_tok.empty()) text_tok = fe_text_tok;
+
+                std::string fe_batch_size = file_extract_number("batch_size");
+                if (!fe_batch_size.empty()) batch_size = fe_batch_size;
+
+                std::string fe_moshi_gpu = file_extract_number("moshi_gpu_id");
+                if (!fe_moshi_gpu.empty()) moshi_gpu = fe_moshi_gpu;
+
+                std::string fe_stt_gpu = file_extract_number("stt_gpu_id");
+                if (!fe_stt_gpu.empty()) stt_gpu = fe_stt_gpu;
+
+                std::string fe_stt_lm = file_extract("stt_lm_model_file");
+                if (!fe_stt_lm.empty()) stt_lm = fe_stt_lm;
+
+                std::string fe_stt_mimi = file_extract("stt_mimi_model_file");
+                if (!fe_stt_mimi.empty()) stt_mimi = fe_stt_mimi;
+
+                std::string fe_stt_tok = file_extract("stt_text_tokenizer_file");
+                if (!fe_stt_tok.empty()) stt_tok = fe_stt_tok;
+
+                std::string fe_asr_delay = file_extract_number("asr_delay_in_tokens");
+                if (!fe_asr_delay.empty()) asr_delay = fe_asr_delay;
+
+                std::string fe_rag_token_id = file_extract_number("rag_token_id");
+                if (!fe_rag_token_id.empty()) rag_token_id = fe_rag_token_id;
+
+                std::string fe_rag_timeout = file_extract_number("rag_timeout");
+                if (!fe_rag_timeout.empty()) rag_timeout = fe_rag_timeout;
+            }
+
+            std::string be_file_content;
+            std::ifstream fbe("moshi-rag/rust/moshi-rag-backend/config.json");
+            if (fbe.is_open()) {
+                std::stringstream ss;
+                ss << fbe.rdbuf();
+                be_file_content = ss.str();
+                fbe.close();
+            }
+
+            if (!be_file_content.empty()) {
+                auto be_file_extract = [&](const std::string& key) -> std::string {
+                    return extract_json_string(be_file_content, key);
+                };
+                auto be_file_extract_bool = [&](const std::string& key) -> std::string {
+                    size_t key_pos = find_json_key(be_file_content, key);
+                    if (key_pos == std::string::npos) return "false";
+                    size_t colon = be_file_content.find(':', key_pos + key.size() + 2);
+                    if (colon == std::string::npos) return "false";
+                    size_t start = colon + 1;
+                    while (start < be_file_content.size() && (be_file_content[start] == ' ' || be_file_content[start] == '\t' || be_file_content[start] == '\n' || be_file_content[start] == '\r')) start++;
+                    if (start >= be_file_content.size()) return "false";
+                    if (be_file_content.compare(start, 4, "true") == 0) return "true";
+                    return "false";
+                };
+                auto be_file_extract_json_value = [&](const std::string& key) -> std::string {
+                    auto pos = find_json_key(be_file_content, key);
+                    if (pos == std::string::npos) return "[]";
+                    auto colon = be_file_content.find(':', pos + key.size() + 2);
+                    if (colon == std::string::npos) return "[]";
+                    auto start = colon + 1;
+                    while (start < be_file_content.size() && (be_file_content[start] == ' ' || be_file_content[start] == '\t' || be_file_content[start] == '\n' || be_file_content[start] == '\r')) start++;
+                    if (start >= be_file_content.size()) return "[]";
+                    char open = be_file_content[start];
+                    if (open != '[' && open != '{') return "[]";
+                    int depth = 1;
+                    bool in_string = false;
+                    bool escaped = false;
+                    size_t i = start + 1;
+                    for (; i < be_file_content.size() && depth > 0; i++) {
+                        char ch = be_file_content[i];
+                        if (escaped) { escaped = false; continue; }
+                        if (ch == '\\' && in_string) { escaped = true; continue; }
+                        if (ch == '"') { in_string = !in_string; continue; }
+                        if (in_string) continue;
+                        if (ch == '[' || ch == '{') depth++;
+                        else if (ch == ']' || ch == '}') depth--;
+                    }
+                    return be_file_content.substr(start, i - start);
+                };
+
+                std::string fe_llm_mode = be_file_extract_bool("llm_mode_enabled");
+                if (!fe_llm_mode.empty()) llm_mode = fe_llm_mode;
+
+                std::string fe_tomedo_crawl = be_file_extract("tomedo_crawl_url");
+                if (!fe_tomedo_crawl.empty()) tomedo_crawl_url = fe_tomedo_crawl;
+
+                std::string fe_triggers = be_file_extract_json_value("triggers");
+                if (!fe_triggers.empty() && fe_triggers != "[]") triggers_json = fe_triggers;
+
+                std::string fe_ret_action = be_file_extract("ret_action");
+                if (!fe_ret_action.empty()) ret_action = fe_ret_action;
+
+                std::string fe_llm_url = be_file_extract("llm_api_url");
+                if (!fe_llm_url.empty()) llm_url = fe_llm_url;
+
+                std::string fe_llm_key = be_file_extract("llm_api_key");
+                if (!fe_llm_key.empty()) llm_key = fe_llm_key;
+            }
+
             auto json_str_or_null = [](const std::string& k, const std::string& v) -> std::string {
                 if (v.empty()) return ",\"" + k + "\":null";
                 return ",\"" + k + "\":\"" + escape_json(v) + "\"";
@@ -7324,57 +7557,26 @@ private:
         if (mg_strcmp(hm->method, mg_str("POST")) == 0) {
             std::string body(hm->body.buf, hm->body.len);
             auto extract = [&](const std::string& key) -> std::string {
-                auto pos = body.find("\"" + key + "\"");
-                if (pos == std::string::npos) return "";
-                auto colon = body.find(':', pos + key.size() + 2);
-                if (colon == std::string::npos) return "";
-                auto start = colon + 1;
-                while (start < body.size() && body[start] == ' ') start++;
-                if (start >= body.size()) return "";
-                if (body[start] == '"') {
-                    std::string result;
-                    size_t i = start + 1;
-                    while (i < body.size()) {
-                        if (body[i] == '\\' && i + 1 < body.size()) {
-                            char next = body[i + 1];
-                            if (next == '"') result += '"';
-                            else if (next == '\\') result += '\\';
-                            else if (next == '/') result += '/';
-                            else if (next == 'b') result += '\b';
-                            else if (next == 'f') result += '\f';
-                            else if (next == 'n') result += '\n';
-                            else if (next == 'r') result += '\r';
-                            else if (next == 't') result += '\t';
-                            else { result += '\\'; result += next; }
-                            i += 2;
-                            continue;
-                        }
-                        if (body[i] == '"') break;
-                        result += body[i];
-                        i++;
-                    }
-                    return result;
-                }
-                return "";
+                return extract_json_string(body, key);
             };
             auto extract_bool = [&](const std::string& key) -> std::string {
-                auto pos = body.find("\"" + key + "\"");
+                auto pos = find_json_key(body, key);
                 if (pos == std::string::npos) return "false";
-                auto colon = body.find(':', pos);
+                auto colon = body.find(':', pos + key.size() + 2);
                 if (colon == std::string::npos) return "false";
                 auto start = colon + 1;
-                while (start < body.size() && body[start] == ' ') start++;
+                while (start < body.size() && (body[start] == ' ' || body[start] == '\t' || body[start] == '\n' || body[start] == '\r')) start++;
                 if (start >= body.size()) return "false";
                 if (body.compare(start, 4, "true") == 0) return "true";
                 return "false";
             };
             auto extract_json_value = [&](const std::string& key) -> std::string {
-                auto pos = body.find("\"" + key + "\"");
+                auto pos = find_json_key(body, key);
                 if (pos == std::string::npos) return "[]";
-                auto colon = body.find(':', pos);
+                auto colon = body.find(':', pos + key.size() + 2);
                 if (colon == std::string::npos) return "[]";
                 auto start = colon + 1;
-                while (start < body.size() && body[start] == ' ') start++;
+                while (start < body.size() && (body[start] == ' ' || body[start] == '\t' || body[start] == '\n' || body[start] == '\r')) start++;
                 if (start >= body.size()) return "[]";
                 char open = body[start];
                 if (open != '[' && open != '{') return "[]";
@@ -7394,12 +7596,12 @@ private:
                 return body.substr(start, i - start);
             };
             auto extract_number = [&](const std::string& key) -> std::string {
-                auto pos = body.find("\"" + key + "\"");
+                auto pos = find_json_key(body, key);
                 if (pos == std::string::npos) return "";
                 auto colon = body.find(':', pos + key.size() + 2);
                 if (colon == std::string::npos) return "";
                 auto start = colon + 1;
-                while (start < body.size() && body[start] == ' ') start++;
+                while (start < body.size() && (body[start] == ' ' || body[start] == '\t' || body[start] == '\n' || body[start] == '\r')) start++;
                 if (start >= body.size()) return "";
                 if (body.compare(start, 4, "null") == 0) return "";
                 std::string result;
@@ -7409,16 +7611,17 @@ private:
                 return result;
             };
             auto extract_string_or_null = [&](const std::string& key) -> std::string {
-                auto pos = body.find("\"" + key + "\"");
+                auto pos = find_json_key(body, key);
                 if (pos == std::string::npos) return "\x01";
                 auto colon = body.find(':', pos + key.size() + 2);
                 if (colon == std::string::npos) return "\x01";
                 auto start = colon + 1;
-                while (start < body.size() && body[start] == ' ') start++;
+                while (start < body.size() && (body[start] == ' ' || body[start] == '\t' || body[start] == '\n' || body[start] == '\r')) start++;
                 if (start >= body.size()) return "\x01";
                 if (body.compare(start, 4, "null") == 0) return "";
-                return extract(key);
+                return extract_json_string(body, key);
             };
+
             std::string backends = extract_json_value("backends");
             std::string triggers = extract_json_value("triggers");
             std::string def_lang = extract("default_language");
@@ -7435,6 +7638,7 @@ private:
             if (backend_url.empty()) backend_url = "http://127.0.0.1:8090";
             if (tomedo_crawl.empty()) tomedo_crawl = "http://127.0.0.1:13181";
             if (ret_action.empty()) ret_action = "tomedo-crawl-query";
+
             set_setting("moshi_backends", backends);
             set_setting("moshi_triggers", triggers);
             set_setting("moshi_default_language", def_lang);
@@ -7447,6 +7651,7 @@ private:
             set_setting("moshi_llm_api_url", llm_url);
             set_setting("moshi_llm_api_key", llm_key);
             set_setting("moshi_ret_action", ret_action);
+
             auto save_if_present_str = [&](const std::string& json_key, const std::string& setting_key) {
                 std::string v = extract_string_or_null(json_key);
                 if (v != "\x01") set_setting(setting_key, v);
@@ -7459,6 +7664,7 @@ private:
                     if (check != "\x01") set_setting(setting_key, "");
                 }
             };
+
             save_if_present_str("lm_model_file", "moshi_lm_model_file");
             save_if_present_str("mimi_model_file", "moshi_mimi_model_file");
             save_if_present_str("text_tokenizer_file", "moshi_text_tokenizer_file");
@@ -7471,10 +7677,248 @@ private:
             save_if_present_num("asr_delay_in_tokens", "moshi_asr_delay_in_tokens");
             save_if_present_str("rag_token_id", "moshi_rag_token_id");
             save_if_present_str("rag_timeout", "moshi_rag_timeout");
+
+            std::string lm_model = extract_string_or_null("lm_model_file");
+            std::string mimi_model = extract_string_or_null("mimi_model_file");
+            std::string text_tok = extract_string_or_null("text_tokenizer_file");
+            std::string batch_size = extract_number("batch_size");
+            std::string moshi_gpu = extract_number("moshi_gpu_id");
+            std::string stt_gpu = extract_number("stt_gpu_id");
+            std::string stt_lm = extract_string_or_null("stt_lm_model_file");
+            std::string stt_mimi = extract_string_or_null("stt_mimi_model_file");
+            std::string stt_tok = extract_string_or_null("stt_text_tokenizer_file");
+            std::string asr_delay = extract_number("asr_delay_in_tokens");
+            std::string rag_token_id = extract_string_or_null("rag_token_id");
+            std::string rag_timeout = extract_string_or_null("rag_timeout");
+
+            // Write/merge config to physical json file
+            std::string selected_config;
+            std::string first_config;
+            size_t temp_pos = 0;
+            while (temp_pos < backends.size()) {
+                size_t obj_start = backends.find('{', temp_pos);
+                if (obj_start == std::string::npos) break;
+                int depth = 1;
+                size_t obj_end = obj_start + 1;
+                bool in_str = false;
+                bool esc = false;
+                for (; obj_end < backends.size() && depth > 0; obj_end++) {
+                    char ch = backends[obj_end];
+                    if (esc) { esc = false; continue; }
+                    if (ch == '\\' && in_str) { esc = true; continue; }
+                    if (ch == '"') { in_str = !in_str; continue; }
+                    if (in_str) continue;
+                    if (ch == '{') depth++;
+                    else if (ch == '}') depth--;
+                }
+                std::string obj = backends.substr(obj_start, obj_end - obj_start);
+                std::string lang   = extract_json_string(obj, "lang");
+                std::string config = extract_json_string(obj, "config");
+                if (!config.empty() && config.find(' ') == std::string::npos) {
+                    if (first_config.empty()) first_config = config;
+                    if (selected_config.empty() && lang == def_lang) selected_config = config;
+                }
+                temp_pos = obj_end;
+            }
+            if (selected_config.empty()) selected_config = first_config;
+
+            if (selected_config.empty()) {
+                char* env_path = getenv("MOSHI_CONFIG_PATH");
+                if (env_path) {
+                    selected_config = env_path;
+                } else {
+                    selected_config = "moshi-rag/rust/moshi-backend/config-q8.json";
+                }
+            }
+
+            if (!selected_config.empty()) {
+                std::string f_content;
+                std::ifstream rf(selected_config);
+                if (rf.is_open()) {
+                    std::stringstream ss;
+                    ss << rf.rdbuf();
+                    f_content = ss.str();
+                    rf.close();
+                }
+                if (!f_content.empty()) {
+                    auto update_json_value = [&](const std::string& key, const std::string& value, bool is_string, bool is_number, bool is_bool) {
+                        size_t key_pos = find_json_key(f_content, key);
+                        std::string new_val_str;
+                        if (is_string) {
+                            new_val_str = "\"" + escape_json(value) + "\"";
+                        } else if (is_bool) {
+                            new_val_str = (value == "true" ? "true" : "false");
+                        } else if (is_number) {
+                            if (value.empty()) new_val_str = "null";
+                            else new_val_str = value;
+                        }
+
+                        if (key_pos != std::string::npos) {
+                            size_t colon = f_content.find(':', key_pos + key.size() + 2);
+                            if (colon != std::string::npos) {
+                                size_t val_start = colon + 1;
+                                while (val_start < f_content.size() && (f_content[val_start] == ' ' || f_content[val_start] == '\t' || f_content[val_start] == '\n' || f_content[val_start] == '\r')) val_start++;
+                                size_t val_end = val_start;
+                                if (f_content[val_start] == '"') {
+                                    val_end = val_start + 1;
+                                    bool escaped = false;
+                                    while (val_end < f_content.size()) {
+                                        if (escaped) { escaped = false; val_end++; continue; }
+                                        if (f_content[val_end] == '\\') { escaped = true; val_end++; continue; }
+                                        if (f_content[val_end] == '"') { val_end++; break; }
+                                        val_end++;
+                                    }
+                                } else if (f_content[val_start] == '[' || f_content[val_start] == '{') {
+                                    int depth = 1;
+                                    bool in_str = false;
+                                    bool esc = false;
+                                    val_end = val_start + 1;
+                                    while (val_end < f_content.size() && depth > 0) {
+                                        char ch = f_content[val_end];
+                                        if (esc) { esc = false; val_end++; continue; }
+                                        if (ch == '\\' && in_str) { esc = true; val_end++; continue; }
+                                        if (ch == '"') { in_str = !in_str; val_end++; continue; }
+                                        if (in_str) { val_end++; continue; }
+                                        if (ch == '[' || ch == '{') depth++;
+                                        else if (ch == ']' || ch == '}') depth--;
+                                        val_end++;
+                                    }
+                                } else {
+                                    while (val_end < f_content.size() && (std::isalnum(f_content[val_end]) || f_content[val_end] == '.' || f_content[val_end] == '-' || f_content[val_end] == '+')) {
+                                        val_end++;
+                                    }
+                                }
+                                f_content.replace(val_start, val_end - val_start, new_val_str);
+                            }
+                        } else {
+                            size_t close_brace = f_content.rfind('}');
+                            if (close_brace != std::string::npos) {
+                                std::string entry = ",\n    \"" + key + "\": " + new_val_str;
+                                f_content.insert(close_brace, entry);
+                            }
+                        }
+                    };
+
+                    update_json_value("backend_url", backend_url, true, false, false);
+                    update_json_value("arc_mode_enabled", arc_mode, false, false, true);
+                    if (arc_model != "\x01") update_json_value("arc_encoder_model_file", arc_model, true, false, false);
+                    if (arc_tok != "\x01") update_json_value("arc_encoder_tokenizer_path", arc_tok, true, false, false);
+                    if (lm_model != "\x01") update_json_value("lm_model_file", lm_model, true, false, false);
+                    if (mimi_model != "\x01") update_json_value("mimi_model_file", mimi_model, true, false, false);
+                    if (text_tok != "\x01") update_json_value("text_tokenizer_file", text_tok, true, false, false);
+                    if (!batch_size.empty()) update_json_value("batch_size", batch_size, false, true, false);
+                    if (!moshi_gpu.empty()) update_json_value("moshi_gpu_id", moshi_gpu, false, true, false);
+                    if (!stt_gpu.empty()) update_json_value("stt_gpu_id", stt_gpu, false, true, false);
+                    if (stt_lm != "\x01") update_json_value("stt_lm_model_file", stt_lm, true, false, false);
+                    if (stt_mimi != "\x01") update_json_value("stt_mimi_model_file", stt_mimi, true, false, false);
+                    if (stt_tok != "\x01") update_json_value("stt_text_tokenizer_file", stt_tok, true, false, false);
+                    if (!asr_delay.empty()) update_json_value("asr_delay_in_tokens", asr_delay, false, true, false);
+                    if (rag_token_id != "\x01") update_json_value("rag_token_id", rag_token_id, false, true, false);
+                    if (rag_timeout != "\x01") update_json_value("rag_timeout", rag_timeout, false, true, false);
+
+                    std::ofstream wf(selected_config);
+                    if (wf.is_open()) {
+                        wf << f_content;
+                        wf.close();
+                    }
+                }
+            }
+
             std::string be_llm_profiles = extract_json_value("be_llm_profiles");
             std::string be_trigger_window = extract_number("be_trigger_window_chars");
             std::string be_timeout = extract_number("be_default_timeout_secs");
             std::string be_max_tokens = extract_number("be_default_max_tokens");
+
+            // Write/merge backend config to physical config.json file
+            std::string backend_config_file = "moshi-rag/rust/moshi-rag-backend/config.json";
+            std::string be_content;
+            std::ifstream rbe(backend_config_file);
+            if (rbe.is_open()) {
+                std::stringstream ss;
+                ss << rbe.rdbuf();
+                be_content = ss.str();
+                rbe.close();
+            }
+            if (!be_content.empty()) {
+                auto update_be_json = [&](const std::string& key, const std::string& value, bool is_string, bool is_number, bool is_bool, bool is_raw_json = false) {
+                    size_t key_pos = find_json_key(be_content, key);
+                    std::string new_val_str;
+                    if (is_raw_json) {
+                        new_val_str = value;
+                    } else if (is_string) {
+                        new_val_str = "\"" + escape_json(value) + "\"";
+                    } else if (is_bool) {
+                        new_val_str = (value == "true" ? "true" : "false");
+                    } else if (is_number) {
+                        if (value.empty()) new_val_str = "null";
+                        else new_val_str = value;
+                    }
+
+                    if (key_pos != std::string::npos) {
+                        size_t colon = be_content.find(':', key_pos + key.size() + 2);
+                        if (colon != std::string::npos) {
+                            size_t val_start = colon + 1;
+                            while (val_start < be_content.size() && (be_content[val_start] == ' ' || be_content[val_start] == '\t' || be_content[val_start] == '\n' || be_content[val_start] == '\r')) val_start++;
+                            size_t val_end = val_start;
+                            if (be_content[val_start] == '"') {
+                                val_end = val_start + 1;
+                                bool escaped = false;
+                                while (val_end < be_content.size()) {
+                                    if (escaped) { escaped = false; val_end++; continue; }
+                                    if (be_content[val_end] == '\\') { escaped = true; val_end++; continue; }
+                                    if (be_content[val_end] == '"') { val_end++; break; }
+                                    val_end++;
+                                }
+                            } else if (be_content[val_start] == '[' || be_content[val_start] == '{') {
+                                int depth = 1;
+                                bool in_str = false;
+                                bool esc = false;
+                                val_end = val_start + 1;
+                                while (val_end < be_content.size() && depth > 0) {
+                                    char ch = be_content[val_end];
+                                    if (esc) { esc = false; val_end++; continue; }
+                                    if (ch == '\\' && in_str) { esc = true; val_end++; continue; }
+                                    if (ch == '"') { in_str = !in_str; val_end++; continue; }
+                                    if (in_str) { val_end++; continue; }
+                                    if (ch == '[' || ch == '{') depth++;
+                                    else if (ch == ']' || ch == '}') depth--;
+                                    val_end++;
+                                }
+                            } else {
+                                while (val_end < be_content.size() && (std::isalnum(be_content[val_end]) || be_content[val_end] == '.' || be_content[val_end] == '-' || be_content[val_end] == '+')) {
+                                    val_end++;
+                                }
+                            }
+                            be_content.replace(val_start, val_end - val_start, new_val_str);
+                        }
+                    } else {
+                        size_t close_brace = be_content.rfind('}');
+                        if (close_brace != std::string::npos) {
+                            std::string entry = ",\n    \"" + key + "\": " + new_val_str;
+                            be_content.insert(close_brace, entry);
+                        }
+                    }
+                };
+
+                update_be_json("llm_mode_enabled", llm_mode, false, false, true);
+                update_be_json("arc_mode_enabled", arc_mode, false, false, true);
+                update_be_json("tomedo_crawl_url", tomedo_crawl, true, false, false);
+                update_be_json("triggers", triggers, false, false, false, true);
+                update_be_json("ret_action", ret_action, true, false, false);
+                update_be_json("llm_api_url", llm_url, true, false, false);
+                update_be_json("llm_api_key", llm_key, true, false, false);
+                if (!be_trigger_window.empty()) update_be_json("trigger_window_chars", be_trigger_window, false, true, false);
+                if (!be_timeout.empty()) update_be_json("default_timeout_secs", be_timeout, false, true, false);
+                if (!be_max_tokens.empty()) update_be_json("default_max_tokens", be_max_tokens, false, true, false);
+                update_be_json("llm_profiles", be_llm_profiles, false, false, false, true);
+
+                std::ofstream wfbe(backend_config_file);
+                if (wfbe.is_open()) {
+                    wfbe << be_content;
+                    wfbe.close();
+                }
+            }
+
             std::string backend_config_body = "{\"llm_mode_enabled\":" + llm_mode
                 + ",\"arc_mode_enabled\":" + arc_mode
                 + ",\"tomedo_crawl_url\":\"" + escape_json(tomedo_crawl) + "\""

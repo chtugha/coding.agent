@@ -54,8 +54,8 @@ pub struct Config {
     pub arc_mode_enabled: bool,
     #[serde(default = "default_zero_usize")]
     pub moshi_gpu_id: usize,
-    #[serde(default = "default_zero_usize")]
-    pub stt_gpu_id: usize,
+    #[serde(default)]
+    pub stt_gpu_id: Option<usize>,
     /// Optional list of retrieval (reference) LLM profiles from `MOSHI_RETRIEVAL_LLMS_JSON` only.
     #[serde(default, skip_deserializing)]
     pub rag_llm_profiles: Option<Vec<crate::rag_retrieval::RagLlmProfile>>,
@@ -286,11 +286,15 @@ fn decode_text_piece(
     text_token: u32,
     config: &moshi::lm_generate_multistream::Config,
 ) -> Option<String> {
+    if text_token == 3 {
+        return Some(" ".to_string());
+    }
+
     if text_token != config.text_start_token
         && text_token != config.text_pad_token
         && text_token != config.text_eop_token
     {
-        if prev_text_token == config.text_start_token {
+        if prev_text_token == config.text_start_token || prev_text_token == 3 {
             tokenizer.decode_piece_ids(&[text_token]).ok()
         } else {
             let prev_ids = tokenizer.decode_piece_ids(&[prev_text_token]).ok();
@@ -331,8 +335,8 @@ impl BatchedState {
     /// Create the pool and spawn the single model loop. Call when batch_size > 1.
     pub fn new(inner: Arc<AppStateInner>) -> Result<Self> {
         let batch_size = inner.lm_model.batch_size();
-        if batch_size <= 1 {
-            anyhow::bail!("batch_size > 1 required");
+        if batch_size == 0 {
+            anyhow::bail!("batch_size > 0 required");
         }
         let mimi_config = inner.mimi_model.config();
         let frame_size = (mimi_config.sample_rate / mimi_config.frame_rate).ceil() as usize;
@@ -433,10 +437,16 @@ impl BatchedState {
 
         // Comprehensive JIT shader warmup on Metal/GPU
         tracing::info!("Comprehensive JIT shader warmup on Metal/GPU starting...");
-        let masks_to_warmup = vec![
-            vec![true, true],
-            vec![true, false],
-        ];
+        let masks_to_warmup = if batch_size > 1 {
+            vec![
+                vec![true, true],
+                vec![true, false],
+            ]
+        } else {
+            vec![
+                vec![true],
+            ]
+        };
 
         // 1. Warm up the main model for all mask combinations (including prepend conditioning)
         for mask_vec in &masks_to_warmup {
@@ -444,7 +454,7 @@ impl BatchedState {
             
             // Set prepend condition to trigger and warm up the forward_prepend JIT compilation path
             for bid in 0..batch_size {
-                if mask_vec[bid] {
+                if mask_vec.get(bid).copied().unwrap_or(false) {
                     let _ = state.set_prepend_condition_lut(bid, "first_speaker", Some("user"));
                 }
             }
@@ -481,17 +491,18 @@ impl BatchedState {
 
         // 2. Warm up STT-1b (asr_state) if available
         if let Some((ref mut asr_state, _)) = stt_state {
-            tracing::info!("Warming up STT-1b (asr_state) on GPU for all mask combinations...");
+            let asr_device = asr_state.device().clone();
+            tracing::info!("Warming up STT-1b (asr_state) on {:?} for all mask combinations...", asr_device);
             for mask_vec in &masks_to_warmup {
                 tracing::info!("Warming up STT-1b with mask: {:?}", mask_vec);
-                let pcm = candle::Tensor::zeros((batch_size, 1, pool.frame_size), candle::DType::F32, &device)?;
-                let mask = moshi::StreamMask::new(mask_vec.clone(), &device)?;
+                let pcm = candle::Tensor::zeros((batch_size, 1, pool.frame_size), candle::DType::F32, &asr_device)?;
+                let mask = moshi::StreamMask::new(mask_vec.clone(), &asr_device)?;
                 let _ = asr_state.step_pcm(pcm, None, &mask, |_, _, _| {})?;
-                let _ = device.synchronize();
+                let _ = asr_device.synchronize();
             }
             // Reset the STT state to start completely clean at step 0
             asr_state.reset()?;
-            let _ = device.synchronize();
+            let _ = asr_device.synchronize();
             tracing::info!("STT-1b JIT warmup completed.");
         }
 
@@ -743,8 +754,9 @@ impl BatchedState {
                     let batch_stt_pcm = candle::Tensor::new(batch_stt_pcm.as_slice(), &stt_dev)?
                         .reshape((batch_size, 1, pool.frame_size))?;
                     let stt_mask = moshi::StreamMask::new(mask.clone(), &stt_dev)?;
-                    let stt_msgs =
+                    let mut stt_msgs =
                         stt_asr.step_pcm(batch_stt_pcm, None, &stt_mask, |_, _, _| ())?;
+                    stt_msgs.extend(stt_asr.flush_remaining_words());
 
                     let stt_word_count = stt_msgs.iter().filter(|m| matches!(m, moshi::asr::AsrMsg::Word { .. })).count();
                     let stt_step_count = stt_msgs.iter().filter(|m| matches!(m, moshi::asr::AsrMsg::Step { .. })).count();
@@ -779,6 +791,15 @@ impl BatchedState {
                             let mut prev = state
                                 .last_stt_text_token(*batch_idx)
                                 .unwrap_or(stt_config.text_start_token);
+                            if state.last_stt_text_token(*batch_idx).is_some() {
+                                msgs_for_pools.push(moshi::batched_lm_generate_multistream::StreamingOutMsg::TextToken {
+                                    batch_idx: *batch_idx,
+                                    prev_token: prev,
+                                    token: 3,
+                                    role: moshi::batched_lm_generate_multistream::TextRole::User,
+                                });
+                                prev = 3;
+                            }
                             for &token in tokens {
                                 msgs_for_pools.push(moshi::batched_lm_generate_multistream::StreamingOutMsg::TextToken {
                                     batch_idx: *batch_idx,
@@ -905,9 +926,10 @@ impl BatchedState {
                                 if let Some(text) =
                                     decode_text_piece(tokenizer, *prev_token, *token, config)
                                 {
+                                    let clean_text = text.replace("\u{2581}", " ");
                                     match role {
-                                        moshi::batched_lm_generate_multistream::TextRole::Model => model_text.push_str(&text),
-                                        moshi::batched_lm_generate_multistream::TextRole::User => user_text.push_str(&text),
+                                        moshi::batched_lm_generate_multistream::TextRole::Model => model_text.push_str(&clean_text),
+                                        moshi::batched_lm_generate_multistream::TextRole::User => user_text.push_str(&clean_text),
                                     }
                                 }
                             },
