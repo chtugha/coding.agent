@@ -348,6 +348,7 @@ public:
         }
 
         log_fwd_.init(FRONTEND_LOG_PORT, ServiceType::TTS_SERVICE);
+        log_fwd_.forward(LogLevel::INFO, 0, "TTS service engine-dock listening and ready");
         std::fprintf(stderr, "[TTS] engine-dock listening on 127.0.0.1:%u\n",
                      static_cast<unsigned>(engine_port));
         std::fprintf(stderr, "[TTS] no engine connected\n");

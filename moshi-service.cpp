@@ -371,6 +371,8 @@ public:
             handle_call_end(call_id);
         });
 
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Moshi Service initialized and running");
+
         resolve_rag_addr();
 
         for (auto& [lang, bp] : backend_processes_) {

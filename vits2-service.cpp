@@ -275,6 +275,7 @@ public:
         }
 
         log_fwd_.init(FRONTEND_LOG_PORT, "VITS2_ENGINE");
+        log_fwd_.forward(LogLevel::INFO, 0, "VITS2 Service initialized and running");
 
         std::printf("[vits2] Service initialized (Piper VITS2, ONNX Runtime)\n");
 

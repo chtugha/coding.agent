@@ -1214,6 +1214,7 @@ public:
         }
 
         log_fwd_.init(FRONTEND_LOG_PORT, "KOKORO_ENGINE");
+        log_fwd_.forward(LogLevel::INFO, 0, "Kokoro Service initialized and running");
 
         std::printf("Kokoro TTS Service initialized (German, variant=%s, voice=%s, decoder=coreml-split)\n",
                    variant.c_str(), voice_name.c_str());

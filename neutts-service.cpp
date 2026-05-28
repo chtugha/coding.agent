@@ -627,6 +627,7 @@ public:
         }
 
         log_fwd_.init(FRONTEND_LOG_PORT, "NEUTTS_ENGINE");
+        log_fwd_.forward(LogLevel::INFO, 0, "NeuTTS Service initialized and running");
 
         std::printf("NeuTTS Service initialized (German, NeuTTS Nano, NeuCodec CoreML)\n");
 

@@ -222,6 +222,8 @@ public:
             this->handle_call_end(call_id);
         });
 
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "VAD Service initialized and running");
+
         return true;
     }
 

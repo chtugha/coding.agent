@@ -102,6 +102,8 @@ public:
             this->handle_call_end(call_id);
         });
 
+        log_fwd_.forward(whispertalk::LogLevel::INFO, 0, "Inbound Audio Processor initialized and running");
+
         return true;
     }
 

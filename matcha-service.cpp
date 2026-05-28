@@ -708,6 +708,7 @@ public:
         }
 
         log_fwd_.init(FRONTEND_LOG_PORT, "MATCHA_ENGINE");
+        log_fwd_.forward(LogLevel::INFO, 0, "Matcha Service initialized and running");
 
         std::printf("[matcha] Service initialized (Matcha-TTS, CoreML, espeak-ng)\n");
 
