@@ -19,6 +19,8 @@ pub struct Config {
     pub batch_size: usize,
     #[serde(default = "default_false")]
     pub use_cpu_for_mimi: bool,
+    #[serde(default = "default_false")]
+    pub stt_only: bool,
     pub asr_delay_in_tokens: Option<usize>,
     // Optional
     #[serde(default)]
@@ -449,29 +451,33 @@ impl BatchedState {
         };
 
         // 1. Warm up the main model for all mask combinations (including prepend conditioning)
-        for mask_vec in &masks_to_warmup {
-            tracing::info!("Warming up main model with mask: {:?}", mask_vec);
-            
-            // Set prepend condition to trigger and warm up the forward_prepend JIT compilation path
-            for bid in 0..batch_size {
-                if mask_vec.get(bid).copied().unwrap_or(false) {
-                    let _ = state.set_prepend_condition_lut(bid, "first_speaker", Some("user"));
+        if !inner.config.stt_only {
+            for mask_vec in &masks_to_warmup {
+                tracing::info!("Warming up main model with mask: {:?}", mask_vec);
+                
+                // Set prepend condition to trigger and warm up the forward_prepend JIT compilation path
+                for bid in 0..batch_size {
+                    if mask_vec.get(bid).copied().unwrap_or(false) {
+                        let _ = state.set_prepend_condition_lut(bid, "first_speaker", Some("user"));
+                    }
+                }
+
+                let pcm = candle::Tensor::zeros((batch_size, 1, pool.frame_size), candle::DType::F32, &device)?;
+                let mask = moshi::StreamMask::new(mask_vec.clone(), &device)?;
+                let _ = state.step_pcm(&pcm, &mask)?;
+                let _ = device.synchronize();
+
+                // Reset slots back to step 0 for the next warmup iteration
+                for bid in 0..batch_size {
+                    state.reset_batch_idx(bid)?;
                 }
             }
 
-            let pcm = candle::Tensor::zeros((batch_size, 1, pool.frame_size), candle::DType::F32, &device)?;
-            let mask = moshi::StreamMask::new(mask_vec.clone(), &device)?;
-            let _ = state.step_pcm(&pcm, &mask)?;
             let _ = device.synchronize();
-
-            // Reset slots back to step 0 for the next warmup iteration
-            for bid in 0..batch_size {
-                state.reset_batch_idx(bid)?;
-            }
+            tracing::info!("Main model JIT warmup completed.");
+        } else {
+            tracing::info!("stt_only is enabled: skipping main model JIT warmup.");
         }
-
-        let _ = device.synchronize();
-        tracing::info!("Main model JIT warmup completed.");
         let mut stt_state: Option<(moshi::asr::State, sentencepiece::SentencePieceProcessor)> = {
             let taken_asr = inner.stt_asr.lock().unwrap().take();
             let taken_tok = inner.stt_tokenizer.lock().unwrap().take();
@@ -821,7 +827,11 @@ impl BatchedState {
                 )?;
                 let stream_mask = moshi::StreamMask::new(mask, &device)?;
                 let t_step_start = std::time::Instant::now();
-                let msgs = state.step_pcm(&pcm_tensor, &stream_mask)?;
+                let msgs = if inner.config.stt_only {
+                    Vec::new()
+                } else {
+                    state.step_pcm(&pcm_tensor, &stream_mask)?
+                };
                 let step_ms = t_step_start.elapsed().as_millis();
                 if step_ms > 200 || loop_counter < 20 || loop_counter % 100 == 0 {
                     tracing::info!(step_ms, loop_counter, batch_size, "step_pcm timing");

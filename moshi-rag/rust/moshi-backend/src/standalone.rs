@@ -84,7 +84,11 @@ pub(crate) fn create_device(cpu: bool, gpu_id: usize) -> Result<candle::Device> 
 
 impl stream_both::AppStateInner {
     pub fn new(args: &StandaloneArgs, config: &stream_both::Config) -> Result<Self> {
-        let device = create_device(args.cpu, config.moshi_gpu_id)?;
+        let device = if config.stt_only {
+            candle::Device::Cpu
+        } else {
+            create_device(args.cpu, config.moshi_gpu_id)?
+        };
         tracing::info!(
             "Loading Moshi LM on GPU {} (config moshi_gpu_id={}, device={:?})",
             config.moshi_gpu_id,
@@ -92,14 +96,9 @@ impl stream_both::AppStateInner {
             device
         );
         let stt_device = if let Some(stt_gpu_id) = config.stt_gpu_id {
-            if stt_gpu_id == config.moshi_gpu_id {
-                device.clone()
-            } else {
-                create_device(args.cpu, stt_gpu_id)?
-            }
+            create_device(args.cpu, stt_gpu_id)?
         } else {
-            tracing::warn!("stt_gpu_id is missing/None in configuration, falling back to moshi_gpu_id: {}", config.moshi_gpu_id);
-            device.clone()
+            create_device(args.cpu, config.moshi_gpu_id)?
         };
 
         let is_gguf = config.lm_model_file.ends_with(".gguf");

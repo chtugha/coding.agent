@@ -935,10 +935,15 @@ private:
                 std::string ll_key = "log_level_" + name;
                 std::string ll = get_setting(ll_key, "");
                 if (!ll.empty() && ll.find(' ') == std::string::npos) {
-                    if (name == "MOSHI_SERVICE")
-                        use_args += " --log " + ll;
-                    else
-                        use_args += " --log-level " + ll;
+                    if (name == "MOSHI_SERVICE" || name == "MOSHI_RAG_BACKEND") {
+                        if (use_args.find("--log ") == std::string::npos && use_args.find("-l ") == std::string::npos) {
+                            use_args += " --log " + ll;
+                        }
+                    } else {
+                        if (use_args.find("--log-level") == std::string::npos) {
+                            use_args += " --log-level " + ll;
+                        }
+                    }
                 }
             }
 
@@ -2716,7 +2721,7 @@ private:
             if (step.name == "MOSHI_SERVICE") {
                 uint16_t moshi_cmd = whispertalk::service_cmd_port(whispertalk::ServiceType::MOSHI_SERVICE);
                 bool moshi_ready = false;
-                for (int i = 0; i < 240; i++) {
+                for (int i = 0; i < 480; i++) {
                     set_setup_progress(task_id, "B",
                         "Waiting for MOSHI_SERVICE model loop ready (" + std::to_string(i / 2) + "s)...");
                     std::string err;
@@ -2725,7 +2730,7 @@ private:
                     usleep(500000);
                 }
                 if (!moshi_ready) {
-                    finish_async_task(task_id, "{\"error\":\"MOSHI_SERVICE model loop did not become ready within 120s\"}");
+                    finish_async_task(task_id, "{\"error\":\"MOSHI_SERVICE model loop did not become ready within 240s\"}");
                     return;
                 }
             } else {

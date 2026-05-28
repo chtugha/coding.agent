@@ -26,7 +26,7 @@ def query_db():
         page.wait_for_timeout(2000)
         
         # Today is 2026-05-26
-        query = "SELECT timestamp, message FROM logs WHERE service='MOSHI_SERVICE' AND message LIKE 'Moshi transcription%' ORDER BY timestamp ASC"
+        query = "SELECT timestamp, message FROM logs WHERE service='MOSHI_SERVICE' ORDER BY timestamp ASC LIMIT 100"
         print(f"Executing query: {query}")
         page.fill("#sqlQuery", query)
         page.click("text=Execute")
