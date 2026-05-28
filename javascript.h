@@ -484,7 +484,11 @@ if(s)updateSvcDetail(s);
 
 function updateSvcDetail(s){
   document.getElementById('svcDetailPath').textContent=s.binary_path;
-  if(s.name!=='MOSHI_SERVICE') document.getElementById('svcDetailArgs').value=s.default_args||'';
+  if(s.name!=='MOSHI_SERVICE') {
+    document.getElementById('svcDetailArgs').value=s.default_args||'';
+  } else {
+    document.getElementById('svcDetailArgs').value='';
+  }
   const online=s.online;
   document.getElementById('svcDetailStatus').innerHTML=online
 ?'<span class="wt-badge wt-badge-success">Online</span>'
@@ -586,6 +590,19 @@ if(s.name==='MOSHI_SERVICE'){
 } else {
   moshic.classList.add('hidden');
 }
+  }
+  const select = document.getElementById('svcRuntimeLogLevel');
+  if (select && document.activeElement !== select) {
+    fetch('/api/settings/log_level')
+      .then(r => r.json())
+      .then(d => {
+        const current = d.log_levels && d.log_levels[s.name] ? d.log_levels[s.name] : 'INFO';
+        if (select && document.activeElement !== select) {
+          select.value = current;
+          select.dataset.lastValue = current;
+        }
+      })
+      .catch(() => {});
   }
 }
 function loadWhisperConfig(args){
@@ -5306,6 +5323,127 @@ function submitChangePassword(){
 
 function logoutCurrentSession(){
   fetch('/api/auth/logout',{method:'POST'}).then(()=>{location.href='/login';}).catch(()=>{location.href='/login';});
+}
+
+function changeServiceLogLevel(level) {
+  console.log('changeServiceLogLevel called for ' + currentSvc + ' with level ' + level);
+  if (!currentSvc) return;
+  const select = document.getElementById('svcRuntimeLogLevel');
+  const prevLevel = select ? (select.dataset.lastValue || 'INFO') : 'INFO';
+
+  fetch('/api/settings/log_level', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ service: currentSvc, level: level })
+  })
+  .then(r => r.json())
+  .then(data => {
+    console.log('changeServiceLogLevel response data:', data);
+    if (data.success) {
+      if (data.live_update) {
+        if (select) select.dataset.lastValue = level;
+        showToast('Log level for ' + currentSvc + ' updated to ' + level + ' at runtime.');
+      } else {
+        fetch('/api/services').then(r => r.json()).then(svcData => {
+          const s = svcData.services.find(x => x.name === currentSvc);
+          console.log('changeServiceLogLevel found service:', s, 's.online:', s ? s.online : 'no service');
+          if (s && s.online) {
+            const modal = document.getElementById('restart-popup-modal');
+            console.log('changeServiceLogLevel modal element:', modal);
+            if (modal) {
+              modal.style.display = 'flex';
+              const yesBtn = document.getElementById('restart-popup-yes-btn');
+              const noBtn = document.getElementById('restart-popup-no-btn');
+              
+              yesBtn.onclick = () => {
+                modal.style.display = 'none';
+                if (select) select.dataset.lastValue = level;
+                
+                const argsInput = document.getElementById('svcDetailArgs');
+                if (argsInput) {
+                  const isMoshi = currentSvc === 'MOSHI_SERVICE' || (s && s.binary_path && s.binary_path.indexOf('moshi') !== -1);
+                  const updatedArgs = replaceLogArg(argsInput.value, isMoshi, level);
+                  argsInput.value = updatedArgs;
+                  
+                  fetch('/api/services/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ service: currentSvc, args: updatedArgs })
+                  })
+                  .then(() => {
+                    fetch('/api/services/restart', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ service: currentSvc, args: updatedArgs })
+                    })
+                    .then(() => {
+                      setTimeout(fetchServices, DELAY_RESTART_MS);
+                      showToast('Service ' + currentSvc + ' config saved and restarted with log level ' + level + '.');
+                    });
+                  });
+                }
+              };
+              
+              noBtn.onclick = () => {
+                modal.style.display = 'none';
+                if (select) select.value = prevLevel;
+              };
+            }
+          } else {
+            if (select) select.dataset.lastValue = level;
+            const argsInput = document.getElementById('svcDetailArgs');
+            if (argsInput) {
+              const isMoshi = currentSvc === 'MOSHI_SERVICE' || (s && s.binary_path && s.binary_path.indexOf('moshi') !== -1);
+              argsInput.value = replaceLogArg(argsInput.value, isMoshi, level);
+            }
+          }
+        });
+      }
+    } else {
+      showToast('Error updating log level: ' + (data.error || 'unknown'), 'error');
+      if (select) select.value = prevLevel;
+    }
+  })
+  .catch(err => {
+    showToast('Network error updating log level: ' + err, 'error');
+    if (select) select.value = prevLevel;
+  });
+}
+
+function replaceLogArg(args, isMoshi, level) {
+  const flag = isMoshi ? '--log' : '--log-level';
+  const otherFlag = isMoshi ? '--log-level' : '--log';
+  const parts = (args || '').trim().split(/\s+/);
+  let updated = false;
+  
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] === otherFlag) {
+      parts.splice(i, 2);
+      i--;
+    }
+  }
+  
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] === flag) {
+      if (i + 1 < parts.length) {
+        parts[i + 1] = level;
+      } else {
+        parts.push(level);
+      }
+      updated = true;
+      break;
+    }
+  }
+  
+  if (!updated) {
+    if (parts.length === 1 && parts[0] === '') {
+      parts[0] = flag + ' ' + level;
+    } else {
+      parts.push(flag + ' ' + level);
+    }
+  }
+  
+  return parts.join(' ').trim();
 }
 
 )JS";

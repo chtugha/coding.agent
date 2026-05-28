@@ -965,7 +965,7 @@ private:
                     use_args += " --g2p " + g2p;
             }
 
-            if (name == "MOSHI_SERVICE" && args_override.empty()) {
+            if (name == "MOSHI_SERVICE") {
                 std::vector<std::string> tokens = split_args(use_args);
                 std::string cleaned_args;
                 for (size_t i = 0; i < tokens.size(); i++) {
@@ -1008,6 +1008,14 @@ private:
                         pos = obj_end;
                     }
                     if (selected_config.empty()) selected_config = first_config;
+                    if (selected_config.empty()) {
+                        char* env_path = getenv("MOSHI_CONFIG_PATH");
+                        if (env_path) {
+                            selected_config = env_path;
+                        } else {
+                            selected_config = "moshi-rag/rust/moshi-backend/config-q8.json";
+                        }
+                    }
                     if (!selected_config.empty()) {
                         if (!use_args.empty()) use_args += " ";
                         use_args += "--config " + selected_config + " standalone";

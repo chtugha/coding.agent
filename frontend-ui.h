@@ -520,6 +520,14 @@ Save outgoing audio as WAV</label>
 <div class="wt-field" style="margin-bottom:0"><label style="font-size:12px">Save to directory</label>
 <input class="wt-input" id="oapWavDir" placeholder="wav_recordings (relative to bin/)" title="Relative directory under bin/ where outbound TTS WAV recordings are written. Absolute paths and '..' are rejected. The directory is created if missing. Files are named by call_id and timestamp." style="font-size:12px" onchange="saveOapWavConfig()"></div>
 </div>
+<div class="wt-field" id="svcRuntimeLogLevelWrap"><label>Runtime Log Level</label>
+<select class="wt-select" id="svcRuntimeLogLevel" onchange="changeServiceLogLevel(this.value)">
+<option value="ERROR">ERROR</option>
+<option value="WARN">WARN</option>
+<option value="INFO">INFO</option>
+<option value="DEBUG">DEBUG</option>
+<option value="TRACE">TRACE</option>
+</select></div>
 <div class="wt-field"><label>Arguments</label>
 <input class="wt-input" id="svcDetailArgs" placeholder="Service arguments..." title="Command-line arguments passed to the service binary on start. For Tomedo RAG the arguments are built automatically by the buttons above. For other services refer to the service documentation."></div>
 <div style="display:flex;gap:8px">
@@ -559,7 +567,8 @@ Save outgoing audio as WAV</label>
 <option value="OUTBOUND_AUDIO_PROCESSOR">Outbound Audio</option>
 <option value="MOSHI_SERVICE">Moshi Voice</option>
 <option value="MOSHI_RAG_BACKEND">Moshi RAG Backend</option>
-<option value="TOMEDO_CRAWL">Tomedo RAG</option>
+<option value="TOMEDO_CRAWL_SERVICE">Tomedo RAG</option>
+<option value="TEST_SIP_PROVIDER">Test SIP Provider</option>
 <option value="FRONTEND">Frontend</option>
 </select>
 <select class="wt-select" id="logLevelFilter" onchange="applyLogLevelFilter()">
@@ -1859,6 +1868,17 @@ Save outgoing audio as WAV</label>
 </div>
 
 </div></div><!-- end page-login -->
+
+<div id="restart-popup-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:9999;align-items:center;justify-content:center">
+<div style="background:var(--wt-card-bg);border:1px solid rgba(255,45,149,0.3);border-radius:var(--wt-radius);padding:24px;max-width:400px;width:90%;box-shadow:0 0 20px rgba(0,0,0,0.5)">
+<div style="font-size:16px;font-weight:700;margin-bottom:12px;color:var(--wt-warning)">Restart Required</div>
+<div style="font-size:13px;color:var(--wt-text-secondary);margin-bottom:16px;line-height:1.6">the log level change needs a service restart. Do you want to restart the service now?</div>
+<div style="display:flex;gap:8px;justify-content:flex-end">
+<button class="wt-btn wt-btn-secondary" id="restart-popup-no-btn">No</button>
+<button class="wt-btn wt-btn-primary" id="restart-popup-yes-btn">Yes</button>
+</div>
+</div>
+</div>
 
 )PG";
 }
