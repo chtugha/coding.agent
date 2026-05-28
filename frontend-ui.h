@@ -567,7 +567,7 @@ Save outgoing audio as WAV</label>
 <option value="OUTBOUND_AUDIO_PROCESSOR">Outbound Audio</option>
 <option value="MOSHI_SERVICE">Moshi Voice</option>
 <option value="MOSHI_RAG_BACKEND">Moshi RAG Backend</option>
-<option value="TOMEDO_CRAWL_SERVICE">Tomedo RAG</option>
+<option value="TOMEDO_CRAWL">Tomedo RAG</option>
 <option value="TEST_SIP_PROVIDER">Test SIP Provider</option>
 <option value="FRONTEND">Frontend</option>
 </select>
