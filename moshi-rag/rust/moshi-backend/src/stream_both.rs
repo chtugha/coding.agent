@@ -273,9 +273,9 @@ fn apply_power_threshold_frame(frame: &mut [f32], thresh_db: f32) {
 }
 
 pub struct AppStateInner {
-    pub lm_model: moshi::lm::LmModel,
-    pub mimi_model: moshi::mimi::Mimi,
-    pub text_tokenizer: sentencepiece::SentencePieceProcessor,
+    pub lm_model: Option<moshi::lm::LmModel>,
+    pub mimi_model: Option<moshi::mimi::Mimi>,
+    pub text_tokenizer: Option<sentencepiece::SentencePieceProcessor>,
     pub device: candle::Device,
     pub stt_asr: Mutex<Option<moshi::asr::State>>,
     pub stt_tokenizer: Mutex<Option<sentencepiece::SentencePieceProcessor>>,
@@ -336,12 +336,20 @@ pub struct BatchedState {
 impl BatchedState {
     /// Create the pool and spawn the single model loop. Call when batch_size > 1.
     pub fn new(inner: Arc<AppStateInner>) -> Result<Self> {
-        let batch_size = inner.lm_model.batch_size();
+        let batch_size = if inner.config.stt_only {
+            if inner.config.batch_size > 1 { inner.config.batch_size } else { 1 }
+        } else {
+            inner.lm_model.as_ref().unwrap().batch_size()
+        };
         if batch_size == 0 {
             anyhow::bail!("batch_size > 0 required");
         }
-        let mimi_config = inner.mimi_model.config();
-        let frame_size = (mimi_config.sample_rate / mimi_config.frame_rate).ceil() as usize;
+        let frame_size = if inner.config.stt_only {
+            1920
+        } else {
+            let mimi_config = inner.mimi_model.as_ref().unwrap().config();
+            (mimi_config.sample_rate / mimi_config.frame_rate).ceil() as usize
+        };
         let pool = crate::batched_channels::BatchedStreamingChannels::new(batch_size, frame_size);
         let pool = Arc::new(pool);
         let rag_retrieval = crate::rag_retrieval::RagRetrievalEndpoints::from_profiles(
@@ -405,36 +413,44 @@ impl BatchedState {
             .lm_config
             .clone()
             .unwrap_or_else(moshi::lm_generate_multistream::Config::v0_1);
-        let batch_size = inner.lm_model.batch_size();
-        let audio_lp: Vec<_> = (0..batch_size)
-            .map(|_| {
-                candle_transformers::generation::LogitsProcessor::from_sampling(
-                    session_config.audio_seed,
-                    candle_transformers::generation::Sampling::TopK {
-                        k: session_config.audio_topk,
-                        temperature: session_config.audio_temperature,
-                    },
-                )
-            })
-            .collect();
-        let text_lp = candle_transformers::generation::LogitsProcessor::from_sampling(
-            session_config.text_seed,
-            candle_transformers::generation::Sampling::TopK {
-                k: session_config.text_topk,
-                temperature: session_config.text_temperature,
-            },
-        );
-        let mut state = moshi::batched_lm_generate_multistream::State::new(
-            inner.lm_model.clone(),
-            inner.mimi_model.clone(),
-            session_config.max_steps,
-            audio_lp,
-            text_lp,
-            session_config.pad_mult,
-            session_config.repetition_penalty,
-            gen_config.clone(),
-        )?;
-        let batch_size = inner.lm_model.batch_size();
+        let batch_size = if inner.config.stt_only {
+            if inner.config.batch_size > 1 { inner.config.batch_size } else { 1 }
+        } else {
+            inner.lm_model.as_ref().unwrap().batch_size()
+        };
+        let mut state = if inner.config.stt_only {
+            None
+        } else {
+            let audio_lp: Vec<_> = (0..batch_size)
+                .map(|_| {
+                    candle_transformers::generation::LogitsProcessor::from_sampling(
+                        session_config.audio_seed,
+                        candle_transformers::generation::Sampling::TopK {
+                            k: session_config.audio_topk,
+                            temperature: session_config.audio_temperature,
+                        },
+                    )
+                })
+                .collect();
+            let text_lp = candle_transformers::generation::LogitsProcessor::from_sampling(
+                session_config.text_seed,
+                candle_transformers::generation::Sampling::TopK {
+                    k: session_config.text_topk,
+                    temperature: session_config.text_temperature,
+                },
+            );
+            let s = moshi::batched_lm_generate_multistream::State::new(
+                inner.lm_model.as_ref().unwrap().clone(),
+                inner.mimi_model.as_ref().unwrap().clone(),
+                session_config.max_steps,
+                audio_lp,
+                text_lp,
+                session_config.pad_mult,
+                session_config.repetition_penalty,
+                gen_config.clone(),
+            )?;
+            Some(s)
+        };
         let device = inner.device.clone();
 
         // Comprehensive JIT shader warmup on Metal/GPU
@@ -452,24 +468,25 @@ impl BatchedState {
 
         // 1. Warm up the main model for all mask combinations (including prepend conditioning)
         if !inner.config.stt_only {
+            let s = state.as_mut().unwrap();
             for mask_vec in &masks_to_warmup {
                 tracing::info!("Warming up main model with mask: {:?}", mask_vec);
                 
                 // Set prepend condition to trigger and warm up the forward_prepend JIT compilation path
                 for bid in 0..batch_size {
                     if mask_vec.get(bid).copied().unwrap_or(false) {
-                        let _ = state.set_prepend_condition_lut(bid, "first_speaker", Some("user"));
+                        let _ = s.set_prepend_condition_lut(bid, "first_speaker", Some("user"));
                     }
                 }
 
                 let pcm = candle::Tensor::zeros((batch_size, 1, pool.frame_size), candle::DType::F32, &device)?;
                 let mask = moshi::StreamMask::new(mask_vec.clone(), &device)?;
-                let _ = state.step_pcm(&pcm, &mask)?;
+                let _ = s.step_pcm(&pcm, &mask)?;
                 let _ = device.synchronize();
 
                 // Reset slots back to step 0 for the next warmup iteration
                 for bid in 0..batch_size {
-                    state.reset_batch_idx(bid)?;
+                    s.reset_batch_idx(bid)?;
                 }
             }
 
@@ -528,7 +545,11 @@ impl BatchedState {
         let rag_timeout = inner.config.rag_timeout;
         let vad_window = inner.config.vad_window_size.unwrap_or(4);
         let vad_threshold = inner.config.vad_threshold.unwrap_or(0.5);
-        let frame_rate = inner.mimi_model.config().frame_rate;
+        let frame_rate = if inner.config.stt_only {
+            12.5
+        } else {
+            inner.mimi_model.as_ref().unwrap().config().frame_rate
+        };
         let vad_wait_steps = (stt_wait_secs * frame_rate).ceil() as usize;
         let (init_speaker, first_speaker_str): (crate::turn_manager::TextRole, Option<&str>) =
             match inner.config.init_active_speaker.as_deref() {
@@ -567,10 +588,13 @@ impl BatchedState {
         tracing::info!("batched model loop started (all warmup complete)");
         let mut prev_channel_ids: Vec<Option<crate::batched_channels::ChannelId>> =
             vec![None; batch_size];
+        let stt_config = moshi::lm_generate_multistream::Config::v0_1_stt();
+        let mut last_stt_text_tokens = vec![stt_config.text_start_token; batch_size];
+        let mut last_stt_text_tokens_initialized = vec![false; batch_size];
         let mut loop_counter: u64 = 0;
         loop {
             loop_counter += 1;
-            let (mut batch_pcm, mask, ref_channel_ids, reset_slots) = pool.pre_process(&mut state);
+            let (mut batch_pcm, mask, ref_channel_ids, reset_slots) = pool.pre_process(state.as_mut());
 
             for (b, (prev, curr)) in prev_channel_ids.iter().zip(ref_channel_ids.iter()).enumerate()
             {
@@ -584,10 +608,14 @@ impl BatchedState {
             prev_channel_ids.clone_from(&ref_channel_ids);
 
             for &bid in &reset_slots {
-                if let Err(e) =
-                    state.set_prepend_condition_lut(bid, "first_speaker", first_speaker_str)
-                {
-                    tracing::debug!(?e, bid, "set_prepend_condition_lut (no condition provider)");
+                last_stt_text_tokens[bid] = stt_config.text_start_token;
+                last_stt_text_tokens_initialized[bid] = false;
+                if let Some(ref mut s) = state {
+                    if let Err(e) =
+                        s.set_prepend_condition_lut(bid, "first_speaker", first_speaker_str)
+                    {
+                        tracing::debug!(?e, bid, "set_prepend_condition_lut (no condition provider)");
+                    }
                 }
                 if let Some((ref mut stt_asr, _)) = stt_state {
                     if let Err(e) = stt_asr.reset_batch_idx(bid) {
@@ -622,35 +650,37 @@ impl BatchedState {
                         ref_text.clone()
                     };
                     if !ref_text.trim().is_empty() {
-                        if arc_mode_enabled {
-                            if let Err(e) =
-                                state.set_streaming_sum_condition(slot_id, "reference_with_time", &ref_text)
-                            {
-                                tracing::warn!(?e, slot_id, "set_streaming_sum_condition");
-                            }
-                        } else {
-                            match inner.text_tokenizer.encode(&display_text) {
-                                Ok(pieces) => {
-                                    let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id).collect();
-                                    tracing::info!(slot_id, n_tokens = token_ids.len(), "rag: teacher-forcing prefill inject");
-                                    match state.prefill_inject_text(slot_id, token_ids) {
-                                        Ok(()) => {}
-                                        Err(e) => {
-                                            tracing::warn!(slot_id, ?e, "ret: prefill_inject_text failed — injection skipped");
-                                        }
-                                    }
-                                    if let Some(ref turn_managers) = turn_managers {
-                                        if let Some(tm) = turn_managers.get(slot_id) {
-                                            let ctx_block = format!(
-                                                "[Injected reference]\n{}\n[End of injected reference]\n\n",
-                                                display_text
-                                            );
-                                            tm.lock().unwrap().append_context(&ctx_block);
-                                        }
-                                    }
+                        if let Some(ref mut s) = state {
+                            if arc_mode_enabled {
+                                if let Err(e) =
+                                    s.set_streaming_sum_condition(slot_id, "reference_with_time", &ref_text)
+                                {
+                                    tracing::warn!(?e, slot_id, "set_streaming_sum_condition");
                                 }
-                                Err(e) => {
-                                    tracing::warn!(slot_id, ?e, "rag: failed to tokenize ref_text for teacher-forcing");
+                            } else {
+                                match inner.text_tokenizer.as_ref().unwrap().encode(&display_text) {
+                                    Ok(pieces) => {
+                                        let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id).collect();
+                                        tracing::info!(slot_id, n_tokens = token_ids.len(), "rag: teacher-forcing prefill inject");
+                                        match s.prefill_inject_text(slot_id, token_ids) {
+                                            Ok(()) => {}
+                                            Err(e) => {
+                                                tracing::warn!(slot_id, ?e, "ret: prefill_inject_text failed — injection skipped");
+                                            }
+                                        }
+                                        if let Some(ref turn_managers) = turn_managers {
+                                            if let Some(tm) = turn_managers.get(slot_id) {
+                                                let ctx_block = format!(
+                                                    "[Injected reference]\n{}\n[End of injected reference]\n\n",
+                                                    display_text
+                                                );
+                                                tm.lock().unwrap().append_context(&ctx_block);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(slot_id, ?e, "rag: failed to tokenize ref_text for teacher-forcing");
+                                    }
                                 }
                             }
                         }
@@ -684,19 +714,21 @@ impl BatchedState {
                                         tm.lock().unwrap().append_context(&ctx_block);
                                     }
                                 }
-                                match inner.text_tokenizer.encode(&text) {
-                                    Ok(pieces) => {
-                                        let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id).collect();
-                                        tracing::info!(slot_id, n_tokens = token_ids.len(), "ws: teacher-forcing prefill inject");
-                                        match state.prefill_inject_text(slot_id, token_ids) {
-                                            Ok(()) => {}
-                                            Err(e) => {
-                                                tracing::warn!(slot_id, ?e, "ws: prefill_inject_text failed — injection skipped");
+                                if let Some(ref mut s) = state {
+                                    match inner.text_tokenizer.as_ref().unwrap().encode(&text) {
+                                        Ok(pieces) => {
+                                            let token_ids: Vec<u32> = pieces.into_iter().map(|p| p.id).collect();
+                                            tracing::info!(slot_id, n_tokens = token_ids.len(), "ws: teacher-forcing prefill inject");
+                                            match s.prefill_inject_text(slot_id, token_ids) {
+                                                Ok(()) => {}
+                                                Err(e) => {
+                                                    tracing::warn!(slot_id, ?e, "ws: prefill_inject_text failed — injection skipped");
+                                                }
                                             }
                                         }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(slot_id, ?e, "ws: failed to tokenize reference_inject text");
+                                        Err(e) => {
+                                            tracing::warn!(slot_id, ?e, "ws: failed to tokenize reference_inject text");
+                                        }
                                     }
                                 }
                                 let out = StreamOut::ReferenceText { text };
@@ -710,12 +742,14 @@ impl BatchedState {
                         crate::backend_ws::InboundWsMsg::ArcInject { slot_id, reference_text } => {
                             if arc_mode_enabled {
                                 let prefixed = format!("backend\t{}", reference_text);
-                                if let Err(e) = state.set_streaming_sum_condition(
-                                    slot_id,
-                                    "reference_with_time",
-                                    &prefixed,
-                                ) {
-                                    tracing::warn!(?e, slot_id, "ws arc_inject set_streaming_sum_condition");
+                                if let Some(ref mut s) = state {
+                                    if let Err(e) = s.set_streaming_sum_condition(
+                                        slot_id,
+                                        "reference_with_time",
+                                        &prefixed,
+                                    ) {
+                                        tracing::warn!(?e, slot_id, "ws arc_inject set_streaming_sum_condition");
+                                    }
                                 }
                             } else {
                                 tracing::warn!(slot_id, "ws: arc_inject received but arc_mode_enabled=false, ignoring");
@@ -794,10 +828,18 @@ impl BatchedState {
 
                     for msg in &stt_msgs {
                         if let moshi::asr::AsrMsg::Word { tokens, batch_idx, .. } = msg {
-                            let mut prev = state
-                                .last_stt_text_token(*batch_idx)
-                                .unwrap_or(stt_config.text_start_token);
-                            if state.last_stt_text_token(*batch_idx).is_some() {
+                            let mut prev = if let Some(ref s) = state {
+                                s.last_stt_text_token(*batch_idx)
+                                    .unwrap_or(stt_config.text_start_token)
+                            } else {
+                                last_stt_text_tokens[*batch_idx]
+                            };
+                            let initialized = if let Some(ref s) = state {
+                                s.last_stt_text_token(*batch_idx).is_some()
+                            } else {
+                                last_stt_text_tokens_initialized[*batch_idx]
+                            };
+                            if initialized {
                                 msgs_for_pools.push(moshi::batched_lm_generate_multistream::StreamingOutMsg::TextToken {
                                     batch_idx: *batch_idx,
                                     prev_token: prev,
@@ -815,7 +857,12 @@ impl BatchedState {
                                 });
                                 prev = token;
                             }
-                            state.set_last_stt_text_token(*batch_idx, prev);
+                            if let Some(ref mut s) = state {
+                                s.set_last_stt_text_token(*batch_idx, prev);
+                            } else {
+                                last_stt_text_tokens[*batch_idx] = prev;
+                                last_stt_text_tokens_initialized[*batch_idx] = true;
+                            }
                         }
                     }
                 }
@@ -830,7 +877,7 @@ impl BatchedState {
                 let msgs = if inner.config.stt_only {
                     Vec::new()
                 } else {
-                    state.step_pcm(&pcm_tensor, &stream_mask)?
+                    state.as_mut().unwrap().step_pcm(&pcm_tensor, &stream_mask)?
                 };
                 let step_ms = t_step_start.elapsed().as_millis();
                 if step_ms > 200 || loop_counter < 20 || loop_counter % 100 == 0 {
@@ -924,7 +971,7 @@ impl BatchedState {
                             moshi::batched_lm_generate_multistream::StreamingOutMsg::TextToken { role, prev_token, token, .. } => {
                                 let (tokenizer, config) = match role {
                                     moshi::batched_lm_generate_multistream::TextRole::Model => {
-                                        (&inner.text_tokenizer, &gen_config)
+                                        (inner.text_tokenizer.as_ref().unwrap(), &gen_config)
                                     }
                                     moshi::batched_lm_generate_multistream::TextRole::User => {
                                         match stt_state {

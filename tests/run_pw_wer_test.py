@@ -95,9 +95,9 @@ def run_wer_test():
         page.select_option("#fullLoopEngine", "moshi-rag")
         page.wait_for_timeout(1000)
 
-        # 6. Select English test file (STT model is en/fr, German files produce 0 transcription)
-        print("Selecting sample_en_01.wav...")
-        page.select_option("#fullLoopFiles", "sample_en_01.wav")
+        # 6. Select German test file to validate the German model's capability
+        print("Selecting sample_de_01.wav...")
+        page.select_option("#fullLoopFiles", "sample_de_01.wav")
         page.wait_for_timeout(1000)
         page.screenshot(path="/tmp/pw_wer_tests_configured.png")
 

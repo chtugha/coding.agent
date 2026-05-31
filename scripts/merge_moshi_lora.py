@@ -278,6 +278,29 @@ def build_lora_mapping(lora: dict, base_keys: set) -> dict:
         mapping[k].sort(key=lambda x: x[0])
 
     print(f"[INFO] LoRA mapping: {n_direct} direct, {n_decomposed} decomposed (concat), {n_skipped} skipped")
+
+    if n_skipped > 0:
+        skipped_prefixes = [
+            prefix for prefix in sorted(prefixes)
+            if (prefix + ".weight") not in base_keys
+            and not re.match(r'^(.*\.self_attn)\.(in_projs|out_projs)\.(\d+)$', prefix)
+        ]
+        if skipped_prefixes:
+            sample = skipped_prefixes[0]
+            hint_lines = [
+                f"[WARN] {n_skipped} LoRA tensor(s) could not be mapped to any base-checkpoint key.",
+                f"       First unmapped prefix: '{sample}'",
+                f"       Possible schema mismatch causes:",
+                f"         1. Training script prepends 'base_model.' (PEFT/LoRAConfig) — "
+                f"verify LoRA keys start with the raw module path, not 'base_model.model.'",
+                f"         2. Layer naming changed (e.g. 'transformer.' vs 'model.') — "
+                f"compare LoRA key prefixes against base-checkpoint keys manually.",
+                f"         3. Wrong --lora-dir checkpoint supplied.",
+                f"       Hint: run  python3 -c \"import safetensors.torch as st; "
+                f"print(list(st.load_file('<lora>.safetensors').keys())[:10])\"  to inspect.",
+            ]
+            for line in hint_lines:
+                print(line, file=sys.stderr)
     return mapping
 
 
@@ -345,9 +368,30 @@ def write_safetensors_streaming(output_path: Path, base_paths: list, lora: dict,
         _, meta, _ = key_source[key]
         begin, end = meta["data_offsets"]
         n_bytes = end - begin
+
+        # Check for trained embedding/projection layers in lora
+        lora_key = None
+        if key == "text_emb.weight" and "text_emb.weight" in lora:
+            lora_key = "text_emb.weight"
+        elif key == "text_linear.weight" and "text_linear.frozen_W.weight" in lora:
+            lora_key = "text_linear.frozen_W.weight"
+        elif key == "text_linear.bias" and "text_linear.bias" in lora:
+            lora_key = "text_linear.bias"
+
+        shape = meta["shape"]
+        dtype_str = meta["dtype"]
+        if lora_key is not None:
+            lora_arr = lora[lora_key]
+            shape = list(lora_arr.shape)
+            st_dtype = NP_TO_ST_DTYPE.get(lora_arr.dtype.name, meta["dtype"])
+            dtype_str = st_dtype
+            elem_size = DTYPE_MAP[st_dtype][1]
+            n_bytes = lora_arr.size * elem_size
+            print(f"[INFO] Resizing output header key '{key}' using lora tensor '{lora_key}' with shape {shape} and bytes {n_bytes}")
+
         out_header[key] = {
-            "dtype": meta["dtype"],
-            "shape": meta["shape"],
+            "dtype": dtype_str,
+            "shape": shape,
             "data_offsets": [current_offset, current_offset + n_bytes],
         }
         current_offset += n_bytes
@@ -371,7 +415,30 @@ def write_safetensors_streaming(output_path: Path, base_paths: list, lora: dict,
             begin, end = meta["data_offsets"]
             n_bytes = end - begin
 
-            if key not in lora_mapping:
+            # Check for trained embedding/projection layers in lora
+            lora_key = None
+            if key == "text_emb.weight" and "text_emb.weight" in lora:
+                lora_key = "text_emb.weight"
+            elif key == "text_linear.weight" and "text_linear.frozen_W.weight" in lora:
+                lora_key = "text_linear.frozen_W.weight"
+            elif key == "text_linear.bias" and "text_linear.bias" in lora:
+                lora_key = "text_linear.bias"
+
+            if lora_key is not None:
+                # Convert the trained embedding/projection layer back to original dtype bytes
+                is_bf16 = meta["dtype"] == "BF16"
+                lora_arr = lora[lora_key]
+                if is_bf16:
+                    result = f32_to_bf16(lora_arr)
+                elif DTYPE_MAP[meta["dtype"]][0] == "float16":
+                    result = lora_arr.astype(np.float16)
+                else:
+                    result = lora_arr.astype(np.float32)
+                f.write(result.tobytes())
+                del result
+                print(f"[INFO] Wrote trained layer '{key}' using lora tensor '{lora_key}'")
+                n_merged += 1
+            elif key not in lora_mapping:
                 with open(p, "rb") as src:
                     src.seek(data_offset + begin)
                     remaining = n_bytes

@@ -36,31 +36,34 @@ fn default_true() -> bool {
 
 impl Config {
     pub fn load<P: AsRef<std::path::Path>>(p: P) -> Result<Self> {
+        let p = p.as_ref();
         let config = std::fs::read_to_string(p)?;
         let mut config: Self = serde_json::from_str(&config)?;
-        config.static_dir = crate::utils::replace_env_vars(&config.static_dir);
-        config.cert_dir = crate::utils::replace_env_vars(&config.cert_dir);
-        config.stream.log_dir = crate::utils::replace_env_vars(&config.stream.log_dir);
-        config.stream.text_tokenizer_file =
-            crate::utils::replace_env_vars(&config.stream.text_tokenizer_file);
-        config.stream.mimi_model_file =
-            crate::utils::replace_env_vars(&config.stream.mimi_model_file);
-        config.stream.lm_model_file = crate::utils::replace_env_vars(&config.stream.lm_model_file);
-        if let Some(ref mut s) = config.stream.stt_lm_model_file {
-            *s = crate::utils::replace_env_vars(s);
-        }
-        if let Some(ref mut s) = config.stream.stt_text_tokenizer_file {
-            *s = crate::utils::replace_env_vars(s);
-        }
-        if let Some(ref mut s) = config.stream.stt_mimi_model_file {
-            *s = crate::utils::replace_env_vars(s);
-        }
-        if let Some(ref mut s) = config.stream.arc_encoder_tokenizer_path {
-            *s = crate::utils::replace_env_vars(s);
-        }
-        if let Some(ref mut s) = config.stream.arc_encoder_model_file {
-            *s = crate::utils::replace_env_vars(s);
-        }
+
+        let config_dir = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+        let ev = |s: &str| -> String {
+            let s = crate::utils::replace_env_vars(s);
+            crate::utils::resolve_config_path(&s, config_dir)
+        };
+        let ev_opt = |s: &mut Option<String>| {
+            if let Some(ref mut v) = s {
+                let expanded = crate::utils::replace_env_vars(v);
+                *v = crate::utils::resolve_config_path(&expanded, config_dir);
+            }
+        };
+
+        config.static_dir = ev(&config.static_dir);
+        config.cert_dir = ev(&config.cert_dir);
+        config.stream.log_dir = ev(&config.stream.log_dir);
+        config.stream.text_tokenizer_file = ev(&config.stream.text_tokenizer_file);
+        config.stream.mimi_model_file = ev(&config.stream.mimi_model_file);
+        config.stream.lm_model_file = ev(&config.stream.lm_model_file);
+        ev_opt(&mut config.stream.stt_lm_model_file);
+        ev_opt(&mut config.stream.stt_text_tokenizer_file);
+        ev_opt(&mut config.stream.stt_mimi_model_file);
+        ev_opt(&mut config.stream.arc_encoder_tokenizer_path);
+        ev_opt(&mut config.stream.arc_encoder_model_file);
         if let Some(ref mut s) = config.stream.backend_url {
             *s = crate::utils::replace_env_vars(s);
         }
@@ -111,37 +114,51 @@ impl stream_both::AppStateInner {
         };
         let batch_size = if config.batch_size > 1 { config.batch_size } else { 1 };
         // Uses config.use_arc() to choose LM loader (ARC encoder only loaded when explicitly enabled).
-        let lm_model = if config.use_arc() {
-            let arc_encoder_tokenizer_path = config
-                .arc_encoder_tokenizer_path
-                .as_deref()
-                .expect("ARC config requires arc_encoder_tokenizer_path");
-            let arc_encoder_weights =
-                config.arc_encoder_model_file.as_deref().map(std::path::Path::new);
-            moshi::lm::load_streaming_rag_batched(
-                batch_size,
-                &config.lm_model_file,
-                dtype,
-                &device,
-                arc_encoder_tokenizer_path,
-                arc_encoder_weights,
-            )?
+        let lm_model = if config.stt_only {
+            None
         } else {
-            moshi::lm::load_streaming_batched(batch_size, &config.lm_model_file, dtype, &device)?
+            let lm = if config.use_arc() {
+                let arc_encoder_tokenizer_path = config
+                    .arc_encoder_tokenizer_path
+                    .as_deref()
+                    .expect("ARC config requires arc_encoder_tokenizer_path");
+                let arc_encoder_weights =
+                    config.arc_encoder_model_file.as_deref().map(std::path::Path::new);
+                moshi::lm::load_streaming_rag_batched(
+                    batch_size,
+                    &config.lm_model_file,
+                    dtype,
+                    &device,
+                    arc_encoder_tokenizer_path,
+                    arc_encoder_weights,
+                )?
+            } else {
+                moshi::lm::load_streaming_batched(batch_size, &config.lm_model_file, dtype, &device)?
+            };
+            Some(lm)
         };
         let mimi_device = if config.use_cpu_for_mimi { &candle::Device::Cpu } else { &device };
-        tracing::info!(
-            "Loading Mimi audio codec on {:?} (use_cpu_for_mimi={})",
-            mimi_device,
-            config.use_cpu_for_mimi
-        );
-        let mimi_model = moshi::mimi::load(
-            &config.mimi_model_file,
-            Some(config.mimi_num_codebooks),
-            mimi_device,
-        )?;
-        let text_tokenizer =
-            sentencepiece::SentencePieceProcessor::open(&config.text_tokenizer_file)?;
+        let mimi_model = if config.stt_only {
+            None
+        } else {
+            tracing::info!(
+                "Loading Mimi audio codec on {:?} (use_cpu_for_mimi={})",
+                mimi_device,
+                config.use_cpu_for_mimi
+            );
+            let mimi = moshi::mimi::load(
+                &config.mimi_model_file,
+                Some(config.mimi_num_codebooks),
+                mimi_device,
+            )?;
+            Some(mimi)
+        };
+        let text_tokenizer = if config.stt_only {
+            None
+        } else {
+            let tok = sentencepiece::SentencePieceProcessor::open(&config.text_tokenizer_file)?;
+            Some(tok)
+        };
 
         // Load in-process STT model when configured.
         let (stt_asr, stt_tokenizer) = if config.use_stt() {
@@ -158,12 +175,22 @@ impl stream_both::AppStateInner {
             } else {
                 candle::DType::F32
             };
-            let stt_lm = moshi::lm::load_asr_stt_1b_en_fr(
-                batch_size,
-                stt_lm_file,
-                stt_dtype,
-                &stt_device,
-            )?;
+            let is_de = stt_lm_file.contains("-de") || stt_lm_file.contains("_de") || stt_tok_file.contains("tokenizer_de") || stt_tok_file.contains("de.model");
+            let stt_lm = if is_de {
+                moshi::lm::load_asr_stt_1b_de(
+                    batch_size,
+                    stt_lm_file,
+                    stt_dtype,
+                    &stt_device,
+                )?
+            } else {
+                moshi::lm::load_asr_stt_1b_en_fr(
+                    batch_size,
+                    stt_lm_file,
+                    stt_dtype,
+                    &stt_device,
+                )?
+            };
             let stt_mimi_device =
                 if config.use_cpu_for_mimi { &candle::Device::Cpu } else { &stt_device };
             let stt_mimi =
@@ -178,8 +205,8 @@ impl stream_both::AppStateInner {
         };
 
         // Warm-up code.
-        {
-            let mut lm_model = lm_model.clone();
+        if !config.stt_only {
+            let mut lm_model = lm_model.as_ref().unwrap().clone();
             if batch_size <= 1 {
                 let (_v, ys) =
                     lm_model.forward(None, vec![None; config.mimi_num_codebooks], &().into())?;
@@ -214,7 +241,7 @@ impl stream_both::AppStateInner {
                     &mut audio_lp,
                 )?;
             }
-            let mut mimi_model = mimi_model.clone();
+            let mut mimi_model = mimi_model.as_ref().unwrap().clone();
             let mimi_config = mimi_model.config();
             let frame_length = (mimi_config.sample_rate / mimi_config.frame_rate).ceil() as usize;
             let mimi_dtype = if mimi_device.is_cuda() {

@@ -350,6 +350,16 @@ impl Config {
         cfg
     }
 
+    /// ASR config for fine-tuned stt-1b German model with extended vocabulary (8002/8001).
+    pub fn asr_stt_1b_de() -> Self {
+        let mut cfg = Self::asr_v0_1_1b();
+        cfg.audio_codebooks = 32;
+        cfg.text_in_vocab_size = 8002;
+        cfg.text_out_vocab_size = 8001;
+        cfg.extra_heads = Some(ExtraHeadsConfig { num_heads: 3, dim: 6 });
+        cfg
+    }
+
     pub fn asr_300m_202501() -> Self {
         let lm_cfg = transformer::Config {
             d_model: 1024,
@@ -1424,6 +1434,17 @@ pub fn load_asr_stt_1b_en_fr<P: AsRef<std::path::Path>>(
     dev: &Device,
 ) -> Result<LmModel> {
     let cfg = Config::asr_stt_1b_en_fr();
+    load_lm_model_batched(batch_size, cfg, model_file, dtype, dev)
+}
+
+/// Load ASR model for stt-1b-de (German model with extended vocab 8005/8004).
+pub fn load_asr_stt_1b_de<P: AsRef<std::path::Path>>(
+    batch_size: usize,
+    model_file: P,
+    dtype: DType,
+    dev: &Device,
+) -> Result<LmModel> {
+    let cfg = Config::asr_stt_1b_de();
     load_lm_model_batched(batch_size, cfg, model_file, dtype, dev)
 }
 

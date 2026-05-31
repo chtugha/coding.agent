@@ -125,7 +125,7 @@ impl BatchedStreamingChannels {
 
     pub fn pre_process(
         &self,
-        state: &mut moshi::batched_lm_generate_multistream::State,
+        mut state: Option<&mut moshi::batched_lm_generate_multistream::State>,
     ) -> (Vec<f32>, Vec<bool>, Vec<Option<ChannelId>>, Vec<usize>) {
         enum Todo {
             Reset(usize),
@@ -230,8 +230,10 @@ impl BatchedStreamingChannels {
         for t in todo {
             match t {
                 Todo::Reset(bid) => {
-                    if let Err(e) = state.reset_batch_idx(bid) {
-                        tracing::error!(?e, bid, "reset_batch_idx");
+                    if let Some(ref mut s) = state {
+                        if let Err(e) = s.reset_batch_idx(bid) {
+                            tracing::error!(?e, bid, "reset_batch_idx");
+                        }
                     }
                 }
             }

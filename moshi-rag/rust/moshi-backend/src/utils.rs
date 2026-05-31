@@ -33,6 +33,21 @@ impl BuildInfo {
     }
 }
 
+/// Resolve a path string relative to a config-file parent directory.
+///
+/// Rules (applied in order):
+///  1. Empty string — returned as-is (means "not set").
+///  2. Starts with `hf://` — returned as-is (HuggingFace URI, not a filesystem path).
+///  3. Absolute path (starts with `/`) — returned as-is.
+///  4. Otherwise — joined with `config_dir` so the path resolves correctly
+///     regardless of the process working directory.
+pub fn resolve_config_path(path: &str, config_dir: &std::path::Path) -> String {
+    if path.is_empty() || path.starts_with("hf://") || std::path::Path::new(path).is_absolute() {
+        return path.to_owned();
+    }
+    config_dir.join(path).to_string_lossy().into_owned()
+}
+
 pub fn replace_env_vars(input: &str) -> String {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
