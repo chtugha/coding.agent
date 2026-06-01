@@ -26,8 +26,8 @@ Use a config where the required paths are set. Either copy `moshi-backend/config
    - `lm_model_file` - path to the main MoshiRAG LM safetensors
    - `text_tokenizer_file` - path to the text tokenizer of the main MoshiRAG LM
    - `mimi_model_file` - path to the mimi safetensor checkpoint
-   - `stt_lm_model_file` — path to the STT LM safetensors
-   - `stt_text_tokenizer_file` — path to the STT text tokenizer (e.g. `.model`)
+   - `stt_lm_model_file` — path to the STT LM safetensors (for German, use the fine-tuned `/Users/whisper/tokenizer/exported/stt-1b-de/model.safetensors` or `/Users/whisper/tokenizer/exported/stt-1b-de-q8/model.safetensors`)
+   - `stt_text_tokenizer_file` — path to the STT text tokenizer (for German, use the extended `/Users/whisper/tokenizer/tokenizer_model/tokenizer_de.model` with 8004 tokens)
    - `stt_mimi_model_file` — path to the STT Mimi checkpoint (can be the same as `mimi_model_file` if you use one Mimi for both)
    - `arc_encoder_tokenizer_path` - path to the text tokenizer of ARC-Encoder
    - `arc_encoder_model_file` - path to the ARC-Encoder safetensors checkpoint

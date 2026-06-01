@@ -85,6 +85,17 @@ It has been replaced by the pure Rust standalone service `bin/moshi-rag-service`
 - `moshi-service.cpp` is kept for historical reference only.
 - The two pipelines (classic VAD→Whisper→LLaMA→TTS and Moshi) **cannot run simultaneously** — stop one before starting the other.
 
+## German STT Fine-Tuning (stt-1b-de)
+
+The `kyutai/stt-1b-en_fr` base model has been successfully fine-tuned on ~600 hours of German speech (using Modal H200 GPU over 3000 steps).
+
+- **Vocabulary Extension**: The SentencePiece tokenizer has been extended from 8000 to **8004** tokens to support German umlauts (`ä`, `ö`, `ü`, `ß`). The extended tokenizer model is located at `/Users/whisper/tokenizer/tokenizer_model/tokenizer_de.model`.
+- **Model Checkpoints**: Downloaded checkpoints are located at `/Users/whisper/tokenizer/checkpoints/stt_1b_de/`. The step 3000 consolidated checkpoint contains `lora.safetensors` (~385 MB).
+- **Merged Model Weights**: The merged models are exported to `/Users/whisper/tokenizer/exported/stt-1b-de/model.safetensors` (bfloat16, ~2 GB) and the quantized version `/Users/whisper/tokenizer/exported/stt-1b-de-q8/model.safetensors` (int8, ~1 GB).
+- **Configuration**: To configure `./moshi-rag/rust/moshi-backend/config.json` or `./moshi-rag/rust/moshi-rag-backend/config.json` to load the German STT model:
+  - Update `stt_lm_model_file` to point to `/Users/whisper/tokenizer/exported/stt-1b-de/model.safetensors` (or the quantized `-q8` variant).
+  - Update `stt_text_tokenizer_file` to point to `/Users/whisper/tokenizer/tokenizer_model/tokenizer_de.model`.
+
 ## Agent Rules
 
 - NEVER wait/sleep/poll for more than 15 minutes in a single action. If a process takes longer (model loading, builds, etc.), use short polls (30-60s) with a timeout counter and bail out with a status report if the limit is reached. This prevents the agent from going idle/unresponsive.

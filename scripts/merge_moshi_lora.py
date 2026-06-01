@@ -178,7 +178,7 @@ def download_base_model(hf_repo: str, cache_dir: Path) -> Path:
         print(f"[ERROR] Could not list files in {hf_repo}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    safetensor_files = sorted([f for f in repo_files if f.endswith(".safetensors") and "lora" not in f.lower()])
+    safetensor_files = sorted([f for f in repo_files if f.endswith(".safetensors") and "lora" not in f.lower() and "mimi" not in f.lower()])
     if not safetensor_files:
         print(f"[ERROR] No safetensors files found in {hf_repo}", file=sys.stderr)
         sys.exit(1)
@@ -383,9 +383,7 @@ def write_safetensors_streaming(output_path: Path, base_paths: list, lora: dict,
         if lora_key is not None:
             lora_arr = lora[lora_key]
             shape = list(lora_arr.shape)
-            st_dtype = NP_TO_ST_DTYPE.get(lora_arr.dtype.name, meta["dtype"])
-            dtype_str = st_dtype
-            elem_size = DTYPE_MAP[st_dtype][1]
+            elem_size = DTYPE_MAP[dtype_str][1]
             n_bytes = lora_arr.size * elem_size
             print(f"[INFO] Resizing output header key '{key}' using lora tensor '{lora_key}' with shape {shape} and bytes {n_bytes}")
 

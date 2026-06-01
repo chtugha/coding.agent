@@ -154,18 +154,24 @@ Located in `bin/models/matcha-german/coreml/`:
 
 Export with `python3 scripts/export_matcha_models.py --checkpoint <path> --output-dir bin/models/matcha-german/coreml`.
 
-### Moshi (real-time speech-to-speech)
+### Moshi & German STT (real-time speech-to-speech)
 
-Located in `bin/models/`:
+Located in `bin/models/` and `/Users/whisper/tokenizer/`:
 
-| File | Size | Purpose |
+| File / Directory | Size | Purpose |
 |------|------|---------|
 | `moshiko-pytorch-bf16-q8.gguf` | ~8 GB | Q8 quantized LM model (recommended for 16GB Macs) |
 | `moshi-en-q8-backend-config.json` | - | English Q8 backend config |
 | `moshi-german-backend-config.json` | - | German LoRA-merged backend config |
 | `moshiko-german-candle.q8.gguf` | ~8 GB | German LoRA-merged Q8 model (if converted) |
+| `/Users/whisper/tokenizer/tokenizer_model/tokenizer_de.model` | ~120 KB | German-extended SentencePiece tokenizer (8004 tokens, includes `ä`, `ö`, `ü`, `ß`) |
+| `/Users/whisper/tokenizer/exported/stt-1b-de/model.safetensors` | ~2 GB | German-fine-tuned STT-1B model (bfloat16, merged LoRA weights) |
+| `/Users/whisper/tokenizer/exported/stt-1b-de-q8/model.safetensors` | ~1 GB | German-fine-tuned STT-1B quantized model (int8, merged LoRA weights) |
 
 The Moshi backend is built from [kyutai-labs/moshi](https://github.com/kyutai-labs/moshi) (Rust) with Metal patches for Apple Silicon. The Q8 GGUF model is required on 16GB Macs — BF16 safetensors (15GB) causes swap thrashing.
+
+**German STT Fine-Tuning Info (stt-1b-de):**
+The `kyutai/stt-1b-en_fr` base model was successfully fine-tuned on ~600 hours of German speech on Modal H200 for 3000 steps. The model reached excellent convergence (final train loss ~0.146). The text tokenizer has been extended to 8004 vocabulary entries to natively support German characters (`ä`, `ö`, `ü`, `ß`).
 
 **Performance** (Apple M4 Mac mini, 16GB, Q8 GGUF + Metal):
 - Steady-state LM step: ~101ms (12.5Hz frame rate = 80ms budget → 1.26× real-time)
