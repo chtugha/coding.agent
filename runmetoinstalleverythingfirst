@@ -31,12 +31,14 @@ if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
     echo "  18. Merge Moshi LoRA adapters into base model (produces moshiko-german-merged.safetensors)"
     echo "  19. Download Moshi Q8 GGUF model (kyutai/moshiko-candle-q8 → bin/models/)"
     echo "       Required for 16 GB Macs — BF16 models cause swap thrashing."
+    echo "  20. Download German STT-1B models (chtugha/stt-1b-german → bin/models/stt-1b-german/)"
+    echo "       Includes both full bfloat16 and quantized int8 models."
     echo ""
     echo "Optional TTS engines (called automatically, non-fatal if unavailable):"
-    echo "  20. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
-    echo "  21. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
-    echo "  22. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
-    echo "      Note: step 22 requires a German Matcha-TTS checkpoint (--checkpoint flag"
+    echo "  21. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
+    echo "  22. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
+    echo "  23. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
+    echo "      Note: step 23 requires a German Matcha-TTS checkpoint (--checkpoint flag"
     echo "      or fine-tuned from shivammehta25/Matcha-TTS). Falls back to English."
     echo ""
     echo "Requirements:"
@@ -1014,6 +1016,16 @@ verify_installation() {
     else
         warn "  [--] Moshi German LoRA not present"
     fi
+    if [ -f "bin/models/stt-1b-german/stt-1b-de/model.safetensors" ]; then
+        info "  [OK] German STT-1B bfloat16 model ($(du -h "bin/models/stt-1b-german/stt-1b-de/model.safetensors" | cut -f1))"
+    else
+        warn "  [--] German STT-1B bfloat16 model not present"
+    fi
+    if [ -f "bin/models/stt-1b-german/stt-1b-de-q8/model.safetensors" ]; then
+        info "  [OK] German STT-1B quantized int8 model ($(du -h "bin/models/stt-1b-german/stt-1b-de-q8/model.safetensors" | cut -f1))"
+    else
+        warn "  [--] German STT-1B quantized int8 model not present"
+    fi
 
     echo ""
     echo "Ollama (RAG embeddings):"
@@ -1212,6 +1224,43 @@ print('[INFO] Backend config written to ' + sys.argv[3])
 " "$abs_model" "$abs_logdir" "$config_en"
         info "Moshi English Q8 backend config created: $config_en"
     fi
+}
+
+download_german_stt_models() {
+    step "Downloading German STT-1B models (chtugha/stt-1b-german)"
+
+    local models_dir="bin/models/stt-1b-german"
+    mkdir -p "$models_dir/stt-1b-de"
+    mkdir -p "$models_dir/stt-1b-de-q8"
+
+    local bf16_model="$models_dir/stt-1b-de/model.safetensors"
+    local q8_model="$models_dir/stt-1b-de-q8/model.safetensors"
+
+    if [ -f "$bf16_model" ] && [ -f "$q8_model" ]; then
+        info "German STT-1B models already exist at $models_dir"
+        return
+    fi
+
+    info "Downloading German STT-1B models from chtugha/stt-1b-german..."
+    if [ -x "$WHISPERTALK_HF_CLI" ]; then
+        "$WHISPERTALK_HF_CLI" download chtugha/stt-1b-german \
+            --local-dir "$models_dir/"
+    else
+        local base_url="https://huggingface.co/chtugha/stt-1b-german/resolve/main"
+        
+        info "Downloading German STT-1B bfloat16 model..."
+        curl -L -o "$models_dir/stt-1b-de/model.safetensors" "$base_url/stt-1b-de/model.safetensors"
+        curl -L -o "$models_dir/stt-1b-de/config.json" "$base_url/stt-1b-de/config.json"
+        curl -L -o "$models_dir/stt-1b-de/moshi-de-backend-config.json" "$base_url/stt-1b-de/moshi-de-backend-config.json"
+        curl -L -o "$models_dir/stt-1b-de/tokenizer_de.model" "$base_url/stt-1b-de/tokenizer_de.model"
+        
+        info "Downloading German STT-1B quantized int8 model..."
+        curl -L -o "$models_dir/stt-1b-de-q8/model.safetensors" "$base_url/stt-1b-de-q8/model.safetensors"
+        curl -L -o "$models_dir/stt-1b-de-q8/config.json" "$base_url/stt-1b-de-q8/config.json"
+        curl -L -o "$models_dir/stt-1b-de-q8/moshi-de-backend-config.json" "$base_url/stt-1b-de-q8/moshi-de-backend-config.json"
+        curl -L -o "$models_dir/stt-1b-de-q8/tokenizer_de.model" "$base_url/stt-1b-de-q8/tokenizer_de.model"
+    fi
+    info "German STT-1B models downloaded successfully"
 }
 
 check_ollama() {
@@ -1418,6 +1467,7 @@ main() {
     download_moshi_lora
     merge_moshi_loras
     download_moshi_q8_model
+    download_german_stt_models
     install_git_hooks
     verify_installation
 }
