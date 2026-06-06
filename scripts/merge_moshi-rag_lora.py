@@ -6,20 +6,20 @@ Usage:
     python3 scripts/merge_moshi_lora.py \\
         --language de \\
         --lora-dir bin/models/german_moshi_lora/run_001/checkpoints/checkpoint_003000/consolidated \\
-        --output bin/models/moshiko-de-merged.safetensors
+        --output bin/models/moshika-rag-de-merged.safetensors
 
     # Auto-select latest checkpoint in a run directory:
     python3 scripts/merge_moshi_lora.py \\
         --language de \\
         --lora-run-dir bin/models/german_moshi_lora/run_001 \\
-        --output bin/models/moshiko-de-merged.safetensors
+        --output bin/models/moshika-rag-de-merged.safetensors
 
-    # Override base model HuggingFace repo (default: kyutai/moshiko-pytorch-bf16):
+    # Override base model HuggingFace repo (default: kyutai/moshika-rag-pytorch-bf16):
     python3 scripts/merge_moshi_lora.py \\
-        --language fr \\
-        --lora-dir bin/models/french_moshi_lora/run_001/checkpoints/checkpoint_005000/consolidated \\
-        --base-repo kyutai/moshika-pytorch-bf16 \\
-        --output bin/models/moshiko-fr-merged.safetensors
+        --language de \\
+        --lora-dir bin/models/german_moshi_lora/run_001/checkpoints/checkpoint_005000/consolidated \\
+        --base-repo kyutai/moshika-rag-pytorch-bf16 \\
+        --output bin/models/moshika-rag-de-merged.safetensors
 
 Merge formula (from moshi/modules/lora.py LoRALinear.merge_weight):
     W_merged = W_base + scaling * (lora_B @ lora_A)
@@ -511,13 +511,13 @@ def main():
     )
     parser.add_argument(
         "--base-repo",
-        default="kyutai/moshiko-pytorch-bf16",
-        help="HuggingFace repo ID for the base Moshi model (default: kyutai/moshiko-pytorch-bf16)",
+        default="kyutai/moshika-rag-pytorch-bf16",
+        help="HuggingFace repo ID for the base Moshi model (default: kyutai/moshika-rag-pytorch-bf16)",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        help="Output path for the merged safetensors file (default: bin/models/moshiko-<lang>-merged.safetensors)",
+        help="Output path for the merged safetensors file (default: bin/models/moshika-rag-<lang>-merged.safetensors)",
     )
     parser.add_argument(
         "--cache-dir",
@@ -539,12 +539,12 @@ def main():
     )
     parser.add_argument(
         "--mimi-model-file",
-        default="hf://kyutai/moshiko-pytorch-bf16/tokenizer-e351c8d8-checkpoint125.safetensors",
+        default="hf://kyutai/moshika-rag-pytorch-bf16/tokenizer-e351c8d8-checkpoint125.safetensors",
         help="Mimi model file path for the generated backend config.json",
     )
     parser.add_argument(
         "--text-tokenizer-file",
-        default="hf://kyutai/moshiko-pytorch-bf16/tokenizer_spm_32k_3.model",
+        default="hf://kyutai/moshika-rag-pytorch-bf16/tokenizer_spm_32k_3.model",
         help="Text tokenizer file path for the generated backend config.json",
     )
     parser.add_argument(
@@ -575,7 +575,7 @@ def main():
 
     print(f"[INFO] LoRA config: rank={rank}, scaling={scaling}")
 
-    output_path = args.output if args.output else Path(f"bin/models/moshiko-{args.language}-merged.safetensors")
+    output_path = args.output if args.output else Path(f"bin/models/moshika-rag-{args.language}-merged.safetensors")
     if output_path.is_file() and not args.force:
         print(f"[WARN] Output already exists: {output_path}")
         answer = input("  Overwrite? [y/N] ").strip().lower()
