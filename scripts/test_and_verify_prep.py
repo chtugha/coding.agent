@@ -15,10 +15,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import scripts.prepare_german_dataset as prep
 
 TEST_PROCESSED_DIR = "/Volumes/eHDD/moshi-rag-data/test_processed"
-os.makedirs(TEST_PROCESSED_DIR, exist_ok=True)
+TEST_PROCESSED_DIR2 = "/Volumes/eHDD/moshi-rag-data/test_processed2"
+TEST_PROCESSED_DIR3 = "/Volumes/eHDD/moshi-rag-data/test_processed3"
+for _d in [TEST_PROCESSED_DIR, TEST_PROCESSED_DIR2, TEST_PROCESSED_DIR3]:
+    os.makedirs(_d, exist_ok=True)
 
-# Temporarily override PROCESSED_DIR in prepare_german_dataset to save to our test directory
 prep.PROCESSED_DIR = TEST_PROCESSED_DIR
+prep.PROCESSED_DIR2 = TEST_PROCESSED_DIR2
+prep.PROCESSED_DIR3 = TEST_PROCESSED_DIR3
 
 WHISPER_CLI = "./whisper-cpp/build/bin/whisper-cli"
 WHISPER_MODEL = "bin/models/ggml-large-v3-turbo-q5_0.bin"
