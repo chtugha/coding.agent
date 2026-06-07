@@ -485,45 +485,76 @@ def ensure_disfluency_dataset():
     print(f"Disfluency dataset prepared: {len(test_split)} samples.")
 
 
-def ensure_medical_dataset():
-    med_dir = os.path.join(PROCESSED_DIR, "medical")
-    if os.path.exists(med_dir) and len(glob.glob(os.path.join(med_dir, "*.wav"))) > 0:
-        print("Medical dataset already prepared locally.")
-        return
+WHISPER_CLI = os.path.join(os.path.dirname(os.path.dirname(__file__)), "whisper-cpp", "build", "bin", "whisper-cli")
+WHISPER_MODEL = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "models", "ggml-large-v3-turbo-q5_0.bin")
 
-    print("Downloading medical dataset from HuggingFace...")
-    os.makedirs(med_dir, exist_ok=True)
+
+def transcribe_right_channel(audio, sr):
+    import tempfile
+    import subprocess
+    right = audio[:, 1]
+    if np.sqrt(np.mean(right ** 2)) < 0.001:
+        return []
+
+    if sr != 16000:
+        t = torch.tensor(right, dtype=torch.float32).unsqueeze(0)
+        resampler = torchaudio.transforms.Resample(sr, 16000)
+        right_16k = resampler(t).numpy()[0]
+    else:
+        right_16k = right
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+        sf.write(tmp_path, right_16k, 16000)
+
     try:
-        from huggingface_hub import hf_hub_download, list_repo_files
-        import shutil
-        repo_id = "chtugha/small-german-medical-dialogue-dataset-for-moshi"
-        files = list_repo_files(repo_id, repo_type="dataset")
-        wav_files = sorted([f for f in files if f.endswith(".wav")])
-        json_files = sorted([f for f in files if f.endswith(".json")])
-        print(f"Found {len(wav_files)} WAV and {len(json_files)} JSON files on HuggingFace.")
+        cmd = [WHISPER_CLI, "-m", WHISPER_MODEL, "-l", "de", "-ml", "1", "-otxt", "-f", tmp_path]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        lines = res.stdout.strip().split("\n")
+        words = []
+        for line in lines:
+            m = re.match(r"\[(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})\]\s*(.*)", line)
+            if m:
+                sh, sm, ss, sms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+                eh, em, es, ems = int(m.group(5)), int(m.group(6)), int(m.group(7)), int(m.group(8))
+                start_t = sh * 3600 + sm * 60 + ss + sms / 1000.0
+                end_t = eh * 3600 + em * 60 + es + ems / 1000.0
+                text = m.group(9).strip()
+                if not text:
+                    continue
+                seg_words = text.split()
+                if seg_words:
+                    seg_dur = (end_t - start_t) / len(seg_words)
+                    for wi, w in enumerate(seg_words):
+                        ws = start_t + wi * seg_dur
+                        we = ws + seg_dur
+                        words.append((w, ws, we))
+        return words
+    except Exception:
+        return []
+    finally:
+        os.unlink(tmp_path)
 
-        for i, wf in enumerate(wav_files):
-            base = os.path.basename(wf)
-            jf = wf.replace(".wav", ".json")
-            if jf not in json_files:
-                continue
-            wav_local = hf_hub_download(repo_id, wf, repo_type="dataset")
-            json_local = hf_hub_download(repo_id, jf, repo_type="dataset")
 
-            shutil.copy2(wav_local, os.path.join(med_dir, base))
-            shutil.copy2(json_local, os.path.join(med_dir, base.replace(".wav", ".json")))
-            if (i + 1) % 50 == 0:
-                print(f"  Downloaded {i + 1}/{len(wav_files)} medical files...")
+def parse_medical_file(wav_path, json_path):
+    audio, sr = sf.read(wav_path)
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    aligns = data.get("alignments", [])
 
-        print(f"Medical dataset downloaded: {len(wav_files)} files.")
-    except Exception as e:
-        print(f"Failed to download medical dataset: {e}")
-        traceback.print_exc()
+    spk0_words = []
+    for entry in aligns:
+        word = entry[0]
+        start_t, end_t = entry[1]
+        spk0_words.append((word, start_t, end_t))
+
+    spk1_words = transcribe_right_channel(audio, sr)
+
+    return audio, sr, spk0_words, spk1_words
 
 
 def main():
     ensure_disfluency_dataset()
-    ensure_medical_dataset()
     manifest_entries1 = []
     manifest_entries2 = []
     manifest_entries3 = []
@@ -775,6 +806,48 @@ def main():
     print(f"Podcast complete: {podcast_count} files ({podcast_errors} errors)")
 
     print("\n" + "=" * 60)
+    print("Processing Medical dataset...")
+    print("=" * 60)
+    med_raw_dir = os.path.join(RAW_DIR, "medical", "stereo")
+    med_dir1 = os.path.join(PROCESSED_DIR, "medical")
+    med_dir2 = os.path.join(PROCESSED_DIR2, "medical")
+    med_dir3 = os.path.join(PROCESSED_DIR3, "medical")
+    med_count = 0
+    med_errors = 0
+
+    if os.path.exists(med_raw_dir):
+        med_wavs = sorted(glob.glob(os.path.join(med_raw_dir, "*.wav")))
+        print(f"  Found {len(med_wavs)} medical WAV files")
+        print(f"  Transcribing right channels with whisper-cli (this may take a while)...")
+        for mi, mw in enumerate(med_wavs):
+            fid = os.path.splitext(os.path.basename(mw))[0]
+            mj = mw.replace(".wav", ".json")
+            if not os.path.exists(mj):
+                log_error("medical", fid, "Missing JSON")
+                med_errors += 1
+                continue
+            try:
+                audio, sr, spk0, spk1 = parse_medical_file(mw, mj)
+                audio_t = audio.T
+                if audio_t.ndim == 1:
+                    audio_t = np.stack([audio_t, audio_t])
+                e1, e2, e3 = process_full_dialogue(audio_t, sr, spk0, spk1, "medical", fid,
+                                                    med_dir1, med_dir2, med_dir3,
+                                                    inject_ref_prob=0.01)
+                manifest_entries1.extend(e1)
+                manifest_entries2.extend(e2)
+                manifest_entries3.extend(e3)
+                med_count += len(e1)
+            except Exception as e:
+                log_error("medical", fid, str(e))
+                med_errors += 1
+            if (mi + 1) % 50 == 0 or mi == len(med_wavs) - 1:
+                print(f"  Medical: {mi + 1}/{len(med_wavs)} files, {med_count} output files, {med_errors} errors")
+    else:
+        print(f"  WARNING: Medical raw data not found at {med_raw_dir}")
+    print(f"Medical complete: {med_count} files ({med_errors} errors)")
+
+    print("\n" + "=" * 60)
     print("Combining all datasets and exporting final train.jsonl and valid.jsonl manifests...")
     print("=" * 60)
 
@@ -790,23 +863,6 @@ def main():
         except Exception as e:
             log_error("disfluency", os.path.basename(dw), str(e))
 
-    medical_wavs = sorted(glob.glob(os.path.join(PROCESSED_DIR, "medical", "*.wav")))
-    med_train = []
-    med_valid = []
-    for idx, mw in enumerate(medical_wavs):
-        try:
-            info = sf.info(mw)
-            item = {
-                "path": f"medical/{os.path.basename(mw)}",
-                "duration": info.duration
-            }
-            if idx < int(len(medical_wavs) * 0.9):
-                med_train.append(item)
-            else:
-                med_valid.append(item)
-        except Exception as e:
-            log_error("medical", os.path.basename(mw), str(e))
-
     for variant_idx, (m_entries, proc_dir, label) in enumerate([
         (manifest_entries1, PROCESSED_DIR, "processed"),
         (manifest_entries2, PROCESSED_DIR2, "processed2"),
@@ -816,21 +872,18 @@ def main():
         shuffled = list(m_entries)
         np.random.shuffle(shuffled)
         split_idx = int(len(shuffled) * 0.95)
-        spont_train = shuffled[:split_idx]
-        spont_valid = shuffled[split_idx:]
+        train_entries = shuffled[:split_idx]
+        valid_entries = shuffled[split_idx:] + disfluency_entries
 
-        final_train = med_train + spont_train
-        final_valid = med_valid + spont_valid + disfluency_entries
-
-        print(f"\n[{label}] Training samples: {len(final_train)} (Medical: {len(med_train)}, Spontaneous: {len(spont_train)})")
-        print(f"[{label}] Validation samples: {len(final_valid)} (Medical: {len(med_valid)}, Spontaneous: {len(spont_valid)}, Disfluency: {len(disfluency_entries)})")
+        print(f"\n[{label}] Training samples: {len(train_entries)}")
+        print(f"[{label}] Validation samples: {len(valid_entries)} (incl. {len(disfluency_entries)} disfluency)")
 
         with open(os.path.join(proc_dir, "train.jsonl"), "w", encoding="utf-8") as f:
-            for entry in final_train:
+            for entry in train_entries:
                 f.write(json.dumps(entry) + "\n")
 
         with open(os.path.join(proc_dir, "valid.jsonl"), "w", encoding="utf-8") as f:
-            for entry in final_valid:
+            for entry in valid_entries:
                 f.write(json.dumps(entry) + "\n")
 
     if error_log:
