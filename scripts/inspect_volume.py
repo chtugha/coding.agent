@@ -2,20 +2,25 @@ import modal
 
 app = modal.App("inspect-volume")
 
+image = modal.Image.debian_slim().pip_install("soundfile")
+
 @app.function(
+    image=image,
     volumes={"/data": modal.Volume.from_name("moshi-german-data")},
 )
 def inspect_json():
     import os
-    import json
+    import soundfile as sf
     
-    json_path = "/data/stereo/mec_0000.json"
-    if os.path.exists(json_path):
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            print(json.dumps(data, indent=2)[:1000])
+    wav_path = "/data/stereo/med_0188.wav"
+    if os.path.exists(wav_path):
+        info = sf.info(wav_path)
+        print(f"File: {wav_path}")
+        print(f"  Sample Rate: {info.samplerate}")
+        print(f"  Channels: {info.channels}")
+        print(f"  Duration: {info.duration}")
     else:
-        print(f"{json_path} does not exist.")
+        print(f"{wav_path} does not exist.")
 
 @app.local_entrypoint()
 def main():

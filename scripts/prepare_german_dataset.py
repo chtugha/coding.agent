@@ -19,7 +19,7 @@ for _d in [PROCESSED_DIR, PROCESSED_DIR2, PROCESSED_DIR3]:
     os.makedirs(_d, exist_ok=True)
 
 TARGET_SR = 24000
-MAX_PODCAST_SEGMENT_SEC = 600
+MAX_PODCAST_SEGMENT_SEC = 180
 
 FACTS = [
     "Der Schwarzschild-Radius beschreibt die Grenze, ab der keine Information dem Schwarzen Loch entkommen kann.",
@@ -117,26 +117,23 @@ def parse_cha(cha_path):
     spk0_words = []
     spk1_words = []
     try:
+        speaker_map = {}
         with open(cha_path, "r", encoding="utf-8") as f:
             for line in f:
-                if line.startswith("*PAR0:"):
-                    speaker = "PAR0"
-                elif line.startswith("*PAR1:"):
-                    speaker = "PAR1"
-                elif line.startswith("*A:"):
-                    speaker = "PAR0"
-                elif line.startswith("*B:"):
-                    speaker = "PAR1"
-                else:
+                m_spk = re.match(r"\*(\w+):", line)
+                if not m_spk:
                     continue
+                tag = m_spk.group(1)
+                if tag not in speaker_map:
+                    speaker_map[tag] = len(speaker_map)
+                spk_idx = speaker_map[tag]
                 m = re.search(r"\x15(\d+)_(\d+)\x15", line)
                 if not m:
                     continue
                 start_t = float(m.group(1)) / 1000.0
                 end_t = float(m.group(2)) / 1000.0
                 text_part = re.sub(r"\x15.*?\x15", "", line)
-                text_part = re.sub(r"\*PAR\d+:\s*", "", text_part)
-                text_part = re.sub(r"\*[AB]:\s*", "", text_part)
+                text_part = re.sub(r"\*\w+:\s*", "", text_part)
                 text_part = re.sub(r"<|>", "", text_part)
                 text_part = re.sub(r"\[.*?\]", "", text_part)
                 text_part = text_part.strip()
@@ -152,7 +149,7 @@ def parse_cha(cha_path):
                     w_end = start_t + (idx + 1) * word_dur
                     w_clean = re.sub(r"[^\w\däöüßÄÖÜ\s-]", "", w)
                     if w_clean:
-                        if speaker == "PAR0":
+                        if spk_idx % 2 == 0:
                             spk0_words.append((w_clean, w_start, w_end))
                         else:
                             spk1_words.append((w_clean, w_start, w_end))
@@ -383,6 +380,9 @@ def process_full_dialogue(audio, sr, spk0_words, spk1_words, dataset_name, file_
                 adj_e = min(seg_dur, we - seg_start)
                 if adj_e > adj_s:
                     seg_a1.append((w, adj_s, adj_e))
+
+        if not seg_a0 and not seg_a1:
+            continue
 
         fact_aligns, shift = _make_fact_injection(inject_ref_prob)
 

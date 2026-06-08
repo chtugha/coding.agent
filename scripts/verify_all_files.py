@@ -65,11 +65,9 @@ def run_whisper_on_channel(wav_path, channel=0, start_sec=0.0, duration_sec=30.0
     segment = ch_audio[start_sample:end_sample]
 
     if sr != 16000:
-        import torch
-        import torchaudio
-        t = torch.tensor(segment, dtype=torch.float32).unsqueeze(0)
-        resampler = torchaudio.transforms.Resample(sr, 16000)
-        segment = resampler(t).numpy()[0]
+        num_samples = int(len(segment) * 16000 / sr)
+        from scipy.signal import resample as scipy_resample
+        segment = scipy_resample(segment, num_samples).astype(np.float32)
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
