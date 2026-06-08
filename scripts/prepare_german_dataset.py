@@ -7,13 +7,14 @@ import json
 import traceback
 import soundfile as sf
 import numpy as np
-import torch
-import torchaudio
+import librosa
 
 RAW_DIR = "/Volumes/eHDD/moshi-rag-data/datasets"
 PROCESSED_DIR = "/Volumes/eHDD/moshi-rag-data/processed"
 PROCESSED_DIR2 = "/Volumes/eHDD/moshi-rag-data/processed2"
 PROCESSED_DIR3 = "/Volumes/eHDD/moshi-rag-data/processed3"
+
+ONLY_V3 = True
 
 for _d in [PROCESSED_DIR, PROCESSED_DIR2, PROCESSED_DIR3]:
     os.makedirs(_d, exist_ok=True)
@@ -164,51 +165,142 @@ WHISPER_CLI = os.path.join(os.path.dirname(os.path.dirname(__file__)), "whisper-
 WHISPER_MODEL = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "models", "ggml-large-v3-turbo-q5_0.bin")
 
 
-def detect_podcast_offset(audio, sr, first_segment_text):
+def _whisper_transcribe_audio(audio_mono_16k, timeout=600):
     import subprocess
     import tempfile
 
-    probe_dur = min(180, audio.shape[1] / sr)
-    probe_samples = int(probe_dur * sr)
-    mono = np.mean(audio[:, :probe_samples], axis=0).astype(np.float32)
-
-    if sr != 16000:
-        t = torch.tensor(mono).unsqueeze(0)
-        resampler = torchaudio.transforms.Resample(sr, 16000)
-        mono_16k = resampler(t).numpy()[0]
-    else:
-        mono_16k = mono
-
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
-        sf.write(tmp_path, mono_16k, 16000)
+        sf.write(tmp_path, audio_mono_16k, 16000)
 
     try:
         cmd = [WHISPER_CLI, "-m", WHISPER_MODEL, "-l", "de", "-f", tmp_path]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
         lines = res.stdout.strip().split("\n")
     except Exception:
-        return 0.0
+        return []
     finally:
         os.unlink(tmp_path)
 
-    ref_words = set(re.sub(r"[^\w\s]", "", first_segment_text.lower()).split())
-    if len(ref_words) < 3:
-        return 0.0
-
+    segments = []
     for line in lines:
         m = re.match(r"\[(\d{2}):(\d{2}):(\d{2})\.(\d+) --> (\d{2}):(\d{2}):(\d{2})\.(\d+)\]\s*(.*)", line)
         if not m:
             continue
         seg_start = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) + int(m.group(4)) / 1000.0
+        seg_end = int(m.group(5)) * 3600 + int(m.group(6)) * 60 + int(m.group(7)) + int(m.group(8)) / 1000.0
         seg_text = m.group(9).strip()
-        seg_words = set(re.sub(r"[^\w\s]", "", seg_text.lower()).split())
-        if len(ref_words) > 0 and len(seg_words) > 0:
-            overlap = len(ref_words & seg_words) / len(ref_words)
-            if overlap >= 0.5:
-                return max(0.0, seg_start)
+        if seg_text:
+            segments.append((seg_start, seg_end, seg_text))
+    return segments
 
-    return 0.0
+
+def _segments_to_words(segments):
+    words = []
+    for seg_start, seg_end, text in segments:
+        ws = re.sub(r"[^\w\s]", "", text.lower()).split()
+        if not ws:
+            continue
+        dur = max(seg_end - seg_start, 0.01)
+        for i, w in enumerate(ws):
+            t = seg_start + dur * i / len(ws)
+            words.append((w, t))
+    return words
+
+
+def clean_podcast_ads(audio, sr, transcript_json_path, ep_label=""):
+    from difflib import SequenceMatcher
+
+    with open(transcript_json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    segments = [s for s in data.get("segments", []) if s.get("text", "").strip()]
+    if not segments:
+        return audio, 0.0
+
+    t_segs = [(float(s["start"]), float(s["end"]), s["text"].strip()) for s in segments]
+    t_words = _segments_to_words(t_segs)
+    if len(t_words) < 10:
+        return audio, 0.0
+
+    mono = np.mean(audio, axis=0).astype(np.float32)
+    if sr != 16000:
+        from scipy.signal import resample as scipy_resample
+        num_16k = int(len(mono) * 16000 / sr)
+        mono_16k = scipy_resample(mono, num_16k).astype(np.float32)
+    else:
+        mono_16k = mono
+
+    print(f"    {ep_label}: whisper-transcribing full audio ({len(mono)/sr:.0f}s)...")
+    w_segs = _whisper_transcribe_audio(mono_16k, timeout=900)
+    if not w_segs:
+        print(f"    {ep_label}: whisper failed, returning original audio")
+        return audio, 0.0
+
+    w_words = _segments_to_words(w_segs)
+    if not w_words:
+        return audio, 0.0
+
+    t_seq = [w for w, _ in t_words]
+    w_seq = [w for w, _ in w_words]
+
+    sm = SequenceMatcher(None, t_seq, w_seq, autojunk=False)
+    matching_blocks = sm.get_matching_blocks()
+
+    anchors = []
+    for t_start_idx, w_start_idx, size in matching_blocks:
+        if size < 3:
+            continue
+        mid = size // 2
+        t_time = t_words[t_start_idx + mid][1]
+        w_time = w_words[w_start_idx + mid][1]
+        anchors.append((t_time, w_time))
+
+    if len(anchors) < 2:
+        print(f"    {ep_label}: too few anchor points ({len(anchors)}), returning original audio")
+        return audio, 0.0
+
+    offsets = [(t, a - t) for t, a in anchors]
+    initial_offset = offsets[0][1]
+
+    ad_breaks = []
+    for i in range(1, len(offsets)):
+        offset_jump = offsets[i][1] - offsets[i - 1][1]
+        if offset_jump > 10:
+            t_gap = anchors[i][0] - anchors[i - 1][0]
+            ad_audio_start = anchors[i - 1][1] + t_gap
+            ad_audio_end = anchors[i][1]
+            if ad_audio_end > ad_audio_start:
+                ad_breaks.append((ad_audio_start, ad_audio_end))
+                print(f"    {ep_label}: mid-roll ad detected at audio {ad_audio_start:.1f}s-{ad_audio_end:.1f}s ({ad_audio_end - ad_audio_start:.1f}s)")
+
+    content_start = max(0.0, initial_offset)
+    total_dur = audio.shape[1] / float(sr)
+    regions = []
+    cursor = content_start
+    for ad_s, ad_e in sorted(ad_breaks):
+        if cursor < ad_s:
+            regions.append((cursor, ad_s))
+        cursor = ad_e
+    if cursor < total_dur:
+        regions.append((cursor, total_dur))
+
+    if not regions:
+        return audio[:, int(content_start * sr):], 0.0
+
+    chunks = []
+    for rs, re_ in regions:
+        s1 = int(rs * sr)
+        s2 = min(int(re_ * sr), audio.shape[1])
+        if s2 > s1:
+            chunks.append(audio[:, s1:s2])
+
+    if chunks:
+        cleaned = np.concatenate(chunks, axis=1)
+    else:
+        cleaned = audio[:, int(content_start * sr):]
+
+    print(f"    {ep_label}: cleaned audio {total_dur:.0f}s -> {cleaned.shape[1]/sr:.0f}s (removed {len(ad_breaks)} mid-roll ads, initial offset={initial_offset:.1f}s)")
+    return cleaned, 0.0
 
 
 def parse_podcast_json(json_path):
@@ -280,9 +372,11 @@ def _write_segment(seg_audio, seg_aligns, sr, output_dir, dataset_name, fname):
     json_path = os.path.join(output_dir, f"{fname}.json")
 
     if sr != TARGET_SR:
-        tensor = torch.from_numpy(seg_audio).to(torch.float32)
-        resampler = torchaudio.transforms.Resample(sr, TARGET_SR)
-        seg_audio = resampler(tensor).numpy()
+        from scipy.signal import resample as scipy_resample
+        num_out = int(seg_audio.shape[1] * TARGET_SR / sr)
+        ch0 = scipy_resample(seg_audio[0], num_out).astype(np.float32)
+        ch1 = scipy_resample(seg_audio[1], num_out).astype(np.float32)
+        seg_audio = np.stack([ch0, ch1])
 
     sf.write(wav_path, seg_audio.T, TARGET_SR)
     with open(json_path, "w", encoding="utf-8") as jf:
@@ -295,7 +389,8 @@ def _write_segment(seg_audio, seg_aligns, sr, output_dir, dataset_name, fname):
 def process_full_dialogue(audio, sr, spk0_words, spk1_words, dataset_name, file_id,
                           output_dir, output_dir2, output_dir3,
                           mono_source=False, inject_ref_prob=0.0,
-                          max_segment_sec=None, trim_start_sec=0.0):
+                          max_segment_sec=None, trim_start_sec=0.0,
+                          skip_gating=False):
     num_channels, total_samples = audio.shape
 
     if trim_start_sec > 0:
@@ -309,23 +404,28 @@ def process_full_dialogue(audio, sr, spk0_words, spk1_words, dataset_name, file_
     if duration < 1.0:
         return [], [], []
 
-    if mono_source:
-        mono = np.mean(audio, axis=0).astype(np.float32)
-    else:
-        mono = None
-
-    mask0 = build_gating_mask(spk0_words, total_samples, sr)
-    mask1 = build_gating_mask(spk1_words, total_samples, sr)
-
-    stereo = np.zeros((2, total_samples), dtype=np.float32)
-    if mono_source:
-        stereo[0] = mono * mask0
-        stereo[1] = mono * mask1
-    else:
+    if skip_gating and not mono_source:
         ch0 = audio[0] if num_channels >= 1 else audio[0]
         ch1 = audio[1] if num_channels >= 2 else audio[0]
-        stereo[0] = ch0 * mask0
-        stereo[1] = ch1 * mask1
+        stereo = np.stack([ch0, ch1]).astype(np.float32)
+    else:
+        if mono_source:
+            mono = np.mean(audio, axis=0).astype(np.float32)
+        else:
+            mono = None
+
+        mask0 = build_gating_mask(spk0_words, total_samples, sr)
+        mask1 = build_gating_mask(spk1_words, total_samples, sr)
+
+        stereo = np.zeros((2, total_samples), dtype=np.float32)
+        if mono_source:
+            stereo[0] = mono * mask0
+            stereo[1] = mono * mask1
+        else:
+            ch0 = audio[0] if num_channels >= 1 else audio[0]
+            ch1 = audio[1] if num_channels >= 2 else audio[0]
+            stereo[0] = ch0 * mask0
+            stereo[1] = ch1 * mask1
 
     aligns_spk0 = []
     for word, start, end in spk0_words:
@@ -392,24 +492,23 @@ def process_full_dialogue(audio, sr, spk0_words, spk1_words, dataset_name, file_
         else:
             seg_audio_inj = seg_audio
 
-        # --- Variant 1: processed/ — left=spk0 (MAIN), right=spk1 ---
-        v1_aligns = []
-        if fact_aligns:
-            v1_aligns.extend(fact_aligns)
-        for w, s, e in seg_a0:
-            v1_aligns.append([w, [s + shift, e + shift], "SPEAKER_MAIN"])
-        e1 = _write_segment(seg_audio_inj, v1_aligns, sr, output_dir, dataset_name, fname)
-        entries1.append(e1)
+        if not ONLY_V3:
+            v1_aligns = []
+            if fact_aligns:
+                v1_aligns.extend(fact_aligns)
+            for w, s, e in seg_a0:
+                v1_aligns.append([w, [s + shift, e + shift], "SPEAKER_MAIN"])
+            e1 = _write_segment(seg_audio_inj, v1_aligns, sr, output_dir, dataset_name, fname)
+            entries1.append(e1)
 
-        # --- Variant 2: processed2/ — left=spk1 (MAIN), right=spk0 (swapped channels) ---
-        swapped_audio = np.stack([seg_audio_inj[1], seg_audio_inj[0]])
-        v2_aligns = []
-        if fact_aligns:
-            v2_aligns.extend(fact_aligns)
-        for w, s, e in seg_a1:
-            v2_aligns.append([w, [s + shift, e + shift], "SPEAKER_MAIN"])
-        e2 = _write_segment(swapped_audio, v2_aligns, sr, output_dir2, dataset_name, fname)
-        entries2.append(e2)
+            swapped_audio = np.stack([seg_audio_inj[1], seg_audio_inj[0]])
+            v2_aligns = []
+            if fact_aligns:
+                v2_aligns.extend(fact_aligns)
+            for w, s, e in seg_a1:
+                v2_aligns.append([w, [s + shift, e + shift], "SPEAKER_MAIN"])
+            e2 = _write_segment(swapped_audio, v2_aligns, sr, output_dir2, dataset_name, fname)
+            entries2.append(e2)
 
         # --- Variant 3: processed3/ — both speakers transcribed ---
         v3_aligns = []
@@ -427,9 +526,17 @@ def process_full_dialogue(audio, sr, spk0_words, spk1_words, dataset_name, file_
 
 
 def ensure_disfluency_dataset():
-    disfluency_dir = os.path.join(PROCESSED_DIR, "disfluency")
+    disfluency_dir = os.path.join(PROCESSED_DIR3 if ONLY_V3 else PROCESSED_DIR, "disfluency")
     if os.path.exists(disfluency_dir) and len(glob.glob(os.path.join(disfluency_dir, "*.wav"))) > 0:
         print("Disfluency dataset already prepared locally.")
+        return
+
+    fallback_dir = os.path.join(PROCESSED_DIR, "disfluency")
+    if ONLY_V3 and os.path.exists(fallback_dir) and len(glob.glob(os.path.join(fallback_dir, "*.wav"))) > 0:
+        import shutil
+        print(f"Copying disfluency dataset from {fallback_dir} to {disfluency_dir}...")
+        shutil.copytree(fallback_dir, disfluency_dir)
+        print(f"Copied {len(glob.glob(os.path.join(disfluency_dir, '*.wav')))} files.")
         return
 
     print("Downloading and preparing nyrahealth/disfluency_speech_german dataset locally...")
@@ -450,20 +557,21 @@ def ensure_disfluency_dataset():
         audio_bytes = audio_data["bytes"]
         array, orig_sr = sf.read(io.BytesIO(audio_bytes))
 
-        tensor = torch.tensor(array, dtype=torch.float32).unsqueeze(0)
+        mono = array.astype(np.float32)
         if orig_sr != TARGET_SR:
-            resampler = torchaudio.transforms.Resample(orig_sr, TARGET_SR)
-            tensor = resampler(tensor)
+            from scipy.signal import resample as scipy_resample
+            num_out = int(len(mono) * TARGET_SR / orig_sr)
+            mono = scipy_resample(mono, num_out).astype(np.float32)
 
-        stereo_tensor = torch.zeros((2, tensor.shape[1]), dtype=torch.float32)
-        stereo_tensor[0, :] = tensor[0, :]
+        stereo_np = np.zeros((2, len(mono)), dtype=np.float32)
+        stereo_np[0, :] = mono
 
         wav_filename = f"nyra_{idx:04d}.wav"
         wav_path = os.path.join(disfluency_dir, wav_filename)
 
-        torchaudio.save(wav_path, stereo_tensor, TARGET_SR)
+        sf.write(wav_path, stereo_np.T, TARGET_SR)
 
-        duration = stereo_tensor.shape[1] / float(TARGET_SR)
+        duration = stereo_np.shape[1] / float(TARGET_SR)
 
         transcript = sample.get("verbatim_transcript") or sample.get("intended_transcript") or ""
         words = transcript.strip().split()
@@ -497,9 +605,9 @@ def transcribe_right_channel(audio, sr):
         return []
 
     if sr != 16000:
-        t = torch.tensor(right, dtype=torch.float32).unsqueeze(0)
-        resampler = torchaudio.transforms.Resample(sr, 16000)
-        right_16k = resampler(t).numpy()[0]
+        from scipy.signal import resample as scipy_resample
+        num_samples_16k = int(len(right) * 16000 / sr)
+        right_16k = scipy_resample(right, num_samples_16k).astype(np.float32)
     else:
         right_16k = right
 
@@ -588,11 +696,11 @@ def main():
                 audio = np.stack([audio, audio])
             e1, e2, e3 = process_full_dialogue(audio, sr, spk0, spk1, "bematac", fid,
                                                 bematac_dir1, bematac_dir2, bematac_dir3,
-                                                inject_ref_prob=0.01)
+                                                inject_ref_prob=0.01, skip_gating=True)
             manifest_entries1.extend(e1)
             manifest_entries2.extend(e2)
             manifest_entries3.extend(e3)
-            bematac_count += len(e1)
+            bematac_count += len(e3)
         except Exception as e:
             log_error("bematac", fid, str(e))
             bematac_errors += 1
@@ -649,11 +757,11 @@ def main():
 
                         e1, e2, e3 = process_full_dialogue(audio, sr0, spk0_w, spk1_w, "gcsc", fid,
                                                             gcsc_dir1, gcsc_dir2, gcsc_dir3,
-                                                            inject_ref_prob=0.01)
+                                                            inject_ref_prob=0.01, skip_gating=True)
                         manifest_entries1.extend(e1)
                         manifest_entries2.extend(e2)
                         manifest_entries3.extend(e3)
-                        gcsc_count += len(e1)
+                        gcsc_count += len(e3)
                     except Exception as e:
                         log_error("gcsc", fid, str(e))
                         gcsc_errors += 1
@@ -685,11 +793,11 @@ def main():
                         audio = np.stack([audio, audio])
                     e1, e2, e3 = process_full_dialogue(audio, sr, spk0, spk1, "callfriend", fid,
                                                         cf_dir1, cf_dir2, cf_dir3,
-                                                        inject_ref_prob=0.01)
+                                                        inject_ref_prob=0.01, skip_gating=True)
                     manifest_entries1.extend(e1)
                     manifest_entries2.extend(e2)
                     manifest_entries3.extend(e3)
-                    cf_count += len(e1)
+                    cf_count += len(e3)
                 except Exception as e:
                     log_error("callfriend", fid, str(e))
                     cf_errors += 1
@@ -721,11 +829,11 @@ def main():
                         audio = np.stack([audio, audio])
                     e1, e2, e3 = process_full_dialogue(audio, sr, spk0, spk1, "callhome", fid,
                                                         ch_dir1, ch_dir2, ch_dir3,
-                                                        inject_ref_prob=0.01)
+                                                        inject_ref_prob=0.01, skip_gating=True)
                     manifest_entries1.extend(e1)
                     manifest_entries2.extend(e2)
                     manifest_entries3.extend(e3)
-                    ch_count += len(e1)
+                    ch_count += len(e3)
                 except Exception as e:
                     log_error("callhome", fid, str(e))
                     ch_errors += 1
@@ -773,31 +881,21 @@ def main():
                     podcast_errors += 1
                     continue
 
-                audio, sr = torchaudio.load(mp3_path)
-                audio = audio.numpy()
+                audio, sr = librosa.load(mp3_path, sr=None, mono=False)
                 if audio.ndim == 1:
                     audio = np.stack([audio, audio])
 
-                with open(json_p, "r", encoding="utf-8") as jf:
-                    jdata = json.load(jf)
-                first_segs = [s for s in jdata.get("segments", []) if s.get("text", "").strip()]
-                first_text = first_segs[0]["text"].strip() if first_segs else ""
+                cleaned_audio, _ = clean_podcast_ads(audio, int(sr), json_p, ep_label=f"ep{ep_num}")
 
-                offset = detect_podcast_offset(audio, int(sr), first_text)
-                if offset > 0:
-                    print(f"    ep{ep_num}: detected ad offset = {offset:.1f}s, cutting intro and adjusting timestamps")
-
-                trim_start = offset
-
-                e1, e2, e3 = process_full_dialogue(audio, int(sr), spk0, spk1, "podcast", f"ep{ep_num}",
+                e1, e2, e3 = process_full_dialogue(cleaned_audio, int(sr), spk0, spk1, "podcast", f"ep{ep_num}",
                                                     podcast_dir1, podcast_dir2, podcast_dir3,
                                                     mono_source=True, inject_ref_prob=0.01,
                                                     max_segment_sec=MAX_PODCAST_SEGMENT_SEC,
-                                                    trim_start_sec=trim_start)
+                                                    trim_start_sec=0.0)
                 manifest_entries1.extend(e1)
                 manifest_entries2.extend(e2)
                 manifest_entries3.extend(e3)
-                podcast_count += len(e1)
+                podcast_count += len(e3)
             except Exception as e:
                 log_error("podcast", f"ep{ep_num}", str(e))
                 podcast_errors += 1
@@ -833,11 +931,11 @@ def main():
                     audio_t = np.stack([audio_t, audio_t])
                 e1, e2, e3 = process_full_dialogue(audio_t, sr, spk0, spk1, "medical", fid,
                                                     med_dir1, med_dir2, med_dir3,
-                                                    inject_ref_prob=0.01)
+                                                    inject_ref_prob=0.01, skip_gating=True)
                 manifest_entries1.extend(e1)
                 manifest_entries2.extend(e2)
                 manifest_entries3.extend(e3)
-                med_count += len(e1)
+                med_count += len(e3)
             except Exception as e:
                 log_error("medical", fid, str(e))
                 med_errors += 1
@@ -851,7 +949,7 @@ def main():
     print("Combining all datasets and exporting final train.jsonl and valid.jsonl manifests...")
     print("=" * 60)
 
-    disfluency_wavs = sorted(glob.glob(os.path.join(PROCESSED_DIR, "disfluency", "*.wav")))
+    disfluency_wavs = sorted(glob.glob(os.path.join(PROCESSED_DIR3 if ONLY_V3 else PROCESSED_DIR, "disfluency", "*.wav")))
     disfluency_entries = []
     for dw in disfluency_wavs:
         try:
@@ -863,11 +961,15 @@ def main():
         except Exception as e:
             log_error("disfluency", os.path.basename(dw), str(e))
 
-    for variant_idx, (m_entries, proc_dir, label) in enumerate([
-        (manifest_entries1, PROCESSED_DIR, "processed"),
-        (manifest_entries2, PROCESSED_DIR2, "processed2"),
-        (manifest_entries3, PROCESSED_DIR3, "processed3"),
-    ]):
+    if ONLY_V3:
+        variant_list = [(manifest_entries3, PROCESSED_DIR3, "processed3")]
+    else:
+        variant_list = [
+            (manifest_entries1, PROCESSED_DIR, "processed"),
+            (manifest_entries2, PROCESSED_DIR2, "processed2"),
+            (manifest_entries3, PROCESSED_DIR3, "processed3"),
+        ]
+    for variant_idx, (m_entries, proc_dir, label) in enumerate(variant_list):
         np.random.seed(42)
         shuffled = list(m_entries)
         np.random.shuffle(shuffled)

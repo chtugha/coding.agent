@@ -47,23 +47,7 @@ def compute_wer(reference, hypothesis):
     return d[len(ref_words)][len(hyp_words)] / len(ref_words)
 
 
-def run_whisper_on_channel(wav_path, channel=0, start_sec=0.0, duration_sec=30.0, timeout=90):
-    try:
-        audio, sr = sf.read(wav_path)
-    except Exception:
-        return ""
-
-    if audio.ndim == 2:
-        ch_audio = audio[:, channel]
-    else:
-        ch_audio = audio
-
-    start_sample = int(start_sec * sr)
-    end_sample = min(int((start_sec + duration_sec) * sr), len(ch_audio))
-    if start_sample >= end_sample:
-        return ""
-    segment = ch_audio[start_sample:end_sample]
-
+def _whisper_transcribe_segment(segment, sr, timeout=90):
     if sr != 16000:
         num_samples = int(len(segment) * 16000 / sr)
         from scipy.signal import resample as scipy_resample
@@ -83,6 +67,44 @@ def run_whisper_on_channel(wav_path, channel=0, start_sec=0.0, duration_sec=30.0
         return ""
     finally:
         os.unlink(tmp_path)
+
+
+def run_whisper_on_channel(wav_path, channel=0, start_sec=0.0, duration_sec=30.0, timeout=90):
+    try:
+        audio, sr = sf.read(wav_path)
+    except Exception:
+        return ""
+
+    if audio.ndim == 2:
+        ch_audio = audio[:, channel]
+    else:
+        ch_audio = audio
+
+    start_sample = int(start_sec * sr)
+    end_sample = min(int((start_sec + duration_sec) * sr), len(ch_audio))
+    if start_sample >= end_sample:
+        return ""
+    segment = ch_audio[start_sample:end_sample]
+    return _whisper_transcribe_segment(segment, sr, timeout)
+
+
+def run_whisper_on_mono_mix(wav_path, start_sec=0.0, duration_sec=30.0, timeout=90):
+    try:
+        audio, sr = sf.read(wav_path)
+    except Exception:
+        return ""
+
+    if audio.ndim == 2:
+        mono = np.mean(audio, axis=1)
+    else:
+        mono = audio
+
+    start_sample = int(start_sec * sr)
+    end_sample = min(int((start_sec + duration_sec) * sr), len(mono))
+    if start_sample >= end_sample:
+        return ""
+    segment = mono[start_sample:end_sample]
+    return _whisper_transcribe_segment(segment, sr, timeout)
 
 
 def check_stereo_format(wav_path):
@@ -154,6 +176,8 @@ def verify_processed_dir(PROCESSED_DIR):
     print("=" * 80)
     print(f"COMPREHENSIVE DATASET VERIFICATION: {PROCESSED_DIR}")
     print("=" * 80)
+
+    is_v3 = "processed3" in PROCESSED_DIR
 
     if not os.path.exists(PROCESSED_DIR):
         print(f"  Directory does not exist, skipping.")
@@ -290,8 +314,12 @@ def verify_processed_dir(PROCESSED_DIR):
                     wer_dur = 30.0
                     wer_gt = gt_text[:200]
 
-                whisper_text = run_whisper_on_channel(wav_path, channel=0,
-                                                      start_sec=wer_start, duration_sec=wer_dur)
+                if is_v3:
+                    whisper_text = run_whisper_on_mono_mix(wav_path,
+                                                           start_sec=wer_start, duration_sec=wer_dur)
+                else:
+                    whisper_text = run_whisper_on_channel(wav_path, channel=0,
+                                                          start_sec=wer_start, duration_sec=wer_dur)
                 if not whisper_text:
                     continue
 
