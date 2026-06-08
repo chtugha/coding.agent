@@ -261,17 +261,18 @@ def verify_processed_dir(PROCESSED_DIR):
                 aligns = jdata.get("alignments", [])
                 non_fact_aligns = []
                 skip = False
+                prev_word = ""
                 for a in aligns:
                     if a[0] == "[Injected":
                         skip = True
                         continue
-                    if skip and a[0] == "reference]" and a[2] == "SPEAKER_MAIN":
-                        if any(kw in " ".join([x[0].lower() for x in aligns]) for kw in FACTS_KEYWORDS[:3]):
+                    if skip:
+                        if a[0] == "reference]" and prev_word == "injected":
+                            skip = False
                             continue
-                        skip = False
+                        prev_word = a[0].lower()
                         continue
-                    if not skip:
-                        non_fact_aligns.append(a)
+                    non_fact_aligns.append(a)
 
                 if non_fact_aligns:
                     mid_idx = len(non_fact_aligns) // 2
