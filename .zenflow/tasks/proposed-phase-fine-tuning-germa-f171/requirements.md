@@ -37,10 +37,19 @@ We analyzed the local files, Modal volumes (`moshi-german-data` and `moshi-germa
 - **What**: The 32k text SentencePiece tokenizer from the base model `kyutai/moshika-rag-candle-bf16` must be extended with German characters (`ä`, `ö`, `ü`, `ß`).
 - **Why**: Ensures proper orthographic representation and parsing of German words without segmenting them into unknown tokens or single bytes.
 
-### FR2. Dataset Alignment and Tokens Generation
-- **What**: Training targets must be tokenized and aligned to Mimi audio codes using the extended 32k text tokenizer. Spontaneous datasets must be split dynamically based on speaker turn changes, converting raw audio into stereo audio chunks containing exactly one active speaker's turn. There will always be one channel muted. Specifically, if Speaker A (or any even index speaker) speaks, the left channel is muted (all zeros) and the right channel contains the unmuted speech. If Speaker B (or any odd index speaker) speaks, the right channel is muted (all zeros) and the left channel contains the unmuted speech. Sibling speakers continue this pattern (C: left muted, D: right muted, etc.).
-- **No Fact Poisoning**: To prevent poisoning the alignment data and ensure correct validation against `whisper.cpp`, the matching alignment JSON files must contain ONLY the exact transcripts matching the words spoken in that turn. No facts or prefill reference tags are prepended.
-- **Why**: Aligns text and audio tokens for full-duplex modeling, so the model learns the tight relationship between German speech phonetics, textual transcriptions, and conversational audio under proper stereo duplex configurations.
+### FR2. Dataset Alignment and Redesign
+- **What**: Training targets must be prepared in a single processed folder. All **8 datasets** (BeMaTac, GCSC, CallFriend, CallHome, Gemischtes Hack Podcast, Medical, Nyrahealth Disfluency, Mozilla German Spontaneous) will be processed as follows:
+  1. Any stereo dialog file is first converted to mono (by averaging channels) to merge both speakers into a single mono track.
+  2. The mono audio is resampled/converted to **48 kHz / 16-Bit / Stereo PCM** containing the same audio information on both channels (**double-mono**).
+  3. The double-mono audio is split into chunks at speaker turn boundaries. The splitting points are calculated to occur exactly at the **midpoint** between the end of one speaker's last word and the start of the next speaker's first word, ensuring no mid-word/sentence cuts.
+  4. **No padding** and **no fading in or out** is added.
+  5. **`_main` files** (right channel muted): Left channel (Channel 0) contains the active double-mono audio, right channel is completely zeroed. The corresponding JSON transcript contains ONLY the timestamped text of `SPEAKER_MAIN`.
+  6. **`_other` files** (left channel muted): Right channel (Channel 1) contains the active double-mono audio, left channel is completely zeroed. The corresponding JSON transcript contains ONLY the timestamped text of `SPEAKER_OTHER`.
+  7. **Single-speaker datasets** (Nyrahealth, Mozilla) produce only `_main` files with no splitting.
+  8. **RAG Prefill (FACTS) Injection**: ~1% of `SPEAKER_MAIN` chunks get astronomical/quantum fact prefills prepended, but **only** for chunks containing more than one minute of speech.
+  9. Output is stored in a single processed folder under dataset-specific subfolders. No training/validation `.jsonl` manifest files are generated in this step.
+  10. **ALL files from every dataset MUST be processed.** No file count limits, no sample limits, no duration caps. Data quality and accuracy is the absolute priority.
+- **Why**: Aligns text and audio tokens for full-duplex modeling under a single processed directory schema, ensuring absolute timestamp accuracy and precise gating without artificial padding/fading artifacts, which enables robust training.
 
 ### FR3. Model Resizing and Weight Initialization
 - **What**: The model's text embedding and linear projection head layers must be resized to match the new piece size of the extended 32k tokenizer. New weights for the German tokens must be initialized appropriately while copying all base vocabulary weights.

@@ -67,25 +67,29 @@ Create the script `./scripts/extend_tokenizer.py` that loads the base SentencePi
 
 ### [x] Step: Dataset Preparation and Mimi Alignment
 <!-- chat-id: a36b901d-28f1-4b04-b384-230b5ec9f9c6 -->
-Prepare the BeMaTac, German_Conversational_Speech_Corpus, German.CallFriend.Corpus, German.CallHome.Corpus, and Gemischtes.Hack.Podcast datasets (from the local `/Volumes/eHDD/moshi-rag-data/datasets/` folder) along with the medical conversations from HuggingFace (`chtugha/small-german-medical-dialogue-dataset-for-moshi`) and the `nyrahealth/disfluency_speech_german` dataset. All processing is done locally on the Mac.
+Process all 8 datasets (BeMaTac, GCSC, CallFriend, CallHome, Gemischtes Hack Podcast, Medical, Nyrahealth Disfluency, Mozilla German Spontaneous) from `/Volumes/eHDD/moshi-rag-data/datasets/` into a single processed folder at `/Volumes/eHDD/moshi-rag-data/processed/`.
 
 **CRITICAL REQUIREMENTS — DATA QUALITY AND COMPLETENESS:**
-- **ALL files from every dataset MUST be processed.** No file count limits, no sample limits, no duration caps. We need every single conversation.
+- **ALL files from every dataset MUST be processed.** No file count limits, no sample limits, no duration caps.
 - **Data quality and accuracy is the absolute priority.** No shortcuts, no skipped files, no silent error swallowing.
 - **Every error must be logged** with dataset name, file ID, and error message for debugging.
-- **The RAG prefill facts** (astronomical/quantum sentences) are injected probabilistically (~1%) to train the model's attention on `[Injected reference]...[End of injected reference]` tags without polluting normal conversation data.
+- **No padding, no fading** added during channel muting.
+- **FACTS** (astronomical/quantum sentences) are only added to SPEAKER_MAIN chunks with > 1 minute of speech.
 
-**Sub-steps:**
-1. **Disfluency Validation Dataset**: Download `nyrahealth/disfluency_speech_german` and prepare as mono-to-stereo validation samples.
-2. **Medical Dataset**: Download `chtugha/small-german-medical-dialogue-dataset-for-moshi` from HuggingFace to `/Volumes/eHDD/moshi-rag-data/processed/medical/`. Split 90% train / 10% validation.
-3. **BeMaTac Processing**: Parse EXMARaLDA XML `.exb` transcript files with word-level timestamps. Audio is stereo 44.1kHz with speaker-separated channels.
-4. **GCSC Processing**: Parse `.txt` transcripts with `[start,end]` timestamps. Each speaker has separate mono WAV files — stack into stereo.
-5. **CallFriend Processing**: Parse CHAT `.cha` files with `\x15` bullet-delimited timestamps. Audio is stereo 8kHz.
-6. **CallHome Processing**: Parse CHAT `.cha` files (speakers `*A:` and `*B:`). Audio is mu-law stereo 8kHz WAV.
-7. **Podcast Processing (episodes 150-300)**: Parse Whisper-generated JSON transcripts. Audio is MP3 stereo 44.1kHz. **Auto-detect per-episode ad offset** using Whisper-based text matching (ads prepended to MP3 files shift all timestamps). Mix to mono source since both speakers are on both channels.
-8. **Stereo Gating & Speaker Turn Splitting**: Split on speaker changes. SpkA (even): left muted, right active. SpkB (odd): right muted, left active.
-9. **RAG Prefill Injection**: ~1% of chunks get astronomical/quantum fact prefills prepended to alignment timestamps.
-- **Verification**: Run `scripts/verify_all_files.py` — comprehensive WER check across ALL processed files (5% sampling per dataset), stereo gating validation, JSON integrity check, facts distribution analysis, corrupt file detection. Outputs detailed report to `verification_report.json`.
+**Processing pipeline:**
+1. All stereo input → mono (channel average) → resample to 48kHz → double-mono (same audio on both channels).
+2. Split at speaker turn boundaries: midpoint between end of one speaker's last word and start of next speaker's first word.
+3. `_main` files: Left channel = audio, right channel = zeros, JSON = SPEAKER_MAIN words only.
+4. `_other` files: Left channel = zeros, right channel = audio, JSON = SPEAKER_OTHER words only.
+5. Single-speaker datasets (Nyrahealth, Mozilla) → only `_main` files, no splitting.
+6. FACTS injection: ~1% probability on SPEAKER_MAIN chunks > 60s.
+7. No manifest `.jsonl` generation — delegated to subsequent step.
+
+**Verification**: Run `scripts/verify_all_files.py` to verify:
+- Correct stereo format (48kHz, 16-bit, proper channel zeroing)
+- JSON alignment integrity (correct speaker labels, valid timestamps)
+- WER checks via whisper-cli on sampled files from each dataset
+- FACTS distribution summary
 
 ### [ ] Step: Configure and Setup Modal LoRA Training
 Configure and save the LoRA training config file `/Users/whisper/zenflow_projects/moshi-finetune/configs/moshi_7b_de.yaml` and the training script `/Users/whisper/zenflow_projects/moshi-finetune/modal_train_rag.py`.

@@ -309,18 +309,10 @@ def run_validation_checks(all_test_chunks):
 
 def main():
     print("=========================================================")
-    print("Starting Stereo-Duplex Dataset Preparation Test Suite...")
+    print("WARNING: This script is DEPRECATED and has been ARCHIVED.")
+    print("Please use `./scripts/verify_all_files.py` as the primary validation script.")
     print("=========================================================")
-    
-    all_chunks = {}
-    all_chunks["bematac"] = test_bematac()
-    all_chunks["gcsc"] = test_gcsc()
-    all_chunks["callfriend"] = test_callfriend()
-    all_chunks["callhome"] = test_callhome()
-    all_chunks["podcast"] = test_podcast()
-    all_chunks["disfluency"] = test_disfluency()
-    
-    run_validation_checks(all_chunks)
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,7 @@
 {
     "instance_name": "moshi-rag-q8",
     "hf_repo": "",
-    "lm_model_file": "bin/models/moshika-rag-de-merged.safetensors",
+    "lm_model_file": "bin/models/moshika-rag-de-merged-q8.gguf",
     "text_tokenizer_file": "/Users/whisper/zenflow_projects/coding.agent/moshi-rag/models/tokenizer_spm_32k_3.model",
     "log_dir": "$HOME/tmp/moshi-logs",
     "mimi_model_file": "/Users/whisper/zenflow_projects/coding.agent/moshi-rag/models/tokenizer-e351c8d8-checkpoint125.safetensors",
@@ -26,8 +26,8 @@
     "stt_only": true,
     "moshi_gpu_id": 0,
     "stt_gpu_id": 0,
-    "stt_lm_model_file": "",
-    "stt_text_tokenizer_file": "",
-    "stt_mimi_model_file": ""
+    "stt_lm_model_file": "bin/models/stt-1b-german/stt-1b-de-q8/model.safetensors",
+    "stt_text_tokenizer_file": "bin/models/stt-1b-german/stt-1b-de-q8/tokenizer_de.model",
+    "stt_mimi_model_file": "hf://kyutai/stt-1b-en_fr-candle/mimi-pytorch-e351c8d8@125.safetensors"
 ,
     "asr_delay_in_tokens": 0}
