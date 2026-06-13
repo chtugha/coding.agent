@@ -5,7 +5,6 @@ import glob
 import json
 import subprocess
 import re
-import tempfile
 import numpy as np
 import soundfile as sf
 from collections import defaultdict
@@ -15,7 +14,7 @@ PROCESSED_DIR = "/Volumes/eHDD/moshi-rag-data/processed"
 WHISPER_CLI = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "whisper-cpp", "build", "bin", "whisper-cli")
 WHISPER_MODEL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "bin", "models", "ggml-large-v3-turbo-q5_0.bin")
+                             "bin", "models", "ggml-large-v3-q5_0.bin")
 
 FACTS_KEYWORDS = [
     "schwarzschild", "quantenverschränkung", "hawking", "gravitationswellen",
@@ -44,24 +43,56 @@ def compute_wer(reference, hypothesis):
     return d[len(ref_words)][len(hyp_words)] / len(ref_words)
 
 
-def whisper_transcribe(audio_segment, sr, timeout=120):
-    if sr != 16000:
-        import librosa
-        audio_segment = librosa.resample(audio_segment.astype(np.float32), orig_sr=sr, target_sr=16000)
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_path = tmp.name
-        sf.write(tmp_path, audio_segment, 16000)
+def whisper_transcribe_to_json(wav_path, verify_json_path, timeout=300):
+    output_base = verify_json_path.replace(".json", "")
+    cmd = [WHISPER_CLI, "-m", WHISPER_MODEL, "-l", "de", "-oj", "-of", output_base, "-f", wav_path]
     try:
-        cmd = [WHISPER_CLI, "-m", WHISPER_MODEL, "-l", "de", "--no-timestamps", "-f", tmp_path]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, timeout=timeout)
-        lines = res.stdout.strip().split("\n")
-        clean = [l.strip() for l in lines if l.strip() and not l.startswith("[")]
-        return " ".join(clean).strip()
+        actual_json = output_base + ".json"
+        if os.path.exists(actual_json):
+            with open(actual_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data
+        return None
     except Exception:
-        return ""
-    finally:
-        os.unlink(tmp_path)
+        return None
+
+
+def extract_text_from_whisper_json(whisper_data):
+    if not whisper_data or "transcription" not in whisper_data:
+        return "", []
+    segments = whisper_data["transcription"]
+    full_text = ""
+    timed_segments = []
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        offsets = seg.get("offsets", {})
+        start_ms = offsets.get("from", 0)
+        end_ms = offsets.get("to", 0)
+        timed_segments.append({
+            "text": text,
+            "start": start_ms / 1000.0,
+            "end": end_ms / 1000.0
+        })
+        full_text += " " + text
+    return full_text.strip(), timed_segments
+
+
+def extract_text_from_original_json(json_path):
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    aligns = data.get("alignments", [])
+    words = [a[0] for a in aligns]
+    timed_words = []
+    for a in aligns:
+        timed_words.append({
+            "word": a[0],
+            "start": a[1][0],
+            "end": a[1][1],
+            "speaker": a[2]
+        })
+    return words, timed_words
 
 
 def check_wav_format(wav_path, read_audio=False):
@@ -182,6 +213,7 @@ def extract_non_fact_text(words):
 def verify_single_file(args):
     wav_path, i, wer_interval, full_check_interval = args
     json_path = wav_path.replace(".wav", ".json")
+    verify_json_path = wav_path.replace(".wav", "_verify.json")
     fname = os.path.basename(wav_path)
 
     is_main = "_main" in fname
@@ -225,23 +257,14 @@ def verify_single_file(args):
     if j_status in ("CORRUPT", "FAIL"):
         return res
 
-    if i % wer_interval == 0 and words and audio is not None:
+    if i % wer_interval == 0 and words:
         gt_text = extract_non_fact_text(words)
         gt_clean = re.sub(r"[^\w\s]", "", gt_text.lower()).strip()
         if len(gt_clean.split()) >= 2:
-            if is_main:
-                channel = audio[:, 0]
-            elif is_other:
-                channel = audio[:, 1]
-            else:
-                channel = np.mean(audio, axis=1)
-
-            max_dur = min(30.0, len(channel) / sr)
-            segment = channel[:int(max_dur * sr)]
-
-            whisper_text = whisper_transcribe(segment, sr)
-            if whisper_text:
-                wh_clean = re.sub(r"[^\w\s]", "", whisper_text.lower()).strip()
+            whisper_data = whisper_transcribe_to_json(wav_path, verify_json_path)
+            if whisper_data:
+                whisper_full_text, _ = extract_text_from_whisper_json(whisper_data)
+                wh_clean = re.sub(r"[^\w\s]", "", whisper_full_text.lower()).strip()
                 wer = compute_wer(gt_clean, wh_clean)
                 res["wer"] = wer
                 res["gt_text"] = gt_clean
@@ -288,7 +311,7 @@ def verify_dataset(proc_dir):
 
         print(f"  Scheduling {len(wav_files)} files with ThreadPoolExecutor...")
         results = []
-        with ThreadPoolExecutor(max_workers=16) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             total_tasks = len(tasks_args)
             chunk_size = 5000
             for idx in range(0, total_tasks, chunk_size):
