@@ -5,10 +5,11 @@ import glob
 import json
 import subprocess
 import re
+import tempfile
 import numpy as np
 import soundfile as sf
+import librosa
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 
 PROCESSED_DIR = "/Volumes/eHDD/moshi-rag-data/processed"
 WHISPER_CLI = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -43,9 +44,29 @@ def compute_wer(reference, hypothesis):
     return d[len(ref_words)][len(hyp_words)] / len(ref_words)
 
 
-def whisper_transcribe_to_json(wav_path, verify_json_path, timeout=300):
+def whisper_transcribe_to_json(wav_path, verify_json_path, timeout=600):
+    fname = os.path.basename(wav_path)
+    is_main = "_main" in fname
+
+    audio, sr = sf.read(wav_path)
+    if audio.ndim == 2 and audio.shape[1] == 2:
+        active_channel = audio[:, 0] if is_main else audio[:, 1]
+    else:
+        active_channel = audio if audio.ndim == 1 else audio[:, 0]
+
+    active_16k = librosa.resample(active_channel.astype(np.float32), orig_sr=sr, target_sr=16000)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp") as tmp:
+        tmp_path = tmp.name
+        sf.write(tmp_path, active_16k, 16000, subtype="PCM_16")
+
     output_base = verify_json_path.replace(".json", "")
-    cmd = [WHISPER_CLI, "-m", WHISPER_MODEL, "-l", "de", "-oj", "-of", output_base, "-f", wav_path]
+    cmd = [
+        WHISPER_CLI, "-m", WHISPER_MODEL, "-l", "de",
+        "--beam-size", "5", "--best-of", "5",
+        "-ojf", "-of", output_base,
+        "-f", tmp_path
+    ]
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, timeout=timeout)
@@ -55,95 +76,71 @@ def whisper_transcribe_to_json(wav_path, verify_json_path, timeout=300):
                 data = json.load(f)
             return data
         return None
-    except Exception:
+    except Exception as e:
+        log(f"    WHISPER ERROR on {fname}: {e}")
         return None
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def extract_text_from_whisper_json(whisper_data):
     if not whisper_data or "transcription" not in whisper_data:
-        return "", []
+        return ""
     segments = whisper_data["transcription"]
     full_text = ""
-    timed_segments = []
     for seg in segments:
         text = seg.get("text", "").strip()
-        offsets = seg.get("offsets", {})
-        start_ms = offsets.get("from", 0)
-        end_ms = offsets.get("to", 0)
-        timed_segments.append({
-            "text": text,
-            "start": start_ms / 1000.0,
-            "end": end_ms / 1000.0
-        })
         full_text += " " + text
-    return full_text.strip(), timed_segments
+    return full_text.strip()
 
 
-def extract_text_from_original_json(json_path):
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    aligns = data.get("alignments", [])
-    words = [a[0] for a in aligns]
-    timed_words = []
-    for a in aligns:
-        timed_words.append({
-            "word": a[0],
-            "start": a[1][0],
-            "end": a[1][1],
-            "speaker": a[2]
-        })
-    return words, timed_words
-
-
-def check_wav_format(wav_path, read_audio=False):
+def check_wav_format(wav_path):
     try:
         info = sf.info(wav_path)
     except Exception as e:
-        return "CORRUPT", f"Cannot read: {e}", None, None
+        return "CORRUPT", f"Cannot read: {e}"
 
     if info.channels != 2:
-        return "FAIL", f"Not stereo: channels={info.channels}", None, None
+        return "FAIL", f"Not stereo: channels={info.channels}"
 
     if info.samplerate != 48000:
-        return "FAIL", f"Wrong sample rate: {info.samplerate} (expected 48000)", None, None
+        return "FAIL", f"Wrong sample rate: {info.samplerate} (expected 48000)"
 
     dur = info.duration
+    if dur < 0.1:
+        return "WARN", f"Very short: {dur:.3f}s"
+    return "OK", f"dur={dur:.2f}s"
 
-    if read_audio:
-        try:
-            audio, sr = sf.read(wav_path)
-        except Exception as e:
-            return "CORRUPT", f"Cannot read audio data: {e}", None, None
 
-        left = audio[:, 0]
-        right = audio[:, 1]
-        left_rms = np.sqrt(np.mean(left ** 2))
-        right_rms = np.sqrt(np.mean(right ** 2))
-        left_nonzero = np.count_nonzero(left)
-        right_nonzero = np.count_nonzero(right)
+def check_wav_channels(wav_path):
+    fname = os.path.basename(wav_path)
+    try:
+        audio, sr = sf.read(wav_path)
+    except Exception as e:
+        return "CORRUPT", f"Cannot read audio data: {e}"
 
-        fname = os.path.basename(wav_path)
-        if "_main" in fname:
-            if right_nonzero > 0:
-                return "FAIL", f"_main file has non-zero right channel ({right_nonzero} samples)", audio, sr
-            if left_rms < 0.0001:
-                return "FAIL", f"_main file has silent left channel (RMS={left_rms:.6f})", audio, sr
-        elif "_other" in fname:
-            if left_nonzero > 0:
-                return "FAIL", f"_other file has non-zero left channel ({left_nonzero} samples)", audio, sr
-            if right_rms < 0.0001:
-                return "FAIL", f"_other file has silent right channel (RMS={right_rms:.6f})", audio, sr
-        else:
-            return "WARN", f"Unknown suffix (not _main or _other)", audio, sr
+    left = audio[:, 0]
+    right = audio[:, 1]
+    left_rms = np.sqrt(np.mean(left ** 2))
+    right_rms = np.sqrt(np.mean(right ** 2))
+    left_nonzero = np.count_nonzero(left)
+    right_nonzero = np.count_nonzero(right)
 
-        if dur < 0.1:
-            return "WARN", f"Very short: {dur:.3f}s", audio, sr
-
-        return "OK", f"dur={dur:.2f}s L_RMS={left_rms:.4f} R_RMS={right_rms:.4f}", audio, sr
+    if "_main" in fname:
+        if right_nonzero > 0:
+            return "FAIL", f"_main file has non-zero right channel ({right_nonzero} samples)"
+        if left_rms < 0.0001:
+            return "FAIL", f"_main file has silent left channel (RMS={left_rms:.6f})"
+    elif "_other" in fname:
+        if left_nonzero > 0:
+            return "FAIL", f"_other file has non-zero left channel ({left_nonzero} samples)"
+        if right_rms < 0.0001:
+            return "FAIL", f"_other file has silent right channel (RMS={right_rms:.6f})"
     else:
-        if dur < 0.1:
-            return "WARN", f"Very short: {dur:.3f}s", None, info.samplerate
-        return "OK", f"dur={dur:.2f}s", None, info.samplerate
+        return "WARN", f"Unknown suffix (not _main or _other)"
+
+    return "OK", f"L_RMS={left_rms:.4f} R_RMS={right_rms:.4f}"
 
 
 def check_json(json_path):
@@ -210,168 +207,142 @@ def extract_non_fact_text(words):
     return " ".join(clean)
 
 
-def verify_single_file(args):
-    wav_path, i, wer_interval, full_check_interval = args
-    json_path = wav_path.replace(".wav", ".json")
-    verify_json_path = wav_path.replace(".wav", "_verify.json")
-    fname = os.path.basename(wav_path)
-
-    is_main = "_main" in fname
-    is_other = "_other" in fname
-
-    should_read_audio = (i % full_check_interval == 0) or (i % wer_interval == 0)
-    status, msg, audio, sr = check_wav_format(wav_path, read_audio=should_read_audio)
-
-    res = {
-        "fname": fname,
-        "is_main": is_main,
-        "is_other": is_other,
-        "status": status,
-        "msg": msg,
-        "duration": 0.0,
-        "json_status": "OK",
-        "json_msg": "",
-        "has_fact": False,
-        "wer": None,
-        "gt_text": "",
-        "whisper_text": ""
-    }
-
-    if status in ("CORRUPT", "FAIL"):
-        return res
-
-    dur_match = re.search(r"dur=([\d.]+)s", msg)
-    if dur_match:
-        res["duration"] = float(dur_match.group(1))
-
-    if not os.path.exists(json_path):
-        res["json_status"] = "FAIL"
-        res["json_msg"] = "Missing JSON"
-        return res
-
-    j_status, j_msg, words, has_fact = check_json(json_path)
-    res["json_status"] = j_status
-    res["json_msg"] = j_msg
-    res["has_fact"] = has_fact
-
-    if j_status in ("CORRUPT", "FAIL"):
-        return res
-
-    if i % wer_interval == 0 and words:
-        gt_text = extract_non_fact_text(words)
-        gt_clean = re.sub(r"[^\w\s]", "", gt_text.lower()).strip()
-        if len(gt_clean.split()) >= 2:
-            whisper_data = whisper_transcribe_to_json(wav_path, verify_json_path)
-            if whisper_data:
-                whisper_full_text, _ = extract_text_from_whisper_json(whisper_data)
-                wh_clean = re.sub(r"[^\w\s]", "", whisper_full_text.lower()).strip()
-                wer = compute_wer(gt_clean, wh_clean)
-                res["wer"] = wer
-                res["gt_text"] = gt_clean
-                res["whisper_text"] = wh_clean
-
-    return res
+def log(msg=""):
+    print(msg, flush=True)
 
 
 def verify_dataset(proc_dir):
-    print("=" * 80)
-    print(f"VERIFICATION: {proc_dir}")
-    print("=" * 80)
+    log("=" * 80)
+    log(f"VERIFICATION: {proc_dir}")
+    log(f"Model: {WHISPER_MODEL}")
+    log(f"Method: active-channel extraction -> 16kHz mono -> beam=5, best-of=5 -> full JSON")
+    log("=" * 80)
 
     if not os.path.exists(proc_dir):
-        print(f"  Directory does not exist, skipping.")
+        log(f"  Directory does not exist, skipping.")
         return {}
 
     datasets = sorted([d for d in os.listdir(proc_dir)
                         if os.path.isdir(os.path.join(proc_dir, d))])
-    print(f"Found datasets: {datasets}")
+    log(f"Found datasets: {datasets}")
 
     summary = defaultdict(lambda: {
         "total": 0, "ok": 0, "fail": 0, "corrupt": 0, "warn": 0,
         "wer_samples": 0, "wer_sum": 0.0, "wer_pass": 0, "wer_fail": 0,
         "facts_count": 0, "total_duration": 0.0,
         "main_count": 0, "other_count": 0,
+        "channel_checked": 0, "channel_fail": 0,
         "corrupt_files": [], "fail_files": [], "wer_fail_files": []
     })
 
     for ds in datasets:
         ds_dir = os.path.join(proc_dir, ds)
         wav_files = sorted(glob.glob(os.path.join(ds_dir, "*.wav")))
-        print(f"\n{'=' * 60}")
-        print(f"Dataset: {ds} ({len(wav_files)} WAV files)")
-        print("=" * 60)
+        log(f"\n{'=' * 60}")
+        log(f"Dataset: {ds} ({len(wav_files)} WAV files)")
+        log("=" * 60)
 
         s = summary[ds]
         s["total"] = len(wav_files)
 
-        wer_interval = max(1, len(wav_files) // 20)
-        full_check_interval = max(1, len(wav_files) // 100)
+        channel_check_interval = max(1, len(wav_files) // 100)
 
-        tasks_args = [(wav_path, i, wer_interval, full_check_interval) for i, wav_path in enumerate(wav_files)]
+        for i, wav_path in enumerate(wav_files):
+            json_path = wav_path.replace(".wav", ".json")
+            verify_json_path = wav_path.replace(".wav", "_verify.json")
+            fname = os.path.basename(wav_path)
 
-        print(f"  Scheduling {len(wav_files)} files with ThreadPoolExecutor...")
-        results = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            total_tasks = len(tasks_args)
-            chunk_size = 5000
-            for idx in range(0, total_tasks, chunk_size):
-                chunk = tasks_args[idx : idx + chunk_size]
-                chunk_results = list(executor.map(verify_single_file, chunk))
-                results.extend(chunk_results)
-                print(f"    Processed {len(results)}/{total_tasks} files...")
+            is_main = "_main" in fname
+            is_other = "_other" in fname
 
-        for res in results:
-            fname = res["fname"]
-
-            if res["is_main"]:
+            if is_main:
                 s["main_count"] += 1
-            elif res["is_other"]:
+            elif is_other:
                 s["other_count"] += 1
 
-            if res["status"] == "CORRUPT":
+            status, msg = check_wav_format(wav_path)
+            if status == "CORRUPT":
                 s["corrupt"] += 1
-                s["corrupt_files"].append((fname, res["msg"]))
+                s["corrupt_files"].append((fname, msg))
                 continue
-            elif res["status"] == "FAIL":
+            elif status == "FAIL":
                 s["fail"] += 1
-                s["fail_files"].append((fname, res["msg"]))
+                s["fail_files"].append((fname, msg))
                 continue
-            elif res["status"] == "WARN":
+            elif status == "WARN":
                 s["warn"] += 1
 
-            s["total_duration"] += res["duration"]
+            dur_match = re.search(r"dur=([\d.]+)s", msg)
+            dur = float(dur_match.group(1)) if dur_match else 0.0
+            s["total_duration"] += dur
 
-            if res["json_status"] in ("CORRUPT", "FAIL"):
+            if i % channel_check_interval == 0:
+                ch_status, ch_msg = check_wav_channels(wav_path)
+                s["channel_checked"] += 1
+                if ch_status in ("CORRUPT", "FAIL"):
+                    s["channel_fail"] += 1
+                    s["fail"] += 1
+                    s["fail_files"].append((fname, ch_msg))
+                    continue
+
+            if not os.path.exists(json_path):
                 s["fail"] += 1
-                s["fail_files"].append((fname, res["json_msg"]))
+                s["fail_files"].append((fname, "Missing JSON"))
                 continue
 
-            if res["has_fact"]:
+            j_status, j_msg, words, has_fact = check_json(json_path)
+            if j_status in ("CORRUPT", "FAIL"):
+                s["fail"] += 1
+                s["fail_files"].append((fname, j_msg))
+                continue
+
+            if has_fact:
                 s["facts_count"] += 1
 
             s["ok"] += 1
 
-            if res["wer"] is not None:
-                wer = res["wer"]
-                s["wer_samples"] += 1
-                s["wer_sum"] += wer
+            if os.path.exists(verify_json_path):
+                try:
+                    with open(verify_json_path, "r", encoding="utf-8") as f:
+                        whisper_data = json.load(f)
+                except Exception:
+                    whisper_data = None
+            else:
+                whisper_data = whisper_transcribe_to_json(wav_path, verify_json_path)
 
-                if wer <= 0.5:
-                    s["wer_pass"] += 1
-                else:
-                    s["wer_fail"] += 1
-                    s["wer_fail_files"].append((fname, f"WER={wer:.2%}", res["gt_text"][:80], res["whisper_text"][:80]))
+            if whisper_data and words:
+                gt_text = extract_non_fact_text(words)
+                gt_clean = re.sub(r"[^\w\s]", "", gt_text.lower()).strip()
+                whisper_full_text = extract_text_from_whisper_json(whisper_data)
+                wh_clean = re.sub(r"[^\w\s]", "", whisper_full_text.lower()).strip()
+                if len(gt_clean.split()) >= 2:
+                    wer = compute_wer(gt_clean, wh_clean)
+                    s["wer_samples"] += 1
+                    s["wer_sum"] += wer
+                    if wer <= 0.5:
+                        s["wer_pass"] += 1
+                    else:
+                        s["wer_fail"] += 1
+                        s["wer_fail_files"].append((fname, f"WER={wer:.2%}", gt_clean[:80], wh_clean[:80]))
+
+            if (i + 1) % 500 == 0 or (i + 1) == len(wav_files):
+                curr_avg = s["wer_sum"] / s["wer_samples"] if s["wer_samples"] > 0 else 0
+                log(f"    [{ds}] {i+1}/{len(wav_files)} files | "
+                    f"OK={s['ok']} FAIL={s['fail']} | "
+                    f"WER avg={curr_avg:.2%} ({s['wer_samples']} samples, {s['wer_pass']} pass, {s['wer_fail']} fail)")
 
         avg_wer = s["wer_sum"] / s["wer_samples"] if s["wer_samples"] > 0 else 0
         facts_pct = (s["facts_count"] / s["ok"] * 100) if s["ok"] > 0 else 0
-        print(f"  {ds}: OK={s['ok']} FAIL={s['fail']} CORRUPT={s['corrupt']} WARN={s['warn']}")
-        print(f"  Main={s['main_count']} Other={s['other_count']}")
-        print(f"  Duration: {s['total_duration']/3600:.2f}h, Facts: {s['facts_count']} ({facts_pct:.1f}%)")
-        print(f"  WER: avg={avg_wer:.2%} ({s['wer_pass']} pass, {s['wer_fail']} fail / {s['wer_samples']} samples)")
+        log(f"\n  {ds} SUMMARY:")
+        log(f"    OK={s['ok']} FAIL={s['fail']} CORRUPT={s['corrupt']} WARN={s['warn']}")
+        log(f"    Main={s['main_count']} Other={s['other_count']}")
+        log(f"    Duration: {s['total_duration']/3600:.2f}h, Facts: {s['facts_count']} ({facts_pct:.1f}%)")
+        log(f"    Channel checks: {s['channel_checked']} done, {s['channel_fail']} failed")
+        log(f"    WER: avg={avg_wer:.2%} ({s['wer_pass']} pass, {s['wer_fail']} fail / {s['wer_samples']} samples)")
 
-    print("\n" + "=" * 80)
-    print("FINAL SUMMARY")
-    print("=" * 80)
+    log("\n" + "=" * 80)
+    log("FINAL SUMMARY")
+    log("=" * 80)
 
     total_ok, total_fail, total_corrupt, total_facts = 0, 0, 0, 0
     total_dur, total_wer_sum, total_wer_samples = 0.0, 0.0, 0
@@ -380,10 +351,10 @@ def verify_dataset(proc_dir):
     for ds, s in sorted(summary.items()):
         avg_wer = s["wer_sum"] / s["wer_samples"] if s["wer_samples"] > 0 else 0
         facts_pct = (s["facts_count"] / s["ok"] * 100) if s["ok"] > 0 else 0
-        print(f"  {ds:20s}: {s['total']:6d} files | OK={s['ok']:5d} FAIL={s['fail']:3d} CORRUPT={s['corrupt']:3d} | "
-              f"main={s['main_count']:5d} other={s['other_count']:5d} | "
-              f"dur={s['total_duration']/3600:.1f}h | facts={s['facts_count']:4d} ({facts_pct:.1f}%) | "
-              f"WER={avg_wer:.2%} ({s['wer_samples']} samples)")
+        log(f"  {ds:20s}: {s['total']:6d} files | OK={s['ok']:5d} FAIL={s['fail']:3d} CORRUPT={s['corrupt']:3d} | "
+            f"main={s['main_count']:5d} other={s['other_count']:5d} | "
+            f"dur={s['total_duration']/3600:.1f}h | facts={s['facts_count']:4d} ({facts_pct:.1f}%) | "
+            f"WER={avg_wer:.2%} ({s['wer_samples']} samples)")
         total_ok += s["ok"]
         total_fail += s["fail"]
         total_corrupt += s["corrupt"]
@@ -395,51 +366,51 @@ def verify_dataset(proc_dir):
         total_other += s["other_count"]
 
     grand_wer = total_wer_sum / total_wer_samples if total_wer_samples > 0 else 0
-    print(f"\n  {'TOTAL':20s}: {total_ok + total_fail + total_corrupt:6d} files | OK={total_ok:5d} FAIL={total_fail:3d} CORRUPT={total_corrupt:3d}")
-    print(f"  Main files: {total_main}, Other files: {total_other}")
-    print(f"  Total duration: {total_dur/3600:.2f} hours")
-    print(f"  Total facts injections: {total_facts}")
-    print(f"  Grand avg WER: {grand_wer:.2%} ({total_wer_samples} samples)")
+    log(f"\n  {'TOTAL':20s}: {total_ok + total_fail + total_corrupt:6d} files | OK={total_ok:5d} FAIL={total_fail:3d} CORRUPT={total_corrupt:3d}")
+    log(f"  Main files: {total_main}, Other files: {total_other}")
+    log(f"  Total duration: {total_dur/3600:.2f} hours")
+    log(f"  Total facts injections: {total_facts}")
+    log(f"  Grand avg WER: {grand_wer:.2%} ({total_wer_samples} samples)")
 
-    print("\n" + "=" * 80)
-    print("CORRUPT FILES")
-    print("=" * 80)
+    log("\n" + "=" * 80)
+    log("CORRUPT FILES")
+    log("=" * 80)
     any_issues = False
     for ds, s in sorted(summary.items()):
         for fname, reason in s["corrupt_files"]:
-            print(f"  [{ds}] {fname}: {reason}")
+            log(f"  [{ds}] {fname}: {reason}")
             any_issues = True
     if not any_issues:
-        print("  None")
+        log("  None")
 
-    print("\n" + "=" * 80)
-    print("FAILED FILES")
-    print("=" * 80)
+    log("\n" + "=" * 80)
+    log("FAILED FILES")
+    log("=" * 80)
     any_issues = False
     for ds, s in sorted(summary.items()):
         for fname, reason in s["fail_files"][:30]:
-            print(f"  [{ds}] {fname}: {reason}")
+            log(f"  [{ds}] {fname}: {reason}")
             any_issues = True
         if len(s["fail_files"]) > 30:
-            print(f"  [{ds}] ... and {len(s['fail_files']) - 30} more")
+            log(f"  [{ds}] ... and {len(s['fail_files']) - 30} more")
     if not any_issues:
-        print("  None")
+        log("  None")
 
-    print("\n" + "=" * 80)
-    print("HIGH WER FILES (WER > 50%)")
-    print("=" * 80)
+    log("\n" + "=" * 80)
+    log("HIGH WER FILES (WER > 50%)")
+    log("=" * 80)
     any_issues = False
     for ds, s in sorted(summary.items()):
-        for entry in s["wer_fail_files"][:15]:
+        for entry in s["wer_fail_files"][:20]:
             fname, wer_str, gt, hyp = entry
-            print(f"  [{ds}] {fname}: {wer_str}")
-            print(f"    GT:  {gt}")
-            print(f"    HYP: {hyp}")
+            log(f"  [{ds}] {fname}: {wer_str}")
+            log(f"    GT:  {gt}")
+            log(f"    HYP: {hyp}")
             any_issues = True
-        if len(s["wer_fail_files"]) > 15:
-            print(f"  [{ds}] ... and {len(s['wer_fail_files']) - 15} more high-WER files")
+        if len(s["wer_fail_files"]) > 20:
+            log(f"  [{ds}] ... and {len(s['wer_fail_files']) - 20} more high-WER files")
     if not any_issues:
-        print("  None")
+        log("  None")
 
     report_path = os.path.join(proc_dir, "verification_report.json")
     report = {}
@@ -466,7 +437,7 @@ def verify_dataset(proc_dir):
         }
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
-    print(f"\nDetailed report saved to: {report_path}")
+    log(f"\nDetailed report saved to: {report_path}")
     return report
 
 
