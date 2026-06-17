@@ -18,6 +18,7 @@ FACT_INJECT_PROB = 0.01
 MIN_DUR_FOR_FACTS = 60.0
 MIN_CHUNK_DUR = 0.1
 
+
 FACTS = [
     "Der Schwarzschild-Radius beschreibt die Grenze, ab der keine Information dem Schwarzen Loch entkommen kann.",
     "Quantenverschränkung bewirkt, dass zwei Teilchen über beliebige Distanzen instantan korreliert bleiben.",
@@ -267,8 +268,20 @@ def _segments_to_words(segments):
     return words
 
 
+
+def _build_clean_regions(content_start, ad_breaks, total_dur):
+    regions = []
+    cursor = content_start
+    for ad_s, ad_e in ad_breaks:
+        if cursor < ad_s:
+            regions.append((cursor, ad_s))
+        cursor = ad_e
+    if cursor < total_dur:
+        regions.append((cursor, total_dur))
+    return regions
+
+
 def clean_podcast_ads(mono_audio, sr, transcript_json_path, ep_label=""):
-    # Try caching first
     if os.path.exists(CACHE_PATH):
         try:
             with open(CACHE_PATH, "r", encoding="utf-8") as f:
@@ -278,19 +291,13 @@ def clean_podcast_ads(mono_audio, sr, transcript_json_path, ep_label=""):
                 initial_offset = entry.get("offset", 0.0)
                 ad_breaks = entry.get("ad_breaks", [])
                 print(f"    {ep_label}: loaded from cache (offset={initial_offset:.1f}s, {len(ad_breaks)} ads)")
-                
+
                 content_start = max(0.0, initial_offset)
                 total_dur = len(mono_audio) / float(sr)
-                regions = []
-                cursor = content_start
-                for ad_s, ad_e in sorted(ad_breaks):
-                    if cursor < ad_s:
-                        regions.append((cursor, ad_s))
-                    cursor = ad_e
-                if cursor < total_dur:
-                    regions.append((cursor, total_dur))
+                ad_regions = [(s, e) for s, e in sorted(ad_breaks)]
+                regions = _build_clean_regions(content_start, ad_regions, total_dur)
                 if not regions:
-                    return mono_audio[int(content_start * sr):], 0.0
+                    return mono_audio[int(content_start * sr):], initial_offset, ad_regions
                 chunks = []
                 for rs, re_ in regions:
                     s1 = int(rs * sr)
@@ -302,8 +309,8 @@ def clean_podcast_ads(mono_audio, sr, transcript_json_path, ep_label=""):
                 else:
                     cleaned = mono_audio[int(content_start * sr):]
                 print(f"    {ep_label}: cleaned {total_dur:.0f}s -> {len(cleaned)/sr:.0f}s "
-                      f"(removed {len(ad_breaks)} ads, offset={initial_offset:.1f}s)")
-                return cleaned, 0.0
+                      f"(removed {len(ad_regions)} ads, offset={initial_offset:.1f}s)")
+                return cleaned, initial_offset, ad_regions
         except Exception as ce:
             print(f"    {ep_label}: error loading cache: {ce}")
 
@@ -312,13 +319,12 @@ def clean_podcast_ads(mono_audio, sr, transcript_json_path, ep_label=""):
         data = json.load(f)
     segments = [s for s in data.get("segments", []) if s.get("text", "").strip()]
     if not segments:
-        return mono_audio, 0.0
+        return mono_audio, 0.0, []
     t_segs = [(float(s["start"]), float(s["end"]), s["text"].strip()) for s in segments]
     t_words = _segments_to_words(t_segs)
     if len(t_words) < 10:
-        return mono_audio, 0.0
+        return mono_audio, 0.0, []
     if sr != 16000:
-        num_16k = int(len(mono_audio) * 16000 / sr)
         mono_16k = librosa.resample(mono_audio.astype(np.float32), orig_sr=sr, target_sr=16000)
     else:
         mono_16k = mono_audio.astype(np.float32)
@@ -326,10 +332,10 @@ def clean_podcast_ads(mono_audio, sr, transcript_json_path, ep_label=""):
     w_segs = _whisper_transcribe_audio(mono_16k, timeout=900)
     if not w_segs:
         print(f"    {ep_label}: whisper failed, returning original audio")
-        return mono_audio, 0.0
+        return mono_audio, 0.0, []
     w_words = _segments_to_words(w_segs)
     if not w_words:
-        return mono_audio, 0.0
+        return mono_audio, 0.0, []
     t_seq = [w for w, _ in t_words]
     w_seq = [w for w, _ in w_words]
     sm = SequenceMatcher(None, t_seq, w_seq, autojunk=False)
@@ -344,7 +350,7 @@ def clean_podcast_ads(mono_audio, sr, transcript_json_path, ep_label=""):
         anchors.append((t_time, w_time))
     if len(anchors) < 2:
         print(f"    {ep_label}: too few anchor points ({len(anchors)}), returning original audio")
-        return mono_audio, 0.0
+        return mono_audio, 0.0, []
     offsets = [(t, a - t) for t, a in anchors]
     initial_offset = offsets[0][1]
     ad_breaks = []
@@ -359,16 +365,9 @@ def clean_podcast_ads(mono_audio, sr, transcript_json_path, ep_label=""):
                 print(f"    {ep_label}: mid-roll ad at audio {ad_audio_start:.1f}s-{ad_audio_end:.1f}s")
     content_start = max(0.0, initial_offset)
     total_dur = len(mono_audio) / float(sr)
-    regions = []
-    cursor = content_start
-    for ad_s, ad_e in sorted(ad_breaks):
-        if cursor < ad_s:
-            regions.append((cursor, ad_s))
-        cursor = ad_e
-    if cursor < total_dur:
-        regions.append((cursor, total_dur))
+    regions = _build_clean_regions(content_start, ad_breaks, total_dur)
     if not regions:
-        return mono_audio[int(content_start * sr):], 0.0
+        return mono_audio[int(content_start * sr):], initial_offset, ad_breaks
     chunks = []
     for rs, re_ in regions:
         s1 = int(rs * sr)
@@ -381,7 +380,21 @@ def clean_podcast_ads(mono_audio, sr, transcript_json_path, ep_label=""):
         cleaned = mono_audio[int(content_start * sr):]
     print(f"    {ep_label}: cleaned {total_dur:.0f}s -> {len(cleaned)/sr:.0f}s "
           f"(removed {len(ad_breaks)} ads, offset={initial_offset:.1f}s)")
-    return cleaned, 0.0
+
+    if ad_breaks:
+        try:
+            if os.path.exists(CACHE_PATH):
+                with open(CACHE_PATH, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+            else:
+                cache = {}
+            cache[ep_label] = {"offset": initial_offset, "ad_breaks": ad_breaks}
+            with open(CACHE_PATH, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    return cleaned, initial_offset, ad_breaks
 
 
 def resample_to_target(audio, sr):
@@ -746,6 +759,7 @@ def process_callhome():
     print(f"CallHome complete: {total_chunks} chunks ({total_errors} errors)")
 
 
+
 def process_podcast():
     print("\n" + "=" * 60)
     print("Processing Gemischtes Hack Podcast (episodes 150-300)...")
@@ -782,9 +796,7 @@ def process_podcast():
                 continue
             mono, sr = librosa.load(mp3_path, sr=TARGET_SR, mono=True)
             mono = mono.astype(np.float32)
-            cleaned, _ = clean_podcast_ads(mono, int(sr), json_p, ep_label=f"ep{ep_num}")
-            if isinstance(cleaned, tuple):
-                cleaned = cleaned[0]
+            cleaned, offset, ad_breaks = clean_podcast_ads(mono, int(sr), json_p, ep_label=f"ep{ep_num}")
             n = process_dialogue(cleaned, int(sr), spk0, spk1, "podcast", f"ep{ep_num}", output_dir)
             total_chunks += n
         except Exception as e:
