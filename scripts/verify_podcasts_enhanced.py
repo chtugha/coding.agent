@@ -307,6 +307,47 @@ def extract_gt_text(alignments):
     return " ".join(words)
 
 
+def check_facts_injection(alignments, duration_seconds):
+    """
+    Check if FACTS are properly injected according to rules:
+    - FACTS should only be in chunks > 60 seconds
+    - FACTS should be marked with [Injected reference] ... [End of injected reference]
+    
+    Returns: (has_facts: bool, is_valid: bool, issue: str or None)
+    """
+    MIN_DURATION_FOR_FACTS = 60.0
+    
+    # Check if chunk has FACTS
+    has_facts = False
+    in_fact = False
+    prev_word = ""
+    
+    for entry in alignments:
+        w = entry[0]
+        if w == "[Injected" and not in_fact:
+            has_facts = True
+            in_fact = True
+            prev_word = w
+            continue
+        if in_fact:
+            if w == "reference]" and prev_word.lower() == "injected":
+                in_fact = False
+            prev_word = w
+            continue
+        prev_word = w
+    
+    # Validate FACTS injection rules
+    if has_facts and duration_seconds < MIN_DURATION_FOR_FACTS:
+        return True, False, f"FACTS in short chunk ({duration_seconds:.1f}s < 60s)"
+    elif not has_facts and duration_seconds >= MIN_DURATION_FOR_FACTS:
+        # This is OK - FACTS injection is probabilistic (1% chance)
+        return False, True, None
+    elif has_facts and duration_seconds >= MIN_DURATION_FOR_FACTS:
+        return True, True, None
+    else:
+        return False, True, None
+
+
 def clean_for_wer(text):
     """Clean text for WER calculation, preserving German characters."""
     # Remove punctuation but keep German umlauts and ß
@@ -350,6 +391,13 @@ def verify_podcasts(podcast_dir, force=False, max_files=None):
         "audio_format_issues": defaultdict(int),
         "files_with_format_issues": [],
         "chunk_count_mismatches": [],
+        "facts_validation": {
+            "total_checked": 0,
+            "chunks_with_facts": 0,
+            "chunks_over_60s": 0,
+            "invalid_facts_injection": [],
+            "facts_in_short_chunks": 0
+        },
         "per_episode": defaultdict(lambda: {
             "wer_sum": 0.0, "wer_count": 0, "files": 0,
             "containment_sum": 0.0, "lcs_sum": 0.0,
@@ -357,7 +405,10 @@ def verify_podcasts(podcast_dir, force=False, max_files=None):
             "format_issues": 0,
             "expected_chunks": None,
             "actual_chunks": 0,
-            "chunk_count_match": None
+            "chunk_count_match": None,
+            "facts_checked": 0,
+            "facts_found": 0,
+            "facts_invalid": 0
         })
     }
     
@@ -467,6 +518,24 @@ def verify_podcasts(podcast_dir, force=False, max_files=None):
             continue
 
         stats["processed"] += 1
+        
+        # ENHANCED: Validate FACTS injection
+        has_facts, facts_valid, facts_issue = check_facts_injection(gt_alignments, dur)
+        stats["facts_validation"]["total_checked"] += 1
+        if dur >= 60.0:
+            stats["facts_validation"]["chunks_over_60s"] += 1
+        if has_facts:
+            stats["facts_validation"]["chunks_with_facts"] += 1
+            stats["per_episode"][ep_label]["facts_found"] += 1
+        if not facts_valid:
+            stats["facts_validation"]["facts_in_short_chunks"] += 1
+            stats["facts_validation"]["invalid_facts_injection"].append({
+                "file": fname,
+                "duration": round(dur, 2),
+                "issue": facts_issue
+            })
+            stats["per_episode"][ep_label]["facts_invalid"] += 1
+        stats["per_episode"][ep_label]["facts_checked"] += 1
 
         gt_text = extract_gt_text(gt_alignments)
         gt_clean = clean_for_wer(gt_text)
@@ -609,6 +678,25 @@ def verify_podcasts(podcast_dir, force=False, max_files=None):
         stats["chunk_count_mismatches"] = chunk_mismatches
     else:
         log(f"\n  ✅ All episodes have matching chunk counts!")
+    
+    # FACTS Injection Validation
+    log(f"\n  FACTS Injection Validation:")
+    facts_val = stats["facts_validation"]
+    log(f"  Total chunks checked: {facts_val['total_checked']}")
+    log(f"  Chunks over 60s: {facts_val['chunks_over_60s']}")
+    log(f"  Chunks with FACTS: {facts_val['chunks_with_facts']}")
+    
+    if facts_val['chunks_over_60s'] > 0:
+        facts_rate = (facts_val['chunks_with_facts'] / facts_val['chunks_over_60s']) * 100
+        log(f"  FACTS injection rate: {facts_rate:.2f}% (expected ~1% due to probabilistic injection)")
+    
+    if facts_val['facts_in_short_chunks'] > 0:
+        log(f"  ⚠️ WARNING: {facts_val['facts_in_short_chunks']} chunks with FACTS in short chunks (<60s)!")
+        log(f"  Invalid FACTS injections (first 10):")
+        for entry in facts_val['invalid_facts_injection'][:10]:
+            log(f"    {entry['file']}: {entry['duration']}s - {entry['issue']}")
+    else:
+        log(f"  ✅ All FACTS properly injected (only in chunks >60s)")
 
     if stats["files_with_format_issues"]:
         log(f"\n  Files with Audio Format Issues (first 20):")
@@ -653,6 +741,17 @@ def verify_podcasts(podcast_dir, force=False, max_files=None):
         "files_with_format_issues": stats["files_with_format_issues"][:100],
         "chunk_count_mismatches": stats.get("chunk_count_mismatches", []),
         "chunk_count_mismatches_count": len(stats.get("chunk_count_mismatches", [])),
+        "facts_validation": {
+            "total_checked": stats["facts_validation"]["total_checked"],
+            "chunks_over_60s": stats["facts_validation"]["chunks_over_60s"],
+            "chunks_with_facts": stats["facts_validation"]["chunks_with_facts"],
+            "facts_in_short_chunks": stats["facts_validation"]["facts_in_short_chunks"],
+            "facts_injection_rate": round(
+                (stats["facts_validation"]["chunks_with_facts"] / stats["facts_validation"]["chunks_over_60s"] * 100)
+                if stats["facts_validation"]["chunks_over_60s"] > 0 else 0, 2
+            ),
+            "invalid_facts_injection": stats["facts_validation"]["invalid_facts_injection"][:50]
+        },
         "per_episode": {
             ep_name: {
                 "avg_wer": round(s["wer_sum"] / s["wer_count"], 4) if s["wer_count"] > 0 else 0,
@@ -664,6 +763,9 @@ def verify_podcasts(podcast_dir, force=False, max_files=None):
                 "expected_chunks": s["expected_chunks"],
                 "actual_chunks": s["actual_chunks"],
                 "chunk_count_match": s["chunk_count_match"],
+                "facts_checked": s["facts_checked"],
+                "facts_found": s["facts_found"],
+                "facts_invalid": s["facts_invalid"],
                 "issues": dict(s["issues"])
             }
             for ep_name, s in stats["per_episode"].items()
