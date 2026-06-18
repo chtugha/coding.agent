@@ -206,6 +206,50 @@ def parse_podcast_json(json_path):
         return [], []
 
 
+def parse_podcast_turns(json_path):
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        segments = data.get("segments", [])
+        speaker_map = {}
+        turns = []
+        for seg in segments:
+            start_t = float(seg["start"])
+            end_t = float(seg["end"])
+            text = seg.get("text", "").strip()
+            speaker = seg.get("speaker", "")
+            if not speaker or not text:
+                continue
+            if speaker not in speaker_map:
+                speaker_map[speaker] = len(speaker_map)
+            spk_label = "SPEAKER_MAIN" if speaker_map[speaker] == 0 else "SPEAKER_OTHER"
+            raw_words = text.split()
+            if not raw_words:
+                continue
+            seg_dur = end_t - start_t
+            if seg_dur <= 0:
+                continue
+            word_dur = seg_dur / len(raw_words)
+            words = []
+            for idx, w in enumerate(raw_words):
+                w_start = start_t + idx * word_dur
+                w_end = start_t + (idx + 1) * word_dur
+                w_clean = re.sub(r"[^\w\däöüßÄÖÜ\s-]", "", w)
+                if w_clean:
+                    words.append((w_clean, w_start, w_end))
+            if not words:
+                continue
+            if turns and turns[-1][0] == spk_label:
+                prev = turns[-1]
+                turns[-1] = (prev[0], prev[1], end_t, prev[3] + words)
+            else:
+                turns.append((spk_label, start_t, end_t, words))
+        return turns
+    except Exception:
+        traceback.print_exc()
+        return []
+
+
 def parse_medical_json(json_path):
     spk0_words, spk1_words = [], []
     try:
@@ -535,14 +579,14 @@ def maybe_inject_facts(stereo, sr, aligns, chunk_dur, speaker):
     return stereo, fact_aligns + shifted
 
 
-def process_dialogue(mono_raw, sr, spk0_words, spk1_words, dataset_name, file_id, output_dir):
+def process_dialogue(mono_raw, sr, spk0_words, spk1_words, dataset_name, file_id, output_dir, precomputed_turns=None):
     mono = resample_to_target(mono_raw, sr)
     sr = TARGET_SR
     total_samples = len(mono)
     total_dur = total_samples / float(sr)
     if total_dur < 0.5:
         return 0
-    turns = compute_speaker_turns(spk0_words, spk1_words)
+    turns = precomputed_turns if precomputed_turns is not None else compute_speaker_turns(spk0_words, spk1_words)
     if not turns:
         return 0
     split_points = [0.0]
@@ -789,15 +833,15 @@ def process_podcast():
     total_chunks, total_errors = 0, 0
     for ei, (ep_num, json_p, mp3_path) in enumerate(matched):
         try:
-            spk0, spk1 = parse_podcast_json(json_p)
-            if not spk0 and not spk1:
-                log_error("podcast", f"ep{ep_num}", "No speaker words in transcript")
+            turns = parse_podcast_turns(json_p)
+            if not turns:
+                log_error("podcast", f"ep{ep_num}", "No speaker turns in transcript")
                 total_errors += 1
                 continue
             mono, sr = librosa.load(mp3_path, sr=TARGET_SR, mono=True)
             mono = mono.astype(np.float32)
             cleaned, offset, ad_breaks = clean_podcast_ads(mono, int(sr), json_p, ep_label=f"ep{ep_num}")
-            n = process_dialogue(cleaned, int(sr), spk0, spk1, "podcast", f"ep{ep_num}", output_dir)
+            n = process_dialogue(cleaned, int(sr), None, None, "podcast", f"ep{ep_num}", output_dir, precomputed_turns=turns)
             total_chunks += n
         except Exception as e:
             log_error("podcast", f"ep{ep_num}", str(e))
