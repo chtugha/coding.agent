@@ -494,7 +494,7 @@ def main():
         elif os.path.isdir(args[i]):
             podcast_dir = args[i]
         i += 1
-    verify_podcasts(podcast_dir, force=force, sample_per_ep=sample_per_ep)
+    verify_podcasts(podcast_dir, force=force)
 
 
 if __name__ == "__main__":

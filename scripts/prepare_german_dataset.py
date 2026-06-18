@@ -1102,11 +1102,14 @@ def process_callhome():
 
 
 
-def process_podcast():
+def process_podcast(episode_range=None, custom_output_dir=None):
     print("\n" + "=" * 60)
-    print("Processing Gemischtes Hack Podcast (episodes 150-300)...")
+    if episode_range:
+        print(f"Processing Gemischtes Hack Podcast (episodes {episode_range[0]}-{episode_range[1]})...")
+    else:
+        print("Processing Gemischtes Hack Podcast (episodes 150-300)...")
     print("=" * 60)
-    output_dir = os.path.join(PROCESSED_DIR, "podcast")
+    output_dir = custom_output_dir if custom_output_dir else os.path.join(PROCESSED_DIR, "podcast")
     trans_dir = os.path.join(RAW_DIR, "Gemischtes.Hack.Podcast", "transcripts")
     audio_dir = os.path.join(RAW_DIR, "Gemischtes.Hack.Podcast")
     if not os.path.exists(trans_dir):
@@ -1127,7 +1130,13 @@ def process_podcast():
             if 150 <= ep_num <= 300 and ep_num in mp3_by_ep:
                 matched.append((ep_num, json_p, mp3_by_ep[ep_num]))
     matched.sort()
-    print(f"  Found {len(matched)} matched episodes (150-300)")
+    
+    # Filter by episode range if specified
+    if episode_range:
+        min_ep, max_ep = episode_range
+        matched = [m for m in matched if min_ep <= m[0] <= max_ep]
+    
+    print(f"  Found {len(matched)} matched episodes")
     total_chunks, total_errors = 0, 0
     for ei, (ep_num, json_p, mp3_path) in enumerate(matched):
         try:
@@ -1286,10 +1295,31 @@ def process_mozilla():
 
 def main():
     import sys
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Prepare German dialogue datasets')
+    parser.add_argument('--dataset', type=str, help='Dataset to process (bematac, gcsc, callfriend, callhome, podcast, medical, nyrahealth, mozilla)')
+    parser.add_argument('--episodes', type=str, help='Episode range for podcast dataset (e.g., "150-150" or "150-160")')
+    parser.add_argument('--output', type=str, help='Custom output directory')
+    
+    args = parser.parse_args()
+    
     np.random.seed(42)
     os.makedirs(PROCESSED_DIR, exist_ok=True)
 
-    dataset_args = [arg.lower() for arg in sys.argv[1:]]
+    # Parse episode range
+    episode_range = None
+    if args.episodes:
+        parts = args.episodes.split('-')
+        if len(parts) == 2:
+            episode_range = (int(parts[0]), int(parts[1]))
+        else:
+            print(f"ERROR: Invalid episode range format: {args.episodes}")
+            print("Use format: --episodes 150-150 or --episodes 150-160")
+            return
+
+    # Determine which datasets to process
+    dataset_args = [args.dataset.lower()] if args.dataset else []
     run_all = len(dataset_args) == 0
 
     if run_all or "bematac" in dataset_args:
@@ -1301,7 +1331,7 @@ def main():
     if run_all or "callhome" in dataset_args:
         process_callhome()
     if run_all or "podcast" in dataset_args:
-        process_podcast()
+        process_podcast(episode_range=episode_range, custom_output_dir=args.output)
     if run_all or "medical" in dataset_args:
         process_medical()
     if run_all or "nyrahealth" in dataset_args:
