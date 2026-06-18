@@ -9,6 +9,8 @@ import traceback
 import soundfile as sf
 import numpy as np
 import librosa
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import correlate, resample
 
 RAW_DIR = "/Volumes/eHDD/moshi-rag-data/datasets"
 PROCESSED_DIR = "/Volumes/eHDD/moshi-rag-data/processed"
@@ -223,20 +225,34 @@ def parse_podcast_turns(json_path):
             if speaker not in speaker_map:
                 speaker_map[speaker] = len(speaker_map)
             spk_label = "SPEAKER_MAIN" if speaker_map[speaker] == 0 else "SPEAKER_OTHER"
-            raw_words = text.split()
-            if not raw_words:
-                continue
-            seg_dur = end_t - start_t
-            if seg_dur <= 0:
-                continue
-            word_dur = seg_dur / len(raw_words)
+            
+            # Use original word-level timestamps from JSON if available
             words = []
-            for idx, w in enumerate(raw_words):
-                w_start = start_t + idx * word_dur
-                w_end = start_t + (idx + 1) * word_dur
-                w_clean = re.sub(r"[^\w\däöüßÄÖÜ\s-]", "", w)
-                if w_clean:
-                    words.append((w_clean, w_start, w_end))
+            word_list = seg.get("words", [])
+            if word_list:
+                # Original JSON has word-level timestamps - use them directly
+                for word_info in word_list:
+                    word_text = word_info.get("word", "").strip()
+                    w_start = float(word_info.get("start", start_t))
+                    w_end = float(word_info.get("end", start_t))
+                    w_clean = re.sub(r"[^\w\däöüßÄÖÜ\s-]", "", word_text)
+                    if w_clean and w_end > w_start:
+                        words.append((w_clean, w_start, w_end))
+            else:
+                # Fallback: if no word-level timestamps, use segment-level only
+                # (This should not happen for podcast data)
+                raw_words = text.split()
+                if raw_words:
+                    seg_dur = end_t - start_t
+                    if seg_dur > 0:
+                        word_dur = seg_dur / len(raw_words)
+                        for idx, w in enumerate(raw_words):
+                            w_start = start_t + idx * word_dur
+                            w_end = start_t + (idx + 1) * word_dur
+                            w_clean = re.sub(r"[^\w\däöüßÄÖÜ\s-]", "", w)
+                            if w_clean:
+                                words.append((w_clean, w_start, w_end))
+            
             if not words:
                 continue
             if turns and turns[-1][0] == spk_label:
@@ -310,6 +326,288 @@ def _segments_to_words(segments):
             t = seg_start + dur * i / len(ws)
             words.append((w, t))
     return words
+
+
+def generate_transcript_waveform(transcript_segments, total_duration, sr=48000):
+    """
+    Generate a simulated waveform from transcript timestamps.
+    Speech regions = 1.0, silence = 0.0
+    """
+    samples = int(total_duration * sr)
+    waveform = np.zeros(samples, dtype=np.float32)
+    
+    for seg in transcript_segments:
+        start_sample = int(seg['start'] * sr)
+        end_sample = int(seg['end'] * sr)
+        end_sample = min(end_sample, samples)
+        if end_sample > start_sample:
+            waveform[start_sample:end_sample] = 1.0
+    
+    # Smooth with gaussian filter to simulate energy envelope
+    waveform = gaussian_filter1d(waveform, sigma=sr*0.05)  # 50ms smoothing
+    
+    return waveform
+
+
+def extract_audio_envelope(audio, sr, window_size=0.1):
+    """
+    Extract energy envelope from audio waveform.
+    Increased window size for faster processing.
+    """
+    window_samples = int(window_size * sr)
+    hop = window_samples  # Use full window as hop for speed
+    
+    energy = []
+    for i in range(0, len(audio) - window_samples, hop):
+        window = audio[i:i+window_samples]
+        rms = np.sqrt(np.mean(window**2))
+        energy.append(rms)
+    
+    energy = np.array(energy)
+    
+    # Normalize
+    if energy.max() > 0:
+        energy = energy / energy.max()
+    
+    return energy
+
+
+def find_nearest_silence(audio, sr, target_time, search_backward=True, window=2.0, threshold=0.01):
+    """
+    Find the nearest silence region to target_time.
+    Searches within ±window seconds.
+    """
+    target_sample = int(target_time * sr)
+    search_samples = int(window * sr)
+    
+    if search_backward:
+        start = max(0, target_sample - search_samples)
+        end = target_sample
+        search_range = range(end, start, -int(0.01 * sr))
+    else:
+        start = target_sample
+        end = min(len(audio), target_sample + search_samples)
+        search_range = range(start, end, int(0.01 * sr))
+    
+    silence_window = int(0.05 * sr)
+    
+    for i in search_range:
+        if i + silence_window > len(audio):
+            continue
+        window_audio = audio[i:i+silence_window]
+        rms = np.sqrt(np.mean(window_audio**2))
+        
+        if rms < threshold:
+            return i / sr
+    
+    return target_time
+
+
+def detect_ad_breaks_from_correlation(audio_env, transcript_env, offset, sr, hop):
+    """
+    Detect ad breaks by finding regions where audio has energy but transcript doesn't.
+    """
+    offset_samples = int(offset * sr / hop)
+    
+    # Align envelopes
+    if offset_samples >= 0:
+        audio_aligned = audio_env[offset_samples:]
+        transcript_aligned = transcript_env[:len(audio_aligned)]
+    else:
+        transcript_aligned = transcript_env[-offset_samples:]
+        audio_aligned = audio_env[:len(transcript_aligned)]
+    
+    min_len = min(len(audio_aligned), len(transcript_aligned))
+    audio_aligned = audio_aligned[:min_len]
+    transcript_aligned = transcript_aligned[:min_len]
+    
+    # Detect mismatches
+    threshold = 0.3
+    mismatch = (audio_aligned > threshold) & (transcript_aligned < threshold)
+    
+    # Find contiguous regions
+    ad_breaks = []
+    in_ad = False
+    ad_start = 0
+    
+    for i, is_mismatch in enumerate(mismatch):
+        if is_mismatch and not in_ad:
+            ad_start = i
+            in_ad = True
+        elif not is_mismatch and in_ad:
+            if i - ad_start > 20:
+                start_time = (ad_start + offset_samples) * hop / sr
+                end_time = (i + offset_samples) * hop / sr
+                ad_breaks.append((start_time, end_time))
+            in_ad = False
+    
+    return ad_breaks
+
+
+def find_alignment_with_cross_correlation(audio, sr, transcript_segments):
+    """
+    Find precise alignment between audio and transcript using cross-correlation.
+    Returns: (offset_seconds, correlation_score, ad_breaks)
+    """
+    print(f"      [DEBUG] Starting cross-correlation alignment...")
+    total_dur = len(audio) / sr
+    print(f"      [DEBUG] Audio duration: {total_dur:.1f}s, {len(audio)} samples")
+    
+    # Downsample audio for faster processing (10Hz is sufficient for alignment)
+    target_rate = 10  # Hz
+    downsample_factor = int(sr / target_rate)
+    audio_downsampled = audio[::downsample_factor]
+    sr_down = sr / downsample_factor
+    print(f"      [DEBUG] Downsampled audio to {sr_down:.1f}Hz: {len(audio_downsampled)} samples")
+    
+    # Generate transcript waveform at lower rate
+    print(f"      [DEBUG] Generating transcript waveform from {len(transcript_segments)} segments...")
+    transcript_wf = generate_transcript_waveform(transcript_segments, total_dur, int(sr_down))
+    print(f"      [DEBUG] Transcript waveform: {len(transcript_wf)} samples")
+    
+    # Extract audio envelope
+    print(f"      [DEBUG] Extracting audio envelope...")
+    audio_envelope = extract_audio_envelope(audio_downsampled, int(sr_down))
+    print(f"      [DEBUG] Audio envelope: {len(audio_envelope)} points")
+    
+    # Downsample transcript waveform to match envelope
+    print(f"      [DEBUG] Resampling transcript waveform...")
+    transcript_envelope = resample(transcript_wf, len(audio_envelope))
+    print(f"      [DEBUG] Transcript envelope: {len(transcript_envelope)} points")
+    
+    # Cross-correlate to find best alignment
+    print(f"      [DEBUG] Computing cross-correlation...")
+    correlation = correlate(audio_envelope, transcript_envelope, mode='valid')
+    print(f"      [DEBUG] Cross-correlation complete: {len(correlation)} points")
+    
+    # Find peak correlation
+    best_offset_samples = np.argmax(correlation)
+    audio_norm = np.linalg.norm(np.asarray(audio_envelope))
+    transcript_norm = np.linalg.norm(np.asarray(transcript_envelope))
+    best_correlation = float(correlation[best_offset_samples]) / (audio_norm * transcript_norm) if (audio_norm * transcript_norm) > 0 else 0.0
+    
+    # Convert to seconds (account for downsampling and envelope extraction)
+    hop = int(0.1 * sr_down)  # Window size used in envelope extraction
+    offset_seconds = best_offset_samples * hop / sr_down
+    
+    # Detect ad breaks
+    print(f"      [DEBUG] Detecting ad breaks...")
+    ad_breaks = detect_ad_breaks_from_correlation(
+        audio_envelope,
+        transcript_envelope,
+        offset_seconds,
+        int(sr_down),
+        hop
+    )
+    print(f"      [DEBUG] Found {len(ad_breaks)} ad breaks")
+    
+    return offset_seconds, best_correlation, ad_breaks
+
+
+def clean_podcast_ads_waveform_based(mono_audio, sr, transcript_json_path, ep_label=""):
+    """
+    Clean podcast ads using waveform pattern matching.
+    This is more precise than text-based matching.
+    """
+    # Check cache first
+    if os.path.exists(CACHE_PATH):
+        try:
+            with open(CACHE_PATH, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            if ep_label in cache:
+                entry = cache[ep_label]
+                initial_offset = entry.get("offset", 0.0)
+                ad_breaks = entry.get("ad_breaks", [])
+                print(f"    {ep_label}: loaded from cache (offset={initial_offset:.1f}s, {len(ad_breaks)} ads)")
+                
+                content_start = max(0.0, initial_offset)
+                total_dur = len(mono_audio) / float(sr)
+                ad_regions = [(s, e) for s, e in sorted(ad_breaks)]
+                regions = _build_clean_regions(content_start, ad_regions, total_dur)
+                if not regions:
+                    return mono_audio[int(content_start * sr):], initial_offset, ad_regions
+                chunks = []
+                for rs, re_ in regions:
+                    s1 = int(rs * sr)
+                    s2 = min(int(re_ * sr), len(mono_audio))
+                    if s2 > s1:
+                        chunks.append(mono_audio[s1:s2])
+                if chunks:
+                    cleaned = np.concatenate(chunks)
+                else:
+                    cleaned = mono_audio[int(content_start * sr):]
+                print(f"    {ep_label}: cleaned {total_dur:.0f}s -> {len(cleaned)/sr:.0f}s")
+                return cleaned, initial_offset, ad_regions
+        except Exception as ce:
+            print(f"    {ep_label}: error loading cache: {ce}")
+    
+    # Load transcript
+    with open(transcript_json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    
+    segments = data.get("segments", [])
+    if not segments:
+        return mono_audio, 0.0, []
+    
+    print(f"    {ep_label}: analyzing waveform patterns...")
+    print(f"    {ep_label}: audio length={len(mono_audio)/sr:.1f}s, segments={len(segments)}")
+    
+    # Find alignment using cross-correlation
+    print(f"    {ep_label}: starting cross-correlation (may take 30-60s for long episodes)...")
+    offset, correlation, ad_breaks = find_alignment_with_cross_correlation(
+        mono_audio, sr, segments
+    )
+    
+    print(f"    {ep_label}: correlation={correlation:.3f}, offset={offset:.1f}s, {len(ad_breaks)} ads detected")
+    
+    # Refine ad break boundaries to silence regions
+    ad_breaks_refined = []
+    for ad_start, ad_end in ad_breaks:
+        refined_start = find_nearest_silence(mono_audio, sr, ad_start, search_backward=True)
+        refined_end = find_nearest_silence(mono_audio, sr, ad_end, search_backward=False)
+        
+        if refined_end > refined_start:
+            ad_breaks_refined.append((refined_start, refined_end))
+            print(f"    {ep_label}: ad break {refined_start:.1f}s - {refined_end:.1f}s")
+    
+    # Build clean regions
+    content_start = max(0.0, offset)
+    total_dur = len(mono_audio) / float(sr)
+    regions = _build_clean_regions(content_start, ad_breaks_refined, total_dur)
+    
+    # Extract clean audio
+    if not regions:
+        return mono_audio[int(content_start * sr):], offset, ad_breaks_refined
+    
+    chunks = []
+    for rs, re in regions:
+        s1 = int(rs * sr)
+        s2 = min(int(re * sr), len(mono_audio))
+        if s2 > s1:
+            chunks.append(mono_audio[s1:s2])
+    
+    if chunks:
+        cleaned = np.concatenate(chunks)
+    else:
+        cleaned = mono_audio[int(content_start * sr):]
+    
+    print(f"    {ep_label}: cleaned {total_dur:.0f}s -> {len(cleaned)/sr:.0f}s")
+    
+    # Cache results
+    if ad_breaks_refined:
+        try:
+            if os.path.exists(CACHE_PATH):
+                with open(CACHE_PATH, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+            else:
+                cache = {}
+            cache[ep_label] = {"offset": offset, "ad_breaks": ad_breaks_refined}
+            with open(CACHE_PATH, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    
+    return cleaned, offset, ad_breaks_refined
 
 
 
@@ -833,15 +1131,27 @@ def process_podcast():
     total_chunks, total_errors = 0, 0
     for ei, (ep_num, json_p, mp3_path) in enumerate(matched):
         try:
+            print(f"\n  Processing episode {ep_num} ({ei+1}/{len(matched)})...")
+            print(f"    Parsing transcript: {json_p}")
             turns = parse_podcast_turns(json_p)
             if not turns:
                 log_error("podcast", f"ep{ep_num}", "No speaker turns in transcript")
                 total_errors += 1
                 continue
+            print(f"    Found {len(turns)} speaker turns")
+            
+            print(f"    Loading audio: {mp3_path}")
             mono, sr = librosa.load(mp3_path, sr=TARGET_SR, mono=True)
             mono = mono.astype(np.float32)
-            cleaned, offset, ad_breaks = clean_podcast_ads(mono, int(sr), json_p, ep_label=f"ep{ep_num}")
+            print(f"    Audio loaded: {len(mono)/sr:.1f}s at {sr}Hz")
+            
+            print(f"    Cleaning ads with waveform alignment...")
+            cleaned, offset, ad_breaks = clean_podcast_ads_waveform_based(mono, int(sr), json_p, ep_label=f"ep{ep_num}")
+            print(f"    Cleaned audio: {len(cleaned)/sr:.1f}s (removed {len(mono)/sr - len(cleaned)/sr:.1f}s)")
+            
+            print(f"    Creating chunks...")
             n = process_dialogue(cleaned, int(sr), None, None, "podcast", f"ep{ep_num}", output_dir, precomputed_turns=turns)
+            print(f"    Created {n} chunks")
             total_chunks += n
         except Exception as e:
             log_error("podcast", f"ep{ep_num}", str(e))

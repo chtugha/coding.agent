@@ -222,7 +222,7 @@ def tokens_to_word_alignments(whisper_json, speaker):
             if text.startswith(" ") or current_word == "":
                 if current_word:
                     cleaned = re.sub(r"[^\w\däöüßÄÖÜ\s-]", "", current_word).strip()
-                    if cleaned and word_start_ms is not None:
+                    if cleaned and word_start_ms is not None and word_end_ms is not None:
                         alignments.append([
                             cleaned,
                             [round(word_start_ms / 1000.0, 6), round(word_end_ms / 1000.0, 6)],
@@ -236,7 +236,7 @@ def tokens_to_word_alignments(whisper_json, speaker):
                 word_end_ms = to_ms
         if current_word:
             cleaned = re.sub(r"[^\w\däöüßÄÖÜ\s-]", "", current_word).strip()
-            if cleaned and word_start_ms is not None:
+            if cleaned and word_start_ms is not None and word_end_ms is not None:
                 alignments.append([
                     cleaned,
                     [round(word_start_ms / 1000.0, 6), round(word_end_ms / 1000.0, 6)],
@@ -505,6 +505,7 @@ def verify_podcasts(podcast_dir, force=False, max_files=None):
         if verify_alignments is None:
             verify_alignments = whisper_transcribe_to_alignments(wav_path, speaker)
             if verify_alignments is not None:
+                # Write ONLY alignments to _wverify.json (to match chunk transcript format)
                 verify_data = {"alignments": verify_alignments}
                 try:
                     with open(verify_path, "w", encoding="utf-8") as f:
@@ -552,6 +553,28 @@ def verify_podcasts(podcast_dir, force=False, max_files=None):
         containment = compute_containment(gt_words, verify_words)
         lcs_ratio = compute_lcs_ratio(gt_words, verify_words)
         issue = classify_issue(gt_words, verify_words, containment, lcs_ratio, wer)
+
+        # Write WER analysis data to separate _analysis.json file
+        analysis_path = wav_path.replace(".wav", "_analysis.json")
+        analysis_data = {
+            "file": fname,
+            "wer": round(wer, 4),
+            "containment": round(containment, 4),
+            "lcs_ratio": round(lcs_ratio, 4),
+            "issue": issue,
+            "gt_text": gt_clean,
+            "verify_text": verify_clean,
+            "gt_word_count": len(gt_words),
+            "verify_word_count": len(verify_words),
+            "duration": round(dur, 2),
+            "speaker": speaker,
+            "episode": ep_label
+        }
+        try:
+            with open(analysis_path, "w", encoding="utf-8") as f:
+                json.dump(analysis_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log(f"    WARN: Could not write analysis file {analysis_path}: {e}")
 
         stats["wer_samples"] += 1
         stats["wer_sum"] += wer
