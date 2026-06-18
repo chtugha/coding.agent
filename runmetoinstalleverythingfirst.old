@@ -1,0 +1,1441 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
+
+if [ "${1}" == "--help" ] || [ "${1}" == "-h" ]; then
+    echo "Prodigy - Full Installation Script"
+    echo ""
+    echo "Usage: ./runmetoinstalleverythingfirst"
+    echo ""
+    echo "This script will:"
+    echo "  1. Check macOS + Apple Silicon"
+    echo "  2. Install Homebrew (if not present)"
+    echo "  3. Install system deps (cmake, wget, git, espeak-ng, ccache, openssl@3)"
+    echo "  4. Install Rust/Cargo via rustup (required for moshi-backend build)"
+    echo "  5. Install Miniconda (if not present)"
+    echo "  6. Create Python environment with PyTorch, CoreML tools"
+    echo "  7. Clone/update whisper.cpp from GitHub (latest)"
+    echo "  8. Clone/update llama.cpp from GitHub (latest)"
+    echo "  9. Check Kokoro dependencies"
+    echo "  10. Download Whisper models (large-v3-q5_0, large-v3-turbo-q5_0)"
+    echo "  11. Generate Whisper CoreML encoders (large-v3, large-v3-turbo)"
+    echo "  12. Download LLaMA model (Llama-3.2-1B-Instruct-Q8_0)"
+    echo "  13. Export Kokoro TTS models (CoreML duration + decoder)"
+    echo "  14. Download NeuTTS Nano German model (GGUF + NeuCodec ONNX→CoreML)"
+    echo "  15. Prepare NeuTTS reference voice (encode audio + phonemize text)"
+    echo "  16. Install Ollama (via brew cask) + pull embeddinggemma:300m for tomedo-crawl RAG"
+    echo "  17. Download Moshi German LoRA (chtugha/moshi-german-lora → bin/models/german_moshi_lora/)"
+    echo "  18. Merge Moshi LoRA adapters into base model (produces moshiko-german-merged.safetensors)"
+    echo "  19. Download Moshi Q8 GGUF model (kyutai/moshiko-candle-q8 → bin/models/)"
+    echo "       Required for 16 GB Macs — BF16 models cause swap thrashing."
+    echo "  20. Download German STT-1B models (chtugha/stt-1b-german → bin/models/stt-1b-german/)"
+    echo "       Includes both full bfloat16 and quantized int8 models."
+    echo ""
+    echo "Optional TTS engines (called automatically, non-fatal if unavailable):"
+    echo "  21. Export Neural G2P model (DeepPhonemizer German → CoreML de_g2p.mlmodelc)"
+    echo "  22. Download VITS2/Piper German voice (de_DE-thorsten-high.onnx)"
+    echo "  23. Export Matcha-TTS models (CoreML encoder + ODE flow + HiFi-GAN vocoder)"
+    echo "      Note: step 23 requires a German Matcha-TTS checkpoint (--checkpoint flag"
+    echo "      or fine-tuned from shivammehta25/Matcha-TTS). Falls back to English."
+    echo ""
+    echo "Requirements:"
+    echo "  - macOS (Apple Silicon M1/M2/M3/M4)"
+    echo "  - ~15 GB free disk space (+ ~1 GB for optional VITS2/Matcha models)"
+    echo "  - Internet connection"
+    echo ""
+    echo "After installation, run: ./runmetobuildeverything"
+    exit 0
+fi
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+step()  { echo -e "\n${BLUE}==============================${NC}"; echo -e "${BLUE} $1${NC}"; echo -e "${BLUE}==============================${NC}"; }
+
+activate_conda_env() {
+    eval "$(conda shell.zsh hook)" 2>/dev/null || eval "$(conda shell.bash hook)" 2>/dev/null || true
+    conda activate "$1" 2>/dev/null || {
+        warn "Could not activate conda env '$1'. Attempting manual PATH setup..."
+        local conda_base
+        conda_base="$(conda info --base 2>/dev/null)" || true
+        if [ -n "$conda_base" ] && [ -d "$conda_base/envs/$1/bin" ]; then
+            export PATH="$conda_base/envs/$1/bin:$PATH"
+            export CONDA_PREFIX="$conda_base/envs/$1"
+        else
+            error "Failed to activate conda env '$1'. Is it created?"
+        fi
+    }
+}
+
+NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+ask_hf_token() {
+    if [ -n "${HF_TOKEN:-}" ]; then
+        info "HuggingFace token already set in environment (HF_TOKEN)"
+        export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
+        return
+    fi
+    echo ""
+    echo -e "${YELLOW}HuggingFace Token (optional)${NC}"
+    echo "  All model repos used by this script are public — no token is required."
+    echo "  Providing a token avoids HuggingFace rate limits on large downloads."
+    echo "  Get a free token at: https://huggingface.co/settings/tokens"
+    echo -n "  Paste your HuggingFace token (or press Enter to skip): "
+    read -r hf_token_input </dev/tty 2>/dev/null || hf_token_input=""
+    if [ -n "$hf_token_input" ]; then
+        export HF_TOKEN="$hf_token_input"
+        export HUGGING_FACE_HUB_TOKEN="$hf_token_input"
+        info "HuggingFace token set for this session"
+    else
+        info "Skipping HuggingFace token — all repos are public, proceeding without authentication"
+    fi
+    echo ""
+}
+
+resolve_whispertalk_python() {
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null)"
+    WHISPERTALK_PYTHON="$conda_base/envs/whispertalk/bin/python3"
+    WHISPERTALK_HF_CLI="$conda_base/envs/whispertalk/bin/hf"
+}
+WHISPERTALK_PYTHON=""
+WHISPERTALK_HF_CLI=""
+WHISPER_COREML_PYTHON=""
+
+check_macos() {
+    step "Checking macOS / Apple Silicon"
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        error "This script is designed for macOS only (Apple Silicon required)"
+    fi
+    if [[ "$(uname -m)" != "arm64" ]]; then
+        error "Apple Silicon (arm64) required. Found: $(uname -m)"
+    fi
+    info "macOS $(sw_vers -productVersion) on Apple Silicon"
+}
+
+check_admin_access() {
+    step "Requesting administrator access"
+    if ! groups | grep -qw admin; then
+        echo ""
+        echo -e "${RED}[ERROR]${NC} The current user '$(whoami)' is not an Administrator."
+        echo ""
+        echo "  Homebrew requires sudo access to create system directories under /opt/homebrew."
+        echo "  To grant administrator rights to this account, ask an existing admin to run:"
+        echo ""
+        echo "    sudo dseditgroup -o edit -a $(whoami) -t user admin"
+        echo ""
+        echo "  Or go to: System Settings → Users & Groups → select this user → enable 'Allow this user to administer this computer'"
+        echo ""
+        echo "  After granting admin rights, open a new terminal and re-run this script."
+        exit 1
+    fi
+    echo "  This script needs administrator (sudo) access to install Homebrew and system tools."
+    echo "  Please enter your macOS login password when prompted."
+    echo ""
+    if ! sudo -v; then
+        error "sudo authentication failed. Ensure your account has a password set and try again."
+    fi
+    (while true; do sudo -n true 2>/dev/null || true; sleep 50; kill -0 "$$" 2>/dev/null || exit 0; done) &
+    SUDO_KEEPALIVE_PID=$!
+    trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' INT TERM EXIT
+    info "Administrator access granted — password cached for this session"
+}
+
+check_and_install_xcode_clt() {
+    step "Checking Xcode Command Line Tools"
+    if xcode-select -p &>/dev/null; then
+        info "Xcode CLT active: $(xcode-select -p)"
+        return
+    fi
+    info "Installing Xcode Command Line Tools..."
+    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    local su_output clt_label
+    su_output="$(softwareupdate -l 2>/dev/null)"
+    clt_label=$(echo "$su_output" | awk '/\* Label:.*Command Line/{gsub(/\* Label: /,""); print; exit}')
+    if [ -z "$clt_label" ]; then
+        clt_label=$(echo "$su_output" | grep -B1 "Command Line Tools" | awk -F"*" '/\*/{gsub(/^ /,"",$2); print $2}' | head -1)
+    fi
+    rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    if [ -z "$clt_label" ]; then
+        error "Could not find Xcode Command Line Tools in softwareupdate catalog. Run manually: xcode-select --install — then re-run this script."
+    fi
+    sudo softwareupdate -i "$clt_label" --verbose
+    sudo xcode-select --switch /Library/Developer/CommandLineTools 2>/dev/null || true
+    info "Xcode Command Line Tools installed"
+}
+
+XCODE_INSTALL_PENDING=false
+XCODE_TIMED_OUT=false
+
+activate_xcode() {
+    if ! sudo -n true 2>/dev/null; then
+        echo ""
+        echo "  Administrator access is needed to activate Xcode."
+        echo "  (Session timed out during the long download — please enter your password.)"
+        sudo -v
+    fi
+    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+    sudo xcodebuild -license accept 2>/dev/null || true
+    sudo xcodebuild -runFirstLaunch 2>/dev/null || true
+}
+
+check_and_install_xcode() {
+    step "Checking Xcode"
+    if [ -d "/Applications/Xcode.app" ]; then
+        activate_xcode
+        info "Xcode.app active: $(xcodebuild -version 2>/dev/null | head -1 || echo 'found')"
+        return
+    fi
+    echo ""
+    echo -e "${YELLOW}==============================${NC}"
+    echo -e "${YELLOW} ACTION REQUIRED: Install Xcode${NC}"
+    echo -e "${YELLOW}==============================${NC}"
+    echo "  Xcode.app is required for CoreML model compilation."
+    echo "  The Mac App Store is opening now."
+    echo -e "  ${YELLOW}Please click Get / Install on the Xcode page.${NC}"
+    echo "  This script will continue setup and wait for Xcode before the CoreML step."
+    echo ""
+    echo -e "  ${YELLOW}NOTE:${NC} If you step away while Xcode downloads (~8 GB), the script will"
+    echo "  pause and ask for your macOS login password once Xcode is installed."
+    echo "  Just enter it when you return and the script will continue automatically."
+    echo ""
+    open "macappstores://apps.apple.com/app/xcode/id497799835" 2>/dev/null || true
+    XCODE_INSTALL_PENDING=true
+}
+
+wait_for_xcode_if_needed() {
+    if [ "$XCODE_INSTALL_PENDING" != "true" ]; then
+        return
+    fi
+    if [ -d "/Applications/Xcode.app" ]; then
+        XCODE_INSTALL_PENDING=false
+        info "Xcode.app installed — activating..."
+        activate_xcode
+        info "Xcode ready: $(xcodebuild -version 2>/dev/null | head -1 || echo 'activated')"
+        return
+    fi
+    echo ""
+    echo -e "${YELLOW}  Waiting for Xcode installation to complete...${NC}"
+    echo "  (If you have not clicked Install in the App Store yet, please do so now.)"
+    echo -n "  Waiting"
+    local waited=0
+    local max_wait=7200
+    while [ ! -d "/Applications/Xcode.app" ]; do
+        sleep 30
+        waited=$((waited + 30))
+        echo -n "."
+        if [ $waited -ge $max_wait ]; then
+            echo ""
+            XCODE_TIMED_OUT=true
+            warn "Timed out waiting for Xcode (2 h). CoreML compilation will be skipped."
+            warn "After Xcode installs, run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+            warn "Then re-run this script to complete CoreML setup."
+            return
+        fi
+    done
+    echo ""
+    XCODE_INSTALL_PENDING=false
+    info "Xcode.app detected — activating..."
+    activate_xcode
+    info "Xcode ready: $(xcodebuild -version 2>/dev/null | head -1 || echo 'activated')"
+}
+
+check_and_install_homebrew() {
+    step "Checking Homebrew"
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    fi
+    if ! command -v brew &> /dev/null; then
+        warn "Homebrew not found. Installing..."
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+        grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zprofile 2>/dev/null || \
+            echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+        info "Homebrew installed"
+    else
+        info "Homebrew: $(brew --version | head -1)"
+    fi
+    if [ -f ~/.zshrc ] && grep -qxF 'eval "$(/opt/homebrew/bin/brew shellenv)"' ~/.zshrc 2>/dev/null; then
+        sed -i '' '\|^eval "\$(/opt/homebrew/bin/brew shellenv)"$|d' ~/.zshrc
+        info "Removed stale brew shellenv entry from ~/.zshrc"
+    fi
+}
+
+install_system_deps() {
+    step "Installing system dependencies"
+    # openssl@3  — required to build the SQLCipher amalgamation
+    #   (./configure --with-crypto-lib=openssl) and statically linked into
+    #   `frontend` and `tomedo-crawl`.  CMakeLists.txt forces .a linkage so
+    #   both binaries have zero Homebrew runtime dependencies.
+    # tclsh     — required by SQLCipher's amalgamation generator (mksqlite3c.tcl)
+    #   which concatenates ~100 source files into a single sqlite3.c.
+    #   tclsh ships with macOS Xcode Command Line Tools (/usr/bin/tclsh).
+    #   If /usr/bin/tclsh is missing, tcl-tk is installed via Homebrew as
+    #   a fallback.
+    DEPS=("cmake" "wget" "git" "espeak-ng" "ccache" "openssl@3" "pkg-config" "sentencepiece" "opus" "protobuf" "nlohmann-json")
+    for dep in "${DEPS[@]}"; do
+        if ! brew list "$dep" &> /dev/null; then
+            info "Installing $dep..."
+            brew install "$dep"
+        else
+            info "$dep already installed"
+        fi
+    done
+
+    # tclsh — check system first (ships with Xcode CLT), install tcl-tk if missing
+    if command -v tclsh &> /dev/null; then
+        info "tclsh already available: $(command -v tclsh)"
+    else
+        warn "tclsh not found in PATH — installing tcl-tk via Homebrew (needed for SQLCipher amalgamation build)"
+        brew install tcl-tk
+    fi
+
+    export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"
+    grep -qxF 'export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"' ~/.zprofile 2>/dev/null || \
+        echo 'export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"' >> ~/.zprofile
+}
+
+install_rust() {
+    step "Checking Rust / Cargo"
+
+    local cargo_bin="${HOME}/.cargo/bin/cargo"
+
+    if command -v cargo &> /dev/null || [ -x "$cargo_bin" ]; then
+        export PATH="${HOME}/.cargo/bin:$PATH"
+        info "Rust already installed: $(cargo --version 2>/dev/null || ${cargo_bin} --version)"
+        return
+    fi
+
+    info "Installing Rust via rustup (minimal profile, no PATH modification)..."
+    local rustup_tmp _prior _prior_body
+    rustup_tmp=$(mktemp /tmp/rustup-init.XXXXXX.sh)
+    _prior=$(trap -p EXIT 2>/dev/null)
+    if [[ -n "$_prior" ]]; then
+        # sed strips the 'trap -- ' prefix and ' EXIT' suffix from trap -p output.
+        # Assumes the body contains no literal single quotes (safe for all traps in this script).
+        _prior_body=$(printf '%s' "$_prior" | sed "s/^trap -- '//;s/' EXIT\$//")
+        trap "rm -f '$rustup_tmp'; $_prior_body" EXIT
+    else
+        trap "rm -f '$rustup_tmp'" EXIT
+    fi
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$rustup_tmp" \
+        || error "Failed to download rustup installer"
+    sh "$rustup_tmp" -y --no-modify-path --profile minimal \
+        || error "rustup installer failed"
+    rm -f "$rustup_tmp"
+
+    export PATH="${HOME}/.cargo/bin:$PATH"
+
+    grep -qxF 'export PATH="$HOME/.cargo/bin:$PATH"' ~/.zprofile 2>/dev/null || \
+        echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zprofile
+
+    info "Rust installed: $(cargo --version)"
+}
+
+accept_conda_tos() {
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
+    conda tos accept 2>/dev/null || true
+}
+
+check_and_install_python() {
+    step "Checking Python / Miniconda"
+    local conda_bin=""
+    for _candidate in \
+            "$(command -v conda 2>/dev/null)" \
+            "$HOME/miniconda3/bin/conda" \
+            "$HOME/anaconda3/bin/conda" \
+            "$HOME/opt/miniconda3/bin/conda"; do
+        if [ -x "$_candidate" ]; then
+            conda_bin="$_candidate"
+            break
+        fi
+    done
+
+    if [ -n "$conda_bin" ]; then
+        eval "$($conda_bin shell.zsh hook)" 2>/dev/null || true
+        info "Miniconda: $(conda --version 2>/dev/null || echo 'found')"
+    else
+        warn "Miniconda not found. Installing..."
+        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh"
+        curl -fsSL -o /tmp/miniconda.sh "$MINICONDA_URL"
+        bash /tmp/miniconda.sh -b -p "$HOME/miniconda3"
+        rm /tmp/miniconda.sh
+        eval "$($HOME/miniconda3/bin/conda shell.zsh hook)"
+        grep -qxF 'eval "$($HOME/miniconda3/bin/conda shell.zsh hook)"' ~/.zprofile 2>/dev/null || \
+            echo 'eval "$($HOME/miniconda3/bin/conda shell.zsh hook)"' >> ~/.zprofile
+        info "Miniconda installed"
+    fi
+    accept_conda_tos
+}
+
+setup_python_env() {
+    step "Setting up Python environment (whispertalk)"
+    eval "$(conda shell.zsh hook)" 2>/dev/null || eval "$(conda shell.bash hook)" 2>/dev/null || true
+
+    if ! conda env list | grep -q "^whispertalk "; then
+        info "Creating whispertalk conda environment..."
+        conda create -n whispertalk python=3.12 -y
+    else
+        info "whispertalk environment already exists"
+    fi
+
+    activate_conda_env whispertalk
+
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null)"
+    WHISPERTALK_PYTHON="$conda_base/envs/whispertalk/bin/python3"
+    if [ ! -x "$WHISPERTALK_PYTHON" ]; then
+        error "whispertalk Python not found at $WHISPERTALK_PYTHON"
+    fi
+
+    info "Installing Python dependencies..."
+    "$WHISPERTALK_PYTHON" -m pip install --quiet --upgrade pip
+    "$WHISPERTALK_PYTHON" -m pip install --quiet coremltools
+    "$WHISPERTALK_PYTHON" -m pip install --quiet openai-whisper
+    "$WHISPERTALK_PYTHON" -m pip install --quiet huggingface_hub
+    "$WHISPERTALK_PYTHON" -m pip install --quiet onnx
+    "$WHISPERTALK_PYTHON" -m pip install --quiet "protobuf>=4.25.1"
+    info "Python environment ready"
+}
+
+setup_whisper_coreml_env() {
+    step "Setting up whisper_coreml environment (ANE-optimised CoreML export)"
+    eval "$(conda shell.zsh hook)" 2>/dev/null || eval "$(conda shell.bash hook)" 2>/dev/null || true
+
+    local conda_base _coreml_py marker
+    conda_base="$(conda info --base 2>/dev/null)"
+    _coreml_py="$conda_base/envs/whisper_coreml/bin/python3"
+    marker="$conda_base/envs/whisper_coreml/.prodigy_deps_v3"
+
+    if ! conda env list | grep -q "^whisper_coreml "; then
+        info "Creating whisper_coreml conda environment (Python 3.10, torch 1.12.1)..."
+        conda create -n whisper_coreml python=3.10 -y
+    elif [ -f "$marker" ]; then
+        info "whisper_coreml environment already verified"
+        return 0
+    else
+        info "whisper_coreml environment exists — verifying dependencies..."
+    fi
+
+    "$_coreml_py" -m pip install --quiet --upgrade "setuptools"
+    "$_coreml_py" -m pip install --quiet "torch==1.12.1" "torchvision==0.13.1"
+    "$_coreml_py" -m pip install --quiet "protobuf>=3.1.0,<=3.20.1"
+    "$_coreml_py" -m pip install --quiet --no-deps "ane-transformers==0.1.3"
+    "$_coreml_py" -m pip install --quiet "coremltools==6.3.0"
+    "$_coreml_py" -m pip install --quiet "openai-whisper"
+    "$_coreml_py" -m pip install --quiet "numpy<2"
+    touch "$marker"
+    info "whisper_coreml environment ready"
+}
+
+resolve_whisper_coreml_python() {
+    local conda_base
+    conda_base="$(conda info --base 2>/dev/null)"
+    WHISPER_COREML_PYTHON="$conda_base/envs/whisper_coreml/bin/python3"
+}
+
+clone_or_update_repo() {
+    local name="$1"
+    local url="$2"
+    local dir="$3"
+
+    if [ -d "$dir/.git" ]; then
+        info "$name: updating existing clone..."
+        cd "$dir"
+        git pull || git pull origin main || git pull origin master || warn "$name: git pull failed, continuing with existing version"
+        cd "$SCRIPT_DIR"
+    elif [ -d "$dir" ]; then
+        if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            rmdir "$dir"
+            info "$name: cloning from $url..."
+            git clone "$url" "$dir"
+        else
+            warn "$name: directory exists but is not a git repo. Backing up and re-cloning..."
+            mv "$dir" "${dir}.bak.$(date +%s)"
+            git clone "$url" "$dir"
+        fi
+    else
+        info "$name: cloning from $url..."
+        git clone "$url" "$dir"
+    fi
+}
+
+setup_whisper_cpp() {
+    step "Setting up whisper.cpp"
+    clone_or_update_repo "whisper.cpp" "https://github.com/ggerganov/whisper.cpp.git" "$SCRIPT_DIR/whisper-cpp"
+    info "whisper.cpp ready at whisper-cpp/"
+}
+
+setup_llama_cpp() {
+    step "Setting up llama.cpp"
+    clone_or_update_repo "llama.cpp" "https://github.com/ggerganov/llama.cpp.git" "$SCRIPT_DIR/llama-cpp"
+    info "llama.cpp ready at llama-cpp/"
+}
+
+setup_kokoro() {
+    step "Checking Kokoro dependencies"
+    if ! "$WHISPERTALK_PYTHON" -c "import kokoro" 2>/dev/null; then
+        info "Installing kokoro package..."
+        "$WHISPERTALK_PYTHON" -m pip install --quiet kokoro
+    else
+        info "kokoro package already installed"
+    fi
+    info "Kokoro dependencies ready"
+}
+
+download_whisper_models() {
+    step "Downloading Whisper models"
+    mkdir -p bin/models
+
+    if [ -f "bin/models/ggml-large-v3-turbo-q5_0.bin" ]; then
+        info "ggml-large-v3-turbo-q5_0.bin already exists"
+    else
+        info "Downloading ggml-large-v3-turbo-q5_0.bin (~547 MB)..."
+        wget -q --show-progress \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin" \
+            -O bin/models/ggml-large-v3-turbo-q5_0.bin
+    fi
+
+    if [ -f "bin/models/ggml-large-v3-q5_0.bin" ]; then
+        info "ggml-large-v3-q5_0.bin already exists"
+    else
+        info "Downloading ggml-large-v3-q5_0.bin (~1.0 GB)..."
+        wget -q --show-progress \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin" \
+            -O bin/models/ggml-large-v3-q5_0.bin
+    fi
+
+    info "Whisper models downloaded"
+}
+
+generate_whisper_coreml_encoder() {
+    local model_name="$1"
+    local encoder_name="ggml-${model_name}-encoder.mlmodelc"
+
+    if [ -d "bin/models/${encoder_name}" ]; then
+        info "CoreML encoder for ${model_name} already exists"
+        return
+    fi
+
+    if [ "$XCODE_TIMED_OUT" = "true" ]; then
+        warn "Skipping CoreML encoder for ${model_name} — Xcode installation timed out."
+        return
+    fi
+
+    if [ ! -x "$WHISPER_COREML_PYTHON" ]; then
+        error "whisper_coreml Python not found at $WHISPER_COREML_PYTHON — did setup_whisper_coreml_env succeed?"
+    fi
+
+    (
+        cd whisper-cpp
+
+        if [ ! -f "models/ggml-${model_name}.bin" ]; then
+            info "Downloading full ${model_name} model for CoreML conversion..."
+            bash models/download-ggml-model.sh "${model_name}"
+        fi
+
+        info "Converting ${model_name} to CoreML (this may take 5-10 minutes)..."
+        if ! "$WHISPER_COREML_PYTHON" -W ignore models/convert-whisper-to-coreml.py \
+            --model "${model_name}" \
+            --encoder-only True \
+            --optimize-ane True; then
+            warn "Full-precision CoreML conversion failed (possibly OOM) — retrying with quantization..."
+            if ! "$WHISPER_COREML_PYTHON" -W ignore models/convert-whisper-to-coreml.py \
+                --model "${model_name}" \
+                --encoder-only True \
+                --quantize True \
+                --optimize-ane True; then
+                warn "CoreML conversion for ${model_name} failed even with quantization — try closing other apps and re-running"
+                exit 1
+            fi
+            warn "CoreML conversion succeeded with quantization (lower precision). Re-run install with more free RAM for full precision."
+        fi
+
+        info "Compiling CoreML model for ${model_name}..."
+        if ! xcrun --find coremlcompiler &>/dev/null; then
+            warn "coremlcompiler not found — full Xcode.app is required (Command Line Tools alone is not sufficient)."
+            warn "Install Xcode from the App Store, then run:"
+            warn "  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+            warn "Then re-run this script to complete CoreML compilation for ${model_name}."
+            exit 0
+        fi
+        xcrun coremlcompiler compile \
+            "models/coreml-encoder-${model_name}.mlpackage" \
+            models/
+
+        if [ -d "models/coreml-encoder-${model_name}.mlmodelc" ]; then
+            mv "models/coreml-encoder-${model_name}.mlmodelc" "models/${encoder_name}"
+        fi
+
+        if [ -d "models/${encoder_name}" ]; then
+            cp -r "models/${encoder_name}" "$SCRIPT_DIR/bin/models/"
+            info "CoreML encoder for ${model_name} generated"
+        else
+            warn "CoreML encoder compilation for ${model_name} may have failed"
+        fi
+    )
+}
+
+generate_whisper_coreml() {
+    step "Generating Whisper CoreML encoders"
+    generate_whisper_coreml_encoder "large-v3"
+    generate_whisper_coreml_encoder "large-v3-turbo"
+}
+
+download_llama_model() {
+    step "Downloading LLaMA model"
+    mkdir -p bin/models
+
+    if [ -f "bin/models/Llama-3.2-1B-Instruct-Q8_0.gguf" ]; then
+        info "LLaMA model already exists"
+        return
+    fi
+
+    activate_conda_env whispertalk
+
+    info "Downloading Llama-3.2-1B-Instruct-Q8_0.gguf (~1.2 GB)..."
+    if [ -x "$WHISPERTALK_HF_CLI" ]; then
+        "$WHISPERTALK_HF_CLI" download bartowski/Llama-3.2-1B-Instruct-GGUF \
+            Llama-3.2-1B-Instruct-Q8_0.gguf \
+            --local-dir bin/models/
+    else
+        wget -q --show-progress \
+            "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q8_0.gguf" \
+            -O bin/models/Llama-3.2-1B-Instruct-Q8_0.gguf
+    fi
+
+    info "LLaMA model downloaded"
+}
+
+export_kokoro_models() {
+    step "Exporting Kokoro TTS models"
+
+    if [ -d "bin/models/kokoro-german/coreml/kokoro_duration.mlmodelc" ] && \
+       [ -d "bin/models/kokoro-german/decoder_variants" ] && \
+       [ -d "bin/models/kokoro-german/coreml/kokoro_f0n_3s.mlmodelc" ]; then
+        info "Kokoro models already exist"
+        return
+    fi
+
+    if ! command -v conda &> /dev/null; then
+        error "conda is required for Kokoro model export. Run the install steps first."
+    fi
+
+    info "Running Kokoro export script (this may take 10-15 minutes)..."
+    info "The export script manages its own conda env (kokoro_coreml) with pinned versions."
+    "$WHISPERTALK_PYTHON" scripts/export_kokoro_models.py
+
+    info "Kokoro models exported"
+}
+
+download_neutts_models() {
+    step "Downloading NeuTTS Nano German models"
+    local neutts_dir="bin/models/neutts-nano-german"
+    mkdir -p "$neutts_dir"
+
+    if [ -f "$neutts_dir/neutts-nano-german-Q4_0.gguf" ]; then
+        info "NeuTTS GGUF backbone already exists"
+    else
+        info "Downloading NeuTTS Nano German Q4_0 GGUF (~185 MB)..."
+        if [ -x "$WHISPERTALK_HF_CLI" ]; then
+            "$WHISPERTALK_HF_CLI" download neuphonic/neutts-nano-german-q4-gguf \
+                neutts-nano-german-Q4_0.gguf \
+                --local-dir "$neutts_dir/"
+        else
+            curl -L -o "$neutts_dir/neutts-nano-german-Q4_0.gguf" \
+                "https://huggingface.co/neuphonic/neutts-nano-german-q4-gguf/resolve/main/neutts-nano-german-Q4_0.gguf"
+        fi
+        info "NeuTTS backbone downloaded"
+    fi
+
+    if [ -f "$neutts_dir/neucodec_decoder.onnx" ]; then
+        info "NeuCodec ONNX decoder already exists"
+    else
+        info "Downloading NeuCodec ONNX decoder (~3.4 GB)..."
+        if [ -x "$WHISPERTALK_HF_CLI" ]; then
+            "$WHISPERTALK_HF_CLI" download neuphonic/neucodec-onnx-decoder \
+                model.onnx \
+                --local-dir "$neutts_dir/"
+            mv "$neutts_dir/model.onnx" "$neutts_dir/neucodec_decoder.onnx" 2>/dev/null || true
+        else
+            curl -L -o "$neutts_dir/neucodec_decoder.onnx" \
+                "https://huggingface.co/neuphonic/neucodec-onnx-decoder/resolve/main/model.onnx"
+        fi
+        info "NeuCodec decoder downloaded"
+    fi
+}
+
+convert_neucodec_to_coreml() {
+    step "Converting NeuCodec ONNX → CoreML mlpackage"
+    local neutts_dir="$SCRIPT_DIR/bin/models/neutts-nano-german"
+    local onnx_path="$neutts_dir/neucodec_decoder.onnx"
+    local mlmodelc_path="$neutts_dir/neucodec_decoder.mlmodelc"
+
+    if [ -d "$mlmodelc_path" ]; then
+        info "NeuCodec CoreML model already compiled at $mlmodelc_path"
+        return
+    fi
+
+    if [ ! -f "$onnx_path" ]; then
+        error "NeuCodec ONNX not found at $onnx_path — run download_neutts_models first"
+    fi
+
+    local mlpackage_path="$neutts_dir/neucodec_decoder.mlpackage"
+
+    if [ ! -d "$mlpackage_path" ]; then
+        info "Running graph surgery + CoreML conversion (this may take 5-10 minutes)..."
+        info "The conversion script manages its own conda env (neucodec_coreml) with pinned versions."
+        "$WHISPERTALK_PYTHON" "$SCRIPT_DIR/scripts/convert_neucodec_to_coreml.py" \
+            "$onnx_path" "$neutts_dir" || error "NeuCodec CoreML conversion failed"
+    else
+        info "mlpackage already exists, skipping conversion"
+    fi
+
+    if [ ! -d "$mlpackage_path" ]; then
+        error "NeuCodec mlpackage not found after conversion: $mlpackage_path"
+    fi
+
+    info "Compiling mlpackage → mlmodelc..."
+    xcrun coremlcompiler compile "$mlpackage_path" "$neutts_dir" \
+        || error "xcrun coremlcompiler failed for NeuCodec"
+
+    if [ ! -d "$mlmodelc_path" ]; then
+        error "mlmodelc not found after compilation: $mlmodelc_path"
+    fi
+
+    info "NeuCodec CoreML model ready: $mlmodelc_path"
+}
+
+prepare_neutts_reference() {
+    step "Preparing NeuTTS reference voice"
+    local neutts_dir="bin/models/neutts-nano-german"
+
+    if [ -f "$neutts_dir/ref_codes.bin" ] && [ -f "$neutts_dir/ref_text.txt" ]; then
+        info "Reference voice files already exist"
+        return
+    fi
+
+    mkdir -p "$neutts_dir"
+
+    if [ ! -f "$neutts_dir/greta.wav" ]; then
+        info "Downloading German reference audio (greta.wav)..."
+        curl -L -o "$neutts_dir/greta.wav" \
+            "https://raw.githubusercontent.com/neuphonic/neutts/main/samples/greta.wav"
+    fi
+
+    local ref_text="Es wurde eine Untersuchung zur Aufklärung des Unfalls eingeleitet."
+
+    "$WHISPERTALK_PYTHON" -c "import neucodec" 2>/dev/null || {
+        info "Installing neucodec, librosa..."
+        "$WHISPERTALK_PYTHON" -m pip install neucodec librosa 2>/dev/null || true
+    }
+
+    info "Validating neucodec API and encoding reference audio → ref_codes.bin..."
+    "$WHISPERTALK_PYTHON" - << PYEOF
+import sys
+import os
+
+neutts_dir = "bin/models/neutts-nano-german"
+
+hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+if hf_token:
+    try:
+        from huggingface_hub import login
+        login(token=hf_token, add_to_git_credential=False)
+    except Exception:
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+
+try:
+    import torch
+    import numpy as np
+    from librosa import load
+except ImportError as e:
+    print(f"ERROR: Missing dependency: {e}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from neucodec import NeuCodec
+except ImportError:
+    print("ERROR: 'neucodec' package not installed or importable.", file=sys.stderr)
+    print("  Try: pip install neucodec", file=sys.stderr)
+    sys.exit(1)
+
+if not hasattr(NeuCodec, 'from_pretrained'):
+    print("ERROR: NeuCodec class has no 'from_pretrained' method. API may have changed.", file=sys.stderr)
+    sys.exit(1)
+
+codec = NeuCodec.from_pretrained("neuphonic/neucodec", token=hf_token)
+
+if not hasattr(codec, 'encode_code'):
+    print("ERROR: NeuCodec instance has no 'encode_code' method. API may have changed.", file=sys.stderr)
+    sys.exit(1)
+
+codec.eval().to("cpu")
+
+wav_path = os.path.join(neutts_dir, "greta.wav")
+if not os.path.exists(wav_path):
+    print(f"ERROR: Reference audio not found: {wav_path}", file=sys.stderr)
+    sys.exit(1)
+
+wav, _ = load(wav_path, sr=16000, mono=True)
+wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)
+ref_codes = codec.encode_code(audio_or_path=wav_tensor).squeeze(0).squeeze(0)
+
+if ref_codes.numel() == 0:
+    print("ERROR: encode_code returned empty codes", file=sys.stderr)
+    sys.exit(1)
+
+codes_np = ref_codes.numpy().astype(np.int32)
+codes_path = os.path.join(neutts_dir, "ref_codes.bin")
+with open(codes_path, "wb") as f:
+    f.write(codes_np.tobytes())
+print(f"Saved {len(codes_np)} reference codes to {codes_path}")
+PYEOF
+
+    if [ $? -ne 0 ]; then
+        error "Reference audio encoding failed. Check neucodec API compatibility."
+    fi
+
+    info "Phonemizing reference text → ref_text.txt..."
+    "$WHISPERTALK_PYTHON" - << PYEOF
+import subprocess
+import os
+import sys
+
+ref_text = "$ref_text"
+neutts_dir = "bin/models/neutts-nano-german"
+phones = None
+
+try:
+    from phonemizer import phonemize
+    phones = phonemize(ref_text, language='de', backend='espeak', strip=True, preserve_punctuation=True)
+except (ImportError, RuntimeError):
+    import ctypes
+    import ctypes.util
+
+    lib_path = ctypes.util.find_library("espeak-ng")
+    if not lib_path:
+        for p in ["/opt/homebrew/lib/libespeak-ng.dylib", "/usr/local/lib/libespeak-ng.dylib"]:
+            if os.path.exists(p):
+                lib_path = p
+                break
+
+    if lib_path:
+        lib = ctypes.CDLL(lib_path)
+        lib.espeak_Initialize(1, 0, None, 0)
+        lib.espeak_SetVoiceByName(b"de")
+        text_ptr = ctypes.c_char_p(ref_text.encode('utf-8'))
+        text_ptr_ptr = ctypes.pointer(text_ptr)
+        lib.espeak_TextToPhonemes.restype = ctypes.c_char_p
+        phones = ""
+        while text_ptr.value:
+            ph = lib.espeak_TextToPhonemes(text_ptr_ptr, 1, 2)
+            if ph:
+                phones += ph.decode('utf-8')
+    else:
+        result = subprocess.run(
+            ["espeak-ng", "-v", "de", "--ipa", "-q", ref_text],
+            capture_output=True, text=True)
+        phones = result.stdout.strip()
+
+if not phones:
+    print("ERROR: Phonemization produced empty output", file=sys.stderr)
+    sys.exit(1)
+
+ref_text_path = os.path.join(neutts_dir, "ref_text.txt")
+with open(ref_text_path, "w") as f:
+    f.write(phones)
+print(f"Saved phonemized reference text: {phones}")
+PYEOF
+
+    if [ $? -ne 0 ]; then
+        error "Reference text phonemization failed."
+    fi
+
+    if [ -f "$neutts_dir/ref_codes.bin" ] && [ -f "$neutts_dir/ref_text.txt" ]; then
+        info "Reference voice prepared"
+    else
+        error "Reference voice preparation failed: ref_codes.bin or ref_text.txt missing"
+    fi
+}
+
+export_g2p_models() {
+    step "Exporting Neural G2P model (optional — step 16)"
+
+    local g2p_dir="bin/models/g2p"
+    if [ -d "${g2p_dir}/de_g2p.mlmodelc" ]; then
+        info "Neural G2P model already exists at ${g2p_dir}/de_g2p.mlmodelc"
+        return
+    fi
+
+    info "Running Neural G2P export script..."
+    local g2p_exit=0
+    "$WHISPERTALK_PYTHON" scripts/export_g2p_model.py --output-dir "$g2p_dir" || g2p_exit=$?
+
+    if [ -d "${g2p_dir}/de_g2p.mlmodelc" ]; then
+        info "Neural G2P model exported to ${g2p_dir}"
+    elif [ "$g2p_exit" -eq 2 ]; then
+        warn "Neural G2P model unavailable — all download sources failed."
+        warn "  Kokoro and Matcha will fall back to espeak-ng (works fine for German TTS)."
+    else
+        warn "Neural G2P export failed (exit $g2p_exit). Run manually:"
+        warn "  python3 scripts/export_g2p_model.py --output-dir ${g2p_dir}"
+    fi
+}
+
+setup_vits2_models() {
+    step "Downloading VITS2/Piper German voice model (optional — step 17)"
+
+    local vits2_dir="bin/models/vits2-german"
+    if ls "${vits2_dir}"/*.onnx 2>/dev/null | grep -q .; then
+        info "VITS2 voice model already present in ${vits2_dir}/"
+        return
+    fi
+
+    info "Downloading Piper German voice (de_DE-thorsten-high)..."
+    if ! "$WHISPERTALK_PYTHON" scripts/setup_vits2_models.py --output-dir "$vits2_dir"; then
+        warn "VITS2 model download failed. Run manually:"
+        warn "  python3 scripts/setup_vits2_models.py --output-dir ${vits2_dir}"
+    fi
+
+    if ls "${vits2_dir}"/*.onnx 2>/dev/null | grep -q .; then
+        info "VITS2 voice model ready at ${vits2_dir}/"
+    fi
+}
+
+export_matcha_models() {
+    step "Exporting Matcha-TTS models (optional — step 18)"
+
+    local matcha_dir="bin/models/matcha-german/coreml"
+    if [ -d "${matcha_dir}/matcha_encoder.mlmodelc" ]; then
+        info "Matcha-TTS CoreML models already exist at ${matcha_dir}/"
+        return
+    fi
+
+    info "Running Matcha-TTS export script (English fallback — no German checkpoint)..."
+    info "For a German voice, provide a fine-tuned checkpoint via --checkpoint."
+    if ! "$WHISPERTALK_PYTHON" scripts/export_matcha_models.py --output-dir "$matcha_dir"; then
+        warn "Matcha-TTS export failed. Run manually:"
+        warn "  python3 scripts/export_matcha_models.py --output-dir ${matcha_dir}"
+    fi
+
+    if [ -d "${matcha_dir}/matcha_encoder.mlmodelc" ]; then
+        info "Matcha-TTS CoreML models exported to ${matcha_dir}/"
+    fi
+}
+
+verify_installation() {
+    step "Verifying installation"
+
+    ALL_OK=true
+
+    for item in \
+        "whisper-cpp/.git:whisper.cpp clone" \
+        "llama-cpp/.git:llama.cpp clone"; do
+        path="${item%%:*}"
+        name="${item##*:}"
+        if [ -d "$path" ]; then
+            info "  $name"
+        else
+            warn "  MISSING: $name"
+            ALL_OK=false
+        fi
+    done
+
+    for item in \
+        "bin/models/ggml-large-v3-turbo-q5_0.bin:Whisper turbo model" \
+        "bin/models/ggml-large-v3-q5_0.bin:Whisper large-v3 model" \
+        "bin/models/Llama-3.2-1B-Instruct-Q8_0.gguf:LLaMA model" \
+        "bin/models/neutts-nano-german/neutts-nano-german-Q4_0.gguf:NeuTTS Nano German backbone"; do
+        path="${item%%:*}"
+        name="${item##*:}"
+        if [ -f "$path" ]; then
+            info "  $name ($(du -h "$path" | cut -f1))"
+        else
+            warn "  MISSING: $name"
+            ALL_OK=false
+        fi
+    done
+
+    for item in \
+        "bin/models/ggml-large-v3-encoder.mlmodelc:Whisper large-v3 CoreML encoder" \
+        "bin/models/ggml-large-v3-turbo-encoder.mlmodelc:Whisper turbo CoreML encoder" \
+        "bin/models/kokoro-german/coreml/kokoro_duration.mlmodelc:Kokoro duration model" \
+        "bin/models/kokoro-german/coreml/kokoro_f0n_3s.mlmodelc:Kokoro F0/N predictor (3s)" \
+        "bin/models/kokoro-german/decoder_variants:Kokoro decoder variants" \
+        "bin/models/neutts-nano-german/neucodec_decoder.onnx:NeuCodec ONNX decoder" \
+        "bin/models/neutts-nano-german/neucodec_decoder.mlmodelc:NeuCodec CoreML model" \
+        "bin/models/neutts-nano-german/ref_codes.bin:NeuTTS reference codes" \
+        "bin/models/neutts-nano-german/ref_text.txt:NeuTTS reference phonemes"; do
+        path="${item%%:*}"
+        name="${item##*:}"
+        if [ -e "$path" ]; then
+            info "  $name"
+        else
+            warn "  MISSING: $name"
+            ALL_OK=false
+        fi
+    done
+
+    echo ""
+    echo "Optional TTS engine models:"
+    for item in \
+        "bin/models/g2p/de_g2p.mlmodelc:Neural G2P model (de_g2p.mlmodelc)" \
+        "bin/models/vits2-german:VITS2/Piper German voice directory" \
+        "bin/models/matcha-german/coreml/matcha_encoder.mlmodelc:Matcha-TTS CoreML models"; do
+        path="${item%%:*}"
+        name="${item##*:}"
+        if [ -e "$path" ]; then
+            info "  [OK] $name"
+        else
+            warn "  [--] $name not present (run step 16/17/18 manually if needed)"
+        fi
+    done
+
+    echo ""
+    echo "Moshi models:"
+    if [ -f "bin/models/moshiko-rag-pytorch-bf16-q8.gguf" ]; then
+        info "  [OK] Moshi Q8 GGUF model ($(du -h "bin/models/moshika-rag-pytorch-bf16-q8.gguf" | cut -f1))"
+    else
+        warn "  [--] Moshi Q8 GGUF model not present"
+    fi
+    if [ -f "bin/models/moshika-rag-pytorch-bf16-q8.gguf" ]; then
+        info "  [OK] Moshi Q8 GGUF model ($(du -h "bin/models/moshika-rag-pytorch-bf16-q8.gguf" | cut -f1))"
+    else
+        warn "  [--] Moshi Q8 GGUF model not present"
+    fi
+    if [ -f "bin/models/moshiko-german-merged.safetensors" ]; then
+        info "  [OK] German LoRA merged model ($(du -h "bin/models/moshiko-german-merged.safetensors" | cut -f1))"
+    elif [ -f "bin/models/german_moshi_lora/checkpoints/checkpoint_003000/consolidated/lora.safetensors" ]; then
+        info "  [OK] German LoRA checkpoint downloaded (not yet merged)"
+    else
+        warn "  [--] Moshi German LoRA not present"
+    fi
+    if [ -f "bin/models/stt-1b-german/stt-1b-de/model.safetensors" ]; then
+        info "  [OK] German STT-1B bfloat16 model ($(du -h "bin/models/stt-1b-german/stt-1b-de/model.safetensors" | cut -f1))"
+    else
+        warn "  [--] German STT-1B bfloat16 model not present"
+    fi
+    if [ -f "bin/models/stt-1b-german/stt-1b-de-q8/model.safetensors" ]; then
+        info "  [OK] German STT-1B quantized int8 model ($(du -h "bin/models/stt-1b-german/stt-1b-de-q8/model.safetensors" | cut -f1))"
+    else
+        warn "  [--] German STT-1B quantized int8 model not present"
+    fi
+
+    echo ""
+    echo "Ollama (RAG embeddings):"
+    if command -v ollama &> /dev/null; then
+        info "  [OK] Ollama installed ($(ollama --version 2>/dev/null || echo 'version unknown'))"
+        if ollama list 2>/dev/null | grep -qi "embeddinggemma"; then
+            info "  [OK] embeddinggemma model pulled"
+        else
+            warn "  [--] embeddinggemma model not pulled (run: ollama pull embeddinggemma:300m)"
+        fi
+    else
+        warn "  [--] Ollama not installed (install from https://ollama.com/download)"
+    fi
+
+    echo ""
+    if $ALL_OK; then
+        echo -e "${GREEN}===============================================${NC}"
+        echo -e "${GREEN} Installation Complete!${NC}"
+        echo -e "${GREEN}===============================================${NC}"
+        echo ""
+        info "Next step: run ./runmetobuildeverything to build all binaries"
+    else
+        echo -e "${YELLOW}===============================================${NC}"
+        echo -e "${YELLOW} Installation finished with warnings${NC}"
+        echo -e "${YELLOW}===============================================${NC}"
+        echo ""
+        warn "Some components are missing. Check the warnings above."
+        warn "You may still try: ./runmetobuildeverything"
+        return 1
+    fi
+}
+
+download_moshi_lora() {
+    step "Downloading Moshi German LoRA (chtugha/moshi-german-lora)"
+
+    local lora_dir="bin/models/german_moshi_lora"
+    local merged="bin/models/moshiko-german-merged.safetensors"
+
+    if [ -f "$merged" ]; then
+        info "Moshi German LoRA already merged at $merged — skipping download"
+        return
+    fi
+
+    local latest_ckpt="$lora_dir/checkpoints/checkpoint_003000/consolidated/lora.safetensors"
+    if [ -f "$latest_ckpt" ]; then
+        info "Moshi German LoRA already downloaded at $lora_dir"
+        return
+    fi
+
+    mkdir -p "$lora_dir"
+
+    info "Downloading chtugha/moshi-german-lora → $lora_dir/ ..."
+    if [ -x "$WHISPERTALK_HF_CLI" ]; then
+        "$WHISPERTALK_HF_CLI" download chtugha/moshi-german-lora \
+            --local-dir "$lora_dir/"
+    else
+        warn "hf CLI not available — trying wget for individual files..."
+        local base_url="https://huggingface.co/chtugha/moshi-german-lora/resolve/main"
+        for ckpt in 002000 002500 003000; do
+            mkdir -p "$lora_dir/checkpoints/checkpoint_${ckpt}/consolidated"
+            wget -q --show-progress -O "$lora_dir/checkpoints/checkpoint_${ckpt}/consolidated/lora.safetensors" \
+                "${base_url}/checkpoints/checkpoint_${ckpt}/consolidated/lora.safetensors" || \
+                warn "  checkpoint_${ckpt} download failed"
+            wget -q -O "$lora_dir/checkpoints/checkpoint_${ckpt}/consolidated/config.json" \
+                "${base_url}/checkpoints/checkpoint_${ckpt}/consolidated/config.json" || true
+        done
+        wget -q -O "$lora_dir/args.yaml" "${base_url}/args.yaml" || true
+    fi
+
+    if [ -f "$latest_ckpt" ]; then
+        info "Moshi German LoRA downloaded"
+    else
+        warn "Moshi German LoRA download may have failed — check $lora_dir"
+        warn "  Manual: hf download chtugha/moshi-german-lora --local-dir $lora_dir/"
+    fi
+}
+
+merge_moshi_loras() {
+    step "Merging Moshi LoRA adapters (step 17 — optional)"
+
+    local lora_base="bin/models"
+    local found_any=false
+    local port_offset=0  # port = 8998 + offset; order follows glob expansion (alphabetical on most FS)
+
+    for run_dir in "$lora_base"/*_moshi_lora/; do
+        [ -d "$run_dir" ] || continue
+        found_any=true
+
+        local dir_name
+        dir_name="$(basename "$run_dir")"
+        local lang
+        lang="${dir_name%%_moshi_lora}"
+
+        local merged_path="$lora_base/moshiko-${lang}-merged.safetensors"
+        if [ -f "$merged_path" ]; then
+            info "LoRA already merged for language '$lang': $merged_path"
+            continue
+        fi
+
+        info "Found LoRA run dir for language '$lang': $run_dir"
+        info "Merging into $merged_path ..."
+
+        if ! "$WHISPERTALK_PYTHON" scripts/merge_moshi_lora.py \
+            --language "$lang" \
+            --lora-run-dir "$run_dir" \
+            --output "$merged_path" \
+            --no-backend-config; then
+            warn "LoRA merge failed for language '$lang' — skipping"
+            warn "  To retry manually: python3 scripts/merge_moshi_lora.py --language $lang --lora-run-dir $run_dir --output $merged_path"
+            continue
+        fi
+
+        info "LoRA merged for language '$lang': $merged_path"
+
+        local config_path="$lora_base/moshi-${lang}-backend-config.json"
+        if [ ! -f "$config_path" ]; then
+            local abs_merged abs_logdir
+            abs_merged="$(cd "$(dirname "$merged_path")" && pwd)/$(basename "$merged_path")"
+            abs_logdir="$(cd "$lora_base" && pwd)"
+            python3 -c "
+import json, sys
+config = {
+    'instance_name': 'moshi-' + sys.argv[1] + '-backend',
+    'hf_repo': 'kyutai/moshika-rag-pytorch-bf16',
+    'lm_model_file': sys.argv[2],
+    'text_tokenizer_file': 'hf://kyutai/moshika-rag-pytorch-bf16/tokenizer_spm_32k_3.model',
+    'log_dir': sys.argv[3],
+    'mimi_model_file': 'hf://kyutai/moshika-rag-pytorch-bf16/tokenizer-e351c8d8-checkpoint125.safetensors',
+    'mimi_num_codebooks': 8,
+    'addr': '127.0.0.1',
+    'port': 8998 + int(sys.argv[5]),
+    'cert_dir': '.'
+}    
+
+if [ -f "bin/models/moshiko-pytorch-bf16-q8.gguf" ]; then
+        info "  [OK] Moshi Q8 GGUF model ($(du -h "bin/models/moshiko-pytorch-bf16-q8.gguf" | cut -f1))"
+    else
+        warn "  [--] Moshi Q8 GGUF model not present"
+    fi
+with open(sys.argv[4], 'w') as f:
+    json.dump(config, f, indent=2)
+print('[INFO] Backend config written to ' + sys.argv[4])
+" "$lang" "$abs_merged" "$abs_logdir" "$config_path" "$port_offset"
+        fi
+        port_offset=$((port_offset + 1))
+    done
+}
+    if [ "$found_any" = "false" ]; then
+        info "No *_moshi_lora run directories found under $lora_base — skipping LoRA merge"
+        info "  To merge a LoRA manually: python3 scripts/merge_moshi_lora.py --help"
+    fi
+}
+
+with open(sys.argv[3], 'w') as f:
+    json.dump(config, f, indent=2)
+print('[INFO] Backend config written to ' + sys.argv[3])
+" "$abs_model" "$abs_logdir" "$config_en"
+        info "Moshi English Q8 backend config created: $config_en"
+    fi
+}
+
+download_german_stt_models() {
+    step "Downloading German STT-1B models (chtugha/stt-1b-german)"
+
+    local models_dir="bin/models/stt-1b-german"
+    mkdir -p "$models_dir/stt-1b-de"
+    mkdir -p "$models_dir/stt-1b-de-q8"
+
+    local bf16_model="$models_dir/stt-1b-de/model.safetensors"
+    local q8_model="$models_dir/stt-1b-de-q8/model.safetensors"
+
+    if [ -f "$bf16_model" ] && [ -f "$q8_model" ]; then
+        info "German STT-1B models already exist at $models_dir"
+        return
+    fi
+
+    info "Downloading German STT-1B models from chtugha/stt-1b-german..."
+    if [ -x "$WHISPERTALK_HF_CLI" ]; then
+        "$WHISPERTALK_HF_CLI" download chtugha/stt-1b-german \
+            --local-dir "$models_dir/"
+    else
+        local base_url="https://huggingface.co/chtugha/stt-1b-german/resolve/main"
+        
+        info "Downloading German STT-1B bfloat16 model..."
+        curl -L -o "$models_dir/stt-1b-de/model.safetensors" "$base_url/stt-1b-de/model.safetensors"
+        curl -L -o "$models_dir/stt-1b-de/config.json" "$base_url/stt-1b-de/config.json"
+        curl -L -o "$models_dir/stt-1b-de/moshi-de-backend-config.json" "$base_url/stt-1b-de/moshi-de-backend-config.json"
+        curl -L -o "$models_dir/stt-1b-de/tokenizer_de.model" "$base_url/stt-1b-de/tokenizer_de.model"
+        
+        info "Downloading German STT-1B quantized int8 model..."
+        curl -L -o "$models_dir/stt-1b-de-q8/model.safetensors" "$base_url/stt-1b-de-q8/model.safetensors"
+        curl -L -o "$models_dir/stt-1b-de-q8/config.json" "$base_url/stt-1b-de-q8/config.json"
+        curl -L -o "$models_dir/stt-1b-de-q8/moshi-de-backend-config.json" "$base_url/stt-1b-de-q8/moshi-de-backend-config.json"
+        curl -L -o "$models_dir/stt-1b-de-q8/tokenizer_de.model" "$base_url/stt-1b-de-q8/tokenizer_de.model"
+    fi
+    info "German STT-1B models downloaded successfully"
+}
+
+check_ollama() {
+    step "Installing Ollama (for tomedo-crawl RAG embeddings)"
+
+    [ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+
+    if ! command -v ollama &> /dev/null; then
+        if brew list --cask 2>/dev/null | grep -q "^ollama"; then
+            info "Ollama cask already installed — updating PATH"
+            for _op in /opt/homebrew/bin /usr/local/bin; do
+                [ -x "$_op/ollama" ] && export PATH="$_op:$PATH" && break
+            done
+            unset _op
+        else
+            info "Installing Ollama via Homebrew..."
+            brew install --cask ollama
+        fi
+    fi
+
+    if ! command -v ollama &> /dev/null; then
+        warn "Ollama install failed — tomedo-crawl RAG will not work."
+        warn "  Install manually from: https://ollama.com/download"
+        return
+    fi
+
+    info "Ollama: $(ollama --version 2>/dev/null || echo 'installed')"
+
+    if ! ollama list 2>/dev/null | grep -qi "embeddinggemma"; then
+        info "Starting Ollama and pulling embeddinggemma:300m..."
+        open -a Ollama 2>/dev/null || true
+        local retries=0
+        while [ $retries -lt 10 ] && ! ollama list &>/dev/null; do
+            sleep 3
+            retries=$((retries + 1))
+        done
+        if ollama list &>/dev/null; then
+            ollama pull embeddinggemma:300m || warn "Failed to pull embeddinggemma:300m — try manually: ollama pull embeddinggemma:300m"
+        else
+            warn "Ollama server did not start in time."
+            warn "  Open Ollama.app, then run: ollama pull embeddinggemma:300m"
+        fi
+    else
+        info "Embedding model 'embeddinggemma:300m' already available"
+    fi
+}
+
+install_git_hooks() {
+    step "Installing git sync helpers"
+
+    local top_level
+    top_level="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+    local git_dir
+    git_dir="$(git -C "$top_level" rev-parse --git-dir 2>/dev/null)" || return 0
+    if [[ "$git_dir" != /* ]]; then
+        git_dir="$top_level/$git_dir"
+    fi
+    local hooks_dir="$git_dir/hooks"
+    mkdir -p "$hooks_dir"
+
+    cat > "$hooks_dir/post-merge" << 'HOOKEOF'
+#!/bin/bash
+CURRENT=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ "$CURRENT" = "main" ]; then
+    echo "[post-merge] Local main updated to $(git rev-parse --short HEAD)."
+fi
+HOOKEOF
+    chmod +x "$hooks_dir/post-merge"
+
+    git -C "$top_level" config alias.pushsync '!f() { git push "$@" && git fetch origin && git merge --ff-only origin/main && echo "[pushsync] Local main synced with remote." || echo "[pushsync] Push succeeded. Run git pull to sync if needed."; }; f'
+    info "Git alias 'git pushsync' installed (pushes then fast-forward merges remote)"
+
+    cat > "$hooks_dir/post-commit" << 'HOOKEOF'
+#!/bin/bash
+CURRENT=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ "$CURRENT" = "main" ]; then
+    echo "[hint] Use 'git pushsync' to push and sync local main with remote."
+fi
+HOOKEOF
+    chmod +x "$hooks_dir/post-commit"
+
+    info "Git hooks installed (post-merge, post-commit hint)"
+}
+
+sync_scripts_dir() {
+    local sha="$1"
+    local scripts_dir="$SCRIPT_DIR/scripts"
+    mkdir -p "$scripts_dir"
+    local contents_url="https://api.github.com/repos/chtugha/coding.agent/contents/scripts?ref=${sha}"
+    local file_list
+    file_list=$(curl -fsSL --max-time 15 "$contents_url" 2>/dev/null \
+        | grep '"name"' \
+        | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    if [ -z "$file_list" ]; then
+        return 0
+    fi
+    local f
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${sha}/scripts/${f}"
+        curl -fsSL --max-time 60 "$raw_url" -o "$scripts_dir/$f" 2>/dev/null || true
+    done <<< "$file_list"
+}
+
+self_update() {
+    echo -e "${BLUE}[INFO]${NC} Checking for updates..."
+    local script_name
+    script_name="$(basename "$0")"
+    local script_path="$SCRIPT_DIR/$script_name"
+    local version_file="$SCRIPT_DIR/.install_version"
+
+    local head_api_url="https://api.github.com/repos/chtugha/coding.agent/commits/main"
+    local latest_sha
+    latest_sha=$(curl -fsSL --max-time 15 "$head_api_url" 2>/dev/null \
+        | grep -m1 '"sha"' \
+        | sed 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+
+    if [ -z "$latest_sha" ]; then
+        echo -e "${YELLOW}[INFO]${NC} Could not reach GitHub — skipping update check"
+        return 0
+    fi
+
+    local local_sha=""
+    [ -f "$version_file" ] && local_sha=$(cat "$version_file" | tr -d '[:space:]')
+
+    if [ "$local_sha" = "$latest_sha" ]; then
+        echo -e "${GREEN}[INFO]${NC} Already up to date (${latest_sha:0:7})"
+        return 0
+    fi
+
+    echo -e "${YELLOW}[INFO]${NC} New version available — updating to ${latest_sha:0:7}..."
+
+    sync_scripts_dir "$latest_sha"
+
+    local tmp_script
+    tmp_script="$(mktemp /tmp/prodigy-install-update.XXXXXX)" || {
+        echo -e "${YELLOW}[INFO]${NC} Could not create temp file — skipping update"
+        echo "$latest_sha" > "$version_file" 2>/dev/null || true
+        return 0
+    }
+    local raw_url="https://raw.githubusercontent.com/chtugha/coding.agent/${latest_sha}/${script_name}"
+    if ! curl -fsSL --max-time 30 "$raw_url" -o "$tmp_script" 2>/dev/null; then
+        echo -e "${YELLOW}[WARN]${NC} Script download failed — re-run to retry the update"
+        rm -f "$tmp_script"
+        return 0
+    fi
+
+    if diff -q "$tmp_script" "$script_path" &>/dev/null; then
+        rm -f "$tmp_script"
+        echo "$latest_sha" > "$version_file" 2>/dev/null || true
+        echo -e "${GREEN}[INFO]${NC} Scripts synced (${latest_sha:0:7})"
+        return 0
+    fi
+
+    chmod +x "$tmp_script"
+    cp "$tmp_script" "$script_path"
+    rm -f "$tmp_script"
+    echo "$latest_sha" > "$version_file" 2>/dev/null || true
+    echo -e "${GREEN}[INFO]${NC} Update applied (${latest_sha:0:7}). Re-launching..."
+    exec "$script_path" "$@"
+}
+
+main() {
+    self_update "$@"
+
+    echo -e "${BLUE}===============================================${NC}"
+    echo -e "${BLUE} Prodigy - Full Installation${NC}"
+    echo -e "${BLUE}===============================================${NC}"
+
+    check_macos
+    ask_hf_token
+    check_admin_access
+    check_and_install_xcode_clt
+    check_and_install_xcode
+    check_and_install_homebrew
+    install_system_deps
+    install_rust
+    check_and_install_python
+    setup_python_env
+    setup_whisper_coreml_env
+    resolve_whispertalk_python
+    resolve_whisper_coreml_python
+
+    setup_whisper_cpp
+    setup_llama_cpp
+    setup_kokoro
+
+    mkdir -p bin/models
+
+    download_whisper_models
+    wait_for_xcode_if_needed
+    generate_whisper_coreml
+    download_llama_model
+    export_kokoro_models
+    download_neutts_models
+    convert_neucodec_to_coreml
+    prepare_neutts_reference
+
+    export_g2p_models
+    setup_vits2_models
+    export_matcha_models
+
+    check_ollama
+    download_moshi_lora
+    merge_moshi_loras
+    download_moshi_q8_model
+    download_german_stt_models
+    install_git_hooks
+    verify_installation
+}
+
+main

@@ -1,0 +1,36 @@
+
+============================================================
+Processing BeMaTac dataset...
+============================================================
+Traceback (most recent call last):
+  File "/Users/whisper/zenflow_projects/coding.agent/scripts/prepare_german_dataset.py", line 831, in <module>
+    main()
+    ~~~~^^
+  File "/Users/whisper/zenflow_projects/coding.agent/scripts/prepare_german_dataset.py", line 806, in main
+    process_bematac()
+    ~~~~~~~~~~~~~~~^^
+  File "/Users/whisper/zenflow_projects/coding.agent/scripts/prepare_german_dataset.py", line 508, in process_bematac
+    n = process_dialogue(mono, sr, spk0, spk1, "bematac", fid, output_dir)
+  File "/Users/whisper/zenflow_projects/coding.agent/scripts/prepare_german_dataset.py", line 453, in process_dialogue
+    write_chunk(stereo, sr, chunk_aligns, output_dir, fname)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/whisper/zenflow_projects/coding.agent/scripts/prepare_german_dataset.py", line 381, in write_chunk
+    sf.write(wav_path, stereo.T, sr, subtype="PCM_16")
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/whisper/miniconda3/lib/python3.13/site-packages/soundfile.py", line 375, in write
+    with SoundFile(file, 'w', samplerate, channels,
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                   subtype, endian, format, closefd,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                   compression_level, bitrate_mode) as f:
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/whisper/miniconda3/lib/python3.13/site-packages/soundfile.py", line 788, in __exit__
+    self.close()
+    ~~~~~~~~~~^^
+  File "/Users/whisper/miniconda3/lib/python3.13/site-packages/soundfile.py", line 1257, in close
+    self.flush()
+    ~~~~~~~~~~^^
+  File "/Users/whisper/miniconda3/lib/python3.13/site-packages/soundfile.py", line 1251, in flush
+    _snd.sf_write_sync(self._file)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+KeyboardInterrupt
