@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>V3 vs V4 Alignment Comparison - Episode 153</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .header {
+            background-color: #2c3e50;
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .header h1 {
+            margin: 0 0 10px 0;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-box {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .comparison-table {
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th {
+            background-color: #34495e;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #ecf0f1;
+        }
+        tr:hover {
+            background-color: #f8f9fa;
+        }
+        .transcript-time {
+            font-weight: bold;
+            color: #2980b9;
+        }
+        .v3-time {
+            color: #27ae60;
+        }
+        .v4-time {
+            color: #e74c3c;
+        }
+        .text-cell {
+            max-width: 400px;
+        }
+        .section-header {
+            background-color: #ecf0f1;
+            font-weight: bold;
+            text-align: center;
+            padding: 15px;
+        }
+        .warning {
+            background-color: #fff3cd;
+            border: 2px solid #ffc107;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .warning-title {
+            font-weight: bold;
+            color: #856404;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔍 V3 vs V4 Alignment Comparison</h1>
+        <p>Episode 153: "GEDANKEN ZUM AUSDRUCKEN BRINGEN"</p>
+        <p>Audio Duration: 5,569.3 seconds (92.8 minutes)</p>
+    </div>
+
+    <div class="warning">
+        <div class="warning-title">⚠️ CRITICAL ISSUE DETECTED</div>
+        <p><strong>V3 and V4 disagree by 32 seconds on where speech begins!</strong></p>
+        <p>This means one algorithm is misaligning the entire episode. All timestamps will be off by 32 seconds.</p>
+        <ul>
+            <li>V3 detected speech starting at <strong>46.0 seconds</strong> in audio</li>
+            <li>V4 detected speech starting at <strong>14.0 seconds</strong> in audio</li>
+            <li>Difference: <strong>32.0 seconds</strong></li>
+        </ul>
+    </div>
+
+    <div class="stats">
+        <div class="stat-box">
+            <div class="stat-label">V3 Offset</div>
+            <div class="stat-value" style="color: #27ae60;">46.0s</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">V4 Offset</div>
+            <div class="stat-value" style="color: #e74c3c;">14.0s</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Disagreement</div>
+            <div class="stat-value" style="color: #e67e22;">32.0s</div>
+        </div>
+    </div>
+
+    <div class="comparison-table">
+        <table>
+            <thead>
+                <tr>
+                    <th>Transcript Time</th>
+                    <th>V3 Audio Time<br><span style="font-weight:normal;font-size:11px;">(+46s offset)</span></th>
+                    <th>V4 Audio Time<br><span style="font-weight:normal;font-size:11px;">(+14s offset)</span></th>
+                    <th>Difference</th>
+                    <th>Text</th>
+                </tr>
+            </thead>
+            <tbody>
+<tr><td colspan="5" class="section-header">Beginning (First 50 segments)</td></tr>
+
+                <tr>
+                    <td class="transcript-time">0.0s - 6.6s</td>
+                    <td class="v3-time">46.0s - 52.6s</td>
+                    <td class="v4-time">14.0s - 20.6s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> What happened to that boy? Ich bin in meiner Blüte wie eine Blume, boy.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">7.9s - 12.1s</td>
+                    <td class="v3-time">53.9s - 58.1s</td>
+                    <td class="v4-time">21.9s - 26.1s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Meine Damen und Herren, war Shindy auf seinem neuen Track Mandarine.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">12.6s - 15.5s</td>
+                    <td class="v3-time">58.6s - 61.5s</td>
+                    <td class="v4-time">26.6s - 29.5s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Sehr, sehr gutes Ding und damit herzlich willkommen zu einer neuen Folge Gemischtes Hack.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">16.0s - 19.5s</td>
+                    <td class="v3-time">62.0s - 65.5s</td>
+                    <td class="v4-time">30.0s - 33.5s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Mein Name ist Felix Lobrecht, mir gegenüber sitzt wie immer der wunderbare Tommy Schmidt.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">20.7s - 23.0s</td>
+                    <td class="v3-time">66.7s - 69.0s</td>
+                    <td class="v4-time">34.7s - 37.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Tommy, direkt eine Sache zum Einstieg.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">23.0s - 26.0s</td>
+                    <td class="v3-time">69.0s - 72.0s</td>
+                    <td class="v4-time">37.0s - 40.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Ich habe so einen Anfängerfehler gemacht.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">26.0s - 31.5s</td>
+                    <td class="v3-time">72.0s - 77.5s</td>
+                    <td class="v4-time">40.0s - 45.5s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Und zwar habe ich Wäsche gewaschen mit einem Taschentuch in der Hosentasche.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">31.9s - 34.2s</td>
+                    <td class="v3-time">77.9s - 80.2s</td>
+                    <td class="v4-time">45.9s - 48.2s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Es fusselt jetzt.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">34.3s - 36.8s</td>
+                    <td class="v3-time">80.3s - 82.8s</td>
+                    <td class="v4-time">48.3s - 50.8s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Ja, jetzt bin ich hier die alte Fleddersau, Alter.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">37.1s - 39.8s</td>
+                    <td class="v3-time">83.1s - 85.8s</td>
+                    <td class="v4-time">51.1s - 53.8s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Es fleddert sogar. Es fusselt nicht, es fleddert sogar.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">40.2s - 43.6s</td>
+                    <td class="v3-time">86.2s - 89.6s</td>
+                    <td class="v4-time">54.2s - 57.6s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Ja, ja, ja. Das ist richtig ärgerlich, weil es war so die letzte Wäsche,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">43.8s - 49.2s</td>
+                    <td class="v3-time">89.8s - 95.2s</td>
+                    <td class="v4-time">57.8s - 63.2s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> für die Hackis ist es Montagmorgen und ich fahre gleich wieder los auf Tour,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">49.2s - 50.9s</td>
+                    <td class="v3-time">95.2s - 96.9s</td>
+                    <td class="v4-time">63.2s - 64.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> auf den letzten Tourblock von Stand Up 44.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">51.5s - 55.0s</td>
+                    <td class="v3-time">97.5s - 101.0s</td>
+                    <td class="v4-time">65.5s - 69.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Und ich habe so richtig, ich dachte mir so, ja, ich bin so ein Typ, der sein Leben im Griff hat,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">55.0s - 59.6s</td>
+                    <td class="v3-time">101.0s - 105.6s</td>
+                    <td class="v4-time">69.0s - 73.6s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> der jetzt nochmal richtig geil hier eine Wäsche wäscht und jetzt bin ich einfach die Fleddersau, ey...</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">60.2s - 62.7s</td>
+                    <td class="v3-time">106.2s - 108.7s</td>
+                    <td class="v4-time">74.2s - 76.7s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Bist du eigentlich ein guter Trockner? Also bist du ein Trockner-Fan?</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">62.8s - 64.5s</td>
+                    <td class="v3-time">108.8s - 110.5s</td>
+                    <td class="v4-time">76.8s - 78.5s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Ich nehme mich gar nicht, um das mal vorwegzunehmen.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">64.8s - 66.2s</td>
+                    <td class="v3-time">110.8s - 112.2s</td>
+                    <td class="v4-time">78.8s - 80.2s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Ich kriege das nicht richtig hin.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">66.5s - 66.9s</td>
+                    <td class="v3-time">112.5s - 112.9s</td>
+                    <td class="v4-time">80.5s - 80.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Oder wie meinst du?</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">66.9s - 69.6s</td>
+                    <td class="v3-time">112.9s - 115.6s</td>
+                    <td class="v4-time">80.9s - 83.6s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Bei mir ist das wirklich, ja, also aufhängen, fantastisch.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">70.0s - 73.3s</td>
+                    <td class="v3-time">116.0s - 119.3s</td>
+                    <td class="v4-time">84.0s - 87.3s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Ich habe ja schon oft drüber gesprochen, da ist aber das Problem,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">73.4s - 76.1s</td>
+                    <td class="v3-time">119.4s - 122.1s</td>
+                    <td class="v4-time">87.4s - 90.1s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> dass ich nichts unästhetischer finde als Wäscheständer.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">76.7s - 78.0s</td>
+                    <td class="v3-time">122.7s - 124.0s</td>
+                    <td class="v4-time">90.7s - 92.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Furchtbar, widerlich.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">78.1s - 80.9s</td>
+                    <td class="v3-time">124.1s - 126.9s</td>
+                    <td class="v4-time">92.1s - 94.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Da hätte ich lieber kein Dach in der Wohnung oder so als Wäscheständer.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">81.1s - 82.0s</td>
+                    <td class="v3-time">127.1s - 128.0s</td>
+                    <td class="v4-time">95.1s - 96.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Das ist schrecklich.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">82.0s - 85.4s</td>
+                    <td class="v3-time">128.0s - 131.4s</td>
+                    <td class="v4-time">96.0s - 99.4s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Aber Trockner haben das Problem, dass entweder, also ich kriege es nicht hin,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">85.5s - 91.1s</td>
+                    <td class="v3-time">131.5s - 137.1s</td>
+                    <td class="v4-time">99.5s - 105.1s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> dass das irgendwie nicht zerknittert ist oder einläuft oder nur so halb trocken ist,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">91.2s - 92.9s</td>
+                    <td class="v3-time">137.2s - 138.9s</td>
+                    <td class="v4-time">105.2s - 106.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> sodass ich es dann doch wieder irgendwie aufhängen muss.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">93.3s - 96.9s</td>
+                    <td class="v3-time">139.3s - 142.9s</td>
+                    <td class="v4-time">107.3s - 110.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Ich bin nicht, bist du gut, kannst du mir Tipps geben, wie trocknet man richtig?</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">97.5s - 100.6s</td>
+                    <td class="v3-time">143.5s - 146.6s</td>
+                    <td class="v4-time">111.5s - 114.6s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Naja, da gibt es wirklich nicht Rocket Science, Tommy.</td>
+                </tr>
+<tr><td colspan="5" class="section-header">Minute 24 (1440s)</td></tr>
+
+                <tr>
+                    <td class="transcript-time">1431.0s - 1433.4s</td>
+                    <td class="v3-time">1477.0s - 1479.4s</td>
+                    <td class="v4-time">1445.0s - 1447.4s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> wie warm das in diesem Zimmer ist?</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1433.7s - 1435.9s</td>
+                    <td class="v3-time">1479.7s - 1481.9s</td>
+                    <td class="v4-time">1447.7s - 1449.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Weil die Klimaanlage...</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1435.9s - 1436.9s</td>
+                    <td class="v3-time">1481.9s - 1482.9s</td>
+                    <td class="v4-time">1449.9s - 1450.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Du hast die Wahl zwischen</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1436.9s - 1438.3s</td>
+                    <td class="v3-time">1482.9s - 1484.3s</td>
+                    <td class="v4-time">1450.9s - 1452.3s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> einer übertrieben</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1438.3s - 1439.8s</td>
+                    <td class="v3-time">1484.3s - 1485.8s</td>
+                    <td class="v4-time">1452.3s - 1453.8s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> lauten Klimaanlage.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1440.3s - 1440.9s</td>
+                    <td class="v3-time">1486.3s - 1486.9s</td>
+                    <td class="v4-time">1454.3s - 1454.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> So ein Pinguin,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1441.0s - 1441.3s</td>
+                    <td class="v3-time">1487.0s - 1487.3s</td>
+                    <td class="v4-time">1455.0s - 1455.3s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> so ein Ding,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1441.3s - 1442.3s</td>
+                    <td class="v3-time">1487.3s - 1488.3s</td>
+                    <td class="v4-time">1455.3s - 1456.3s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> was du so auf den Boden stellst.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1442.4s - 1443.0s</td>
+                    <td class="v3-time">1488.4s - 1489.0s</td>
+                    <td class="v4-time">1456.4s - 1457.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Was die ganze Zeit so macht.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1443.2s - 1444.0s</td>
+                    <td class="v3-time">1489.2s - 1490.0s</td>
+                    <td class="v4-time">1457.2s - 1458.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Rob, rob, rob, rob, rob.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1444.2s - 1444.9s</td>
+                    <td class="v3-time">1490.2s - 1490.9s</td>
+                    <td class="v4-time">1458.2s - 1458.9s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Oder du...</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1444.9s - 1446.3s</td>
+                    <td class="v3-time">1490.9s - 1492.3s</td>
+                    <td class="v4-time">1458.9s - 1460.3s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Oder es ist übertrieben heiß.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1446.4s - 1448.0s</td>
+                    <td class="v3-time">1492.4s - 1494.0s</td>
+                    <td class="v4-time">1460.4s - 1462.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Oder wie so ein Trockengerät.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1448.1s - 1448.8s</td>
+                    <td class="v3-time">1494.1s - 1494.8s</td>
+                    <td class="v4-time">1462.1s - 1462.8s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> So ein durchgehendes...</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">1449.8s - 1450.6s</td>
+                    <td class="v3-time">1495.8s - 1496.6s</td>
+                    <td class="v4-time">1463.8s - 1464.6s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Ja, ja, ja.</td>
+                </tr>
+<tr><td colspan="5" class="section-header">Minute 48 (2880s)</td></tr>
+
+                <tr>
+                    <td class="transcript-time">2870.0s - 2871.3s</td>
+                    <td class="v3-time">2916.0s - 2917.3s</td>
+                    <td class="v4-time">2884.0s - 2885.3s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> wirklich bis zum Abbrechen.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2872.1s - 2872.7s</td>
+                    <td class="v3-time">2918.1s - 2918.7s</td>
+                    <td class="v4-time">2886.1s - 2886.7s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Also das ist,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2873.0s - 2873.8s</td>
+                    <td class="v3-time">2919.0s - 2919.8s</td>
+                    <td class="v4-time">2887.0s - 2887.8s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> du hast quasi,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2873.8s - 2875.2s</td>
+                    <td class="v3-time">2919.8s - 2921.2s</td>
+                    <td class="v4-time">2887.8s - 2889.2s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> du hast quasi genügend Versuche.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2875.2s - 2876.4s</td>
+                    <td class="v3-time">2921.2s - 2922.4s</td>
+                    <td class="v4-time">2889.2s - 2890.4s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Und was ich,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2876.4s - 2877.0s</td>
+                    <td class="v3-time">2922.4s - 2923.0s</td>
+                    <td class="v4-time">2890.4s - 2891.0s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> was mir noch,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2877.0s - 2878.6s</td>
+                    <td class="v3-time">2923.0s - 2924.6s</td>
+                    <td class="v4-time">2891.0s - 2892.6s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> was ich noch interessant fand,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2878.6s - 2878.7s</td>
+                    <td class="v3-time">2924.6s - 2924.7s</td>
+                    <td class="v4-time">2892.6s - 2892.7s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> ist,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2879.5s - 2881.5s</td>
+                    <td class="v3-time">2925.5s - 2927.5s</td>
+                    <td class="v4-time">2893.5s - 2895.5s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> also natürlich spielt man da irgendwas,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2882.0s - 2882.8s</td>
+                    <td class="v3-time">2928.0s - 2928.8s</td>
+                    <td class="v4-time">2896.0s - 2896.8s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> aber dadurch,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2883.4s - 2884.3s</td>
+                    <td class="v3-time">2929.4s - 2930.3s</td>
+                    <td class="v4-time">2897.4s - 2898.3s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> dass die Situation,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2884.6s - 2885.5s</td>
+                    <td class="v3-time">2930.6s - 2931.5s</td>
+                    <td class="v4-time">2898.6s - 2899.5s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> die man spielt,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2885.9s - 2887.5s</td>
+                    <td class="v3-time">2931.9s - 2933.5s</td>
+                    <td class="v4-time">2899.9s - 2901.5s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> in dem Moment ja real ist,</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2888.2s - 2889.6s</td>
+                    <td class="v3-time">2934.2s - 2935.6s</td>
+                    <td class="v4-time">2902.2s - 2903.6s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> muss man sich da gar nicht so reindenken.</td>
+                </tr>
+
+                <tr>
+                    <td class="transcript-time">2889.6s - 2890.3s</td>
+                    <td class="v3-time">2935.6s - 2936.3s</td>
+                    <td class="v4-time">2903.6s - 2904.3s</td>
+                    <td style="font-weight:bold;color:#e67e22;">32.0s</td>
+                    <td class="text-cell"> Also ich spiele,</td>
+                </tr>
+
+            </tbody>
+        </table>
+    </div>
+
+    <div style="margin-top: 20px; padding: 15px; background: white; border-radius: 8px;">
+        <h3>How to Read This Table</h3>
+        <ul>
+            <li><strong>Transcript Time:</strong> The timestamp in the original transcript JSON</li>
+            <li><strong>V3 Audio Time:</strong> Where V3 thinks this text appears in the audio file (transcript time + 46s)</li>
+            <li><strong>V4 Audio Time:</strong> Where V4 thinks this text appears in the audio file (transcript time + 14s)</li>
+            <li><strong>Difference:</strong> How far apart V3 and V4 disagree (always 32 seconds)</li>
+        </ul>
+        <p><strong>Example:</strong> The text "So ein Pinguin," appears at transcript time 1440.3s.</p>
+        <ul>
+            <li>V3 says it's at audio time <span style="color:#27ae60;">1486.3s</span> (1440.3 + 46.0)</li>
+            <li>V4 says it's at audio time <span style="color:#e74c3c;">1454.3s</span> (1440.3 + 14.0)</li>
+            <li>They disagree by <span style="color:#e67e22;">32.0 seconds</span></li>
+        </ul>
+        <p><strong>Only one can be correct!</strong> We need to verify which alignment is accurate.</p>
+    </div>
+</body>
+</html>

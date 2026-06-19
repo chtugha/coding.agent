@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Test V4 optimized waveform alignment on episode 153"""
+
+import json
+import time
+import librosa
+import soundfile as sf
+from fix_waveform_alignment_v4_optimized import align_audio_to_transcript_fast
+
+# Paths
+audio_path = "/Volumes/eHDD/moshi-rag-data/datasets/Gemischtes.Hack.Podcast/#153 GEDANKEN ZUM AUSDRUCKEN BRINGEN [d4c68e72-0a5c-11ec-88ca-4ff47ad17557].mp3"
+transcript_path = "/Volumes/eHDD/moshi-rag-data/datasets/Gemischtes.Hack.Podcast/transcripts/episode_153_gedanken_zum_ausdrucken_bringen.json"
+output_path = "/tmp/fixed_alignment_test/episode_153_cleaned_v4.wav"
+regions_path = "/tmp/fixed_alignment_test/episode_153_kept_regions_v4.json"
+
+print("="*80)
+print("Testing V4 Optimized Waveform Alignment - Episode 153")
+print("="*80)
+
+# Load transcript
+print("\n1. Loading transcript...")
+with open(transcript_path, 'r') as f:
+    transcript_data = json.load(f)
+
+segments = transcript_data['segments']
+print(f"   Loaded {len(segments)} segments")
+
+# Load audio
+print("\n2. Loading audio...")
+start_time = time.time()
+audio, sr = librosa.load(audio_path, sr=None, mono=True)
+load_time = time.time() - start_time
+duration = len(audio) / sr
+print(f"   Sample rate: {sr} Hz")
+print(f"   Duration: {duration:.1f} seconds ({duration/60:.1f} minutes)")
+print(f"   Load time: {load_time:.2f}s")
+
+# Run V4 alignment
+print("\n3. Running V4 optimized alignment...")
+start_time = time.time()
+cleaned_audio, kept_regions = align_audio_to_transcript_fast(audio, sr, segments)
+align_time = time.time() - start_time
+
+print(f"   Alignment time: {align_time:.2f}s")
+print(f"   Kept regions: {len(kept_regions)}")
+
+# Calculate statistics
+original_duration = len(audio) / sr
+cleaned_duration = len(cleaned_audio) / sr
+removed_duration = original_duration - cleaned_duration
+removal_pct = (removed_duration / original_duration) * 100
+
+print(f"\n4. Results:")
+print(f"   Original duration:  {original_duration:.1f}s ({original_duration/60:.1f} min)")
+print(f"   Cleaned duration:   {cleaned_duration:.1f}s ({cleaned_duration/60:.1f} min)")
+print(f"   Removed duration:   {removed_duration:.1f}s ({removed_duration/60:.1f} min)")
+print(f"   Removal percentage: {removal_pct:.2f}%")
+
+# Save cleaned audio
+print(f"\n5. Saving cleaned audio to: {output_path}")
+sf.write(output_path, cleaned_audio, sr)
+
+# Save kept regions
+print(f"   Saving kept regions to: {regions_path}")
+with open(regions_path, 'w') as f:
+    json.dump(kept_regions, f, indent=2)
+
+print("\n" + "="*80)
+print("V4 ALIGNMENT COMPLETE")
+print("="*80)
+print(f"\nProcessing speed: {duration/align_time:.1f}x realtime")
+print(f"Total time: {align_time:.2f}s for {duration/60:.1f} minutes of audio")
+
+# Made with Bob
