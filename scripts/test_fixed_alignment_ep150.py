@@ -12,13 +12,13 @@ import sys
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fix_waveform_alignment import align_audio_to_transcript_pattern
+from fix_waveform_alignment_v3 import align_audio_to_transcript_continuous
 
 # Paths
 DATASET_DIR = "/Volumes/eHDD/moshi-rag-data/datasets/Gemischtes.Hack.Podcast"
 TRANSCRIPT_DIR = os.path.join(DATASET_DIR, "Gemischtes.Hack.Podcast.Transcript/transcripts")
-AUDIO_FILE = os.path.join(DATASET_DIR, "#150 SEIL SEIL SEIL (mit Tommi Schmitt).mp3")
-TRANSCRIPT_FILE = os.path.join(TRANSCRIPT_DIR, "episode_150_gemischtes_hack.json")
+AUDIO_FILE = os.path.join(DATASET_DIR, "#150 SEIL SEIL SEIL [07736554-72c1-11eb-8725-67d7ee38f508].mp3")
+TRANSCRIPT_FILE = os.path.join(TRANSCRIPT_DIR, "episode_150_seil_seil_seil.json")
 OUTPUT_DIR = "/tmp/fixed_alignment_test"
 
 def main():
@@ -47,10 +47,8 @@ def main():
     print("Running FIXED waveform alignment...")
     print(f"{'='*60}\n")
     
-    cleaned_audio, kept_regions = align_audio_to_transcript_pattern(
-        audio, sr, segments,
-        correlation_threshold=0.6,
-        min_match_duration=5.0
+    cleaned_audio, kept_regions = align_audio_to_transcript_continuous(
+        audio, sr, segments
     )
     
     cleaned_duration = len(cleaned_audio) / sr

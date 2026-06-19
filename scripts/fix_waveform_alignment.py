@@ -96,8 +96,8 @@ def align_audio_to_transcript_pattern(audio, sr, transcript_segments,
     pattern_pos = 0  # Position in pattern
     audio_pos = 0    # Position in audio envelope
     
-    window_size = int(2.0 * pattern_sr)  # 2-second correlation window
-    slide_step = int(0.5 * pattern_sr)   # 0.5-second slide step
+    window_size = int(5.0 * pattern_sr)  # 5-second correlation window (increased from 2s)
+    slide_step = int(1.0 * pattern_sr)   # 1-second slide step (increased from 0.5s)
     
     while pattern_pos < len(pattern) and audio_pos < len(audio_envelope):
         # Get pattern window
