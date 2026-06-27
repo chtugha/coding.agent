@@ -259,21 +259,67 @@ def _bootstrap_offset(whisper_words: list, transcript_segs: list,
                        max_segs: int = 40,
                        max_raw_t: float = 180.0) -> float | None:
     """
-    Estimate the initial raw_time − transcript_time offset by finding the
-    first 4-word exact run shared between the transcript (first max_segs
-    segments) and the whisper output (first max_raw_t seconds only).
+    Estimate the initial raw_time − transcript_time offset.
 
-    Constraining to the first max_raw_t seconds of whisper prevents a rare
-    false match deep in the audio from producing a wildly wrong initial offset.
+    Strategy (primary): for each of the first max_segs transcript segments
+    with ≥4 words, run a true LCS search within the first max_raw_t seconds
+    of whisper output.  The first segment that scores above threshold gives
+    the offset as:  raw_start_of_match − transcript_seg_start.
+
+    This is better than a 4-gram exact scan because:
+    - It tolerates whisper dropping the first 1-2 words of a segment (common
+      at intro boundaries) — true LCS scores the remaining words correctly.
+    - It scores the best-matching position in the window rather than the
+      first exact 4-gram, so it's robust to accidental 4-gram repeats
+      elsewhere in the audio.
+    - Bounding to max_raw_t ensures we can never get a false offset from a
+      repeated phrase deep in the episode.
+
+    Fallback: if LCS finds nothing, try an exact 4-gram scan in the same
+    window (handles cases where all early segments are very short and LCS
+    thresholds are never met).
 
     Returns offset (float) or None if nothing found.
     """
-    w_norm = [((norm_words(w["word"]) or [""])[0]) for w in whisper_words]
-    w_starts = [w["start"] for w in whisper_words]
+    w_starts_all = [w["start"] for w in whisper_words]
 
-    # Only search within the first max_raw_t seconds of whisper output
-    wi_limit = bisect.bisect_right(w_starts, max_raw_t)
+    # Window: first max_raw_t seconds only
+    hi_idx = bisect.bisect_right(w_starts_all, max_raw_t)
+    if hi_idx == 0:
+        return None
 
+    w_window = whisper_words[:hi_idx]
+    w_starts  = w_starts_all[:hi_idx]
+
+    def _min_score(n: int) -> float:
+        if n <= 4:  return 0.75
+        if n <= 6:  return 0.67
+        if n <= 10: return 0.60
+        return 0.55
+
+    # ── Primary: LCS search across all early segments, pick earliest raw hit ─
+    # We collect all candidates and return the one with the smallest raw_time,
+    # because intro jingles/ads always precede content — the first content
+    # segment to appear in whisper output anchors the offset most accurately.
+    best_raw_t = float("inf")
+    best_offset = None
+    mid = w_starts[-1] / 2.0
+    for seg in transcript_segs[:max_segs]:
+        tn = norm_words(seg["text"])
+        n  = len(tn)
+        t_start = float(seg["start"])
+        if n < 4:
+            continue
+        abs_s, abs_e, score = search_segment(
+            tn, w_window, w_starts, 0, mid, mid + 1.0, _min_score(n))
+        if abs_s is not None and w_starts[abs_s] < best_raw_t:
+            best_raw_t  = w_starts[abs_s]
+            best_offset = w_starts[abs_s] - t_start
+    if best_offset is not None:
+        return best_offset
+
+    # ── Fallback: exact 4-gram scan ───────────────────────────────────────────
+    w_norm = [((norm_words(w["word"]) or [""])[0]) for w in w_window]
     for seg in transcript_segs[:max_segs]:
         tn = norm_words(seg["text"])
         t_start = float(seg["start"])
@@ -282,12 +328,12 @@ def _bootstrap_offset(whisper_words: list, transcript_segs: list,
             continue
         for gi in range(len(tn) - 3):
             gram = tn[gi:gi + 4]
-            for wi in range(min(wi_limit, len(w_norm) - 3)):
+            for wi in range(len(w_norm) - 3):
                 if w_norm[wi:wi + 4] == gram:
                     word_frac = gi / len(tn)
                     approx_gram_t = t_start + word_frac * seg_dur
-                    offset = w_starts[wi] - approx_gram_t
-                    return offset
+                    return w_starts[wi] - approx_gram_t
+
     return None
 
 
@@ -331,7 +377,7 @@ def step2_align(ep_num: int, whisper_words: list,
     # ── Bootstrap offset via 4-gram exact scan ────────────────────────────────
     offset = _bootstrap_offset(whisper_words, transcript_segs)
     if offset is not None:
-        print(f"  step2: bootstrap offset={offset:+.2f}s (4-gram scan)", flush=True)
+        print(f"  step2: bootstrap offset={offset:+.2f}s", flush=True)
     else:
         offset = 0.0
         print(f"  step2: bootstrap failed, starting with offset=0.0", flush=True)
