@@ -1,45 +1,45 @@
 #!/usr/bin/env python3
 """
-podcast_to_moshi_dataset.py
-────────────────────────────────────────────────────────────────
-Convert Gemischtes Hack Podcast episodes into the moshi-finetune
-dataset format:
+podcast_to_moshi_dataset.py — Phase 1: word-level timestamp alignment
+═══════════════════════════════════════════════════════════════════════
 
-  {out_dir}/ep{N}_{chunk:04d}_{main|other}.wav   48kHz stereo PCM-16
-  {out_dir}/ep{N}_{chunk:04d}_{main|other}.json  {"alignments": [[word,[s,e],spk], ...]}
+ARCHITECTURE
+────────────
+Step 1 — Transcribe full raw MP3 with whisper-cpp
+    No intro-stripping, no chunking.  Whisper sees the whole file.
+    Output: flat word list with audio-grounded timestamps.
+    Saved:  whisper_cache/ep{N}_w1.json
 
-Audio layout (double-mono):
-  SPEAKER_MAIN  → channel-0 = speech, channel-1 = zeros
-  SPEAKER_OTHER → channel-0 = zeros,  channel-1 = speech
+Step 2 — Auto-detect offset(s) + align words to transcript
+    The transcript has correct text+speaker+relative-timestamps but was
+    produced on the clean audio (intro/ads removed).  The raw MP3 whisper
+    timestamps are shifted by an unknown amount δ that may jump at ad breaks.
 
-Word-level timestamps come from WhisperX forced-alignment (wav2vec2 + MPS)
-applied to each segment of the already-transcribed podcast JSONs.
+    We detect δ automatically:
+      a) Sample ~40 anchor segments spread across the transcript.
+      b) For each anchor, search the whisper word stream for matching text
+         in a ±60s window around the current δ estimate.
+      c) Build a piecewise δ timeline — sudden jumps reveal ad-break positions.
 
-The waveform-alignment cache (podcast_alignment_cache.json) holds the
-intro-offset + mid-roll ad-break positions for every episode, computed
-previously by cross-correlation.  We consume that cache directly —
-no re-correlation needed.
+    For each whisper word, look up which transcript interval contains
+    word.start − δ(t).  Assign that segment's speaker + text.
+    Words with no match = intro / ad / outro → out_of_transcript=True.
 
-Memory design
-─────────────
-Long episodes (up to 2 h) at 48 kHz float32 take > 1.5 GB — exceeding
-macOS OOM thresholds when the whisperx model is also loaded.
+    Saved:  aligned_cache/ep{N}_aligned.json
 
-Solution: all alignment work runs at 16 kHz (4× smaller).  Audio is never
-held at 48 kHz as a full array.  When writing output chunks we decode only
-the required time-slice directly from the MP3 via ffmpeg subprocess (no
-full-file re-read), then resample that small slice to 48 kHz.
+Step 3 — Rerun whisper on stripped audio + compare timestamps
+    Keep only the assigned-word regions from the raw MP3.
+    Run whisper-cpp on the stripped WAV.
+    Compare word timestamps: w1-assigned vs w2-stripped.
+    Saved:  whisper_cache/ep{N}_w2.json
 
-Usage (all episodes):
-    python3 scripts/podcast_to_moshi_dataset.py
-
-Usage (subset):
-    python3 scripts/podcast_to_moshi_dataset.py --episodes 150-159
-    python3 scripts/podcast_to_moshi_dataset.py --episodes 150,151,200
+Usage:
+    python3 scripts/podcast_to_moshi_dataset.py --episodes 152
+    python3 scripts/podcast_to_moshi_dataset.py --episodes 150-152
 """
 
 import argparse
-import gc
+import bisect
 import glob
 import json
 import os
@@ -48,488 +48,591 @@ import subprocess
 import sys
 import tempfile
 
-import numpy as np
-import soundfile as sf
-import librosa
-
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
 # ── paths ─────────────────────────────────────────────────────────────────────
-RAW_DIR       = "/Volumes/eHDD/moshi-rag-data/datasets"
-CACHE_PATH    = "/Volumes/eHDD/moshi-rag-data/datasets/podcast_alignment_cache.json"
-TRANSCRIPT_DIR= os.path.join(RAW_DIR, "Gemischtes.Hack.Podcast", "transcripts")
-AUDIO_DIR     = os.path.join(RAW_DIR, "Gemischtes.Hack.Podcast")
-OUTPUT_DIR    = "/Volumes/eHDD/moshi-rag-data/processed/podcast"
+BASE_DIR       = "/Volumes/eHDD/moshi-rag-data"
+DATASETS_DIR   = os.path.join(BASE_DIR, "datasets")
+TRANSCRIPT_DIR = os.path.join(DATASETS_DIR, "Gemischtes.Hack.Podcast", "transcripts")
+AUDIO_DIR      = os.path.join(DATASETS_DIR, "Gemischtes.Hack.Podcast")
+WHISPER_CACHE  = os.path.join(DATASETS_DIR, "whisper_cache")
+ALIGNED_CACHE  = os.path.join(DATASETS_DIR, "aligned_cache")
 
-# ── audio constants ────────────────────────────────────────────────────────────
-TARGET_SR    = 48000   # moshi-finetune requirement
-WHISPERX_SR  = 16000   # whisperx alignment native sample-rate
-MIN_CHUNK_DUR = 0.5    # discard chunks shorter than this
+WHISPER_CLI    = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "whisper-cpp", "build", "bin", "whisper-cli",
+)
+WHISPER_MODEL  = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "bin", "models", "ggml-large-v3-turbo-q5_0.bin",
+)
 
-# ── lazy-load whisperx ────────────────────────────────────────────────────────
-_align_model  = None
-_align_meta   = None
-
-def get_align_model():
-    global _align_model, _align_meta
-    if _align_model is None:
-        import whisperx, torch
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-        print(f"[whisperx] loading German alignment model on {device} …", flush=True)
-        _align_model, _align_meta = whisperx.load_align_model(
-            language_code="de", device=device
-        )
-        print("[whisperx] model ready", flush=True)
-    return _align_model, _align_meta
+WHISPER_THREADS = 8
 
 
-# ── audio helpers ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Shared helper — whisper-cpp → flat word list
+# ══════════════════════════════════════════════════════════════════════════════
 
-def load_cache():
-    if os.path.exists(CACHE_PATH):
-        with open(CACHE_PATH, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+def norm_words(text: str) -> list:
+    """Lowercase + strip punctuation → list of word strings."""
+    return [w for w in
+            re.sub(r"[^\w\däöüßàáâãåæçèéêëìíîïðñòóôõøùúûüýþÿ-]", " ",
+                   text.lower()).split()
+            if w]
 
 
-def build_clean_regions(offset: float, ad_breaks: list, total_dur: float):
-    """Return list of (start_sec, end_sec) content regions in the raw audio."""
+def run_whisper_words(wav_path: str) -> list:
+    """
+    Run whisper-cpp on a 16 kHz mono WAV.
+    Returns a flat list of {word, start, end, p} dicts.
+    Sub-word BPE tokens are merged into words (space prefix = word boundary).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        out_base = os.path.join(td, "out")
+        r = subprocess.run([
+            WHISPER_CLI, "-m", WHISPER_MODEL, "-l", "de", "-f", wav_path,
+            "--output-json-full", "--output-file", out_base,
+            "--threads", str(WHISPER_THREADS), "--beam-size", "5",
+        ], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"whisper-cpp failed:\n{r.stderr[:600]}")
+        raw = json.load(open(out_base + ".json", encoding="utf-8"))
+
+    words = []
+    for seg in raw.get("transcription", []):
+        cur, cur_s, cur_e, cur_p = "", None, None, []
+        for tok in seg.get("tokens", []):
+            t = tok["text"]
+            if t.startswith("[_") or t.startswith("<"):
+                continue
+            ts = tok["offsets"]["from"] / 1000.0
+            te = tok["offsets"]["to"]   / 1000.0
+            tp = tok.get("p", 1.0)
+            if (t.startswith(" ") or cur == "") and cur:
+                w = cur.strip()
+                if w and cur_e is not None and cur_e > (cur_s or 0):
+                    words.append({"word": w,
+                                  "start": round(cur_s, 4),
+                                  "end":   round(cur_e, 4),
+                                  "p":     round(sum(cur_p)/len(cur_p), 4)})
+                cur, cur_s, cur_e, cur_p = t, ts, te, [tp]
+            else:
+                cur += t
+                if cur_s is None: cur_s = ts
+                cur_e = te; cur_p.append(tp)
+        if cur.strip() and cur_e is not None and cur_e > (cur_s or 0):
+            w = cur.strip()
+            words.append({"word": w,
+                          "start": round(cur_s, 4),
+                          "end":   round(cur_e, 4),
+                          "p":     round(sum(cur_p)/len(cur_p), 4)})
+    return words
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 1 — Transcribe full raw MP3
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step1_transcribe(ep_num: int, mp3_path: str) -> list:
+    """Run whisper-cpp directly on the MP3 → flat word list."""
+    os.makedirs(WHISPER_CACHE, exist_ok=True)
+    out_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w1.json")
+
+    print(f"  step1: running whisper-cpp on MP3…", flush=True)
+    words = run_whisper_words(mp3_path)
+
+    print(f"  step1: {len(words)} words  "
+          f"{words[0]['start']:.2f}s – {words[-1]['end']:.2f}s", flush=True)
+    json.dump(words, open(out_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"  step1: saved → {out_path}", flush=True)
+    return words
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 2 — Segment-by-segment alignment
+# ══════════════════════════════════════════════════════════════════════════════
+
+def match_segment_in_whisper(t_norm: list, whisper_words: list,
+                              w_starts: list, search_from: int,
+                              expected_raw_t: float, window: float) -> tuple:
+    """
+    Find the best position in the whisper stream for a transcript segment.
+
+    Uses a sliding window of (len(t_norm) + SLACK) whisper words scored by
+    longest-common-subsequence overlap, tolerating whisper insertions/deletions
+    at segment boundaries.
+
+    Returns (best_whisper_index, score) or (None, 0.0) if no good match.
+    """
+    n     = len(t_norm)
+    SLACK = min(4, n)   # allow up to SLACK extra whisper words per window
+    WIN   = n + SLACK
+
+    lo = bisect.bisect_left(w_starts,  expected_raw_t - window)
+    hi = bisect.bisect_right(w_starts, expected_raw_t + window)
+    lo = max(lo, search_from)
+    if lo >= hi:
+        return None, 0.0
+
+    best_score, best_i = 0.0, None
+    for i in range(lo, hi):
+        end  = min(i + WIN, hi)
+        flat = []
+        for j in range(i, end):
+            k = norm_words(whisper_words[j]["word"])
+            flat.append(k[0] if k else "")
+        # LCS: count t_norm words found in flat in order
+        ti = fi = 0
+        while ti < n and fi < len(flat):
+            if t_norm[ti] == flat[fi]:
+                ti += 1
+            fi += 1
+        score = ti / n
+        if score > best_score:
+            best_score = score
+            best_i = i
+
+    if best_score < 0.50 or best_i is None:
+        return None, 0.0
+
+    return best_i, best_score
+
+
+def step2_align(ep_num: int, whisper_words: list,
+                transcript_segs: list) -> list:
+    """
+    Aligns every transcript segment (ground truth) to raw-MP3 timestamps from
+    whisper.  The transcript is the authority on text and order — no segment is
+    ever skipped from the output.
+
+    Pass 1 — build per-segment delta:
+      Walk segments in order.  For each segment with ≥MIN_WORDS:
+        • Search whisper near (seg.start + current_delta) ± SEARCH_WINDOW.
+        • If found: update delta, advance whisper cursor past matched words.
+        • If not found: widen to WIDE_WINDOW once (ad-break recovery).
+        • If still not found: keep current delta (whisper mistranscription).
+      Short segments always inherit the current delta.
+
+    Pass 2 — build raw-time windows for every segment:
+      raw_start = seg.start + delta_for_this_seg
+      raw_end   = seg.end   + delta_for_this_seg
+      Every segment gets a window — none are skipped.
+
+    Pass 3 — mark ad-break gaps:
+      Walk consecutive segment windows.  If the raw gap between window[i].end
+      and window[i+1].start is ≥ MIN_AD_GAP seconds, the whisper words that
+      fall in that gap are out_of_transcript (intro/ad/outro).
+
+    Pass 4 — assign whisper words to segment windows.
+    """
+    os.makedirs(ALIGNED_CACHE, exist_ok=True)
+    out_path = os.path.join(ALIGNED_CACHE, f"ep{ep_num}_aligned.json")
+
+    w_starts = [w["start"] for w in whisper_words]
+
+    SEARCH_WINDOW = 45.0  # normal per-segment search window (±s)
+    WIDE_WINDOW   = 120.0 # bootstrap / ad-break recovery window (±s)
+    MIN_WORDS     = 4     # minimum words to use a segment as an anchor
+    MIN_AD_GAP    = 8.0   # raw-audio gap ≥ this → real ad/intro/outro break
+    DEBUG         = False  # set True to print per-segment match details
+
+    def min_score(n_words: int) -> float:
+        """Minimum acceptable LCS score — higher threshold for short segments."""
+        if n_words <= 4:  return 0.75
+        if n_words <= 6:  return 0.67
+        if n_words <= 10: return 0.60
+        return 0.55
+
+    delta    = None  # raw_mp3_time = transcript_time + delta
+    w_cursor = 0     # whisper index — advance past last matched words
+    n_matched = 0
+    n_missed  = 0
+
+    # Per-segment delta: full_deltas[i] = delta to apply to segment i
+    full_deltas = [None] * len(transcript_segs)
+
+    print(f"  step2: aligning {len(transcript_segs)} segments…", flush=True)
+
+    # ── Pass 1: anchor matching ───────────────────────────────────────────────
+    for si, seg in enumerate(transcript_segs):
+        t_norm  = norm_words(seg["text"])
+        t_start = float(seg["start"])
+
+        if len(t_norm) >= MIN_WORDS:
+            expected = t_start + (delta if delta is not None else 0.0)
+            window   = WIDE_WINDOW if delta is None else SEARCH_WINDOW
+
+            n = len(t_norm)
+            best_i, score = match_segment_in_whisper(
+                t_norm, whisper_words, w_starts, w_cursor, expected, window)
+
+            if (best_i is None or score < min_score(n)) and delta is not None:
+                best_i2, score2 = match_segment_in_whisper(
+                    t_norm, whisper_words, w_starts, w_cursor, expected, WIDE_WINDOW)
+                if best_i2 is not None and score2 >= min_score(n):
+                    best_i, score = best_i2, score2
+                elif best_i is not None and score < min_score(n):
+                    best_i = None  # reject the low-confidence normal-window match
+
+            if best_i is not None and score >= min_score(n):
+                # Compute delta via LCS pairs: walk t_norm and the whisper
+                # window in LCS order, recording (w.start - proportional_t)
+                # for each matched pair, then take the median.
+                seg_dur = float(seg["end"]) - t_start
+                SLACK   = min(4, n)
+                WIN     = n + SLACK
+                end_wi  = min(best_i + WIN, len(whisper_words))
+
+                flat = []
+                for j in range(best_i, end_wi):
+                    k = norm_words(whisper_words[j]["word"])
+                    flat.append((k[0] if k else "", j))  # (norm, original_index)
+
+                # Replay LCS to get matched pairs (t_norm_pos, whisper_idx)
+                ti = fi = 0
+                pairs = []
+                while ti < n and fi < len(flat):
+                    if t_norm[ti] == flat[fi][0]:
+                        pairs.append((ti, flat[fi][1]))
+                        ti += 1
+                    fi += 1
+
+                if pairs:
+                    # Median delta across matched pairs
+                    indiv = []
+                    for (tk, wi) in pairs:
+                        t_word = t_start + (tk / n) * seg_dur
+                        indiv.append(whisper_words[wi]["start"] - t_word)
+                    indiv.sort()
+                    delta = indiv[len(indiv) // 2]
+                else:
+                    delta = whisper_words[best_i]["start"] - t_start
+
+                n_matched += 1
+                w_cursor = best_i + n    # advance only past matched segment length
+
+                if DEBUG:
+                    w_text = " ".join(whisper_words[j]["word"]
+                                      for j in range(best_i, end_wi))
+                    print(f"  MATCH si={si:4d} t={t_start:7.1f}s "
+                          f"score={score:.2f} δ={delta:+.2f}s  "
+                          f"T: {seg['text'].strip()[:50]!r}", flush=True)
+                    print(f"        W: {w_text[:60]!r}", flush=True)
+            else:
+                n_missed += 1
+                if DEBUG:
+                    print(f"  MISS  si={si:4d} t={t_start:7.1f}s "
+                          f"δ={delta if delta else 0:+.2f}s  "
+                          f"T: {seg['text'].strip()[:60]!r}", flush=True)
+
+        # Every segment gets a delta — unmatched inherit last known delta.
+        if delta is not None:
+            full_deltas[si] = delta
+
+    if delta is None:
+        raise RuntimeError("step2: could not align any segment")
+
+    # Back-fill segments before the first anchor with the first known delta.
+    first_delta = next(d for d in full_deltas if d is not None)
+    full_deltas = [d if d is not None else first_delta for d in full_deltas]
+
+    print(f"  step2: matched {n_matched}  missed {n_missed}  "
+          f"total {len(transcript_segs)} segments", flush=True)
+
+    # ── Pass 2: build raw-time windows for every segment ─────────────────────
+    seg_windows = []  # (raw_start, raw_end, speaker, seg_text) — one per segment
+    for si, seg in enumerate(transcript_segs):
+        d   = full_deltas[si]
+        rs  = float(seg["start"]) + d
+        re  = float(seg["end"])   + d
+        seg_windows.append((rs, re, seg.get("speaker", ""), seg.get("text", "").strip()))
+
+    # ── Pass 3: identify genuine gap regions (ad breaks / intro / outro) ──────
+    # A gap between consecutive segment windows that is ≥ MIN_AD_GAP seconds
+    # in raw time is a real ad/intro/outro.  Whisper words in those gaps get
+    # out_of_transcript = True.
+    gap_regions = []  # list of (raw_gap_start, raw_gap_end)
+
+    # Gap before the first segment (intro jingle)
+    first_raw_start = seg_windows[0][0]
+    if first_raw_start > MIN_AD_GAP:
+        gap_regions.append((0.0, first_raw_start))
+        print(f"  step2: intro gap  0.0s – {first_raw_start:.1f}s  "
+              f"({first_raw_start:.1f}s)", flush=True)
+
+    # Gaps between consecutive segments
+    for i in range(len(seg_windows) - 1):
+        gap_start = seg_windows[i][1]     # end of segment i
+        gap_end   = seg_windows[i + 1][0] # start of segment i+1
+        gap_dur   = gap_end - gap_start
+        if gap_dur >= MIN_AD_GAP:
+            gap_regions.append((gap_start, gap_end))
+            print(f"  step2: gap  {gap_start:.1f}s – {gap_end:.1f}s  "
+                  f"({gap_dur:.1f}s)", flush=True)
+
+    print(f"  step2: {len(gap_regions)} gap region(s) detected", flush=True)
+
+    # Build a fast lookup: is raw_t inside any gap?
+    gap_starts = [g[0] for g in gap_regions]
+    gap_ends   = [g[1] for g in gap_regions]
+
+    def in_gap(raw_t: float) -> bool:
+        idx = bisect.bisect_right(gap_starts, raw_t) - 1
+        return idx >= 0 and raw_t < gap_ends[idx]
+
+    # ── Pass 4: assign each whisper word to a segment window ─────────────────
+    sw_starts = [s[0] for s in seg_windows]
+    sw_ends   = [s[1] for s in seg_windows]
+
+    result  = []
+    n_in = n_out = 0
+    for w in whisper_words:
+        raw_t = w["start"]
+
+        if in_gap(raw_t):
+            result.append({
+                "word": w["word"], "start": w["start"], "end": w["end"],
+                "p": w["p"], "speaker": None, "seg_text": None,
+                "out_of_transcript": True,
+            })
+            n_out += 1
+            continue
+
+        idx = bisect.bisect_right(sw_starts, raw_t) - 1
+        if idx >= 0 and raw_t <= sw_ends[idx]:
+            result.append({
+                "word":              w["word"],
+                "start":             w["start"],
+                "end":               w["end"],
+                "p":                 w["p"],
+                "speaker":           seg_windows[idx][2],
+                "seg_text":          seg_windows[idx][3],
+                "out_of_transcript": False,
+            })
+            n_in += 1
+        else:
+            result.append({
+                "word": w["word"], "start": w["start"], "end": w["end"],
+                "p": w["p"], "speaker": None, "seg_text": None,
+                "out_of_transcript": True,
+            })
+            n_out += 1
+
+    pct = 100.0 * n_in / len(result) if result else 0
+    print(f"  step2: {n_in} words assigned ({pct:.1f}%)  "
+          f"{n_out} outside (intro/ad/outro)", flush=True)
+
+    json.dump(result, open(out_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"  step2: saved → {out_path}", flush=True)
+    return result
+
+
+def print_alignment_report(aligned_words: list, transcript_segs: list):
+    """Print assignment rate + first 5 segment examples."""
+    in_words  = [w for w in aligned_words if not w["out_of_transcript"]]
+    out_words = [w for w in aligned_words if     w["out_of_transcript"]]
+    pct = 100.0 * len(in_words) / len(aligned_words) if aligned_words else 0
+
+    print(f"\n  Alignment QA:", flush=True)
+    print(f"  Assigned  : {len(in_words)}  ({pct:.1f}%)", flush=True)
+    print(f"  Excluded  : {len(out_words)}  (intro/ad/outro)", flush=True)
+
+    # Group assigned words by seg_text so we can show per-segment coverage
+    print(f"\n  First 5 transcript segments vs whisper words:", flush=True)
+    for seg in transcript_segs[:5]:
+        seg_txt = seg.get("text", "").strip()
+        seg_words = [w for w in in_words if w["seg_text"] == seg_txt]
+        whisper_text = " ".join(w["word"] for w in seg_words)
+        t_norm = set(norm_words(seg_txt))
+        w_norm = set(norm_words(whisper_text))
+        conf = len(t_norm & w_norm) / len(t_norm) if t_norm else 1.0
+        t_s, t_e = float(seg["start"]), float(seg["end"])
+        print(f"  [{t_s:.2f}–{t_e:.2f}s] conf={conf:.2f} n={len(seg_words)}", flush=True)
+        print(f"    T: '{seg_txt[:80]}'", flush=True)
+        print(f"    W: '{whisper_text[:80]}'", flush=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — Stripped audio rerun + timestamp comparison
+# ══════════════════════════════════════════════════════════════════════════════
+
+def derive_keep_regions(aligned_words: list) -> list:
+    """
+    From aligned words, derive contiguous keep-regions in raw MP3 time.
+    A new region starts whenever there is a gap > 2s between consecutive
+    assigned words (= intro, ad-break, or outro boundary).
+    """
+    in_words = [w for w in aligned_words if not w["out_of_transcript"]]
+    if not in_words:
+        raise ValueError("No assigned words")
     regions = []
-    cursor  = max(0.0, offset)
-    for ad_s, ad_e in sorted(ad_breaks):
-        if cursor < ad_s:
-            regions.append((cursor, ad_s))
-        cursor = ad_e
-    if cursor < total_dur:
-        regions.append((cursor, total_dur))
+    r_start = in_words[0]["start"]
+    prev_e  = in_words[0]["end"]
+    for w in in_words[1:]:
+        if w["start"] - prev_e > 2.0:
+            regions.append((r_start, prev_e))
+            r_start = w["start"]
+        prev_e = w["end"]
+    regions.append((r_start, prev_e))
     return regions
 
 
-def get_audio_duration(mp3_path: str) -> float:
-    """Return duration in seconds via ffprobe (no audio decode)."""
-    r = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", mp3_path],
-        capture_output=True, text=True
-    )
-    return float(r.stdout.strip())
+def build_stripped_mp3(mp3_path: str, keep_regions: list, out_mp3: str):
+    """Extract keep_regions from raw MP3 and concatenate into a single MP3."""
+    inputs, labels = [], []
+    for idx, (rs, re_) in enumerate(keep_regions):
+        inputs += ["-ss", str(rs), "-t", str(re_ - rs), "-i", mp3_path]
+        labels.append(f"[{idx}:a]")
+    n   = len(keep_regions)
+    flt = "".join(labels) + f"concat=n={n}:v=0:a=1[out]"
+    subprocess.run(["ffmpeg", "-v", "error"] + inputs +
+                   ["-filter_complex", flt, "-map", "[out]", out_mp3, "-y"],
+                   check=True)
 
 
-def load_audio_segment_16k(mp3_path: str, start_sec: float, end_sec: float) -> np.ndarray:
+def step3_rerun_compare(ep_num: int, mp3_path: str, aligned_words: list) -> list:
     """
-    Decode a time-range of an MP3 directly to 16 kHz mono float32 via ffmpeg.
-    Uses -ss/-to for fast seeking — no full-file decode.
-    Returns numpy array at 16 kHz.
+    Build stripped WAV, run whisper-cpp on it, then update each assigned word's
+    timestamps to use the more accurate w2 timestamps (clean audio, no intro
+    distraction).
+
+    Matching is done positionally along the w2 word stream: we walk w1_in and w2
+    in parallel using a small sliding window, matching on normalised text.  This
+    is robust because both streams cover the same audio region in the same order.
+
+    Returns updated aligned_words with 'start'/'end' replaced by w2-remapped
+    timestamps for every word that could be matched; unmatched words keep their
+    w1 timestamps.  The refined list is saved to aligned_cache/ep{N}_aligned.json.
+
+    w2 timestamps are relative to the stripped WAV start.
+    w1 timestamps are in raw MP3 time.
+    We remap w2 timestamps back to raw MP3 time using the keep_region boundaries.
     """
-    duration = end_sec - start_sec
-    cmd = [
-        "ffmpeg", "-v", "error",
-        "-ss", str(start_sec),
-        "-t",  str(duration),
-        "-i",  mp3_path,
-        "-ar", str(WHISPERX_SR),
-        "-ac", "1",
-        "-f",  "f32le",        # raw 32-bit float little-endian PCM
-        "pipe:1",
-    ]
-    r = subprocess.run(cmd, capture_output=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {r.stderr.decode()[:300]}")
-    audio = np.frombuffer(r.stdout, dtype=np.float32).copy()
-    return audio
+    os.makedirs(WHISPER_CACHE, exist_ok=True)
+    out_path    = os.path.join(WHISPER_CACHE,  f"ep{ep_num}_w2.json")
+    refined_path = os.path.join(ALIGNED_CACHE, f"ep{ep_num}_aligned.json")
 
-
-def load_audio_segment_48k(mp3_path: str, start_sec: float, end_sec: float) -> np.ndarray:
-    """
-    Decode a time-range of an MP3 to 48 kHz mono float32 via ffmpeg.
-    Used only when writing small output chunks — never the full file.
-    """
-    duration = end_sec - start_sec
-    cmd = [
-        "ffmpeg", "-v", "error",
-        "-ss", str(start_sec),
-        "-t",  str(duration),
-        "-i",  mp3_path,
-        "-ar", str(TARGET_SR),
-        "-ac", "1",
-        "-f",  "f32le",
-        "pipe:1",
-    ]
-    r = subprocess.run(cmd, capture_output=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {r.stderr.decode()[:300]}")
-    return np.frombuffer(r.stdout, dtype=np.float32).copy()
-
-
-def transcript_time_to_clean_time(t: float, ad_breaks: list) -> float:
-    """
-    Map content-relative time (t = raw_time − offset) to position in the
-    concatenated clean audio (after ad-breaks are removed).
-    """
-    removed = 0.0
-    for ad_s, ad_e in sorted(ad_breaks):
-        if ad_e <= t:
-            removed += ad_e - ad_s
-        elif ad_s < t:
-            removed += t - ad_s
-            break
-    return max(0.0, t - removed)
-
-
-def clean_time_to_raw_time(clean_t: float, offset: float, ad_breaks: list) -> float:
-    """
-    Inverse of transcript_time_to_clean_time: given a position in the
-    concatenated clean audio, return the corresponding time in the original
-    raw MP3.  Used to seek to the right position when decoding output chunks.
-    """
-    raw_t = clean_t + offset
-    for ad_s, ad_e in sorted(ad_breaks):
-        ad_dur = ad_e - ad_s
-        if raw_t >= ad_s:
-            raw_t += ad_dur
-        else:
-            break
-    return raw_t
-
-
-# ── whisperx alignment ────────────────────────────────────────────────────────
-
-def align_segments_whisperx(segments: list, audio_16k: np.ndarray) -> dict:
-    """
-    Run WhisperX forced alignment on `segments` against `audio_16k`.
-
-    `segments` is a list of dicts: {text, start, end}  (seconds, relative to
-    the start of audio_16k).
-
-    Returns a dict mapping segment index → list of word dicts:
-        {"word": str, "start": float, "end": float, "score": float}
-
-    NOTE: whisperx may SPLIT one input segment into multiple output segments
-    when backtrack fails.  We therefore use the flat `word_segments` list and
-    assign each word to the input segment whose time window contains it.
-    """
-    import whisperx
-
-    model_a, metadata = get_align_model()
-    device = next(iter(model_a.parameters())).device.type \
-        if hasattr(model_a, "parameters") else "cpu"
-
-    result = whisperx.align(segments, model_a, metadata, audio_16k, device,
-                            return_char_alignments=False)
-
-    all_words = result.get("word_segments", [])
-    word_map: dict = {i: [] for i in range(len(segments))}
-
-    if all_words:
-        for wd in all_words:
-            ws = wd.get("start")
-            we = wd.get("end")
-            if ws is None or we is None:
-                continue
-            mid = (float(ws) + float(we)) / 2.0
-            for idx, seg in enumerate(segments):
-                if seg["start"] - 0.5 <= mid <= seg["end"] + 0.5:
-                    word_map[idx].append(wd)
-                    break
-    else:
-        out_segs = result.get("segments", [])
-        for i, out_seg in enumerate(out_segs):
-            if i >= len(segments):
-                break
-            word_map[i] = out_seg.get("words", [])
-
-    return word_map
-
-
-# ── output helpers ────────────────────────────────────────────────────────────
-
-def clean_word(text: str) -> str:
-    """Strip punctuation except hyphens and German characters."""
-    return re.sub(r"[^\w\däöüßÄÖÜ\s-]", "", text).strip()
-
-
-def write_chunk(stereo: np.ndarray, sr: int, alignments: list,
-                out_dir: str, fname: str):
-    os.makedirs(out_dir, exist_ok=True)
-    wav_path  = os.path.join(out_dir, f"{fname}.wav")
-    json_path = os.path.join(out_dir, f"{fname}.json")
-    sf.write(wav_path, stereo.T, sr, subtype="PCM_16")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump({"alignments": alignments}, f, ensure_ascii=False)
-
-
-# ── core per-episode logic ─────────────────────────────────────────────────────
-
-def process_episode(ep_num: int, transcript_path: str, mp3_path: str,
-                    cache: dict, out_dir: str) -> int:
-    ep_label = f"ep{ep_num}"
-    print(f"\n{'─'*60}", flush=True)
-    print(f"  Episode {ep_num}", flush=True)
-
-    # ── 1. load cache entry ────────────────────────────────────────────────────
-    entry     = cache.get(ep_label, {})
-    offset    = float(entry.get("offset", 34.2))
-    ad_breaks = [(float(a), float(b)) for a, b in entry.get("ad_breaks", [])]
-    print(f"  cache: offset={offset:.1f}s, {len(ad_breaks)} ad-break(s)", flush=True)
-
-    # ── 2. determine total duration (ffprobe — no audio decode) ───────────────
-    total_dur_orig = get_audio_duration(mp3_path)
-    print(f"  duration: {total_dur_orig:.1f}s ({total_dur_orig/3600:.2f}h)", flush=True)
-    mem_estimate_gb = total_dur_orig * TARGET_SR * 4 / 1e9
-    print(f"  (48k array would be {mem_estimate_gb:.2f} GB — loading at 16k instead)",
+    keep_regions = derive_keep_regions(aligned_words)
+    total_kept   = sum(e - s for s, e in keep_regions)
+    print(f"  step3: {len(keep_regions)} keep-region(s)  {total_kept:.0f}s total",
           flush=True)
 
-    # ── 3. build clean regions (content only, no intro/ads) ───────────────────
-    clean_regions = build_clean_regions(offset, ad_breaks, total_dur_orig)
-    clean_dur = sum(e - s for s, e in clean_regions)
-    print(f"  clean duration: {clean_dur:.1f}s (removed {total_dur_orig - clean_dur:.1f}s)",
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        tmp = f.name
+    try:
+        build_stripped_mp3(mp3_path, keep_regions, tmp)
+        print(f"  step3: stripped MP3 built — running whisper-cpp…", flush=True)
+        w2 = run_whisper_words(tmp)
+    finally:
+        os.unlink(tmp)
+
+    json.dump(w2, open(out_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"  step3: {len(w2)} words saved → {out_path}", flush=True)
+
+    # ── Remap w2 timestamps from stripped-WAV time → raw MP3 time ────────────
+    cum_offsets = []   # (stripped_start, raw_start) for each region
+    stripped_t  = 0.0
+    for rs, re_ in keep_regions:
+        cum_offsets.append((stripped_t, rs))
+        stripped_t += (re_ - rs)
+    stripped_starts = [c[0] for c in cum_offsets]
+
+    def to_raw(stripped: float) -> float:
+        idx = bisect.bisect_right(stripped_starts, stripped) - 1
+        if idx < 0: idx = 0
+        offset_in_region = stripped - cum_offsets[idx][0]
+        return cum_offsets[idx][1] + offset_in_region
+
+    # ── Time-anchored text match: for each w1 word find the w2 word with the
+    # same normalised text whose remapped timestamp is closest to w1's timestamp,
+    # within a ±3s window.  This is robust to divergences between the two
+    # whisper passes because it uses w1's time as an anchor, not a global cursor.
+    # Build index: norm_text → sorted list of (raw_time, end_raw_time, w2_idx)
+    w2_index: dict = {}
+    for i, w in enumerate(w2):
+        key = norm_words(w["word"])
+        key = key[0] if key else ""
+        if key:
+            t_raw = to_raw(w["start"])
+            e_raw = to_raw(w["end"])
+            w2_index.setdefault(key, []).append((t_raw, e_raw))
+    # Sort each list by time so we can bisect
+    w2_starts: dict = {}
+    for key, entries in w2_index.items():
+        entries.sort()
+        w2_starts[key] = [e[0] for e in entries]
+
+    WINDOW = 3.0   # ±seconds around w1 timestamp to accept a w2 match
+
+    w1_in  = [w for w in aligned_words if not w["out_of_transcript"]]
+    n_updated = n_kept = 0
+    deltas: list = []
+    large:  list = []
+
+    for w1w in w1_in:
+        key = norm_words(w1w["word"])
+        key = key[0] if key else ""
+        if not key or key not in w2_index:
+            n_kept += 1
+            continue
+
+        entries  = w2_index[key]
+        starts   = w2_starts[key]
+        t1       = w1w["start"]
+
+        # Binary-search for candidates within ±WINDOW
+        lo = bisect.bisect_left(starts,  t1 - WINDOW)
+        hi = bisect.bisect_right(starts, t1 + WINDOW)
+        if lo >= hi:
+            n_kept += 1
+            continue
+
+        # Pick the closest one
+        best_t, best_e = min(entries[lo:hi], key=lambda e: abs(e[0] - t1))
+        d = abs(t1 - best_t)
+        deltas.append(d)
+        if d > 0.3:
+            large.append((w1w["word"], t1, best_t))
+        w1w["start"] = round(best_t, 4)
+        w1w["end"]   = round(best_e, 4)
+        n_updated += 1
+
+    # ── Report ────────────────────────────────────────────────────────────────
+    n      = len(deltas)
+    mean_d = sum(deltas) / n if n else 0
+    max_d  = max(deltas)     if n else 0
+
+    print(f"\n  Timestamp refinement (w1 → w2, positional stream-match):",
           flush=True)
+    print(f"  w1-assigned words  : {len(w1_in)}", flush=True)
+    print(f"  Updated to w2      : {n_updated}  kept w1: {n_kept}", flush=True)
+    print(f"  Mean |Δ| before    : {mean_d*1000:.0f} ms", flush=True)
+    print(f"  Max  |Δ| before    : {max_d*1000:.0f} ms", flush=True)
+    print(f"  Words Δ>300ms      : {len(large)}", flush=True)
+    if large:
+        print(f"\n  Large deltas (first 10):", flush=True)
+        for word, t1, t2 in large[:10]:
+            print(f"    '{word}'  w1={t1:.3f}s  w2={t2:.3f}s  "
+                  f"Δ={abs(t1-t2)*1000:.0f}ms", flush=True)
 
-    # ── 4. load transcript, map speakers ──────────────────────────────────────
-    with open(transcript_path, encoding="utf-8") as f:
-        data = json.load(f)
-
-    segments_raw = [s for s in data.get("segments", []) if s.get("text", "").strip()]
-    if not segments_raw:
-        print(f"  ✗ no segments, skipping", flush=True)
-        return 0
-
-    speaker_map: dict = {}
-    for seg in segments_raw:
-        spk = seg.get("speaker", "")
-        if spk and spk not in speaker_map:
-            speaker_map[spk] = "SPEAKER_MAIN" if len(speaker_map) == 0 else "SPEAKER_OTHER"
-    print(f"  speakers: {speaker_map}", flush=True)
-
-    # ── 5. re-time segments to clean-audio space ───────────────────────────────
-    segments_clean = []
-    for seg in segments_raw:
-        raw_start = float(seg["start"])
-        raw_end   = float(seg["end"])
-        if raw_end <= offset:
-            continue
-        clean_start = transcript_time_to_clean_time(raw_start - offset, ad_breaks)
-        clean_end   = transcript_time_to_clean_time(raw_end   - offset, ad_breaks)
-        clean_start = max(0.0, min(clean_start, clean_dur))
-        clean_end   = max(0.0, min(clean_end,   clean_dur))
-        if clean_end <= clean_start:
-            continue
-        spk_raw   = seg.get("speaker", "")
-        spk_label = speaker_map.get(spk_raw, "SPEAKER_MAIN")
-        segments_clean.append({
-            "text":    seg["text"].strip(),
-            "start":   clean_start,
-            "end":     clean_end,
-            "speaker": spk_label,
-        })
-
-    if not segments_clean:
-        print(f"  ✗ all segments before offset, skipping", flush=True)
-        return 0
-    print(f"  {len(segments_clean)} content segments (of {len(segments_raw)} total)",
-          flush=True)
-
-    # ── 6. whisperx alignment in batches — all at 16 kHz ──────────────────────
-    # Each batch decodes only BATCH_DUR seconds from the MP3 at 16k,
-    # which is tiny compared to loading the full file at 48k.
-    BATCH_DUR = 300.0   # seconds
-
-    word_results: list = []
-
-    batch_start_idx   = 0
-    batch_clean_start = 0.0   # position in concatenated clean audio
-
-    while batch_start_idx < len(segments_clean):
-        # Collect segments for this batch
-        batch_segs = []
-        batch_clean_end = batch_clean_start + BATCH_DUR
-        i = batch_start_idx
-        while i < len(segments_clean) and segments_clean[i]["start"] < batch_clean_end:
-            batch_segs.append(segments_clean[i])
-            i += 1
-        if not batch_segs:
-            i = batch_start_idx + 1
-
-        # ── decode this batch's audio at 16 kHz from the MP3 ─────────────────
-        # We need to reassemble clean audio from possibly multiple raw regions.
-        # Find which raw-time ranges correspond to [batch_clean_start, batch_clean_end].
-        raw_start_of_batch = clean_time_to_raw_time(batch_clean_start, offset, ad_breaks)
-        raw_end_of_batch   = clean_time_to_raw_time(
-            min(batch_clean_end + 10.0, clean_dur), offset, ad_breaks
-        )
-
-        # Collect all clean sub-regions that overlap this batch window
-        # (handles ad breaks that fall inside the batch)
-        batch_audio_parts = []
-        for rs, re_ in clean_regions:
-            # Does this clean region overlap [raw_start_of_batch, raw_end_of_batch]?
-            seg_raw_s = max(rs, raw_start_of_batch)
-            seg_raw_e = min(re_, raw_end_of_batch)
-            if seg_raw_e > seg_raw_s + 0.01:
-                part = load_audio_segment_16k(mp3_path, seg_raw_s, seg_raw_e)
-                batch_audio_parts.append(part)
-
-        if not batch_audio_parts:
-            # Nothing decoded — skip (shouldn't happen)
-            word_results.extend([[] for _ in batch_segs])
-            batch_start_idx  = i
-            batch_clean_start = batch_clean_end
-            continue
-
-        batch_audio_16k = np.concatenate(batch_audio_parts)
-        del batch_audio_parts
-
-        # whisperx wants times relative to the start of batch_audio_16k
-        wx_segs = [{
-            "text":  s["text"],
-            "start": s["start"] - batch_clean_start,
-            "end":   s["end"]   - batch_clean_start,
-        } for s in batch_segs]
-
-        try:
-            word_map = align_segments_whisperx(wx_segs, batch_audio_16k)
-        except Exception as exc:
-            print(f"  ⚠ whisperx error in batch [{batch_clean_start:.0f}s]: {exc}",
-                  flush=True)
-            word_map = {}
-
-        del batch_audio_16k
-        gc.collect()
-
-        # Shift word times back to absolute clean-audio space
-        for j, seg in enumerate(batch_segs):
-            words_raw = word_map.get(j, [])
-            words_abs = []
-            for w in words_raw:
-                ws = w.get("start")
-                we = w.get("end")
-                wt = clean_word(w.get("word", ""))
-                if ws is None or we is None or not wt:
-                    continue
-                words_abs.append({
-                    "word":  wt,
-                    "start": float(ws) + batch_clean_start,
-                    "end":   float(we) + batch_clean_start,
-                })
-            word_results.append(words_abs)
-
-        batch_start_idx   = i
-        batch_clean_start = batch_segs[-1]["end"] if batch_segs else batch_clean_end
-
-    assert len(word_results) == len(segments_clean), \
-        f"word_results mismatch: {len(word_results)} vs {len(segments_clean)}"
-
-    # ── 7. fill in fallback timestamps for unaligned segments ─────────────────
-    for seg, words in zip(segments_clean, word_results):
-        if words:
-            seg["words"] = words
-        else:
-            raw_words = [clean_word(w) for w in seg["text"].split() if clean_word(w)]
-            if not raw_words:
-                seg["words"] = []
-                continue
-            dur  = seg["end"] - seg["start"]
-            wdur = dur / len(raw_words)
-            seg["words"] = [
-                {"word": w, "start": seg["start"] + idx * wdur,
-                 "end": seg["start"] + (idx + 1) * wdur}
-                for idx, w in enumerate(raw_words)
-            ]
-
-    # ── 8. group consecutive same-speaker segments into turns ──────────────────
-    turns = []
-    for seg in segments_clean:
-        spk = seg["speaker"]
-        if turns and turns[-1][0] == spk:
-            turns[-1][1].extend(seg["words"])
-            turns[-1][3] = seg["end"]
-        else:
-            turns.append([spk, list(seg["words"]), seg["start"], seg["end"]])
-
-    # ── 9. split boundaries ────────────────────────────────────────────────────
-    split_points = [0.0]
-    for k in range(len(turns) - 1):
-        mid = (turns[k][3] + turns[k + 1][2]) / 2.0
-        mid = max(split_points[-1], min(mid, clean_dur))
-        split_points.append(mid)
-    split_points.append(clean_dur)
-
-    # ── 10. write output chunks — decode 48k audio only for each small chunk ──
-    chunk_count = 0
-    for k, (speaker, words, _ts, _te) in enumerate(turns):
-        chunk_clean_s = split_points[k]
-        chunk_clean_e = split_points[k + 1]
-        chunk_dur     = chunk_clean_e - chunk_clean_s
-        if chunk_dur < MIN_CHUNK_DUR:
-            continue
-
-        # Build alignment list first (cheap)
-        aligns = []
-        for wd in words:
-            adj_s = round(max(0.0,       wd["start"] - chunk_clean_s), 6)
-            adj_e = round(min(chunk_dur, wd["end"]   - chunk_clean_s), 6)
-            if adj_e > adj_s and wd["word"]:
-                aligns.append([wd["word"], [adj_s, adj_e], speaker])
-        if not aligns:
-            continue
-
-        # Decode only this chunk's audio at 48 kHz from the MP3
-        raw_s = clean_time_to_raw_time(chunk_clean_s, offset, ad_breaks)
-        raw_e = clean_time_to_raw_time(chunk_clean_e, offset, ad_breaks)
-
-        # A chunk may span an ad-break boundary — decode each sub-region
-        chunk_parts = []
-        for rs, re_ in clean_regions:
-            seg_raw_s = max(rs, raw_s)
-            seg_raw_e = min(re_, raw_e)
-            if seg_raw_e > seg_raw_s + 0.001:
-                part = load_audio_segment_48k(mp3_path, seg_raw_s, seg_raw_e)
-                chunk_parts.append(part)
-
-        if not chunk_parts:
-            continue
-
-        chunk_mono = np.concatenate(chunk_parts)
-        del chunk_parts
-
-        # Pad/trim to expected length (ffmpeg seek can be slightly off)
-        expected_samples = int(round(chunk_dur * TARGET_SR))
-        if len(chunk_mono) < expected_samples:
-            chunk_mono = np.pad(chunk_mono, (0, expected_samples - len(chunk_mono)))
-        else:
-            chunk_mono = chunk_mono[:expected_samples]
-
-        # Double-mono stereo
-        stereo = np.stack([chunk_mono, chunk_mono.copy()])
-        del chunk_mono
-        if speaker == "SPEAKER_MAIN":
-            suffix = "main"
-            stereo[1] = 0.0
-        else:
-            suffix = "other"
-            stereo[0] = 0.0
-
-        fname = f"ep{ep_num}_{chunk_count:04d}_{suffix}"
-        write_chunk(stereo, TARGET_SR, aligns, out_dir, fname)
-        del stereo
-        chunk_count += 1
-
-    print(f"  ✓ {chunk_count} chunks written to {out_dir}", flush=True)
-    return chunk_count
+    # ── Save refined alignment ─────────────────────────────────────────────
+    json.dump(aligned_words, open(refined_path, "w", encoding="utf-8"),
+              ensure_ascii=False)
+    print(f"\n  step3: refined alignment saved → {refined_path}", flush=True)
+    return aligned_words
 
 
-# ── episode discovery ─────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Episode discovery + orchestration
+# ══════════════════════════════════════════════════════════════════════════════
 
-def find_episodes(episode_filter=None):
+def find_episodes(episode_filter=None) -> list:
     trans_files = sorted(glob.glob(os.path.join(TRANSCRIPT_DIR, "episode_*.json")))
     mp3_files   = sorted(glob.glob(os.path.join(AUDIO_DIR, "*.mp3")))
-
-    mp3_by_ep = {}
+    mp3_by_ep   = {}
     for mp3 in mp3_files:
         m = re.search(r"^#(\d+)\s", os.path.basename(mp3))
         if m:
             mp3_by_ep[int(m.group(1))] = mp3
-
     episodes = []
     for tp in trans_files:
         m = re.search(r"episode_(\d+)_", os.path.basename(tp))
@@ -538,15 +641,13 @@ def find_episodes(episode_filter=None):
         ep_num = int(m.group(1))
         if episode_filter is not None and ep_num not in episode_filter:
             continue
-        if ep_num not in mp3_by_ep:
-            continue
-        episodes.append((ep_num, tp, mp3_by_ep[ep_num]))
-
+        if ep_num in mp3_by_ep:
+            episodes.append((ep_num, tp, mp3_by_ep[ep_num]))
     episodes.sort()
     return episodes
 
 
-def parse_episode_filter(spec: str):
+def parse_episode_filter(spec: str) -> set:
     result = set()
     for part in spec.split(","):
         part = part.strip()
@@ -558,60 +659,71 @@ def parse_episode_filter(spec: str):
     return result
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
+    print(f"\n{'═'*60}", flush=True)
+    print(f"  Episode {ep_num}  —  {os.path.basename(mp3_path)}", flush=True)
+    print(f"{'─'*60}", flush=True)
+
+    tdata = json.load(open(transcript_path, encoding="utf-8"))
+    transcript_segs = [s for s in tdata.get("segments", [])
+                       if s.get("text", "").strip()]
+    print(f"  transcript: {len(transcript_segs)} segments  "
+          f"[{transcript_segs[0]['start']:.1f}s – "
+          f"{transcript_segs[-1]['end']:.1f}s]", flush=True)
+
+    # ── Step 1 ────────────────────────────────────────────────────────────────
+    w1_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w1.json")
+    if os.path.exists(w1_path):
+        w1 = json.load(open(w1_path, encoding="utf-8"))
+        print(f"\n  [Step 1] cached — {len(w1)} words from {w1_path}", flush=True)
+    else:
+        print(f"\n  [Step 1] Transcribe full MP3", flush=True)
+        w1 = step1_transcribe(ep_num, mp3_path)
+
+    # ── Step 2 ────────────────────────────────────────────────────────────────
+    print(f"\n  [Step 2] Auto-detect offsets + align words", flush=True)
+    aligned = step2_align(ep_num, w1, transcript_segs)
+    print_alignment_report(aligned, transcript_segs)
+
+    # ── Step 3 ────────────────────────────────────────────────────────────────
+    print(f"\n  [Step 3] Rerun whisper on stripped audio + compare", flush=True)
+    step3_rerun_compare(ep_num, mp3_path, aligned)
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--episodes", default=None,
-                        help='Episode filter, e.g. "150-159" or "150,151,200"')
-    parser.add_argument("--out-dir", default=OUTPUT_DIR,
-                        help=f"Output directory (default: {OUTPUT_DIR})")
-    parser.add_argument("--skip-existing", action="store_true",
-                        help="Skip episodes that already have output chunks")
+                        help='e.g. "152" or "150-152" or "150,152"')
     args = parser.parse_args()
 
-    out_dir   = args.out_dir
-    os.makedirs(out_dir, exist_ok=True)
+    if not os.path.isfile(WHISPER_CLI):
+        sys.exit(f"whisper-cli not found: {WHISPER_CLI}")
+    if not os.path.isfile(WHISPER_MODEL):
+        sys.exit(f"whisper model not found: {WHISPER_MODEL}")
 
-    ep_filter = parse_episode_filter(args.episodes) if args.episodes else None
-    cache     = load_cache()
+    ep_filt  = parse_episode_filter(args.episodes) if args.episodes else None
+    episodes = find_episodes(ep_filt)
 
-    episodes = find_episodes(ep_filter)
     if not episodes:
-        print("No matching episodes found. Check paths.", file=sys.stderr)
-        sys.exit(1)
+        sys.exit("No matching episodes found.")
 
-    print(f"Found {len(episodes)} episode(s) to process → {out_dir}")
+    print(f"Found {len(episodes)} episode(s). Running all 3 steps.")
 
-    total_chunks = 0
-    total_errors = 0
-
+    errors = 0
     for ep_num, transcript_path, mp3_path in episodes:
-        ep_label = f"ep{ep_num}"
-
-        if args.skip_existing:
-            existing = glob.glob(os.path.join(out_dir, f"ep{ep_num}_*.wav"))
-            if existing:
-                print(f"  skipping ep{ep_num} ({len(existing)} chunks already present)")
-                continue
-
-        if ep_label not in cache:
-            print(f"  ⚠ {ep_label} not in alignment cache — using default offset=34.2s")
-
         try:
-            n = process_episode(ep_num, transcript_path, mp3_path, cache, out_dir)
-            total_chunks += n
+            process_episode(ep_num, transcript_path, mp3_path)
         except Exception as exc:
             import traceback
-            print(f"  ✗ {ep_label} FAILED: {exc}", flush=True)
+            print(f"\n  ✗ ep{ep_num} FAILED: {exc}", flush=True)
             traceback.print_exc()
-            total_errors += 1
+            errors += 1
 
-    print(f"\n{'='*60}")
-    print(f"Done.  {total_chunks} chunks written,  {total_errors} episode errors.")
-    print(f"Output: {out_dir}")
+    print(f"\n{'═'*60}")
+    print(f"Done.  {errors} error(s).")
 
 
 if __name__ == "__main__":
