@@ -62,7 +62,7 @@ WHISPER_CLI    = os.path.join(
 )
 WHISPER_MODEL  = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "bin", "models", "ggml-large-v3-turbo-q5_0.bin",
+    "bin", "models", "ggml-large-v3.bin",
 )
 
 WHISPER_THREADS = 8
@@ -256,15 +256,23 @@ def search_segment(t_norm: list, whisper_words: list, w_starts: list,
 
 
 def _bootstrap_offset(whisper_words: list, transcript_segs: list,
-                       max_segs: int = 40) -> float | None:
+                       max_segs: int = 40,
+                       max_raw_t: float = 180.0) -> float | None:
     """
     Estimate the initial raw_time − transcript_time offset by finding the
-    first 4-word exact run shared between the transcript and whisper words.
+    first 4-word exact run shared between the transcript (first max_segs
+    segments) and the whisper output (first max_raw_t seconds only).
+
+    Constraining to the first max_raw_t seconds of whisper prevents a rare
+    false match deep in the audio from producing a wildly wrong initial offset.
 
     Returns offset (float) or None if nothing found.
     """
     w_norm = [((norm_words(w["word"]) or [""])[0]) for w in whisper_words]
     w_starts = [w["start"] for w in whisper_words]
+
+    # Only search within the first max_raw_t seconds of whisper output
+    wi_limit = bisect.bisect_right(w_starts, max_raw_t)
 
     for seg in transcript_segs[:max_segs]:
         tn = norm_words(seg["text"])
@@ -274,12 +282,12 @@ def _bootstrap_offset(whisper_words: list, transcript_segs: list,
             continue
         for gi in range(len(tn) - 3):
             gram = tn[gi:gi + 4]
-            for wi in range(len(w_norm) - 3):
+            for wi in range(min(wi_limit, len(w_norm) - 3)):
                 if w_norm[wi:wi + 4] == gram:
-                    # gram starts at gi/len(tn) through the segment
                     word_frac = gi / len(tn)
                     approx_gram_t = t_start + word_frac * seg_dur
-                    return w_starts[wi] - approx_gram_t
+                    offset = w_starts[wi] - approx_gram_t
+                    return offset
     return None
 
 
@@ -783,7 +791,8 @@ def parse_episode_filter(spec: str) -> set:
     return result
 
 
-def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
+def process_episode(ep_num: int, transcript_path: str, mp3_path: str,
+                    skip_step3: bool = False):
     print(f"\n{'═'*60}", flush=True)
     print(f"  Episode {ep_num}  —  {os.path.basename(mp3_path)}", flush=True)
     print(f"{'─'*60}", flush=True)
@@ -810,8 +819,11 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
     print_alignment_report(aligned, transcript_segs)
 
     # ── Step 3 ────────────────────────────────────────────────────────────────
-    print(f"\n  [Step 3] Rerun whisper on stripped audio + compare", flush=True)
-    step3_rerun_compare(ep_num, mp3_path, aligned)
+    if skip_step3:
+        print(f"\n  [Step 3] skipped (--skip-step3)", flush=True)
+    else:
+        print(f"\n  [Step 3] Rerun whisper on stripped audio + compare", flush=True)
+        step3_rerun_compare(ep_num, mp3_path, aligned)
 
 
 def main():
@@ -821,6 +833,8 @@ def main():
     )
     parser.add_argument("--episodes", default=None,
                         help='e.g. "152" or "150-152" or "150,152"')
+    parser.add_argument("--skip-step3", action="store_true",
+                        help="skip the stripped-audio re-transcription step")
     args = parser.parse_args()
 
     if not os.path.isfile(WHISPER_CLI):
@@ -834,12 +848,14 @@ def main():
     if not episodes:
         sys.exit("No matching episodes found.")
 
-    print(f"Found {len(episodes)} episode(s). Running all 3 steps.")
+    steps = "steps 1+2" if args.skip_step3 else "all 3 steps"
+    print(f"Found {len(episodes)} episode(s). Running {steps}.")
 
     errors = 0
     for ep_num, transcript_path, mp3_path in episodes:
         try:
-            process_episode(ep_num, transcript_path, mp3_path)
+            process_episode(ep_num, transcript_path, mp3_path,
+                            skip_step3=args.skip_step3)
         except Exception as exc:
             import traceback
             print(f"\n  ✗ ep{ep_num} FAILED: {exc}", flush=True)
