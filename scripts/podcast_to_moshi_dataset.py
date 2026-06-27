@@ -546,6 +546,20 @@ def step2_align(ep_num: int, whisper_words: list,
         re = seg_raw_end[si]   or 0.0
         seg_windows.append((rs, re, seg.get("speaker", ""), seg.get("text", "").strip()))
 
+    # ── Close cracks between adjacent windows ────────────────────────────────
+    # After interpolation, consecutive segment windows may not be contiguous:
+    # the end of window[i] < start of window[i+1].  Any whisper word that
+    # falls in this crack gets misclassified as out_of_transcript even though
+    # it belongs to real content.  Extend each window's end to the next
+    # window's start so cracks are closed.  The gap-detection below then only
+    # sees spans that are genuinely not covered by any window.
+    closed = []
+    for i, (rs, re, spk, txt) in enumerate(seg_windows):
+        if i + 1 < len(seg_windows):
+            re = max(re, seg_windows[i + 1][0])
+        closed.append((rs, re, spk, txt))
+    seg_windows = closed
+
     # ── Detect real gaps ≥ MIN_AD_GAP ─────────────────────────────────────────
     gap_regions = []
     if seg_windows[0][0] > MIN_AD_GAP:
