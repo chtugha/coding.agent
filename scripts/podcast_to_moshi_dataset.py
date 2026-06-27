@@ -151,271 +151,395 @@ def step1_transcribe(ep_num: int, mp3_path: str) -> list:
 # Step 2 — Segment-by-segment alignment
 # ══════════════════════════════════════════════════════════════════════════════
 
-def match_segment_in_whisper(t_norm: list, whisper_words: list,
-                              w_starts: list, search_from: int,
-                              expected_raw_t: float, window: float) -> tuple:
+def _true_lcs_len(a: list, b: list) -> int:
     """
-    Find the best position in the whisper stream for a transcript segment.
-
-    Uses a sliding window of (len(t_norm) + SLACK) whisper words scored by
-    longest-common-subsequence overlap, tolerating whisper insertions/deletions
-    at segment boundaries.
-
-    Returns (best_whisper_index, score) or (None, 0.0) if no good match.
+    Standard O(|a|·|b|) DP longest-common-subsequence count.
+    Works regardless of where the match starts in either sequence.
     """
-    n     = len(t_norm)
-    SLACK = min(4, n)   # allow up to SLACK extra whisper words per window
-    WIN   = n + SLACK
+    n, m = len(a), len(b)
+    if n == 0 or m == 0:
+        return 0
+    prev = [0] * (m + 1)
+    for ai in range(n):
+        curr = [0] * (m + 1)
+        for bi in range(m):
+            if a[ai] == b[bi]:
+                curr[bi + 1] = prev[bi] + 1
+            else:
+                curr[bi + 1] = max(curr[bi], prev[bi + 1])
+        prev = curr
+    return prev[m]
 
-    lo = bisect.bisect_left(w_starts,  expected_raw_t - window)
-    hi = bisect.bisect_right(w_starts, expected_raw_t + window)
-    lo = max(lo, search_from)
+
+def lcs_score(t_norm: list, w_flat: list) -> float:
+    """True LCS match count / len(t_norm). Order-preserving, position-independent."""
+    n = len(t_norm)
+    return _true_lcs_len(t_norm, w_flat) / n if n else 0.0
+
+
+def _find_lcs_span(t_norm: list, w_flat: list) -> tuple:
+    """
+    Return (start_idx, end_idx_exclusive) in w_flat that is the tightest span
+    enclosing the full LCS match, plus the lcs length.
+
+    Uses the DP table to recover which w_flat positions were matched.
+    Returns (None, None, 0) if no match.
+    """
+    n, m = len(t_norm), len(w_flat)
+    if n == 0 or m == 0:
+        return None, None, 0
+
+    # Full DP table to trace back
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for ai in range(n):
+        for bi in range(m):
+            if t_norm[ai] == w_flat[bi]:
+                dp[ai + 1][bi + 1] = dp[ai][bi] + 1
+            else:
+                dp[ai + 1][bi + 1] = max(dp[ai][bi + 1], dp[ai + 1][bi])
+
+    lcs_len = dp[n][m]
+    if lcs_len == 0:
+        return None, None, 0
+
+    # Traceback to find first and last matched positions in w_flat
+    ai, bi = n, m
+    first_b = last_b = -1
+    while ai > 0 and bi > 0:
+        if t_norm[ai - 1] == w_flat[bi - 1] and dp[ai][bi] == dp[ai - 1][bi - 1] + 1:
+            if last_b == -1:
+                last_b = bi - 1
+            first_b = bi - 1
+            ai -= 1
+            bi -= 1
+        elif dp[ai - 1][bi] >= dp[ai][bi - 1]:
+            ai -= 1
+        else:
+            bi -= 1
+
+    return first_b, last_b + 1, lcs_len  # exclusive end
+
+
+def search_segment(t_norm: list, whisper_words: list, w_starts: list,
+                   cursor: int, center: float, half_win: float,
+                   min_score: float) -> tuple:
+    """
+    Search for t_norm in whisper_words within [center-half_win, center+half_win],
+    starting no earlier than cursor.
+
+    Uses true LCS (DP) over the entire window — no sliding sub-window needed.
+    The DP finds the best subsequence match regardless of where t_norm starts
+    or ends relative to the window boundaries.
+
+    Returns (abs_start_idx, abs_end_idx, score) or (None, None, 0.0).
+    abs_end_idx is exclusive (one past last matched whisper word).
+    """
+    lo = max(cursor, bisect.bisect_left(w_starts,  center - half_win))
+    hi = bisect.bisect_right(w_starts, center + half_win)
     if lo >= hi:
-        return None, 0.0
+        return None, None, 0.0
 
-    best_score, best_i = 0.0, None
-    for i in range(lo, hi):
-        end  = min(i + WIN, hi)
-        flat = []
-        for j in range(i, end):
-            k = norm_words(whisper_words[j]["word"])
-            flat.append(k[0] if k else "")
-        # LCS: count t_norm words found in flat in order
-        ti = fi = 0
-        while ti < n and fi < len(flat):
-            if t_norm[ti] == flat[fi]:
-                ti += 1
-            fi += 1
-        score = ti / n
-        if score > best_score:
-            best_score = score
-            best_i = i
+    flat = []
+    for j in range(lo, hi):
+        k = norm_words(whisper_words[j]["word"])
+        flat.append(k[0] if k else "")
 
-    if best_score < 0.50 or best_i is None:
-        return None, 0.0
+    first_b, last_b, lcs_len = _find_lcs_span(t_norm, flat)
+    if first_b is None:
+        return None, None, 0.0
 
-    return best_i, best_score
+    score = lcs_len / len(t_norm)
+    if score < min_score:
+        return None, None, 0.0
+
+    return lo + first_b, lo + last_b, score
+
+
+def _bootstrap_offset(whisper_words: list, transcript_segs: list,
+                       max_segs: int = 40) -> float | None:
+    """
+    Estimate the initial raw_time − transcript_time offset by finding the
+    first 4-word exact run shared between the transcript and whisper words.
+
+    Returns offset (float) or None if nothing found.
+    """
+    w_norm = [((norm_words(w["word"]) or [""])[0]) for w in whisper_words]
+    w_starts = [w["start"] for w in whisper_words]
+
+    for seg in transcript_segs[:max_segs]:
+        tn = norm_words(seg["text"])
+        t_start = float(seg["start"])
+        seg_dur = max(float(seg["end"]) - t_start, 0.001)
+        if len(tn) < 4:
+            continue
+        for gi in range(len(tn) - 3):
+            gram = tn[gi:gi + 4]
+            for wi in range(len(w_norm) - 3):
+                if w_norm[wi:wi + 4] == gram:
+                    # gram starts at gi/len(tn) through the segment
+                    word_frac = gi / len(tn)
+                    approx_gram_t = t_start + word_frac * seg_dur
+                    return w_starts[wi] - approx_gram_t
+    return None
 
 
 def step2_align(ep_num: int, whisper_words: list,
                 transcript_segs: list) -> list:
     """
-    Aligns every transcript segment (ground truth) to raw-MP3 timestamps from
-    whisper.  The transcript is the authority on text and order — no segment is
-    ever skipped from the output.
+    Segment-by-segment stream alignment with offset tracking.
 
-    Pass 1 — build per-segment delta:
-      Walk segments in order.  For each segment with ≥MIN_WORDS:
-        • Search whisper near (seg.start + current_delta) ± SEARCH_WINDOW.
-        • If found: update delta, advance whisper cursor past matched words.
-        • If not found: widen to WIDE_WINDOW once (ad-break recovery).
-        • If still not found: keep current delta (whisper mistranscription).
-      Short segments always inherit the current delta.
+    For each transcript segment:
+    • Expected raw position = seg.start + current_offset
+    • Search ±TIGHT_WIN seconds around expected position (covers normal jitter)
+    • Cursor starts 2s before end of previous match (boundary overlap)
+    • If not found in tight window → ad break → search ±WIDE_WIN, update offset
+    • Unmatched segments (short / mistranscribed) get timestamps interpolated
+      from surrounding matches using the current offset.
 
-    Pass 2 — build raw-time windows for every segment:
-      raw_start = seg.start + delta_for_this_seg
-      raw_end   = seg.end   + delta_for_this_seg
-      Every segment gets a window — none are skipped.
-
-    Pass 3 — mark ad-break gaps:
-      Walk consecutive segment windows.  If the raw gap between window[i].end
-      and window[i+1].start is ≥ MIN_AD_GAP seconds, the whisper words that
-      fall in that gap are out_of_transcript (intro/ad/outro).
-
-    Pass 4 — assign whisper words to segment windows.
+    Real gaps ≥ MIN_AD_GAP seconds in raw audio = intro/ad/outro.
     """
     os.makedirs(ALIGNED_CACHE, exist_ok=True)
     out_path = os.path.join(ALIGNED_CACHE, f"ep{ep_num}_aligned.json")
 
-    w_starts = [w["start"] for w in whisper_words]
+    TIGHT_WIN    = 12.0  # ±s normal search window
+    # After N_MISS_AD consecutive misses we try a wider recalibration around
+    # the expected raw position. This handles both gradual offset drift and
+    # ad-break jumps without the oscillation of a forward-only wide scan.
+    N_MISS_AD    = 8     # consecutive misses before recalibration attempt
+    RECAL_WIN    = 60.0  # ±s recalibration window (centered on expected pos)
+    MIN_WORDS    = 4     # min words to anchor a segment
+    MIN_AD_GAP   = 8.0   # raw gap ≥ this → real ad/intro/outro
+    OVERLAP_SEC  = 2.0   # rewind cursor this many seconds for boundary overlap
+    DEBUG        = False # set True for per-segment detail
 
-    SEARCH_WINDOW = 45.0  # normal per-segment search window (±s)
-    WIDE_WINDOW   = 120.0 # bootstrap / ad-break recovery window (±s)
-    MIN_WORDS     = 4     # minimum words to use a segment as an anchor
-    MIN_AD_GAP    = 8.0   # raw-audio gap ≥ this → real ad/intro/outro break
-    DEBUG         = False  # set True to print per-segment match details
-
-    def min_score(n_words: int) -> float:
-        """Minimum acceptable LCS score — higher threshold for short segments."""
-        if n_words <= 4:  return 0.75
-        if n_words <= 6:  return 0.67
-        if n_words <= 10: return 0.60
+    def min_score(n: int) -> float:
+        if n <= 4:  return 0.75
+        if n <= 6:  return 0.67
+        if n <= 10: return 0.60
         return 0.55
 
-    delta    = None  # raw_mp3_time = transcript_time + delta
-    w_cursor = 0     # whisper index — advance past last matched words
-    n_matched = 0
-    n_missed  = 0
+    w_starts = [w["start"] for w in whisper_words]
 
-    # Per-segment delta: full_deltas[i] = delta to apply to segment i
-    full_deltas = [None] * len(transcript_segs)
+    # ── Bootstrap offset via 4-gram exact scan ────────────────────────────────
+    offset = _bootstrap_offset(whisper_words, transcript_segs)
+    if offset is not None:
+        print(f"  step2: bootstrap offset={offset:+.2f}s (4-gram scan)", flush=True)
+    else:
+        offset = 0.0
+        print(f"  step2: bootstrap failed, starting with offset=0.0", flush=True)
+
+    # cursor: whisper-word lower-bound for the tight search.
+    # Never goes backwards on normal matches; back-fill uses explicit lo/hi.
+    cursor        = 0
+    consec_misses = 0   # consecutive misses on ≥MIN_WORDS segments
+
+    seg_raw_start = [None] * len(transcript_segs)
+    seg_raw_end   = [None] * len(transcript_segs)
+    n_matched = n_missed = 0
 
     print(f"  step2: aligning {len(transcript_segs)} segments…", flush=True)
 
-    # ── Pass 1: anchor matching ───────────────────────────────────────────────
-    for si, seg in enumerate(transcript_segs):
+    # pending_miss: segment indices that failed tight search and are waiting
+    # to be back-filled once the next successful match anchors them.
+    pending_miss: list = []
+
+    si = 0
+    while si < len(transcript_segs):
+        seg     = transcript_segs[si]
         t_norm  = norm_words(seg["text"])
         t_start = float(seg["start"])
+        n       = len(t_norm)
 
-        if len(t_norm) >= MIN_WORDS:
-            expected = t_start + (delta if delta is not None else 0.0)
-            window   = WIDE_WINDOW if delta is None else SEARCH_WINDOW
+        if n < MIN_WORDS:
+            # Too short to anchor — never goes into pending_miss.
+            # Interpolation handles these later.
+            n_missed += 1
+            si += 1
+            continue
 
-            n = len(t_norm)
-            best_i, score = match_segment_in_whisper(
-                t_norm, whisper_words, w_starts, w_cursor, expected, window)
+        # Expected raw position using current offset
+        expected = t_start + offset
 
-            if (best_i is None or score < min_score(n)) and delta is not None:
-                best_i2, score2 = match_segment_in_whisper(
-                    t_norm, whisper_words, w_starts, w_cursor, expected, WIDE_WINDOW)
-                if best_i2 is not None and score2 >= min_score(n):
-                    best_i, score = best_i2, score2
-                elif best_i is not None and score < min_score(n):
-                    best_i = None  # reject the low-confidence normal-window match
+        # ── Tight-window search ───────────────────────────────────────────────
+        abs_start, abs_end, score = search_segment(
+            t_norm, whisper_words, w_starts,
+            cursor, expected, TIGHT_WIN, min_score(n))
 
-            if best_i is not None and score >= min_score(n):
-                # Compute delta via LCS pairs: walk t_norm and the whisper
-                # window in LCS order, recording (w.start - proportional_t)
-                # for each matched pair, then take the median.
-                seg_dur = float(seg["end"]) - t_start
-                SLACK   = min(4, n)
-                WIN     = n + SLACK
-                end_wi  = min(best_i + WIN, len(whisper_words))
+        # ── Recalibration after consecutive misses ────────────────────────────
+        # After N_MISS_AD consecutive misses, the offset has likely drifted or
+        # an ad break occurred. Search ±RECAL_WIN around the expected position,
+        # using cursor as the floor (never rewinds past consumed audio).
+        if abs_start is None and consec_misses >= N_MISS_AD:
+            abs_start, abs_end, score = search_segment(
+                t_norm, whisper_words, w_starts,
+                cursor, expected, RECAL_WIN, min_score(n))
+            if abs_start is not None:
+                new_offset = whisper_words[abs_start]["start"] - t_start
+                jump = new_offset - offset
+                print(f"  step2: recal at t={t_start:.0f}s  "
+                      f"Δ={jump:+.1f}s  raw={whisper_words[abs_start]['start']:.1f}s",
+                      flush=True)
+                offset = new_offset
+                new_cursor_t = whisper_words[abs_end - 1]["end"] - OVERLAP_SEC
+                cursor = max(cursor, bisect.bisect_left(w_starts, new_cursor_t))
+                consec_misses = 0
 
-                flat = []
-                for j in range(best_i, end_wi):
-                    k = norm_words(whisper_words[j]["word"])
-                    flat.append((k[0] if k else "", j))  # (norm, original_index)
+        # ── Queue for back-fill ───────────────────────────────────────────────
+        if abs_start is None:
+            pending_miss.append(si)
+            n_missed += 1
+            consec_misses += 1
+            if DEBUG:
+                print(f"  MISS  si={si:4d} t={t_start:.1f}s "
+                      f"T:{seg['text'].strip()[:60]!r}", flush=True)
+            si += 1
+            continue
 
-                # Replay LCS to get matched pairs (t_norm_pos, whisper_idx)
-                ti = fi = 0
-                pairs = []
-                while ti < n and fi < len(flat):
-                    if t_norm[ti] == flat[fi][0]:
-                        pairs.append((ti, flat[fi][1]))
-                        ti += 1
-                    fi += 1
+        # ── Successful match ──────────────────────────────────────────────────
+        offset = whisper_words[abs_start]["start"] - t_start
+        consec_misses = 0
 
-                if pairs:
-                    # Median delta across matched pairs
-                    indiv = []
-                    for (tk, wi) in pairs:
-                        t_word = t_start + (tk / n) * seg_dur
-                        indiv.append(whisper_words[wi]["start"] - t_word)
-                    indiv.sort()
-                    delta = indiv[len(indiv) // 2]
-                else:
-                    delta = whisper_words[best_i]["start"] - t_start
+        seg_raw_start[si] = whisper_words[abs_start]["start"]
+        seg_raw_end[si]   = whisper_words[abs_end - 1]["end"]
+        n_matched += 1
 
+        # Advance cursor to 2s before end of this match
+        new_cursor_t = whisper_words[abs_end - 1]["end"] - OVERLAP_SEC
+        cursor = max(cursor, bisect.bisect_left(w_starts, new_cursor_t))
+
+        if DEBUG:
+            wt = " ".join(whisper_words[j]["word"]
+                          for j in range(abs_start, min(abs_end + 1, len(whisper_words))))
+            print(f"  MATCH si={si:4d} t={t_start:.1f}s raw={seg_raw_start[si]:.1f}s "
+                  f"score={score:.2f} off={offset:+.2f}s", flush=True)
+            print(f"    T: {seg['text'].strip()[:70]!r}", flush=True)
+            print(f"    W: {wt[:70]!r}", flush=True)
+
+        # ── Back-fill pending missed segments using this anchor ───────────────
+        # Walk in reverse order (closest to anchor first).
+        # Each pending seg gets a ±TIGHT_WIN window anchored by current offset,
+        # capped at abs_start so segment order is preserved.
+        for psi in reversed(pending_miss):
+            pseg   = transcript_segs[psi]
+            pt_n   = norm_words(pseg["text"])
+            pt_s   = float(pseg["start"])
+            pt_len = len(pt_n)
+            if pt_len < MIN_WORDS:
+                continue
+            p_expected = pt_s + offset
+            p_lo = bisect.bisect_left(w_starts,  p_expected - TIGHT_WIN)
+            p_hi = min(abs_start,
+                       bisect.bisect_right(w_starts, p_expected + TIGHT_WIN))
+            if p_lo >= p_hi:
+                if DEBUG:
+                    print(f"  BACKFILL MISS psi={psi:4d} no window", flush=True)
+                continue
+            p_center   = (w_starts[p_lo] + w_starts[p_hi - 1]) / 2.0
+            p_half_win = (w_starts[p_hi - 1] - w_starts[p_lo]) / 2.0 + 0.01
+            pa_s, pa_e, p_score = search_segment(
+                pt_n, whisper_words, w_starts,
+                p_lo, p_center, p_half_win, min_score(pt_len))
+            if pa_s is not None and pa_e <= abs_start:
+                seg_raw_start[psi] = whisper_words[pa_s]["start"]
+                seg_raw_end[psi]   = whisper_words[pa_e - 1]["end"]
                 n_matched += 1
-                w_cursor = best_i + n    # advance only past matched segment length
-
+                n_missed  -= 1
                 if DEBUG:
-                    w_text = " ".join(whisper_words[j]["word"]
-                                      for j in range(best_i, end_wi))
-                    print(f"  MATCH si={si:4d} t={t_start:7.1f}s "
-                          f"score={score:.2f} δ={delta:+.2f}s  "
-                          f"T: {seg['text'].strip()[:50]!r}", flush=True)
-                    print(f"        W: {w_text[:60]!r}", flush=True)
+                    print(f"  BACKFILL MATCH psi={psi:4d} "
+                          f"t={pt_s:.1f}s raw={seg_raw_start[psi]:.1f}s "
+                          f"score={p_score:.2f}", flush=True)
             else:
-                n_missed += 1
                 if DEBUG:
-                    print(f"  MISS  si={si:4d} t={t_start:7.1f}s "
-                          f"δ={delta if delta else 0:+.2f}s  "
-                          f"T: {seg['text'].strip()[:60]!r}", flush=True)
+                    print(f"  BACKFILL MISS psi={psi:4d} t={pt_s:.1f}s",
+                          flush=True)
+        pending_miss.clear()
 
-        # Every segment gets a delta — unmatched inherit last known delta.
-        if delta is not None:
-            full_deltas[si] = delta
-
-    if delta is None:
-        raise RuntimeError("step2: could not align any segment")
-
-    # Back-fill segments before the first anchor with the first known delta.
-    first_delta = next(d for d in full_deltas if d is not None)
-    full_deltas = [d if d is not None else first_delta for d in full_deltas]
+        si += 1
 
     print(f"  step2: matched {n_matched}  missed {n_missed}  "
-          f"total {len(transcript_segs)} segments", flush=True)
+          f"total {len(transcript_segs)}", flush=True)
 
-    # ── Pass 2: build raw-time windows for every segment ─────────────────────
-    seg_windows = []  # (raw_start, raw_end, speaker, seg_text) — one per segment
+    # ── Interpolate timestamps for unmatched segments ─────────────────────────
+    # Use offset from surrounding matched segments, linear in transcript time.
+    t_starts_f = [float(s["start"]) for s in transcript_segs]
+    t_ends_f   = [float(s["end"])   for s in transcript_segs]
+
+    for si in range(len(transcript_segs)):
+        if seg_raw_start[si] is not None:
+            continue
+        prev = next((j for j in range(si - 1, -1, -1) if seg_raw_start[j] is not None), None)
+        nxt  = next((j for j in range(si + 1, len(transcript_segs)) if seg_raw_start[j] is not None), None)
+
+        if prev is not None and nxt is not None:
+            t0, r0 = t_starts_f[prev], seg_raw_start[prev]
+            t1, r1 = t_starts_f[nxt],  seg_raw_start[nxt]
+            a = (t_starts_f[si] - t0) / (t1 - t0) if t1 != t0 else 0.0
+            seg_raw_start[si] = r0 + a * (r1 - r0)
+        elif prev is not None:
+            off = seg_raw_start[prev] - t_starts_f[prev]
+            seg_raw_start[si] = t_starts_f[si] + off
+        elif nxt is not None:
+            off = seg_raw_start[nxt] - t_starts_f[nxt]
+            seg_raw_start[si] = t_starts_f[si] + off
+
+        if seg_raw_start[si] is not None:
+            seg_raw_end[si] = seg_raw_start[si] + (t_ends_f[si] - t_starts_f[si])
+
+    # ── Build segment windows ─────────────────────────────────────────────────
+    seg_windows = []
     for si, seg in enumerate(transcript_segs):
-        d   = full_deltas[si]
-        rs  = float(seg["start"]) + d
-        re  = float(seg["end"])   + d
+        rs = seg_raw_start[si] or 0.0
+        re = seg_raw_end[si]   or 0.0
         seg_windows.append((rs, re, seg.get("speaker", ""), seg.get("text", "").strip()))
 
-    # ── Pass 3: identify genuine gap regions (ad breaks / intro / outro) ──────
-    # A gap between consecutive segment windows that is ≥ MIN_AD_GAP seconds
-    # in raw time is a real ad/intro/outro.  Whisper words in those gaps get
-    # out_of_transcript = True.
-    gap_regions = []  # list of (raw_gap_start, raw_gap_end)
+    # ── Detect real gaps ≥ MIN_AD_GAP ─────────────────────────────────────────
+    gap_regions = []
+    if seg_windows[0][0] > MIN_AD_GAP:
+        gap_regions.append((0.0, seg_windows[0][0]))
+        print(f"  step2: intro  0.0 – {seg_windows[0][0]:.1f}s", flush=True)
 
-    # Gap before the first segment (intro jingle)
-    first_raw_start = seg_windows[0][0]
-    if first_raw_start > MIN_AD_GAP:
-        gap_regions.append((0.0, first_raw_start))
-        print(f"  step2: intro gap  0.0s – {first_raw_start:.1f}s  "
-              f"({first_raw_start:.1f}s)", flush=True)
-
-    # Gaps between consecutive segments
     for i in range(len(seg_windows) - 1):
-        gap_start = seg_windows[i][1]     # end of segment i
-        gap_end   = seg_windows[i + 1][0] # start of segment i+1
-        gap_dur   = gap_end - gap_start
-        if gap_dur >= MIN_AD_GAP:
-            gap_regions.append((gap_start, gap_end))
-            print(f"  step2: gap  {gap_start:.1f}s – {gap_end:.1f}s  "
-                  f"({gap_dur:.1f}s)", flush=True)
+        gs = seg_windows[i][1]
+        ge = seg_windows[i + 1][0]
+        if ge - gs >= MIN_AD_GAP:
+            gap_regions.append((gs, ge))
+            print(f"  step2: gap  {gs:.1f}s – {ge:.1f}s  ({ge-gs:.1f}s)", flush=True)
 
-    print(f"  step2: {len(gap_regions)} gap region(s) detected", flush=True)
+    print(f"  step2: {len(gap_regions)} gap region(s)", flush=True)
 
-    # Build a fast lookup: is raw_t inside any gap?
-    gap_starts = [g[0] for g in gap_regions]
-    gap_ends   = [g[1] for g in gap_regions]
+    g_starts = [g[0] for g in gap_regions]
+    g_ends   = [g[1] for g in gap_regions]
 
-    def in_gap(raw_t: float) -> bool:
-        idx = bisect.bisect_right(gap_starts, raw_t) - 1
-        return idx >= 0 and raw_t < gap_ends[idx]
+    def in_gap(t: float) -> bool:
+        i = bisect.bisect_right(g_starts, t) - 1
+        return i >= 0 and t < g_ends[i]
 
-    # ── Pass 4: assign each whisper word to a segment window ─────────────────
+    # ── Assign whisper words ──────────────────────────────────────────────────
     sw_starts = [s[0] for s in seg_windows]
     sw_ends   = [s[1] for s in seg_windows]
 
-    result  = []
+    result = []
     n_in = n_out = 0
     for w in whisper_words:
-        raw_t = w["start"]
-
-        if in_gap(raw_t):
-            result.append({
-                "word": w["word"], "start": w["start"], "end": w["end"],
-                "p": w["p"], "speaker": None, "seg_text": None,
-                "out_of_transcript": True,
-            })
+        t = w["start"]
+        if in_gap(t):
+            result.append({"word": w["word"], "start": w["start"], "end": w["end"],
+                           "p": w["p"], "speaker": None, "seg_text": None,
+                           "out_of_transcript": True})
             n_out += 1
-            continue
-
-        idx = bisect.bisect_right(sw_starts, raw_t) - 1
-        if idx >= 0 and raw_t <= sw_ends[idx]:
-            result.append({
-                "word":              w["word"],
-                "start":             w["start"],
-                "end":               w["end"],
-                "p":                 w["p"],
-                "speaker":           seg_windows[idx][2],
-                "seg_text":          seg_windows[idx][3],
-                "out_of_transcript": False,
-            })
-            n_in += 1
         else:
-            result.append({
-                "word": w["word"], "start": w["start"], "end": w["end"],
-                "p": w["p"], "speaker": None, "seg_text": None,
-                "out_of_transcript": True,
-            })
-            n_out += 1
+            idx = bisect.bisect_right(sw_starts, t) - 1
+            if idx >= 0 and t <= sw_ends[idx]:
+                result.append({"word": w["word"], "start": w["start"], "end": w["end"],
+                               "p": w["p"], "speaker": seg_windows[idx][2],
+                               "seg_text": seg_windows[idx][3],
+                               "out_of_transcript": False})
+                n_in += 1
+            else:
+                result.append({"word": w["word"], "start": w["start"], "end": w["end"],
+                               "p": w["p"], "speaker": None, "seg_text": None,
+                               "out_of_transcript": True})
+                n_out += 1
 
     pct = 100.0 * n_in / len(result) if result else 0
     print(f"  step2: {n_in} words assigned ({pct:.1f}%)  "
