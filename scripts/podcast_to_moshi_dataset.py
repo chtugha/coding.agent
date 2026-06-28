@@ -447,8 +447,9 @@ def step2_align(ep_num: int, whisper_words: list,
             if abs_start is not None:
                 new_offset = whisper_words[abs_start]["start"] - t_start
                 jump = new_offset - offset
-                print(f"  step2: recal at t={t_start:.0f}s  "
-                      f"Δ={jump:+.1f}s  raw={whisper_words[abs_start]['start']:.1f}s",
+                print(f"  step2: offset-recal at t={t_start:.0f}s  "
+                      f"offset-jump={jump:+.1f}s  raw={whisper_words[abs_start]['start']:.1f}s"
+                      f"  (whisper drift, not an ad break)",
                       flush=True)
                 offset = new_offset
                 new_cursor_t = whisper_words[abs_end - 1]["end"] - OVERLAP_SEC
