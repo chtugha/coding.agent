@@ -692,8 +692,8 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
     and makes step 3 independently reproducible from the w2uncut cache.
 
     Saves:
-      ep{N}_stripped.mp3              — raw MP3 with intro/ads removed
-      whisper_cache/ep{N}_w2.json     — in-transcript words at stripped-MP3 timestamps
+      whisper_cache/ep{N}_stripped.mp3  — raw MP3 with intro/ads removed
+      whisper_cache/ep{N}_w2.json       — in-transcript words at stripped-MP3 timestamps
     """
     MIN_AD_GAP = 8.0  # seconds — same threshold as step 2
 
@@ -747,7 +747,7 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
           f"{total_keep:.0f}s total content", flush=True)
 
     # ── Build stripped MP3 ────────────────────────────────────────────────────
-    stripped_path = os.path.join(AUDIO_DIR, f"ep{ep_num}_stripped.mp3")
+    stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.mp3")
     _build_stripped_mp3(mp3_path, keep_regions, stripped_path)
     print(f"  step3: stripped MP3 saved → {stripped_path}", flush=True)
 
@@ -830,7 +830,7 @@ def step4_verify(ep_num: int) -> None:
     300 ms, mean < 50 ms).  Any systematic deviation points to a bug in the
     gap-cut boundaries or the timestamp-adjustment logic in step 3.
     """
-    stripped_path = os.path.join(AUDIO_DIR, f"ep{ep_num}_stripped.mp3")
+    stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.mp3")
     w2_path       = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
     w3_path       = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w3.json")
 
