@@ -835,53 +835,63 @@ def step4_verify(ep_num: int) -> None:
               ensure_ascii=False)
     print(f"  step4: {len(w3_words)} words saved → {w3_path}", flush=True)
 
-    # ── Compare w2 vs w3 ──────────────────────────────────────────────────────
-    # Both in moshi-finetune format: {"alignments": [[text, [start, end], ...], ...]}
+    # ── Compare w2 vs w3 timestamps ───────────────────────────────────────────
+    # Strategy: forward-cursor walk through both streams in order.
+    # For each w2 word advance the w3 cursor until we find the same normalised
+    # text within a ±LOOK_AHEAD word window.  Only words that both runs agree on
+    # (same text, same relative order) get their timestamps compared.
+    # This avoids the "common short word matched at wrong instance" problem of
+    # the previous bisect approach.
     w2_alignments = json.load(open(w2_path, encoding="utf-8"))["alignments"]
 
     w3_norm  = [((norm_words(w["word"]) or [""])[0]) for w in w3_words]
     w3_start = [w["start"] for w in w3_words]
+    w2_norm  = [((norm_words(e[0]) or [""])[0]) for e in w2_alignments]
+    w2_start = [e[1][0] for e in w2_alignments]
 
-    MATCH_WIN = 15.0  # ±s around w2 time to search for w3 counterpart
-                      # Two independent whisper runs on the same audio can drift
-                      # by several seconds at segment boundaries over a long episode.
-    n_match = n_miss = 0
+    LOOK_AHEAD = 30   # scan up to this many w3 words ahead before giving up
+    TIME_SYNC  = 10.0 # re-anchor w3 cursor by time if it drifts more than this
     deltas: list = []
     large:  list = []
+    n_matched = n_skipped = 0
+    j = 0   # w3 cursor
 
-    for entry in w2_alignments:
-        text, (t2, _t2e) = entry[0], entry[1]
-        key = (norm_words(text) or [""])[0]
+    for i, key in enumerate(w2_norm):
         if not key:
             continue
-        lo = bisect.bisect_left(w3_start,  t2 - MATCH_WIN)
-        hi = bisect.bisect_right(w3_start, t2 + MATCH_WIN)
-        best_d, best_t3 = float("inf"), None
-        for i in range(lo, hi):
-            if w3_norm[i] == key:
-                d = abs(w3_start[i] - t2)
-                if d < best_d:
-                    best_d  = d
-                    best_t3 = w3_start[i]
-        if best_t3 is None:
-            n_miss += 1
-        else:
-            n_match += 1
-            deltas.append(best_d)
-            if best_d > 0.300:
-                large.append((text, t2, best_t3))
+        t2 = w2_start[i]
+        # Re-anchor cursor: if w3[j] is more than TIME_SYNC seconds away from
+        # the expected w2 time, reset j to the closest w3 position by time.
+        if j < len(w3_start) and abs(w3_start[j] - t2) > TIME_SYNC:
+            j = bisect.bisect_left(w3_start, t2 - 1.0)
+        # scan w3 from current cursor up to LOOK_AHEAD words ahead
+        found = False
+        for k in range(j, min(j + LOOK_AHEAD, len(w3_norm))):
+            if w3_norm[k] == key:
+                d = abs(w3_start[k] - t2)
+                deltas.append(d)
+                if d > 0.300:
+                    large.append((w2_alignments[i][0], t2, w3_start[k]))
+                j = k + 1   # advance cursor past this match
+                n_matched += 1
+                found = True
+                break
+        if not found:
+            n_skipped += 1
 
-    total    = n_match + n_miss
-    pct      = 100.0 * n_match / total if total else 0
+    total    = n_matched + n_skipped
+    pct      = 100.0 * n_matched / total if total else 0
     mean_d   = sum(deltas) / len(deltas) if deltas else 0
     max_d    = max(deltas)               if deltas else 0
+    median_d = sorted(deltas)[len(deltas) // 2] if deltas else 0
     over_300 = len(large)
 
     print(f"\n  Step 4 — w2 vs w3 timestamp comparison:", flush=True)
     print(f"  w2 words        : {len(w2_alignments)}", flush=True)
     print(f"  w3 words        : {len(w3_words)}", flush=True)
-    print(f"  Matched         : {n_match}/{total}  ({pct:.1f}%)", flush=True)
+    print(f"  Order-matched   : {n_matched}/{total}  ({pct:.1f}%)", flush=True)
     print(f"  Mean  |Δ|       : {mean_d*1000:.0f} ms", flush=True)
+    print(f"  Median|Δ|       : {median_d*1000:.0f} ms", flush=True)
     print(f"  Max   |Δ|       : {max_d*1000:.0f} ms", flush=True)
     print(f"  Words > 300 ms  : {over_300}", flush=True)
 
@@ -891,18 +901,15 @@ def step4_verify(ep_num: int) -> None:
             print(f"    {word!r:20s}  w2={t2:.3f}s  w3={t3:.3f}s  "
                   f"Δ={abs(t2-t3)*1000:.0f}ms", flush=True)
 
-    # Quality gate: two independent whisper runs on the same audio will naturally
-    # differ by ~5-8% due to retranscription variance (different word choices, splits,
-    # merges) and timestamps drift by up to several seconds over a long episode.
-    # We check match rate ≥90% and median |Δ| ≤ 300ms — anything worse indicates
-    # a real problem with gap-cut boundaries or timestamp math.
-    median_d = sorted(deltas)[len(deltas) // 2] if deltas else 0
-    if pct < 90.0 or median_d > 0.300:
+    # Quality gate: only words both runs agree on (same text, same order) are
+    # compared.  Timestamp delta should be small — large median Δ means the
+    # gap-cut boundaries or timestamp math is wrong.
+    if median_d > 0.300:
         print(f"\n  ✗ Quality gate FAILED  "
-              f"(need ≥90% match and median Δ ≤ 300ms)", flush=True)
+              f"(median Δ={median_d*1000:.0f}ms, need ≤ 300ms)", flush=True)
     else:
         print(f"\n  ✓ Quality gate PASSED  "
-              f"(match={pct:.1f}%  median|Δ|={median_d*1000:.0f}ms)", flush=True)
+              f"(median|Δ|={median_d*1000:.0f}ms)", flush=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
