@@ -5,29 +5,32 @@ podcast_to_moshi_dataset.py — Phase 1: word-level timestamp alignment
 
 ARCHITECTURE
 ────────────
-Step 1 — Transcribe full raw MP3 with whisper-cpp
-    No intro-stripping, no chunking.  Whisper sees the whole file.
-    Output: flat word list with audio-grounded timestamps.
-    Saved:  whisper_cache/ep{N}_w1.json
+Step 1 — Convert MP3 → 16 kHz mono WAV; copy transcript as w0; transcribe WAV
+    a) ffmpeg converts the raw MP3 to 16 kHz mono WAV → ep{N}.wav
+    b) Original diarized transcript is copied as w0.json (ground truth)
+    c) whisper-cpp transcribes the WAV → flat word list with audio timestamps.
+    Saved:  whisper_cache/ep{N}.wav  (skipped if exists)
+            whisper_cache/ep{N}_w0.json  (transcript copy, always refreshed)
+            whisper_cache/ep{N}_w1.json  (whisper output, skipped if exists)
 
 Step 2 — Auto-detect offset(s) + align words to transcript
-    The transcript has correct text+speaker+relative-timestamps but was
-    produced on the clean audio (intro/ads removed).  The raw MP3 whisper
+    The transcript (w0) has correct text+speaker+relative-timestamps but was
+    produced on the clean audio (intro/ads removed).  The WAV whisper
     timestamps are shifted by an unknown amount δ that may jump at ad breaks.
 
     We detect δ automatically, assign speaker labels, and flag intro/ad/outro
     words as out_of_transcript=True.
 
-    Saved:  aligned_cache/ep{N}_aligned.json
+    Saved:  whisper_cache/ep{N}_w2uncut.json
 
-Step 3 — Cut stripped MP3 + recalculate timestamps
-    Build ep{N}_stripped.mp3 by concatenating only the keep-regions
-    (raw MP3 minus all detected gaps).  Recalculate every in-transcript
-    word's timestamp to stripped-MP3 time (raw_t − cumulative_gap_before_t).
-    Saved:  ep{N}_stripped.mp3  +  whisper_cache/ep{N}_w2.json
+Step 3 — Cut stripped WAV + recalculate timestamps
+    Build ep{N}_stripped.wav by concatenating only the keep-regions
+    (WAV minus all detected gaps).  Recalculate every in-transcript
+    word's timestamp to stripped-WAV time (raw_t − cumulative_gap_before_t).
+    Saved:  whisper_cache/ep{N}_stripped.wav  +  whisper_cache/ep{N}_w2.json
 
-Step 4 — Rerun whisper on stripped audio + compare timestamps
-    Transcribe the stripped MP3 with whisper-cpp → w3.json.
+Step 4 — Rerun whisper on stripped WAV + compare timestamps
+    Transcribe the stripped WAV with whisper-cpp → w3.json.
     Compare w2 vs w3 timestamps word by word.
     Saved:  whisper_cache/ep{N}_w3.json
 
@@ -42,6 +45,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -142,22 +146,52 @@ def _to_moshi_format(words: list, speaker: str | None = None) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 1 — Transcribe full raw MP3
+# Step 1 — Convert MP3 → 16 kHz mono WAV; copy transcript (w0); transcribe WAV
 # ══════════════════════════════════════════════════════════════════════════════
 
-def step1_transcribe(ep_num: int, mp3_path: str) -> list:
-    """Run whisper-cpp directly on the MP3 → flat word list."""
+def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
+    """
+    a) Convert raw MP3 to 16 kHz mono WAV (skip if WAV already exists).
+    b) Copy original transcript to whisper_cache/ep{N}_w0.json (always refreshed).
+    c) Run whisper-cpp on the WAV → flat word list (skip if w1 already exists).
+    """
     os.makedirs(WHISPER_CACHE, exist_ok=True)
-    out_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w1.json")
+    wav_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}.wav")
+    w0_path  = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w0.json")
+    w1_path  = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w1.json")
 
-    print(f"  step1: running whisper-cpp on MP3…", flush=True)
-    words = run_whisper_words(mp3_path)
+    # ── a) MP3 → 16 kHz mono WAV ─────────────────────────────────────────────
+    if os.path.exists(wav_path):
+        print(f"  step1: WAV already exists — skipping conversion ({wav_path})",
+              flush=True)
+    else:
+        print(f"  step1: converting MP3 → 16 kHz mono WAV…", flush=True)
+        subprocess.run([
+            "ffmpeg", "-v", "error", "-i", mp3_path,
+            "-ar", "16000", "-ac", "1", wav_path, "-y",
+        ], check=True)
+        print(f"  step1: WAV saved → {wav_path}", flush=True)
+
+    # ── b) Copy transcript as w0 ──────────────────────────────────────────────
+    shutil.copy2(transcript_path, w0_path)
+    print(f"  step1: transcript copied → {w0_path}", flush=True)
+
+    # ── c) Transcribe WAV → w1 ────────────────────────────────────────────────
+    if os.path.exists(w1_path):
+        print(f"  step1: w1 already exists — skipping transcription ({w1_path})",
+              flush=True)
+        raw = json.load(open(w1_path, encoding="utf-8"))
+        return [{"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
+                for e in raw["alignments"]]
+
+    print(f"  step1: running whisper-cpp on WAV…", flush=True)
+    words = run_whisper_words(wav_path)
 
     print(f"  step1: {len(words)} words  "
           f"{words[0]['start']:.2f}s – {words[-1]['end']:.2f}s", flush=True)
-    json.dump(_to_moshi_format(words), open(out_path, "w", encoding="utf-8"),
+    json.dump(_to_moshi_format(words), open(w1_path, "w", encoding="utf-8"),
               ensure_ascii=False)
-    print(f"  step1: saved → {out_path}", flush=True)
+    print(f"  step1: w1 saved → {w1_path}", flush=True)
     return words
 
 
@@ -690,35 +724,45 @@ def print_alignment_report(aligned_words: list, transcript_segs: list):
 # Shared audio helper
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_stripped_mp3(mp3_path: str, keep_regions: list, out_mp3: str):
-    """Concatenate keep_regions from raw MP3 into a single stripped MP3."""
-    inputs, labels = [], []
-    for idx, (rs, re_) in enumerate(keep_regions):
-        inputs += ["-ss", str(rs), "-t", str(re_ - rs), "-i", mp3_path]
-        labels.append(f"[{idx}:a]")
-    n   = len(keep_regions)
-    flt = "".join(labels) + f"concat=n={n}:v=0:a=1[out]"
-    subprocess.run(["ffmpeg", "-v", "error"] + inputs +
-                   ["-filter_complex", flt, "-map", "[out]", out_mp3, "-y"],
-                   check=True)
+def _build_stripped_wav(wav_path: str, keep_regions: list, out_wav: str):
+    """Concatenate keep_regions from a WAV into a single stripped WAV.
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Step 3 — Cut stripped MP3 + recalculate timestamps to stripped-audio time
-# ══════════════════════════════════════════════════════════════════════════════
-
-def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
+    Uses ffmpeg's concat demuxer with stream-copy (no re-encoding, preserves
+    sample rate / bit depth) for efficiency and timestamp accuracy.
     """
-    Build ep{N}_stripped.mp3 by cutting all gap regions out of the raw MP3,
-    then recalculate every in-transcript word's timestamp to stripped-MP3 time.
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as flist:
+        for rs, re_ in keep_regions:
+            flist.write(f"file '{wav_path}'\n")
+            flist.write(f"inpoint {rs:.6f}\n")
+            flist.write(f"outpoint {re_:.6f}\n")
+        flist_path = flist.name
+    try:
+        subprocess.run([
+            "ffmpeg", "-v", "error",
+            "-f", "concat", "-safe", "0", "-i", flist_path,
+            "-c", "copy", out_wav, "-y",
+        ], check=True)
+    finally:
+        os.unlink(flist_path)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — Cut stripped WAV + recalculate timestamps to stripped-audio time
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step3_cut(ep_num: int, aligned: list) -> None:
+    """
+    Build ep{N}_stripped.wav by cutting all gap regions out of the 16 kHz mono
+    WAV produced in step 1, then recalculate every in-transcript word's
+    timestamp to stripped-WAV time.
 
     Gap regions are re-derived here from the w2uncut word list (consecutive
     spans with no in-transcript content ≥ MIN_AD_GAP).  This keeps step 2 clean
     and makes step 3 independently reproducible from the w2uncut cache.
 
     Saves:
-      whisper_cache/ep{N}_stripped.mp3  — raw MP3 with intro/ads removed
-      whisper_cache/ep{N}_w2.json       — in-transcript words at stripped-MP3 timestamps
+      whisper_cache/ep{N}_stripped.wav  — WAV with intro/ads removed
+      whisper_cache/ep{N}_w2.json       — in-transcript words at stripped-WAV timestamps
     """
     MIN_AD_GAP = 8.0  # seconds — same threshold as step 2
 
@@ -771,10 +815,11 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
     print(f"  step3: {len(keep_regions)} keep-region(s)  "
           f"{total_keep:.0f}s total content", flush=True)
 
-    # ── Build stripped MP3 ────────────────────────────────────────────────────
-    stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.mp3")
-    _build_stripped_mp3(mp3_path, keep_regions, stripped_path)
-    print(f"  step3: stripped MP3 saved → {stripped_path}", flush=True)
+    # ── Build stripped WAV ────────────────────────────────────────────────────
+    wav_path      = os.path.join(WHISPER_CACHE, f"ep{ep_num}.wav")
+    stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
+    _build_stripped_wav(wav_path, keep_regions, stripped_path)
+    print(f"  step3: stripped WAV saved → {stripped_path}", flush=True)
 
     # ── Compute w2: adjust timestamps to stripped-MP3 time ───────────────────
     # Process gaps one at a time in order.  After each removal the coordinate
@@ -825,6 +870,7 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
     # One file per episode (full stripped audio). Chunking into per-turn clips
     # is Phase 2.
     w2_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
+    stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
     alignments = []
     for i, w in enumerate(w2_proto):
         alignments.append([
@@ -844,34 +890,37 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
 
 def step4_verify(ep_num: int) -> None:
     """
-    Transcribe ep{N}_stripped.mp3 with whisper → w3.json.
+    Transcribe ep{N}_stripped.wav with whisper → w3.json.
     Compare w3 timestamps against w2 timestamps word by word.
 
-    w2 = step3 output: in-transcript words with timestamps in stripped-MP3 time.
-    w3 = fresh whisper transcription of the same stripped-MP3.
+    w2 = step3 output: in-transcript words with timestamps in stripped-WAV time.
+    w3 = fresh whisper transcription of the same stripped-WAV.
 
     Since both reference the same audio file starting at t=0, the timestamps
     must agree within whisper's natural jitter (target: ≥98% of words within
     300 ms, mean < 50 ms).  Any systematic deviation points to a bug in the
     gap-cut boundaries or the timestamp-adjustment logic in step 3.
     """
-    stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.mp3")
+    stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
     w2_path       = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
     w3_path       = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w3.json")
 
     if not os.path.isfile(stripped_path):
-        raise FileNotFoundError(f"Stripped MP3 not found: {stripped_path}")
+        raise FileNotFoundError(f"Stripped WAV not found: {stripped_path}")
     if not os.path.isfile(w2_path):
         raise FileNotFoundError(f"w2 not found: {w2_path}")
 
-    # ── Transcribe stripped MP3 → w3 ─────────────────────────────────────────
-    print(f"  step4: transcribing stripped MP3 → w3…", flush=True)
+    # ── Transcribe stripped WAV → w3 ─────────────────────────────────────────
+    print(f"  step4: transcribing stripped WAV → w3…", flush=True)
     w3_words = run_whisper_words(stripped_path)
     json.dump(_to_moshi_format(w3_words), open(w3_path, "w", encoding="utf-8"),
               ensure_ascii=False)
     print(f"  step4: {len(w3_words)} words saved → {w3_path}", flush=True)
 
     # ── Compare w2 vs w3 timestamps ───────────────────────────────────────────
+    # Both w2 and w3 share the same coordinate system (stripped WAV, t=0 =
+    # first content word) so no offset bootstrap is needed.
+    #
     # Strategy: forward-cursor walk through both streams in order.
     # For each w2 word advance the w3 cursor until we find the same normalised
     # text within a ±LOOK_AHEAD word window.  Only words that both runs agree on
@@ -885,8 +934,12 @@ def step4_verify(ep_num: int) -> None:
     w2_norm  = [((norm_words(e[0]) or [""])[0]) for e in w2_alignments]
     w2_start = [e[1][0] for e in w2_alignments]
 
-    LOOK_AHEAD = 30   # scan up to this many w3 words ahead before giving up
-    TIME_SYNC  = 10.0 # re-anchor w3 cursor by time if it drifts more than this
+    LOOK_AHEAD = 30  # scan up to this many w3 words ahead before giving up
+    # TIME_SYNC: re-anchor the w3 cursor by time when it drifts (e.g. whisper
+    # hallucinated a run of words w3 has but w2 doesn't).  Both streams are in
+    # stripped-WAV time so this should never absorb a large systematic offset —
+    # a 3s threshold catches only local hallucination drift, not bugs.
+    TIME_SYNC  = 3.0
     deltas: list = []
     large:  list = []
     n_matched = n_skipped = 0
@@ -896,8 +949,7 @@ def step4_verify(ep_num: int) -> None:
         if not key:
             continue
         t2 = w2_start[i]
-        # Re-anchor cursor: if w3[j] is more than TIME_SYNC seconds away from
-        # the expected w2 time, reset j to the closest w3 position by time.
+        # Re-anchor cursor when local drift exceeds TIME_SYNC.
         if j < len(w3_start) and abs(w3_start[j] - t2) > TIME_SYNC:
             j = bisect.bisect_left(w3_start, t2 - 1.0)
         # scan w3 from current cursor up to LOOK_AHEAD words ahead
@@ -992,26 +1044,21 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str,
     print(f"  Episode {ep_num}  —  {os.path.basename(mp3_path)}", flush=True)
     print(f"{'─'*60}", flush=True)
 
-    tdata = json.load(open(transcript_path, encoding="utf-8"))
+    # ── Step 1 ────────────────────────────────────────────────────────────────
+    print(f"\n  [Step 1] Convert MP3 → WAV; copy transcript (w0); transcribe WAV",
+          flush=True)
+    w1 = step1_transcribe(ep_num, mp3_path, transcript_path)
+
+    # ── Step 2 ────────────────────────────────────────────────────────────────
+    # Load transcript segments from w0 (the copy in the cache folder)
+    w0_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w0.json")
+    tdata   = json.load(open(w0_path, encoding="utf-8"))
     transcript_segs = [s for s in tdata.get("segments", [])
                        if s.get("text", "").strip()]
-    print(f"  transcript: {len(transcript_segs)} segments  "
+    print(f"  transcript (w0): {len(transcript_segs)} segments  "
           f"[{transcript_segs[0]['start']:.1f}s – "
           f"{transcript_segs[-1]['end']:.1f}s]", flush=True)
 
-    # ── Step 1 ────────────────────────────────────────────────────────────────
-    w1_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w1.json")
-    if os.path.exists(w1_path):
-        # w1 on disk is in moshi format; convert back to internal dict list
-        raw = json.load(open(w1_path, encoding="utf-8"))
-        w1 = [{"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
-              for e in raw["alignments"]]
-        print(f"\n  [Step 1] cached — {len(w1)} words from {w1_path}", flush=True)
-    else:
-        print(f"\n  [Step 1] Transcribe full MP3", flush=True)
-        w1 = step1_transcribe(ep_num, mp3_path)
-
-    # ── Step 2 ────────────────────────────────────────────────────────────────
     w2uncut_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2uncut.json")
     if os.path.exists(w2uncut_path):
         aligned = json.load(open(w2uncut_path, encoding="utf-8"))
@@ -1023,14 +1070,14 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str,
         print_alignment_report(aligned, transcript_segs)
 
     # ── Step 3 ────────────────────────────────────────────────────────────────
-    print(f"\n  [Step 3] Cut stripped MP3 + recalculate timestamps", flush=True)
-    step3_cut(ep_num, mp3_path, aligned)
+    print(f"\n  [Step 3] Cut stripped WAV + recalculate timestamps", flush=True)
+    step3_cut(ep_num, aligned)
 
     # ── Step 4 ────────────────────────────────────────────────────────────────
     if skip_step3:
         print(f"\n  [Step 4] skipped (--skip-step3)", flush=True)
     else:
-        print(f"\n  [Step 4] Verify: transcribe stripped MP3 + compare timestamps",
+        print(f"\n  [Step 4] Verify: transcribe stripped WAV + compare timestamps",
               flush=True)
         step4_verify(ep_num)
 
