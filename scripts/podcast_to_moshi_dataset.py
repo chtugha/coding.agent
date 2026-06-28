@@ -591,6 +591,12 @@ def step2_align(ep_num: int, whisper_words: list,
 
     # ── Interpolate timestamps for unmatched segments ─────────────────────────
     # Use offset from surrounding matched segments, linear in transcript time.
+    # After computing a candidate raw_start, validate that it is strictly
+    # greater than the previous segment's raw_end.  If not, the interpolated
+    # position falls inside (or before) an already-assigned window — this
+    # happens when the surrounding anchors are on opposite sides of an ad break
+    # and the linear interpolation lands inside the gap.  In that case leave the
+    # segment as None so the gap remains visible to the gap detector.
     t_starts_f = [float(s["start"]) for s in transcript_segs]
     t_ends_f   = [float(s["end"])   for s in transcript_segs]
 
@@ -600,30 +606,44 @@ def step2_align(ep_num: int, whisper_words: list,
         prev = next((j for j in range(si - 1, -1, -1) if seg_raw_start[j] is not None), None)
         nxt  = next((j for j in range(si + 1, len(transcript_segs)) if seg_raw_start[j] is not None), None)
 
+        candidate = None
         if prev is not None and nxt is not None:
             t0, r0 = t_starts_f[prev], seg_raw_start[prev]
             t1, r1 = t_starts_f[nxt],  seg_raw_start[nxt]
             a = (t_starts_f[si] - t0) / (t1 - t0) if t1 != t0 else 0.0
-            seg_raw_start[si] = r0 + a * (r1 - r0)
+            candidate = r0 + a * (r1 - r0)
         elif prev is not None:
             off = seg_raw_start[prev] - t_starts_f[prev]
-            seg_raw_start[si] = t_starts_f[si] + off
+            candidate = t_starts_f[si] + off
         elif nxt is not None:
             off = seg_raw_start[nxt] - t_starts_f[nxt]
-            seg_raw_start[si] = t_starts_f[si] + off
+            candidate = t_starts_f[si] + off
 
-        if seg_raw_start[si] is not None:
-            seg_raw_end[si] = seg_raw_start[si] + (t_ends_f[si] - t_starts_f[si])
+        if candidate is not None:
+            # Sanity check: candidate must be strictly after the previous
+            # segment's raw_end.  If the candidate falls at or before that
+            # boundary, the interpolation has crossed an ad-break gap —
+            # leave the segment as None so the gap stays detectable.
+            prev_raw_end = seg_raw_end[prev] if prev is not None else 0.0
+            if candidate > prev_raw_end:
+                seg_raw_start[si] = candidate
+                seg_raw_end[si]   = candidate + (t_ends_f[si] - t_starts_f[si])
+            # else: leave both as None — segment is unplaceable
 
     # ── Build segment windows ─────────────────────────────────────────────────
     # Each entry: (raw_start, raw_end, speaker, seg_text, segment_id)
     # segment_id is the index into transcript_segs (0-based), used in step 3
     # to validate that gap boundaries fall between consecutive segments.
+    # Segments where interpolation failed (raw_start still None) are excluded
+    # entirely — their absence keeps ad-break gaps visible to the detector.
     seg_windows = []
     for si, seg in enumerate(transcript_segs):
-        rs = seg_raw_start[si] or 0.0
-        re = seg_raw_end[si]   or 0.0
-        seg_windows.append((rs, re, seg.get("speaker", ""), seg.get("text", "").strip(), si))
+        if seg_raw_start[si] is None:
+            continue
+        seg_windows.append((
+            seg_raw_start[si], seg_raw_end[si],
+            seg.get("speaker", ""), seg.get("text", "").strip(), si,
+        ))
 
     # ── Close cracks between adjacent windows ────────────────────────────────
     # After interpolation, consecutive segment windows may not be contiguous:
@@ -632,10 +652,18 @@ def step2_align(ep_num: int, whisper_words: list,
     # it belongs to real content.  Extend each window's end to the next
     # window's start so cracks are closed.  The gap-detection below then only
     # sees spans that are genuinely not covered by any window.
+    #
+    # IMPORTANT: only close cracks smaller than MIN_AD_GAP.  A crack ≥
+    # MIN_AD_GAP is itself an ad-break gap — extending across it would hide
+    # exactly the gaps we need to detect.
     closed = []
     for i, (rs, re, spk, txt, sid) in enumerate(seg_windows):
         if i + 1 < len(seg_windows):
-            re = max(re, seg_windows[i + 1][0])
+            next_rs = seg_windows[i + 1][0]
+            crack   = next_rs - re
+            if 0 < crack < MIN_AD_GAP:
+                re = next_rs   # close small crack
+            # cracks ≥ MIN_AD_GAP or already-overlapping windows: leave as-is
         closed.append((rs, re, spk, txt, sid))
     seg_windows = closed
 
