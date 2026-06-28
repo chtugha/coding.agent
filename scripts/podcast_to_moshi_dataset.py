@@ -699,21 +699,33 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
     MIN_AD_GAP = 8.0  # seconds — same threshold as step 2
 
     # ── Re-derive gap regions from the aligned word list ──────────────────────
-    # Collect contiguous runs of out_of_transcript=True words.
+    # A gap is a span of raw audio that contains no in-transcript content.
+    # We detect this by looking at the raw timeline of in-transcript words:
+    # any span ≥ MIN_AD_GAP between the end of one in-transcript word and the
+    # start of the next (or from t=0 to the first in-transcript word) is a gap.
+    #
+    # This is more reliable than looking at out_of_transcript word runs because
+    # whisper often produces only a handful of OOT words for a long intro jingle
+    # (the rest is music/silence that whisper doesn't transcribe at all), so the
+    # OOT word run can be much shorter than the actual audio gap.
+    in_words = sorted(
+        (w for w in aligned if not w["out_of_transcript"]),
+        key=lambda w: w["start"],
+    )
     gap_regions: list = []
-    run_start: float | None = None
-    run_end:   float | None = None
-    for w in aligned:
-        if w["out_of_transcript"]:
-            if run_start is None:
-                run_start = w["start"]
-            run_end = w["end"]
-        else:
-            if run_start is not None and (run_end - run_start) >= MIN_AD_GAP:
-                gap_regions.append((run_start, run_end))
-            run_start = run_end = None
-    if run_start is not None and (run_end - run_start) >= MIN_AD_GAP:
-        gap_regions.append((run_start, run_end))
+    # intro gap: from t=0 to first in-transcript word
+    if in_words and in_words[0]["start"] >= MIN_AD_GAP:
+        gap_regions.append((0.0, in_words[0]["start"]))
+    # mid-episode gaps: between consecutive in-transcript words
+    for i in range(len(in_words) - 1):
+        gap_s = in_words[i]["end"]
+        gap_e = in_words[i + 1]["start"]
+        if gap_e - gap_s >= MIN_AD_GAP:
+            gap_regions.append((gap_s, gap_e))
+    # outro gap: from last in-transcript word to end of raw audio
+    raw_end_word = aligned[-1]["end"]
+    if in_words and raw_end_word - in_words[-1]["end"] >= MIN_AD_GAP:
+        gap_regions.append((in_words[-1]["end"], raw_end_word))
 
     print(f"  step3: {len(gap_regions)} gap region(s) → cutting stripped MP3",
           flush=True)
