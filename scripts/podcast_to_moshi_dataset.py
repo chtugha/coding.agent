@@ -836,16 +836,12 @@ def step4_verify(ep_num: int) -> None:
     print(f"  step4: {len(w3_words)} words saved → {w3_path}", flush=True)
 
     # ── Compare w2 vs w3 timestamps ───────────────────────────────────────────
-    # w3 is ground truth: whisper on the stripped MP3 starting at t=0.
-    # w2 is our computed timestamps: raw timestamps minus cumulative gap offsets.
-    # If there is a systematic signed offset (w3 − w2) it means our gap-cut
-    # boundaries were wrong and we need to correct w2.
-    #
-    # Strategy: forward-cursor walk through both streams matching on normalised
-    # word text in order.  Collect signed deltas (w3.start − w2.start).
-    # The median signed delta is the systematic cut error.
-    # If |median| > OFFSET_THRESHOLD we correct all w2 timestamps by that amount
-    # and rewrite the w2 file.
+    # Strategy: forward-cursor walk through both streams in order.
+    # For each w2 word advance the w3 cursor until we find the same normalised
+    # text within a ±LOOK_AHEAD word window.  Only words that both runs agree on
+    # (same text, same relative order) get their timestamps compared.
+    # This avoids the "common short word matched at wrong instance" problem of
+    # the previous bisect approach.
     w2_alignments = json.load(open(w2_path, encoding="utf-8"))["alignments"]
 
     w3_norm  = [((norm_words(w["word"]) or [""])[0]) for w in w3_words]
@@ -853,65 +849,67 @@ def step4_verify(ep_num: int) -> None:
     w2_norm  = [((norm_words(e[0]) or [""])[0]) for e in w2_alignments]
     w2_start = [e[1][0] for e in w2_alignments]
 
-    LOOK_AHEAD       = 30    # word-window for forward-cursor matching
-    TIME_SYNC        = 10.0  # re-anchor w3 cursor if it drifts > this many seconds
-    OFFSET_THRESHOLD = 0.200 # median signed offset above this → repair w2
-
-    signed: list = []   # w3.start − w2.start for each matched word
+    LOOK_AHEAD = 30   # scan up to this many w3 words ahead before giving up
+    TIME_SYNC  = 10.0 # re-anchor w3 cursor by time if it drifts more than this
+    deltas: list = []
+    large:  list = []
     n_matched = n_skipped = 0
-    j = 0  # w3 cursor
+    j = 0   # w3 cursor
 
     for i, key in enumerate(w2_norm):
         if not key:
             continue
         t2 = w2_start[i]
-        # re-anchor by time if cursor has drifted
+        # Re-anchor cursor: if w3[j] is more than TIME_SYNC seconds away from
+        # the expected w2 time, reset j to the closest w3 position by time.
         if j < len(w3_start) and abs(w3_start[j] - t2) > TIME_SYNC:
             j = bisect.bisect_left(w3_start, t2 - 1.0)
-        # find matching word in w3 within LOOK_AHEAD
+        # scan w3 from current cursor up to LOOK_AHEAD words ahead
+        found = False
         for k in range(j, min(j + LOOK_AHEAD, len(w3_norm))):
             if w3_norm[k] == key:
-                signed.append(w3_start[k] - t2)
-                j = k + 1
+                d = abs(w3_start[k] - t2)
+                deltas.append(d)
+                if d > 0.300:
+                    large.append((w2_alignments[i][0], t2, w3_start[k]))
+                j = k + 1   # advance cursor past this match
                 n_matched += 1
+                found = True
                 break
-        else:
+        if not found:
             n_skipped += 1
 
-    total        = n_matched + n_skipped
-    pct          = 100.0 * n_matched / total if total else 0
-    sorted_s     = sorted(signed)
-    median_signed = sorted_s[len(sorted_s) // 2] if sorted_s else 0.0
-    abs_deltas   = [abs(d) for d in signed]
-    mean_abs     = sum(abs_deltas) / len(abs_deltas) if abs_deltas else 0
-    over_300     = sum(1 for d in abs_deltas if d > 0.300)
+    total    = n_matched + n_skipped
+    pct      = 100.0 * n_matched / total if total else 0
+    mean_d   = sum(deltas) / len(deltas) if deltas else 0
+    max_d    = max(deltas)               if deltas else 0
+    median_d = sorted(deltas)[len(deltas) // 2] if deltas else 0
+    over_300 = len(large)
 
     print(f"\n  Step 4 — w2 vs w3 timestamp comparison:", flush=True)
     print(f"  w2 words        : {len(w2_alignments)}", flush=True)
     print(f"  w3 words        : {len(w3_words)}", flush=True)
     print(f"  Order-matched   : {n_matched}/{total}  ({pct:.1f}%)", flush=True)
-    print(f"  Median offset   : {median_signed*1000:+.0f} ms  (w3 − w2, signed)", flush=True)
-    print(f"  Mean  |Δ|       : {mean_abs*1000:.0f} ms", flush=True)
+    print(f"  Mean  |Δ|       : {mean_d*1000:.0f} ms", flush=True)
+    print(f"  Median|Δ|       : {median_d*1000:.0f} ms", flush=True)
+    print(f"  Max   |Δ|       : {max_d*1000:.0f} ms", flush=True)
     print(f"  Words > 300 ms  : {over_300}", flush=True)
 
-    # ── Detect and repair systematic cut error ────────────────────────────────
-    if abs(median_signed) > OFFSET_THRESHOLD:
-        print(f"\n  ✗ Systematic cut error detected: {median_signed*1000:+.0f} ms",
-              flush=True)
-        print(f"  → Correcting all w2 timestamps by {median_signed*1000:+.0f} ms "
-              f"and rewriting w2…", flush=True)
-        corrected = []
-        for entry in w2_alignments:
-            text, (s, e) = entry[0], entry[1]
-            new_s = round(s + median_signed, 4)
-            new_e = round(e + median_signed, 4)
-            corrected.append([text, [new_s, new_e]] + entry[2:])
-        json.dump({"alignments": corrected},
-                  open(w2_path, "w", encoding="utf-8"), ensure_ascii=False)
-        print(f"  step4: w2 corrected and saved → {w2_path}", flush=True)
+    if over_300:
+        print(f"\n  Large deltas (first 10):", flush=True)
+        for word, t2, t3 in large[:10]:
+            print(f"    {word!r:20s}  w2={t2:.3f}s  w3={t3:.3f}s  "
+                  f"Δ={abs(t2-t3)*1000:.0f}ms", flush=True)
+
+    # Quality gate: only words both runs agree on (same text, same order) are
+    # compared.  Timestamp delta should be small — large median Δ means the
+    # gap-cut boundaries or timestamp math is wrong.
+    if median_d > 0.300:
+        print(f"\n  ✗ Quality gate FAILED  "
+              f"(median Δ={median_d*1000:.0f}ms, need ≤ 300ms)", flush=True)
     else:
-        print(f"\n  ✓ No systematic cut error  "
-              f"(median offset={median_signed*1000:+.0f} ms)", flush=True)
+        print(f"\n  ✓ Quality gate PASSED  "
+              f"(median|Δ|={median_d*1000:.0f}ms)", flush=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
