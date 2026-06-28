@@ -401,8 +401,9 @@ def step2_align(ep_num: int, whisper_words: list,
 
     # cursor: whisper-word lower-bound for the tight search.
     # Never goes backwards on normal matches; back-fill uses explicit lo/hi.
-    cursor        = 0
-    consec_misses = 0   # consecutive misses on ≥MIN_WORDS segments
+    cursor               = 0
+    consec_misses        = 0  # consecutive misses on ≥MIN_WORDS segments
+    last_matched_abs_end = 0  # abs index past end of last confirmed match
 
     seg_raw_start = [None] * len(transcript_segs)
     seg_raw_end   = [None] * len(transcript_segs)
@@ -454,6 +455,7 @@ def step2_align(ep_num: int, whisper_words: list,
                 offset = new_offset
                 new_cursor_t = whisper_words[abs_end - 1]["end"] - OVERLAP_SEC
                 cursor = max(cursor, bisect.bisect_left(w_starts, new_cursor_t))
+                last_matched_abs_end = max(last_matched_abs_end, abs_end)
                 consec_misses = 0
 
         # ── Queue for back-fill ───────────────────────────────────────────────
@@ -468,12 +470,24 @@ def step2_align(ep_num: int, whisper_words: list,
             continue
 
         # ── Successful match ──────────────────────────────────────────────────
+        # Enforce strict order: abs_start must be >= last_matched_abs_end.
+        # The cursor already prevents the search window from rewinding, but
+        # a repeated phrase can still be found at an earlier whisper position
+        # than where the previous anchor ended (e.g. 'Ich glaube,' appears 50×).
+        if abs_start < last_matched_abs_end:
+            pending_miss.append(si)
+            n_missed += 1
+            consec_misses += 1
+            si += 1
+            continue
+
         offset = whisper_words[abs_start]["start"] - t_start
         consec_misses = 0
 
         seg_raw_start[si] = whisper_words[abs_start]["start"]
         seg_raw_end[si]   = whisper_words[abs_end - 1]["end"]
         n_matched += 1
+        last_matched_abs_end = abs_end
 
         # Advance cursor to 2s before end of this match
         new_cursor_t = whisper_words[abs_end - 1]["end"] - OVERLAP_SEC
@@ -488,9 +502,15 @@ def step2_align(ep_num: int, whisper_words: list,
             print(f"    W: {wt[:70]!r}", flush=True)
 
         # ── Back-fill pending missed segments using this anchor ───────────────
-        # Walk in reverse order (closest to anchor first).
-        # Each pending seg gets a ±TIGHT_WIN window anchored by current offset,
-        # capped at abs_start so segment order is preserved.
+        # Walk REVERSED (closest to anchor → farthest from anchor).
+        # upper_bound starts at abs_start and moves LEFT as we assign.
+        # Each back-filled segment must end strictly before upper_bound,
+        # and upper_bound is updated to pa_s so the next (earlier) segment
+        # is constrained to be placed before the one just assigned.
+        # This guarantees the back-filled assignments are in transcript order.
+        upper_bound = abs_start
+        bf_results: dict = {}  # psi → (pa_s, pa_e)
+
         for psi in reversed(pending_miss):
             pseg   = transcript_segs[psi]
             pt_n   = norm_words(pseg["text"])
@@ -500,7 +520,7 @@ def step2_align(ep_num: int, whisper_words: list,
                 continue
             p_expected = pt_s + offset
             p_lo = bisect.bisect_left(w_starts,  p_expected - TIGHT_WIN)
-            p_hi = min(abs_start,
+            p_hi = min(upper_bound,
                        bisect.bisect_right(w_starts, p_expected + TIGHT_WIN))
             if p_lo >= p_hi:
                 if DEBUG:
@@ -511,19 +531,23 @@ def step2_align(ep_num: int, whisper_words: list,
             pa_s, pa_e, p_score = search_segment(
                 pt_n, whisper_words, w_starts,
                 p_lo, p_center, p_half_win, min_score(pt_len))
-            if pa_s is not None and pa_e <= abs_start:
-                seg_raw_start[psi] = whisper_words[pa_s]["start"]
-                seg_raw_end[psi]   = whisper_words[pa_e - 1]["end"]
-                n_matched += 1
-                n_missed  -= 1
+            if pa_s is not None and pa_e <= upper_bound:
+                bf_results[psi] = (pa_s, pa_e)
+                upper_bound = pa_s  # earlier segs must be placed before this
                 if DEBUG:
                     print(f"  BACKFILL MATCH psi={psi:4d} "
-                          f"t={pt_s:.1f}s raw={seg_raw_start[psi]:.1f}s "
+                          f"t={pt_s:.1f}s raw={whisper_words[pa_s]['start']:.1f}s "
                           f"score={p_score:.2f}", flush=True)
             else:
                 if DEBUG:
                     print(f"  BACKFILL MISS psi={psi:4d} t={pt_s:.1f}s",
                           flush=True)
+
+        for psi, (pa_s, pa_e) in bf_results.items():
+            seg_raw_start[psi] = whisper_words[pa_s]["start"]
+            seg_raw_end[psi]   = whisper_words[pa_e - 1]["end"]
+            n_matched += 1
+            n_missed  -= 1
         pending_miss.clear()
 
         si += 1
