@@ -126,6 +126,22 @@ def run_whisper_words(wav_path: str) -> list:
     return words
 
 
+def _to_moshi_format(words: list, speaker: str | None = None) -> dict:
+    """
+    Convert internal word-dict list to moshi-finetune alignment format:
+      {"alignments": [[word_text, [start_sec, end_sec]], ...]}
+    Speaker is omitted (no third element) when not provided — matches the
+    format produced by annotate.py when speaker info is unavailable.
+    """
+    alignments = []
+    for w in words:
+        entry = [w["word"], [round(w["start"], 4), round(w["end"], 4)]]
+        if speaker is not None:
+            entry.append(speaker)
+        alignments.append(entry)
+    return {"alignments": alignments}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 1 — Transcribe full raw MP3
 # ══════════════════════════════════════════════════════════════════════════════
@@ -140,7 +156,8 @@ def step1_transcribe(ep_num: int, mp3_path: str) -> list:
 
     print(f"  step1: {len(words)} words  "
           f"{words[0]['start']:.2f}s – {words[-1]['end']:.2f}s", flush=True)
-    json.dump(words, open(out_path, "w", encoding="utf-8"), ensure_ascii=False)
+    json.dump(_to_moshi_format(words), open(out_path, "w", encoding="utf-8"),
+              ensure_ascii=False)
     print(f"  step1: saved → {out_path}", flush=True)
     return words
 
@@ -813,24 +830,25 @@ def step4_verify(ep_num: int) -> None:
 
     # ── Transcribe stripped MP3 → w3 ─────────────────────────────────────────
     print(f"  step4: transcribing stripped MP3 → w3…", flush=True)
-    w3 = run_whisper_words(stripped_path)
-    json.dump(w3, open(w3_path, "w", encoding="utf-8"), ensure_ascii=False)
-    print(f"  step4: {len(w3)} words saved → {w3_path}", flush=True)
+    w3_words = run_whisper_words(stripped_path)
+    json.dump(_to_moshi_format(w3_words), open(w3_path, "w", encoding="utf-8"),
+              ensure_ascii=False)
+    print(f"  step4: {len(w3_words)} words saved → {w3_path}", flush=True)
 
     # ── Compare w2 vs w3 ──────────────────────────────────────────────────────
-    # w2 is in moshi-finetune format: {"alignments": [[text, [start, end], spk], ...]}
-    w2_raw = json.load(open(w2_path, encoding="utf-8"))
-    w2_alignments = w2_raw["alignments"]   # list of [text, [start, end], speaker]
+    # Both in moshi-finetune format: {"alignments": [[text, [start, end], ...], ...]}
+    w2_alignments = json.load(open(w2_path, encoding="utf-8"))["alignments"]
 
-    w3_norm  = [((norm_words(w["word"]) or [""])[0]) for w in w3]
-    w3_start = [w["start"] for w in w3]
+    w3_norm  = [((norm_words(w["word"]) or [""])[0]) for w in w3_words]
+    w3_start = [w["start"] for w in w3_words]
 
     MATCH_WIN = 5.0   # ±s around w2 time to search for w3 counterpart
     n_match = n_miss = 0
     deltas: list = []
     large:  list = []
 
-    for text, (t2, _t2e), _spk in w2_alignments:
+    for entry in w2_alignments:
+        text, (t2, _t2e) = entry[0], entry[1]
         key = (norm_words(text) or [""])[0]
         if not key:
             continue
@@ -932,7 +950,10 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str,
     # ── Step 1 ────────────────────────────────────────────────────────────────
     w1_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w1.json")
     if os.path.exists(w1_path):
-        w1 = json.load(open(w1_path, encoding="utf-8"))
+        # w1 on disk is in moshi format; convert back to internal dict list
+        raw = json.load(open(w1_path, encoding="utf-8"))
+        w1 = [{"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
+              for e in raw["alignments"]]
         print(f"\n  [Step 1] cached — {len(w1)} words from {w1_path}", flush=True)
     else:
         print(f"\n  [Step 1] Transcribe full MP3", flush=True)
