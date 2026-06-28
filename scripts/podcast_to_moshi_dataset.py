@@ -620,12 +620,22 @@ def step2_align(ep_num: int, whisper_words: list,
             candidate = t_starts_f[si] + off
 
         if candidate is not None:
-            # Sanity check: candidate must be strictly after the previous
-            # segment's raw_end.  If the candidate falls at or before that
-            # boundary, the interpolation has crossed an ad-break gap —
-            # leave the segment as None so the gap stays detectable.
-            prev_raw_end = seg_raw_end[prev] if prev is not None else 0.0
-            if candidate > prev_raw_end:
+            # Validate the candidate does not land inside an ad-break gap.
+            #
+            # Accept only when BOTH hold:
+            #   1. candidate is strictly after the previous segment's raw_end
+            #   2. if the span [prev_raw_end → nxt_raw_start] is a real gap
+            #      (≥ MIN_AD_GAP), the candidate must not fall inside that gap
+            #      (i.e. it must be ≥ nxt_raw_start to land on the far side).
+            #      When there is no real gap (span < MIN_AD_GAP), any candidate
+            #      after prev_raw_end is fine.
+            prev_raw_end  = seg_raw_end[prev]   if prev is not None else 0.0
+            nxt_raw_start = seg_raw_start[nxt]  if nxt  is not None else float("inf")
+            span_is_gap   = (nxt_raw_start - prev_raw_end) >= MIN_AD_GAP
+
+            # Inside a real gap → reject; otherwise accept
+            inside_gap = span_is_gap and (prev_raw_end < candidate < nxt_raw_start)
+            if candidate > prev_raw_end and not inside_gap:
                 seg_raw_start[si] = candidate
                 seg_raw_end[si]   = candidate + (t_ends_f[si] - t_starts_f[si])
             # else: leave both as None — segment is unplaceable
