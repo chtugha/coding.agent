@@ -52,7 +52,6 @@ DATASETS_DIR   = os.path.join(BASE_DIR, "datasets")
 TRANSCRIPT_DIR = os.path.join(DATASETS_DIR, "Gemischtes.Hack.Podcast", "transcripts")
 AUDIO_DIR      = os.path.join(DATASETS_DIR, "Gemischtes.Hack.Podcast")
 WHISPER_CACHE  = os.path.join(DATASETS_DIR, "whisper_cache")
-ALIGNED_CACHE  = os.path.join(DATASETS_DIR, "aligned_cache")
 
 WHISPER_CLI    = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -370,8 +369,8 @@ def step2_align(ep_num: int, whisper_words: list,
     fields added and out_of_transcript flag).  Gap-cutting and w2 computation
     happen in step3_cut().
     """
-    os.makedirs(ALIGNED_CACHE, exist_ok=True)
-    out_path = os.path.join(ALIGNED_CACHE, f"ep{ep_num}_aligned.json")
+    os.makedirs(WHISPER_CACHE, exist_ok=True)
+    out_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2uncut.json")
 
     TIGHT_WIN    = 12.0  # ±s normal search window
     # After N_MISS_AD consecutive misses we try a wider recalibration around
@@ -688,13 +687,13 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
     Build ep{N}_stripped.mp3 by cutting all gap regions out of the raw MP3,
     then recalculate every in-transcript word's timestamp to stripped-MP3 time.
 
-    Gap regions are re-derived here from the aligned word list (consecutive
-    out_of_transcript spans ≥ MIN_AD_GAP).  This keeps step 2 clean and makes
-    step 3 independently reproducible from the aligned.json cache.
+    Gap regions are re-derived here from the w2uncut word list (consecutive
+    spans with no in-transcript content ≥ MIN_AD_GAP).  This keeps step 2 clean
+    and makes step 3 independently reproducible from the w2uncut cache.
 
     Saves:
-      ep{N}_stripped.mp3  — raw MP3 with intro/ads removed
-      whisper_cache/ep{N}_w2.json — in-transcript words at stripped-MP3 timestamps
+      ep{N}_stripped.mp3              — raw MP3 with intro/ads removed
+      whisper_cache/ep{N}_w2.json     — in-transcript words at stripped-MP3 timestamps
     """
     MIN_AD_GAP = 8.0  # seconds — same threshold as step 2
 
@@ -988,9 +987,15 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str,
         w1 = step1_transcribe(ep_num, mp3_path)
 
     # ── Step 2 ────────────────────────────────────────────────────────────────
-    print(f"\n  [Step 2] Auto-detect offsets + align words", flush=True)
-    aligned = step2_align(ep_num, w1, transcript_segs)
-    print_alignment_report(aligned, transcript_segs)
+    w2uncut_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2uncut.json")
+    if os.path.exists(w2uncut_path):
+        aligned = json.load(open(w2uncut_path, encoding="utf-8"))
+        print(f"\n  [Step 2] cached — {len(aligned)} words from {w2uncut_path}",
+              flush=True)
+    else:
+        print(f"\n  [Step 2] Auto-detect offsets + align words", flush=True)
+        aligned = step2_align(ep_num, w1, transcript_segs)
+        print_alignment_report(aligned, transcript_segs)
 
     # ── Step 3 ────────────────────────────────────────────────────────────────
     print(f"\n  [Step 3] Cut stripped MP3 + recalculate timestamps", flush=True)
