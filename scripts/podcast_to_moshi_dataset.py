@@ -766,19 +766,22 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
               f"adj_start={gap_start_adj:.1f}s  dur={gap_dur:.1f}s  "
               f"→ shifted {len(starts) - cut_idx} words", flush=True)
 
+    # ── Write w2 in moshi-finetune alignment format ───────────────────────────
+    # Format matches annotate.py output exactly:
+    #   {"alignments": [[word_text, [start_sec, end_sec], speaker], ...]}
+    # One file per episode (full stripped audio). Chunking into per-turn clips
+    # is Phase 2.
     w2_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
-    w2 = []
+    alignments = []
     for i, w in enumerate(w2_proto):
-        w2.append({
-            "word":     w["word"],
-            "start":    round(starts[i], 4),
-            "end":      round(ends[i],   4),
-            "p":        w["p"],
-            "speaker":  w["speaker"],
-            "seg_text": w["seg_text"],
-        })
-    json.dump(w2, open(w2_path, "w", encoding="utf-8"), ensure_ascii=False)
-    print(f"  step3: w2 ({len(w2)} words, stripped-time) saved → {w2_path}",
+        alignments.append([
+            w["word"],
+            [round(starts[i], 4), round(ends[i], 4)],
+            w["speaker"] or "SPEAKER_MAIN",
+        ])
+    w2_out = {"alignments": alignments}
+    json.dump(w2_out, open(w2_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"  step3: w2 ({len(alignments)} words, moshi-finetune format) saved → {w2_path}",
           flush=True)
 
 
@@ -815,7 +818,9 @@ def step4_verify(ep_num: int) -> None:
     print(f"  step4: {len(w3)} words saved → {w3_path}", flush=True)
 
     # ── Compare w2 vs w3 ──────────────────────────────────────────────────────
-    w2 = json.load(open(w2_path, encoding="utf-8"))
+    # w2 is in moshi-finetune format: {"alignments": [[text, [start, end], spk], ...]}
+    w2_raw = json.load(open(w2_path, encoding="utf-8"))
+    w2_alignments = w2_raw["alignments"]   # list of [text, [start, end], speaker]
 
     w3_norm  = [((norm_words(w["word"]) or [""])[0]) for w in w3]
     w3_start = [w["start"] for w in w3]
@@ -825,11 +830,10 @@ def step4_verify(ep_num: int) -> None:
     deltas: list = []
     large:  list = []
 
-    for w2w in w2:
-        key = (norm_words(w2w["word"]) or [""])[0]
+    for text, (t2, _t2e), _spk in w2_alignments:
+        key = (norm_words(text) or [""])[0]
         if not key:
             continue
-        t2 = w2w["start"]
         lo = bisect.bisect_left(w3_start,  t2 - MATCH_WIN)
         hi = bisect.bisect_right(w3_start, t2 + MATCH_WIN)
         best_d, best_t3 = float("inf"), None
@@ -845,7 +849,7 @@ def step4_verify(ep_num: int) -> None:
             n_match += 1
             deltas.append(best_d)
             if best_d > 0.300:
-                large.append((w2w["word"], t2, best_t3))
+                large.append((text, t2, best_t3))
 
     total    = n_match + n_miss
     pct      = 100.0 * n_match / total if total else 0
@@ -854,7 +858,7 @@ def step4_verify(ep_num: int) -> None:
     over_300 = len(large)
 
     print(f"\n  Step 4 — w2 vs w3 timestamp comparison:", flush=True)
-    print(f"  w2 words        : {len(w2)}", flush=True)
+    print(f"  w2 words        : {len(w2_alignments)}", flush=True)
     print(f"  w3 words        : {len(w3)}", flush=True)
     print(f"  Matched         : {n_match}/{total}  ({pct:.1f}%)", flush=True)
     print(f"  Mean  |Δ|       : {mean_d*1000:.0f} ms", flush=True)
