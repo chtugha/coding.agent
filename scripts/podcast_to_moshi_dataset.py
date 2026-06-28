@@ -739,8 +739,14 @@ def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
     #
     # Working on a mutable list of floats avoids re-reading the aligned list N times.
 
-    # Collect only in-transcript words; build parallel start/end lists.
-    w2_proto = [w for w in aligned if not w["out_of_transcript"]]
+    # Collect only in-transcript words, sorted by start time.
+    # Whisper segment boundaries can produce slightly non-monotone timestamps
+    # (adjacent segments overlap by a few ms).  bisect requires a sorted list,
+    # so we sort here.  The output w2 is then in strict chronological order.
+    w2_proto = sorted(
+        (w for w in aligned if not w["out_of_transcript"]),
+        key=lambda w: w["start"],
+    )
     starts = [w["start"] for w in w2_proto]
     ends   = [w["end"]   for w in w2_proto]
 
