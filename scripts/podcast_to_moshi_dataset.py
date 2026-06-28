@@ -15,23 +15,21 @@ Step 2 — Auto-detect offset(s) + align words to transcript
     produced on the clean audio (intro/ads removed).  The raw MP3 whisper
     timestamps are shifted by an unknown amount δ that may jump at ad breaks.
 
-    We detect δ automatically:
-      a) Sample ~40 anchor segments spread across the transcript.
-      b) For each anchor, search the whisper word stream for matching text
-         in a ±60s window around the current δ estimate.
-      c) Build a piecewise δ timeline — sudden jumps reveal ad-break positions.
-
-    For each whisper word, look up which transcript interval contains
-    word.start − δ(t).  Assign that segment's speaker + text.
-    Words with no match = intro / ad / outro → out_of_transcript=True.
+    We detect δ automatically, assign speaker labels, and flag intro/ad/outro
+    words as out_of_transcript=True.
 
     Saved:  aligned_cache/ep{N}_aligned.json
 
-Step 3 — Rerun whisper on stripped audio + compare timestamps
-    Keep only the assigned-word regions from the raw MP3.
-    Run whisper-cpp on the stripped WAV.
-    Compare word timestamps: w1-assigned vs w2-stripped.
-    Saved:  whisper_cache/ep{N}_w2.json
+Step 3 — Cut stripped MP3 + recalculate timestamps
+    Build ep{N}_stripped.mp3 by concatenating only the keep-regions
+    (raw MP3 minus all detected gaps).  Recalculate every in-transcript
+    word's timestamp to stripped-MP3 time (raw_t − cumulative_gap_before_t).
+    Saved:  ep{N}_stripped.mp3  +  whisper_cache/ep{N}_w2.json
+
+Step 4 — Rerun whisper on stripped audio + compare timestamps
+    Transcribe the stripped MP3 with whisper-cpp → w3.json.
+    Compare w2 vs w3 timestamps word by word.
+    Saved:  whisper_cache/ep{N}_w3.json
 
 Usage:
     python3 scripts/podcast_to_moshi_dataset.py --episodes 152
@@ -346,11 +344,14 @@ def step2_align(ep_num: int, whisper_words: list,
     • Expected raw position = seg.start + current_offset
     • Search ±TIGHT_WIN seconds around expected position (covers normal jitter)
     • Cursor starts 2s before end of previous match (boundary overlap)
-    • If not found in tight window → ad break → search ±WIDE_WIN, update offset
-    • Unmatched segments (short / mistranscribed) get timestamps interpolated
-      from surrounding matches using the current offset.
+    • If not found in tight window → recalibrate after N_MISS_AD misses
+    • Unmatched segments get timestamps interpolated from surrounding matches.
 
     Real gaps ≥ MIN_AD_GAP seconds in raw audio = intro/ad/outro.
+
+    Returns the flat aligned word list (same whisper_words with speaker/seg_text
+    fields added and out_of_transcript flag).  Gap-cutting and w2 computation
+    happen in step3_cut().
     """
     os.makedirs(ALIGNED_CACHE, exist_ok=True)
     out_path = os.path.join(ALIGNED_CACHE, f"ep{ep_num}_aligned.json")
@@ -615,6 +616,7 @@ def step2_align(ep_num: int, whisper_words: list,
 
     json.dump(result, open(out_path, "w", encoding="utf-8"), ensure_ascii=False)
     print(f"  step2: saved → {out_path}", flush=True)
+
     return result
 
 
@@ -644,32 +646,11 @@ def print_alignment_report(aligned_words: list, transcript_segs: list):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 3 — Stripped audio rerun + timestamp comparison
+# Shared audio helper
 # ══════════════════════════════════════════════════════════════════════════════
 
-def derive_keep_regions(aligned_words: list) -> list:
-    """
-    From aligned words, derive contiguous keep-regions in raw MP3 time.
-    A new region starts whenever there is a gap > 2s between consecutive
-    assigned words (= intro, ad-break, or outro boundary).
-    """
-    in_words = [w for w in aligned_words if not w["out_of_transcript"]]
-    if not in_words:
-        raise ValueError("No assigned words")
-    regions = []
-    r_start = in_words[0]["start"]
-    prev_e  = in_words[0]["end"]
-    for w in in_words[1:]:
-        if w["start"] - prev_e > 2.0:
-            regions.append((r_start, prev_e))
-            r_start = w["start"]
-        prev_e = w["end"]
-    regions.append((r_start, prev_e))
-    return regions
-
-
-def build_stripped_mp3(mp3_path: str, keep_regions: list, out_mp3: str):
-    """Extract keep_regions from raw MP3 and concatenate into a single MP3."""
+def _build_stripped_mp3(mp3_path: str, keep_regions: list, out_mp3: str):
+    """Concatenate keep_regions from raw MP3 into a single stripped MP3."""
     inputs, labels = [], []
     for idx, (rs, re_) in enumerate(keep_regions):
         inputs += ["-ss", str(rs), "-t", str(re_ - rs), "-i", mp3_path]
@@ -681,136 +662,210 @@ def build_stripped_mp3(mp3_path: str, keep_regions: list, out_mp3: str):
                    check=True)
 
 
-def step3_rerun_compare(ep_num: int, mp3_path: str, aligned_words: list) -> list:
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 3 — Cut stripped MP3 + recalculate timestamps to stripped-audio time
+# ══════════════════════════════════════════════════════════════════════════════
+
+def step3_cut(ep_num: int, mp3_path: str, aligned: list) -> None:
     """
-    Build stripped WAV, run whisper-cpp on it, then update each assigned word's
-    timestamps to use the more accurate w2 timestamps (clean audio, no intro
-    distraction).
+    Build ep{N}_stripped.mp3 by cutting all gap regions out of the raw MP3,
+    then recalculate every in-transcript word's timestamp to stripped-MP3 time.
 
-    Matching is done positionally along the w2 word stream: we walk w1_in and w2
-    in parallel using a small sliding window, matching on normalised text.  This
-    is robust because both streams cover the same audio region in the same order.
+    Gap regions are re-derived here from the aligned word list (consecutive
+    out_of_transcript spans ≥ MIN_AD_GAP).  This keeps step 2 clean and makes
+    step 3 independently reproducible from the aligned.json cache.
 
-    Returns updated aligned_words with 'start'/'end' replaced by w2-remapped
-    timestamps for every word that could be matched; unmatched words keep their
-    w1 timestamps.  The refined list is saved to aligned_cache/ep{N}_aligned.json.
-
-    w2 timestamps are relative to the stripped WAV start.
-    w1 timestamps are in raw MP3 time.
-    We remap w2 timestamps back to raw MP3 time using the keep_region boundaries.
+    Saves:
+      ep{N}_stripped.mp3  — raw MP3 with intro/ads removed
+      whisper_cache/ep{N}_w2.json — in-transcript words at stripped-MP3 timestamps
     """
-    os.makedirs(WHISPER_CACHE, exist_ok=True)
-    out_path    = os.path.join(WHISPER_CACHE,  f"ep{ep_num}_w2.json")
-    refined_path = os.path.join(ALIGNED_CACHE, f"ep{ep_num}_aligned.json")
+    MIN_AD_GAP = 8.0  # seconds — same threshold as step 2
 
-    keep_regions = derive_keep_regions(aligned_words)
-    total_kept   = sum(e - s for s, e in keep_regions)
-    print(f"  step3: {len(keep_regions)} keep-region(s)  {total_kept:.0f}s total",
+    # ── Re-derive gap regions from the aligned word list ──────────────────────
+    # Collect contiguous runs of out_of_transcript=True words.
+    gap_regions: list = []
+    run_start: float | None = None
+    run_end:   float | None = None
+    for w in aligned:
+        if w["out_of_transcript"]:
+            if run_start is None:
+                run_start = w["start"]
+            run_end = w["end"]
+        else:
+            if run_start is not None and (run_end - run_start) >= MIN_AD_GAP:
+                gap_regions.append((run_start, run_end))
+            run_start = run_end = None
+    if run_start is not None and (run_end - run_start) >= MIN_AD_GAP:
+        gap_regions.append((run_start, run_end))
+
+    print(f"  step3: {len(gap_regions)} gap region(s) → cutting stripped MP3",
+          flush=True)
+    for gs, ge in gap_regions:
+        print(f"    gap  {gs:.1f}s – {ge:.1f}s  ({ge-gs:.1f}s)", flush=True)
+
+    # ── Build keep-regions (inverse of gaps) ──────────────────────────────────
+    raw_end = aligned[-1]["end"]
+    keep_regions: list = []
+    cursor_t = 0.0
+    for gs, ge in gap_regions:
+        if gs > cursor_t:
+            keep_regions.append((cursor_t, gs))
+        cursor_t = ge
+    if cursor_t < raw_end:
+        keep_regions.append((cursor_t, raw_end))
+
+    total_keep = sum(e - s for s, e in keep_regions)
+    print(f"  step3: {len(keep_regions)} keep-region(s)  "
+          f"{total_keep:.0f}s total content", flush=True)
+
+    # ── Build stripped MP3 ────────────────────────────────────────────────────
+    stripped_path = os.path.join(AUDIO_DIR, f"ep{ep_num}_stripped.mp3")
+    _build_stripped_mp3(mp3_path, keep_regions, stripped_path)
+    print(f"  step3: stripped MP3 saved → {stripped_path}", flush=True)
+
+    # ── Compute w2: adjust timestamps to stripped-MP3 time ───────────────────
+    # Process gaps one at a time in order.  After each removal the coordinate
+    # system shifts, so every subsequent gap's boundaries are expressed in the
+    # already-adjusted time.  Concretely:
+    #
+    #   gap_regions are in raw MP3 time.
+    #   carried_offset accumulates how much has been subtracted so far.
+    #   gap_start_adj = gap_start_raw − carried_offset  (adjusted coordinate)
+    #   gap_dur       = gap_end_raw − gap_start_raw     (duration never changes)
+    #
+    # For each gap we subtract gap_dur from every word whose current (adjusted)
+    # start time is ≥ gap_start_adj.  Then carried_offset += gap_dur so the next
+    # gap's boundary is computed in the new coordinate system.
+    #
+    # Working on a mutable list of floats avoids re-reading the aligned list N times.
+
+    # Collect only in-transcript words; build parallel start/end lists.
+    w2_proto = [w for w in aligned if not w["out_of_transcript"]]
+    starts = [w["start"] for w in w2_proto]
+    ends   = [w["end"]   for w in w2_proto]
+
+    carried_offset = 0.0
+    for gap_num, (gs_raw, ge_raw) in enumerate(gap_regions):
+        gap_dur       = ge_raw - gs_raw
+        gap_start_adj = gs_raw - carried_offset   # where this gap starts in current coords
+
+        # All words at or after gap_start_adj get shifted left by gap_dur.
+        cut_idx = bisect.bisect_left(starts, gap_start_adj)
+        for i in range(cut_idx, len(starts)):
+            starts[i] -= gap_dur
+            ends[i]   -= gap_dur
+
+        carried_offset += gap_dur
+        print(f"    gap {gap_num+1}: raw [{gs_raw:.1f}–{ge_raw:.1f}s]  "
+              f"adj_start={gap_start_adj:.1f}s  dur={gap_dur:.1f}s  "
+              f"→ shifted {len(starts) - cut_idx} words", flush=True)
+
+    w2_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
+    w2 = []
+    for i, w in enumerate(w2_proto):
+        w2.append({
+            "word":     w["word"],
+            "start":    round(starts[i], 4),
+            "end":      round(ends[i],   4),
+            "p":        w["p"],
+            "speaker":  w["speaker"],
+            "seg_text": w["seg_text"],
+        })
+    json.dump(w2, open(w2_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"  step3: w2 ({len(w2)} words, stripped-time) saved → {w2_path}",
           flush=True)
 
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-        tmp = f.name
-    try:
-        build_stripped_mp3(mp3_path, keep_regions, tmp)
-        print(f"  step3: stripped MP3 built — running whisper-cpp…", flush=True)
-        w2 = run_whisper_words(tmp)
-    finally:
-        os.unlink(tmp)
 
-    json.dump(w2, open(out_path, "w", encoding="utf-8"), ensure_ascii=False)
-    print(f"  step3: {len(w2)} words saved → {out_path}", flush=True)
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 4 — Verify: transcribe stripped MP3 → w3, compare timestamps with w2
+# ══════════════════════════════════════════════════════════════════════════════
 
-    # ── Remap w2 timestamps from stripped-WAV time → raw MP3 time ────────────
-    cum_offsets = []   # (stripped_start, raw_start) for each region
-    stripped_t  = 0.0
-    for rs, re_ in keep_regions:
-        cum_offsets.append((stripped_t, rs))
-        stripped_t += (re_ - rs)
-    stripped_starts = [c[0] for c in cum_offsets]
+def step4_verify(ep_num: int) -> None:
+    """
+    Transcribe ep{N}_stripped.mp3 with whisper → w3.json.
+    Compare w3 timestamps against w2 timestamps word by word.
 
-    def to_raw(stripped: float) -> float:
-        idx = bisect.bisect_right(stripped_starts, stripped) - 1
-        if idx < 0: idx = 0
-        offset_in_region = stripped - cum_offsets[idx][0]
-        return cum_offsets[idx][1] + offset_in_region
+    w2 = step3 output: in-transcript words with timestamps in stripped-MP3 time.
+    w3 = fresh whisper transcription of the same stripped-MP3.
 
-    # ── Time-anchored text match: for each w1 word find the w2 word with the
-    # same normalised text whose remapped timestamp is closest to w1's timestamp,
-    # within a ±3s window.  This is robust to divergences between the two
-    # whisper passes because it uses w1's time as an anchor, not a global cursor.
-    # Build index: norm_text → sorted list of (raw_time, end_raw_time, w2_idx)
-    w2_index: dict = {}
-    for i, w in enumerate(w2):
-        key = norm_words(w["word"])
-        key = key[0] if key else ""
-        if key:
-            t_raw = to_raw(w["start"])
-            e_raw = to_raw(w["end"])
-            w2_index.setdefault(key, []).append((t_raw, e_raw))
-    # Sort each list by time so we can bisect
-    w2_starts: dict = {}
-    for key, entries in w2_index.items():
-        entries.sort()
-        w2_starts[key] = [e[0] for e in entries]
+    Since both reference the same audio file starting at t=0, the timestamps
+    must agree within whisper's natural jitter (target: ≥98% of words within
+    300 ms, mean < 50 ms).  Any systematic deviation points to a bug in the
+    gap-cut boundaries or the timestamp-adjustment logic in step 3.
+    """
+    stripped_path = os.path.join(AUDIO_DIR, f"ep{ep_num}_stripped.mp3")
+    w2_path       = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
+    w3_path       = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w3.json")
 
-    WINDOW = 3.0   # ±seconds around w1 timestamp to accept a w2 match
+    if not os.path.isfile(stripped_path):
+        raise FileNotFoundError(f"Stripped MP3 not found: {stripped_path}")
+    if not os.path.isfile(w2_path):
+        raise FileNotFoundError(f"w2 not found: {w2_path}")
 
-    w1_in  = [w for w in aligned_words if not w["out_of_transcript"]]
-    n_updated = n_kept = 0
+    # ── Transcribe stripped MP3 → w3 ─────────────────────────────────────────
+    print(f"  step4: transcribing stripped MP3 → w3…", flush=True)
+    w3 = run_whisper_words(stripped_path)
+    json.dump(w3, open(w3_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"  step4: {len(w3)} words saved → {w3_path}", flush=True)
+
+    # ── Compare w2 vs w3 ──────────────────────────────────────────────────────
+    w2 = json.load(open(w2_path, encoding="utf-8"))
+
+    w3_norm  = [((norm_words(w["word"]) or [""])[0]) for w in w3]
+    w3_start = [w["start"] for w in w3]
+
+    MATCH_WIN = 5.0   # ±s around w2 time to search for w3 counterpart
+    n_match = n_miss = 0
     deltas: list = []
     large:  list = []
 
-    for w1w in w1_in:
-        key = norm_words(w1w["word"])
-        key = key[0] if key else ""
-        if not key or key not in w2_index:
-            n_kept += 1
+    for w2w in w2:
+        key = (norm_words(w2w["word"]) or [""])[0]
+        if not key:
             continue
+        t2 = w2w["start"]
+        lo = bisect.bisect_left(w3_start,  t2 - MATCH_WIN)
+        hi = bisect.bisect_right(w3_start, t2 + MATCH_WIN)
+        best_d, best_t3 = float("inf"), None
+        for i in range(lo, hi):
+            if w3_norm[i] == key:
+                d = abs(w3_start[i] - t2)
+                if d < best_d:
+                    best_d  = d
+                    best_t3 = w3_start[i]
+        if best_t3 is None:
+            n_miss += 1
+        else:
+            n_match += 1
+            deltas.append(best_d)
+            if best_d > 0.300:
+                large.append((w2w["word"], t2, best_t3))
 
-        entries  = w2_index[key]
-        starts   = w2_starts[key]
-        t1       = w1w["start"]
+    total    = n_match + n_miss
+    pct      = 100.0 * n_match / total if total else 0
+    mean_d   = sum(deltas) / len(deltas) if deltas else 0
+    max_d    = max(deltas)               if deltas else 0
+    over_300 = len(large)
 
-        # Binary-search for candidates within ±WINDOW
-        lo = bisect.bisect_left(starts,  t1 - WINDOW)
-        hi = bisect.bisect_right(starts, t1 + WINDOW)
-        if lo >= hi:
-            n_kept += 1
-            continue
+    print(f"\n  Step 4 — w2 vs w3 timestamp comparison:", flush=True)
+    print(f"  w2 words        : {len(w2)}", flush=True)
+    print(f"  w3 words        : {len(w3)}", flush=True)
+    print(f"  Matched         : {n_match}/{total}  ({pct:.1f}%)", flush=True)
+    print(f"  Mean  |Δ|       : {mean_d*1000:.0f} ms", flush=True)
+    print(f"  Max   |Δ|       : {max_d*1000:.0f} ms", flush=True)
+    print(f"  Words > 300 ms  : {over_300}", flush=True)
 
-        # Pick the closest one
-        best_t, best_e = min(entries[lo:hi], key=lambda e: abs(e[0] - t1))
-        d = abs(t1 - best_t)
-        deltas.append(d)
-        if d > 0.3:
-            large.append((w1w["word"], t1, best_t))
-        w1w["start"] = round(best_t, 4)
-        w1w["end"]   = round(best_e, 4)
-        n_updated += 1
-
-    # ── Report ────────────────────────────────────────────────────────────────
-    n      = len(deltas)
-    mean_d = sum(deltas) / n if n else 0
-    max_d  = max(deltas)     if n else 0
-
-    print(f"\n  Timestamp refinement (w1 → w2, positional stream-match):",
-          flush=True)
-    print(f"  w1-assigned words  : {len(w1_in)}", flush=True)
-    print(f"  Updated to w2      : {n_updated}  kept w1: {n_kept}", flush=True)
-    print(f"  Mean |Δ| before    : {mean_d*1000:.0f} ms", flush=True)
-    print(f"  Max  |Δ| before    : {max_d*1000:.0f} ms", flush=True)
-    print(f"  Words Δ>300ms      : {len(large)}", flush=True)
-    if large:
+    if over_300:
         print(f"\n  Large deltas (first 10):", flush=True)
-        for word, t1, t2 in large[:10]:
-            print(f"    '{word}'  w1={t1:.3f}s  w2={t2:.3f}s  "
-                  f"Δ={abs(t1-t2)*1000:.0f}ms", flush=True)
+        for word, t2, t3 in large[:10]:
+            print(f"    {word!r:20s}  w2={t2:.3f}s  w3={t3:.3f}s  "
+                  f"Δ={abs(t2-t3)*1000:.0f}ms", flush=True)
 
-    # ── Save refined alignment ─────────────────────────────────────────────
-    json.dump(aligned_words, open(refined_path, "w", encoding="utf-8"),
-              ensure_ascii=False)
-    print(f"\n  step3: refined alignment saved → {refined_path}", flush=True)
-    return aligned_words
+    if pct < 98.0 or max_d > 0.300:
+        print(f"\n  ✗ Quality gate FAILED  "
+              f"(need ≥98% match and max Δ ≤ 300ms)", flush=True)
+    else:
+        print(f"\n  ✓ Quality gate PASSED", flush=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -879,11 +934,16 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str,
     print_alignment_report(aligned, transcript_segs)
 
     # ── Step 3 ────────────────────────────────────────────────────────────────
+    print(f"\n  [Step 3] Cut stripped MP3 + recalculate timestamps", flush=True)
+    step3_cut(ep_num, mp3_path, aligned)
+
+    # ── Step 4 ────────────────────────────────────────────────────────────────
     if skip_step3:
-        print(f"\n  [Step 3] skipped (--skip-step3)", flush=True)
+        print(f"\n  [Step 4] skipped (--skip-step3)", flush=True)
     else:
-        print(f"\n  [Step 3] Rerun whisper on stripped audio + compare", flush=True)
-        step3_rerun_compare(ep_num, mp3_path, aligned)
+        print(f"\n  [Step 4] Verify: transcribe stripped MP3 + compare timestamps",
+              flush=True)
+        step4_verify(ep_num)
 
 
 def main():
