@@ -877,7 +877,7 @@ def step4_verify(ep_num: int) -> None:
 
     print(f"\n  Step 4 — w2 vs w3 timestamp comparison:", flush=True)
     print(f"  w2 words        : {len(w2_alignments)}", flush=True)
-    print(f"  w3 words        : {len(w3)}", flush=True)
+    print(f"  w3 words        : {len(w3_words)}", flush=True)
     print(f"  Matched         : {n_match}/{total}  ({pct:.1f}%)", flush=True)
     print(f"  Mean  |Δ|       : {mean_d*1000:.0f} ms", flush=True)
     print(f"  Max   |Δ|       : {max_d*1000:.0f} ms", flush=True)
