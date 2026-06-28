@@ -730,251 +730,313 @@ def print_alignment_report(aligned_words: list, transcript_segs: list):
 # Step 3 — Replace gaps with silence in WAV; adjust w2uncut timestamps → w2
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Silence filler for intro/outro gaps (ms).  Mid-episode ads use the w0
-# transcript time between the last segment before the gap and the first
-# segment after it — that is the "natural" pause length the speakers intended.
-INTRO_OUTRO_FILLER_MS = 500
+INTRO_OUTRO_FILLER_MS = 500   # ms of silence to keep for intro / outro gaps
 
 
 def step3_cut(ep_num: int, gap_regions: list, transcript_segs: list,
               w2uncut: list) -> None:
     """
-    For each gap detected by step 2:
-      • Compute gapcuttime  = exact duration of the gap in the raw WAV (ms).
-      • Compute gapfiller   = silence to insert instead (ms).
-          intro/outro → INTRO_OUTRO_FILLER_MS
-          mid-episode → w0 transcript time between seg[before].end and
-                        seg[after].start  (natural pause, in ms)
-      • Validate mid-episode gaps: the last in-transcript word before the gap
-        must belong to segment S and the first after must belong to S+1.
-        If not, abort with a diagnostic so the false gap can be debugged.
+    Exact execution order per spec:
 
-    Audio:
-      ep{N}.wav  → copy → ep{N}_stripped.wav
-      Each gap region in the copy is replaced with silence of gapfiller ms.
+    a) For every gap from step2: classify intro/outro; for mid-episode gaps
+       find the boundary words (before/after), validate consecutive segment_ids,
+       compute gapcuttime_ms and gapfiller_ms.
 
-    Timestamps (w2uncut → w2):
-      For every gap (processed left→right), all word timestamps that lie at or
-      after the gap's start are shifted:
-          new_ms = (old_ms − gapcuttime_ms) + gapfiller_ms
-      This is applied cumulatively so each gap's shift is expressed in the
-      already-adjusted coordinate system.
+    b) Copy ep{N}.wav → ep{N}_stripped.wav.
+       For every gap in forward order: replace the gap region with silence of
+       gapfiller_ms duration.
+
+    c) Copy w2uncut → w2 (as working data).
+       For every gap in forward order: adjust all timestamps that fall after
+       the gap's cut point by delta = gapfiller_ms - gapcuttime_ms.
 
     Saves:
       whisper_cache/ep{N}_stripped.wav
-      whisper_cache/ep{N}_w2.json  (moshi-finetune format, stripped-WAV timestamps)
+      whisper_cache/ep{N}_w2.json
     """
     wav_path      = os.path.join(WHISPER_CACHE, f"ep{ep_num}.wav")
     stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
     w2_path       = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
 
-    # Duration of the raw WAV (seconds) — needed to detect outro
+    # WAV duration — needed to classify outro gaps
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", wav_path],
         capture_output=True, text=True, check=True,
     )
     wav_duration_s = float(r.stdout.strip())
-    OUTRO_THRESH = 5.0   # if gap ends within 5 s of WAV end → outro
-    INTRO_THRESH = 1.0   # if gap starts within 1 s of t=0 → intro
+    INTRO_THRESH = 1.0   # gap starts within 1 s of t=0  → intro
+    OUTRO_THRESH = 5.0   # gap ends   within 5 s of end  → outro
 
     print(f"  step3: {len(gap_regions)} gap(s)  wav_duration={wav_duration_s:.1f}s",
           flush=True)
 
-    # ── a) Classify each gap, compute gapcuttime + gapfiller ─────────────────
-    # Build a fast lookup: for each in-transcript word, what is its position
-    # (index) in the w2uncut list?  We need the last word before each gap and
-    # the first word after it.
-    # Work only with in-transcript words sorted by start time.
-    in_words = [w for w in w2uncut if not w["out_of_transcript"]]
-    in_words.sort(key=lambda w: w["start"])
+    # ── a) Classify every gap; compute gapcuttime + gapfiller ────────────────
+    # in-transcript words sorted by start time, used to find boundary words
+    in_words  = sorted(
+        (w for w in w2uncut if not w["out_of_transcript"]),
+        key=lambda w: w["start"],
+    )
     in_starts = [w["start"] for w in in_words]
 
-    gaps = []   # list of dicts with all computed values, in order
+    # gaps[i] matches gap_regions[i]; keys: gs, ge, is_intro, is_outro,
+    #   gapcuttime_ms, gapfiller_ms, before_word, after_word
+    gaps = []
 
     for gap_idx, (gs, ge) in enumerate(gap_regions):
         is_intro = gs <= INTRO_THRESH
         is_outro = ge >= wav_duration_s - OUTRO_THRESH
-
         gapcuttime_ms = round((ge - gs) * 1000)
 
+        # ── a1) intro or outro: skip a2–a6, go straight to a7 ────────────────
         if is_intro or is_outro:
+            # a7) filler = 500 ms; gapcuttime already set above
             gapfiller_ms = INTRO_OUTRO_FILLER_MS
             label = "intro" if is_intro else "outro"
             print(f"  step3: gap[{gap_idx}] {label}  "
-                  f"{gs:.3f}s–{ge:.3f}s  cut={gapcuttime_ms}ms  "
-                  f"filler={gapfiller_ms}ms", flush=True)
+                  f"{gs:.3f}s–{ge:.3f}s  "
+                  f"gapcuttime={gapcuttime_ms}ms  gapfiller={gapfiller_ms}ms",
+                  flush=True)
             gaps.append({
-                "gs": gs, "ge": ge,
-                "gapcuttime_ms": gapcuttime_ms,
-                "gapfiller_ms": gapfiller_ms,
+                "idx": gap_idx, "gs": gs, "ge": ge,
                 "is_intro": is_intro, "is_outro": is_outro,
+                "gapcuttime_ms": gapcuttime_ms,
+                "gapfiller_ms":  gapfiller_ms,
                 "before_word": None, "after_word": None,
             })
             continue
 
-        # ── mid-episode gap: find last in-transcript word before gap ──────────
+        # ── a2) word immediately before the gap ───────────────────────────────
         pos_before = bisect.bisect_left(in_starts, gs) - 1
-        pos_after  = bisect.bisect_right(in_starts, ge)
-
-        if pos_before < 0 or pos_after >= len(in_words):
-            print(f"  step3 ABORT: gap[{gap_idx}] {gs:.3f}s–{ge:.3f}s — "
-                  f"no in-transcript word found before or after the gap.",
-                  flush=True)
+        if pos_before < 0:
+            print(f"  step3 ABORT: gap[{gap_idx}] {gs:.3f}s–{ge:.3f}s  "
+                  f"no in-transcript word found before the gap.", flush=True)
             raise SystemExit(1)
+        before_gap_w2a = in_words[pos_before]
 
-        before_word = in_words[pos_before]
-        after_word  = in_words[pos_after]
+        # ── a3) word immediately after the gap ────────────────────────────────
+        pos_after = bisect.bisect_right(in_starts, ge)
+        if pos_after >= len(in_words):
+            print(f"  step3 ABORT: gap[{gap_idx}] {gs:.3f}s–{ge:.3f}s  "
+                  f"no in-transcript word found after the gap.", flush=True)
+            raise SystemExit(1)
+        after_gap_w2a = in_words[pos_after]
 
-        sid_before = before_word["segment_id"]
-        sid_after  = after_word["segment_id"]
+        sid_before = before_gap_w2a["segment_id"]
+        sid_after  = after_gap_w2a["segment_id"]
 
-        # ── a4) same segment on both sides → false gap ────────────────────────
+        # ── a4) same segment_id on both sides → false gap ─────────────────────
         if sid_before == sid_after:
             print(
-                f"\n  step3 ABORT: gap[{gap_idx}] looks like a false gap — "
-                f"both boundary words belong to the same segment_id={sid_before}.\n"
-                f"  word BEFORE gap: {json.dumps(before_word)}\n"
-                f"  word AFTER  gap: {json.dumps(after_word)}\n"
-                f"  gap raw timestamps: {gs:.3f}s – {ge:.3f}s",
+                f"\n  step3 ABORT: gap[{gap_idx}] is a false gap — "
+                f"both boundary words belong to segment_id={sid_before}\n"
+                f"  $before_gap{gap_idx}_w2a : {json.dumps(before_gap_w2a)}\n"
+                f"  $after_gap{gap_idx}_w2a  : {json.dumps(after_gap_w2a)}\n"
+                f"  gap raw timestamps       : {gs:.3f}s – {ge:.3f}s",
                 flush=True,
             )
             raise SystemExit(1)
 
-        # ── a5) not consecutive segments → unexpected gap ─────────────────────
+        # ── a5) not consecutive → unexpected gap ──────────────────────────────
         if sid_after != sid_before + 1:
             print(
                 f"\n  step3 ABORT: gap[{gap_idx}] spans non-consecutive segments "
-                f"(sid_before={sid_before}, sid_after={sid_after}).\n"
-                f"  word BEFORE gap: {json.dumps(before_word)}\n"
-                f"  word AFTER  gap: {json.dumps(after_word)}\n"
-                f"  gap raw timestamps: {gs:.3f}s – {ge:.3f}s",
+                f"(sid_before={sid_before}, sid_after={sid_after})\n"
+                f"  $before_gap{gap_idx}_w2a : {json.dumps(before_gap_w2a)}\n"
+                f"  $after_gap{gap_idx}_w2a  : {json.dumps(after_gap_w2a)}\n"
+                f"  gap raw timestamps       : {gs:.3f}s – {ge:.3f}s",
                 flush=True,
             )
             raise SystemExit(1)
 
-        # ── a6) consecutive segments → use w0 transcript time as filler ───────
-        seg_before = transcript_segs[sid_before]
-        seg_after  = transcript_segs[sid_after]
-        gapfiller_ms = round(
-            (float(seg_after["start"]) - float(seg_before["end"])) * 1000
-        )
-        # Guard: filler must be ≥ 0; if transcript has overlapping segments
-        # clamp to 0 (silence splice of zero length = no change at that point).
-        gapfiller_ms = max(0, gapfiller_ms)
+        # ── a6) consecutive segments → gapfiller = w0 pause between them ──────
+        seg_before_end   = float(transcript_segs[sid_before]["end"])
+        seg_after_start  = float(transcript_segs[sid_after]["start"])
+        gapfiller_ms     = max(0, round((seg_after_start - seg_before_end) * 1000))
 
         print(f"  step3: gap[{gap_idx}] mid-episode  "
-              f"{gs:.3f}s–{ge:.3f}s  cut={gapcuttime_ms}ms  "
-              f"filler={gapfiller_ms}ms  "
-              f"(seg {sid_before}→{sid_after})", flush=True)
+              f"{gs:.3f}s–{ge:.3f}s  "
+              f"gapcuttime={gapcuttime_ms}ms  gapfiller={gapfiller_ms}ms  "
+              f"(seg {sid_before} end={seg_before_end:.3f}s → "
+              f"seg {sid_after} start={seg_after_start:.3f}s)",
+              flush=True)
+        print(f"    $before_gap{gap_idx}_w2a: {json.dumps(before_gap_w2a)}",
+              flush=True)
+        print(f"    $after_gap{gap_idx}_w2a:  {json.dumps(after_gap_w2a)}",
+              flush=True)
 
         gaps.append({
-            "gs": gs, "ge": ge,
-            "gapcuttime_ms": gapcuttime_ms,
-            "gapfiller_ms": gapfiller_ms,
+            "idx": gap_idx, "gs": gs, "ge": ge,
             "is_intro": False, "is_outro": False,
-            "before_word": before_word,
-            "after_word":  after_word,
+            "gapcuttime_ms": gapcuttime_ms,
+            "gapfiller_ms":  gapfiller_ms,
+            "before_word":   before_gap_w2a,
+            "after_word":    after_gap_w2a,
         })
 
-    # ── b) Build stripped WAV: copy source, replace each gap with silence ─────
+    # ── b1) Copy source WAV → stripped WAV ───────────────────────────────────
     shutil.copy2(wav_path, stripped_path)
-    print(f"  step3: copied {wav_path} → {stripped_path}", flush=True)
+    print(f"  step3 b1: copied {wav_path} → {stripped_path}", flush=True)
 
-    # Process gaps right-to-left so that replacing one gap does not shift the
-    # byte-positions of earlier gaps in the file.
-    # ffmpeg: overwrite the region [gs, ge) with silence of gapfiller_ms length.
-    # We use the apad+atrim approach: extract content before gap, generate
-    # silence, extract content after gap, concatenate — all in a single pass
-    # per gap, working on the stripped file in place.
-    for gap in reversed(gaps):
-        if gap["is_outro"]:
-            # Outro: just truncate the file at gs + gapfiller_ms
-            new_end = gap["gs"] + gap["gapfiller_ms"] / 1000.0
-            tmp = stripped_path + ".tmp.wav"
-            subprocess.run([
-                "ffmpeg", "-v", "error", "-i", stripped_path,
-                "-t", f"{new_end:.6f}", "-c", "copy", tmp, "-y",
-            ], check=True)
-            os.replace(tmp, stripped_path)
-            continue
+    # ── b2) For every gap in forward order: replace gap region with silence ───
+    # We process gaps left-to-right.  Each ffmpeg pass reads the current
+    # stripped file and writes a tmp, then the tmp replaces the stripped file.
+    # Because we process forward and rewrite each time, the timestamps inside
+    # the file shift after every pass — but since we always re-read the full
+    # file for the next gap we always use the *original* gs/ge timestamps
+    # referenced in the file as it exists at that point.
+    #
+    # The key insight: after replacing gap[i], the audio timeline has shifted
+    # by delta_i = gapfiller_i - gapcuttime_i for everything after gap[i].
+    # So for gap[i+1] the correct position in the current file is:
+    #   gs_adj = gs_original + sum(delta_j for j < i+1)
+    # We track this cumulative_audio_delta_ms for WAV editing.
 
-        gs_s          = gap["gs"]
-        gapfiller_s   = gap["gapfiller_ms"] / 1000.0
-        ge_s          = gap["ge"]
-
-        tmp = stripped_path + ".tmp.wav"
-        # Build: [0, gs) + silence(gapfiller_s) + [ge, end)
-        silence_filter = (
-            f"[0:a]atrim=0:{gs_s:.6f},asetpts=PTS-STARTPTS[before];"
-            f"aevalsrc=0:c=mono:r=16000:d={gapfiller_s:.6f}[sil];"
-            f"[0:a]atrim={ge_s:.6f},asetpts=PTS-STARTPTS[after];"
-            f"[before][sil][after]concat=n=3:v=0:a=1[out]"
-        )
-        subprocess.run([
-            "ffmpeg", "-v", "error", "-i", stripped_path,
-            "-filter_complex", silence_filter,
-            "-map", "[out]", tmp, "-y",
-        ], check=True)
-        os.replace(tmp, stripped_path)
-
-    print(f"  step3: stripped WAV ready → {stripped_path}", flush=True)
-
-    # ── c) Adjust timestamps: w2uncut → w2 ───────────────────────────────────
-    # Work on mutable start/end arrays (milliseconds as integers for precision).
-    # For each gap (left→right), shift all timestamps that fall at or after the
-    # gap's current adjusted start position:
-    #   new_ms = old_ms - gapcuttime_ms + gapfiller_ms
-    # The shift Δ = gapfiller_ms - gapcuttime_ms is applied cumulatively so
-    # subsequent gap boundaries are expressed in the already-adjusted space.
-
-    # Collect all words (in + OOT) sorted by start, keeping original index
-    all_words = list(w2uncut)  # shallow copy; we will not mutate the originals
-    all_words.sort(key=lambda w: w["start"])
-
-    starts_ms = [round(w["start"] * 1000) for w in all_words]
-    ends_ms   = [round(w["end"]   * 1000) for w in all_words]
-
-    cumulative_delta_ms = 0  # sum of all (filler - cut) applied so far
+    cumulative_audio_delta_ms = 0
 
     for gap in gaps:
-        if gap["is_outro"]:
-            # Outro words are dropped from w2 entirely (handled by filter below)
-            continue
-
         gapcuttime_ms = gap["gapcuttime_ms"]
         gapfiller_ms  = gap["gapfiller_ms"]
         delta_ms      = gapfiller_ms - gapcuttime_ms
 
-        # The gap's start in the current (already-adjusted) coordinate system
-        gap_start_adj_ms = round(gap["gs"] * 1000) + cumulative_delta_ms
+        # Adjusted timestamps in current file
+        gs_adj = gap["gs"] + cumulative_audio_delta_ms / 1000.0
+        ge_adj = gap["ge"] + cumulative_audio_delta_ms / 1000.0
+        sil_s  = gapfiller_ms / 1000.0
 
-        cut_idx = bisect.bisect_left(starts_ms, gap_start_adj_ms)
+        tmp = stripped_path + ".tmp.wav"
+
+        if gap["is_outro"]:
+            # Outro: keep content up to gs_adj, then append gapfiller_ms silence
+            sil_src = (
+                f"anullsrc=r=16000:cl=mono,"
+                f"atrim=duration={sil_s:.6f},"
+                f"asetpts=PTS-STARTPTS"
+            )
+            silence_filter = (
+                f"[0:a]atrim=0:{gs_adj:.6f},asetpts=PTS-STARTPTS[before];"
+                f"{sil_src}[sil];"
+                f"[before][sil]concat=n=2:v=0:a=1[out]"
+            )
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-i", stripped_path,
+                "-filter_complex", silence_filter,
+                "-map", "[out]", tmp, "-y",
+            ], check=True)
+            os.replace(tmp, stripped_path)
+            print(f"  step3 b2a: gap[{gap['idx']}] outro replaced "
+                  f"→ kept up to {gs_adj:.3f}s + {sil_s:.3f}s silence",
+                  flush=True)
+
+        elif gap["is_intro"]:
+            # Intro: starts at t=0 so no [before] segment
+            # Build: silence(sil_s) + [ge_adj, end)
+            sil_src = (
+                f"anullsrc=r=16000:cl=mono,"
+                f"atrim=duration={sil_s:.6f},"
+                f"asetpts=PTS-STARTPTS"
+            )
+            silence_filter = (
+                f"{sil_src}[sil];"
+                f"[0:a]atrim={ge_adj:.6f},asetpts=PTS-STARTPTS[after];"
+                f"[sil][after]concat=n=2:v=0:a=1[out]"
+            )
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-i", stripped_path,
+                "-filter_complex", silence_filter,
+                "-map", "[out]", tmp, "-y",
+            ], check=True)
+            os.replace(tmp, stripped_path)
+            print(f"  step3 b2a: gap[{gap['idx']}] intro replaced "
+                  f"[0–{ge_adj:.3f}s] → {sil_s:.3f}s silence",
+                  flush=True)
+
+        else:
+            # Mid-episode: [0, gs_adj) + silence(sil_s) + [ge_adj, end)
+            sil_src = (
+                f"anullsrc=r=16000:cl=mono,"
+                f"atrim=duration={sil_s:.6f},"
+                f"asetpts=PTS-STARTPTS"
+            )
+            silence_filter = (
+                f"[0:a]atrim=0:{gs_adj:.6f},asetpts=PTS-STARTPTS[before];"
+                f"{sil_src}[sil];"
+                f"[0:a]atrim={ge_adj:.6f},asetpts=PTS-STARTPTS[after];"
+                f"[before][sil][after]concat=n=3:v=0:a=1[out]"
+            )
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-i", stripped_path,
+                "-filter_complex", silence_filter,
+                "-map", "[out]", tmp, "-y",
+            ], check=True)
+            os.replace(tmp, stripped_path)
+            print(f"  step3 b2a: gap[{gap['idx']}] mid-episode replaced "
+                  f"[{gs_adj:.3f}–{ge_adj:.3f}s] → {sil_s:.3f}s silence",
+                  flush=True)
+
+        cumulative_audio_delta_ms += delta_ms
+
+    print(f"  step3 b: stripped WAV ready → {stripped_path}", flush=True)
+
+    # ── c1) Copy w2uncut → working word list ─────────────────────────────────
+    # We work on mutable start/end arrays in milliseconds (integer precision).
+    # The source list is w2uncut (already in memory); all_words is a sorted copy.
+    all_words = sorted(w2uncut, key=lambda w: w["start"])
+    starts_ms = [round(w["start"] * 1000) for w in all_words]
+    ends_ms   = [round(w["end"]   * 1000) for w in all_words]
+
+    # ── c2) For every gap in forward order: adjust timestamps ─────────────────
+    # cumulative_ts_delta_ms tracks how much the coordinate system has already
+    # shifted due to previously processed gaps, so we can find the correct
+    # cut-point in the already-adjusted array for each successive gap.
+    cumulative_ts_delta_ms = 0
+
+    for gap in gaps:
+        gapcuttime_ms = gap["gapcuttime_ms"]
+        gapfiller_ms  = gap["gapfiller_ms"]
+        delta_ms      = gapfiller_ms - gapcuttime_ms
+
+        # c2b) outro → nothing to do for timestamps (words get dropped at write)
+        if gap["is_outro"]:
+            continue
+
+        # c2a) intro: cut-point is 0 (all timestamps shift)
+        # c2c) mid-episode: cut-point is end of before_word in adjusted coords
+        if gap["is_intro"]:
+            cut_ms = 0
+        else:
+            # end of the word immediately before this gap, in adjusted coords
+            cut_ms = round(gap["before_word"]["end"] * 1000) + cumulative_ts_delta_ms
+
+        # Shift every timestamp at or after cut_ms
+        cut_idx = bisect.bisect_left(starts_ms, cut_ms)
         for i in range(cut_idx, len(starts_ms)):
             starts_ms[i] += delta_ms
             ends_ms[i]   += delta_ms
 
-        cumulative_delta_ms += delta_ms
-        print(f"  step3: timestamps adjusted for gap {gap['gs']:.3f}s–{gap['ge']:.3f}s  "
-              f"Δ={delta_ms:+d}ms  shifted {len(starts_ms)-cut_idx} words",
+        cumulative_ts_delta_ms += delta_ms
+        print(f"  step3 c2: gap[{gap['idx']}] "
+              f"cut_ms={cut_ms}  delta={delta_ms:+d}ms  "
+              f"shifted {len(starts_ms) - cut_idx} words",
               flush=True)
 
-    # Determine outro cutoff in adjusted ms (to drop outro words from w2)
-    outro_cut_ms = None
+    # Outro cutoff in adjusted ms — words at or after this are excluded from w2
+    outro_cutoff_ms = None
     for gap in gaps:
         if gap["is_outro"]:
-            outro_cut_adj_ms = round(gap["gs"] * 1000) + cumulative_delta_ms
-            outro_cut_ms = outro_cut_adj_ms + gap["gapfiller_ms"]
+            outro_cutoff_ms = (
+                round(gap["gs"] * 1000) + cumulative_ts_delta_ms + gap["gapfiller_ms"]
+            )
             break
 
-    # ── Write w2 ─────────────────────────────────────────────────────────────
+    # ── Write w2 in moshi-finetune format ─────────────────────────────────────
     alignments = []
     for i, w in enumerate(all_words):
         if w["out_of_transcript"]:
             continue
         s_ms = starts_ms[i]
         e_ms = ends_ms[i]
-        if outro_cut_ms is not None and s_ms >= outro_cut_ms:
+        if outro_cutoff_ms is not None and s_ms >= outro_cutoff_ms:
             continue
         alignments.append([
             w["word"],
@@ -982,9 +1044,9 @@ def step3_cut(ep_num: int, gap_regions: list, transcript_segs: list,
             w.get("speaker") or "SPEAKER_MAIN",
         ])
 
-    w2_out = {"alignments": alignments}
-    json.dump(w2_out, open(w2_path, "w", encoding="utf-8"), ensure_ascii=False)
-    print(f"  step3: w2 ({len(alignments)} words, moshi-finetune format) "
+    json.dump({"alignments": alignments},
+              open(w2_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"  step3 c: w2 ({len(alignments)} words, moshi-finetune format) "
           f"saved → {w2_path}", flush=True)
 
 
