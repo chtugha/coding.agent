@@ -51,7 +51,6 @@ import json
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -78,6 +77,12 @@ WHISPER_MODEL  = os.path.join(
 )
 
 WHISPER_THREADS = 8
+
+# Endian probe — constant for the lifetime of the process.
+# WAV PCM is always little-endian on disk; array.array decodes using host byte
+# order, so we must byteswap on big-endian hosts before interleaving.
+# sys.byteorder == 'little' on all Apple Silicon / x86 machines.
+_HOST_IS_BIG_ENDIAN: bool = sys.byteorder != "little"
 
 # Ad-Break-Marker-Muster (Case-insensitive)
 # START-Marker: Ankündigung, dass jetzt Werbung kommt
@@ -253,6 +258,10 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
         print(f"  step1: w1 vorhanden — Transkription übersprungen ({w1_path})", flush=True)
         with open(w1_path, encoding="utf-8") as fh:
             raw = json.load(fh)
+        if not isinstance(raw.get("alignments"), list):
+            raise ValueError(
+                f"step1: w1-Cache hat unerwartetes Format (kein 'alignments'-Array): {w1_path}"
+            )
         return [{"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
                 for e in raw["alignments"]]
 
@@ -285,6 +294,11 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
             print(f"  step1: Chunk {idx:02d} [{t_start:.1f}s–{t_end:.1f}s] aus Cache geladen", flush=True)
             with open(chunk_json, encoding="utf-8") as fh:
                 raw_chunk = json.load(fh)
+            if not isinstance(raw_chunk.get("alignments"), list):
+                raise ValueError(
+                    f"step1: Chunk-Cache hat unerwartetes Format (kein 'alignments'-Array): "
+                    f"{chunk_json}"
+                )
             chunk_words = [
                 {"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
                 for e in raw_chunk["alignments"]
@@ -590,6 +604,16 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
     CONFIRM_N    = 4
     MIN_SEG_WORDS = 5
 
+    # Pre-compute normalised word lists for all transcript segments once.
+    # find_post_ad_anchor calls norm_words() inside two nested loops — for every
+    # candidate × every w1-position × every confirmation segment.  Without this
+    # cache a single episode can trigger ~360 000 redundant norm_words() calls.
+    # Same pattern as step2_align's seg_nwords (lines 397–400).
+    seg_nwords: dict[int, list] = {
+        i: norm_words(s.get("text", ""))
+        for i, s in enumerate(transcript_segs)
+    }
+
     def last_w1_end_before(t_exp: float) -> float | None:
         """Ende des letzten w1-Wortes mit Start ≤ t_exp im Fenster ±NARROW_S."""
         lo  = bisect.bisect_left(w1_starts,  t_exp - NARROW_S)
@@ -620,7 +644,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
             txt = seg.get("text", "")
             if AD_START_RE.search(txt) or AD_END_RE.search(txt):
                 continue
-            if len(norm_words(seg.get("text", ""))) >= MIN_SEG_WORDS:
+            if len(seg_nwords[si]) >= MIN_SEG_WORDS:
                 candidates.append(si)
             if len(candidates) >= 15:  # Erste 15 Kandidaten reichen
                 break
@@ -644,7 +668,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
                 for si2 in range(cand_si + 1, len(transcript_segs)):
                     if hits >= CONFIRM_N:
                         break
-                    if len(norm_words(transcript_segs[si2].get("text", ""))) < MIN_SEG_WORDS:
+                    if len(seg_nwords[si2]) < MIN_SEG_WORDS:
                         continue
                     r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts)
                     if r2 is None:
@@ -1013,7 +1037,7 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
     # disk).  sys.byteorder is 'little' on all Apple Silicon / x86 machines.
     arr_a = _array.array("h", ch0)
     arr_b = _array.array("h", ch1)
-    if _array.array("h", b"\x00\x01").tobytes() != b"\x00\x01":
+    if _HOST_IS_BIG_ENDIAN:
         # Host is big-endian: swap to match little-endian WAV on disk
         arr_a.byteswap()
         arr_b.byteswap()
@@ -1024,7 +1048,7 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
     stereo_arr[1::2] = arr_b
 
     # Convert back to little-endian bytes for writing
-    if _array.array("h", b"\x00\x01").tobytes() != b"\x00\x01":
+    if _HOST_IS_BIG_ENDIAN:
         stereo_arr.byteswap()
     stereo_bytes = stereo_arr.tobytes()
 
@@ -1143,12 +1167,12 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
     # ── Step 5 ────────────────────────────────────────────────────────────────
     # w2_alignments is already in memory from step4_cut — no disk re-read needed.
     print(f"\n  [Step 5] Double-Mono-WAV erzeugen", flush=True)
-    w2_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
     step5_double_mono(ep_num, w2_alignments, spk_order)
 
     # ── Ergebnis-Zusammenfassung ──────────────────────────────────────────────
     stripped_path    = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
     double_mono_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_double_mono.wav")
+    w2_path          = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
     dur_stripped     = wav_duration(stripped_path)
     n_words_out      = len(w2_alignments)
 
