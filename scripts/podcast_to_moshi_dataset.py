@@ -400,11 +400,11 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
           f"anchor_offset={anchor_offset:+.3f}s", flush=True)
 
     # ── Segment-Dauer-Selbstprüfung (linearer Offset) ─────────────────────────
-    # Für jedes lange Segment: Prüfe ob nahe am erwarteten w1-Zeitpunkt
-    # tatsächlich Inhalt vorhanden ist. Warnung wenn Drift > DRIFT_WARN_S.
+    # Nur Segmente NACH dem Anchor prüfen — Segmente davor liegen im Intro-Jingle,
+    # wo Whisper erwartungsgemäß still ist. Das ist kein Drift.
     DRIFT_WARN_S = 5.0  # Warnschwelle für Timestamp-Drift
     n_warn = 0
-    for si, seg in enumerate(transcript_segs[:50]):  # Erste 50 für schnellen Überblick
+    for si, seg in enumerate(transcript_segs[anchor_si:50], start=anchor_si):
         if len(seg_words(seg)) < MIN_SEG_WORDS:
             continue
         expected_w1 = float(seg["start"]) + anchor_offset
@@ -412,12 +412,12 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
         lo = bisect.bisect_left(w1_starts, expected_w1 - DRIFT_WARN_S)
         hi = bisect.bisect_right(w1_starts, expected_w1 + DRIFT_WARN_S)
         if hi <= lo:
-            print(f"  step2: FEHLER Segment {si} — "
+            print(f"  step2: WARNUNG Segment {si} — "
                   f"erwartet w1-Zeit {expected_w1:.2f}s, "
                   f"aber kein w1-Wort in ±{DRIFT_WARN_S:.0f}s-Fenster", flush=True)
             n_warn += 1
     if n_warn:
-        print(f"  step2: {n_warn} Drift-Warnungen in den ersten 50 Segmenten", flush=True)
+        print(f"  step2: {n_warn} Drift-Warnungen nach dem Anchor (erste 50 Segmente)", flush=True)
 
     # ── Linearer Offset → Zeitstempel für alle w0-Wörter ─────────────────────
     # Jedes w0-Wort erhält: start = w0_seg.start + anchor_offset (linear)
