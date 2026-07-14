@@ -44,6 +44,7 @@ Verwendung:
 """
 
 import argparse
+import array as _array
 import bisect
 import glob
 import json
@@ -343,7 +344,20 @@ def _chunk_cut_points(transcript_segs: list, wav_duration_s: float,
         wav_cut = min(best[0] + intro_offset, wav_duration_s - 0.001)
         cut_points.append(wav_cut)
         next_target = best[0] + target_chunk_sec
-    return sorted(set(round(c, 3) for c in cut_points))
+
+    deduped = sorted(set(round(c, 3) for c in cut_points))
+    if len(deduped) < len(cut_points):
+        # This happens when there are fewer natural pauses than needed chunks.
+        # The episode will be processed in fewer (longer) chunks than intended,
+        # which may exceed whisper-cpp's effective context window (~30 min).
+        print(
+            f"  _chunk_cut_points: WARNUNG — {len(cut_points)} Schnittpunkte berechnet, "
+            f"aber nur {len(deduped)} eindeutig (zu wenig natürliche Pausen). "
+            f"Episode wird in {len(deduped) + 1} Chunk(s) transkribiert — "
+            f"Qualitätsverlust bei sehr langen Chunks möglich.",
+            flush=True,
+        )
+    return deduped
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -377,10 +391,18 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
     CONFIRM_N     = 6    # Anzahl nachfolgender Segmente zur Bestätigung
     SLIDE_LIMIT_S = 240.0  # w1-Suchfenster für den Anchor (Intro + evtl. Vorsatz)
 
+    # Pre-compute normalised word lists for all transcript segments once.
+    # The anchor search inner loop calls len(norm_words(seg["text"])) thousands of
+    # times for the same segment; the cache eliminates redundant tokenisation.
+    seg_nwords: dict[int, list] = {
+        i: norm_words(s.get("text", ""))
+        for i, s in enumerate(transcript_segs)
+    }
+
     # ── Anchor-Suche ──────────────────────────────────────────────────────────
     # Kandidaten: erste 30 w0-Segmente mit ≥ MIN_SEG_WORDS Wörtern
-    candidates = [i for i, s in enumerate(transcript_segs[:30])
-                  if len(norm_words(s.get("text", ""))) >= MIN_SEG_WORDS]
+    candidates = [i for i in range(min(30, len(transcript_segs)))
+                  if len(seg_nwords[i]) >= MIN_SEG_WORDS]
     if not candidates:
         raise RuntimeError("step2: kein w0-Segment mit ≥ MIN_SEG_WORDS Wörtern gefunden")
 
@@ -407,7 +429,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
                 for si2 in range(cand_si + 1, len(transcript_segs)):
                     if hits >= CONFIRM_N:
                         break
-                    if len(norm_words(transcript_segs[si2].get("text", ""))) < MIN_SEG_WORDS:
+                    if len(seg_nwords[si2]) < MIN_SEG_WORDS:
                         continue
                     r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts)
                     if r2 is None:
@@ -442,8 +464,11 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
     # wo Whisper erwartungsgemäß still ist. Das ist kein Drift.
     DRIFT_WARN_S = 5.0  # Warnschwelle für Timestamp-Drift
     n_warn = 0
-    for si, seg in enumerate(transcript_segs[anchor_si:50], start=anchor_si):
-        if len(norm_words(seg.get("text", ""))) < MIN_SEG_WORDS:
+    # Use anchor_si:anchor_si+50 (relative), not anchor_si:50 (absolute), so the
+    # drift check always examines 50 segments after the anchor regardless of where
+    # in the transcript the anchor was found.
+    for si, seg in enumerate(transcript_segs[anchor_si:anchor_si + 50], start=anchor_si):
+        if len(seg_nwords[si]) < MIN_SEG_WORDS:
             continue
         expected_w1 = float(seg["start"]) + anchor_offset
         # Prüfe ob in ±DRIFT_WARN_S ein w1-Wort liegt
@@ -455,7 +480,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
                   f"aber kein w1-Wort in ±{DRIFT_WARN_S:.0f}s-Fenster", flush=True)
             n_warn += 1
     if n_warn:
-        print(f"  step2: {n_warn} Drift-Warnungen nach dem Anchor (erste 50 Segmente)", flush=True)
+        print(f"  step2: {n_warn} Drift-Warnungen nach dem Anchor (nächste 50 Segmente)", flush=True)
 
     # ── Linearer Offset → Zeitstempel für alle w0-Wörter ─────────────────────
     # Jedes w0-Wort erhält: start = w0_seg.start + anchor_offset (linear)
@@ -533,9 +558,14 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
     typed_markers = []  # (seg_id, "START"|"END")
     for si, seg in enumerate(transcript_segs):
         txt = seg.get("text", "")
+        # Use two independent if-checks (not if/elif) so a segment that matches
+        # both patterns (e.g. announcing end of one ad and start of another in the
+        # same sentence) emits both a START and an END marker.  The downstream
+        # pairing loop handles zero-duration spans via the raw_ad_end <= raw_ad_start
+        # guard (which emits a WARNUNG and skips the degenerate pair).
         if AD_START_RE.search(txt):
             typed_markers.append((si, "START"))
-        elif AD_END_RE.search(txt):
+        if AD_END_RE.search(txt):
             typed_markers.append((si, "END"))
 
     if not typed_markers:
@@ -655,6 +685,15 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
         if first_post_si is None:
             first_post_si = si_e + 1
 
+        # Guard: if the fallback index is out of bounds (si_e was the last segment,
+        # or all remaining segments are ad-markers) we cannot compute a valid
+        # raw_ad_end — skip this ad-break cleanly rather than raising IndexError.
+        if first_post_si >= len(transcript_segs):
+            print(f"  step3: WARNUNG — kein Inhalts-Segment nach END-Marker seg[{si_e}] "
+                  f"vorhanden; Ad-Break-Ende kann nicht berechnet werden — übersprungen",
+                  flush=True)
+            return None
+
         # Rückwärts-Alignment:
         # anchor_w1_time entspricht w0-Zeit von transcript_segs[cand_si]["start"]
         # first_post_si beginnt bei transcript_segs[first_post_si]["start"] in w0
@@ -733,7 +772,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
-              transcript_segs: list) -> tuple[list, list]:
+              transcript_segs: list) -> tuple[list, list, list]:
     """
     a) Nicht-Ad-WAV-Segmente verketten → ep{N}_stripped.wav
        Das erste Nicht-Ad-Segment beginnt bei t=0 in der Ausgabe.
@@ -746,7 +785,9 @@ def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
       whisper_cache/ep{N}_stripped.wav
       whisper_cache/ep{N}_w2.json
 
-    Gibt (keep_regions, spk_order) zurück.
+    Gibt (keep_regions, spk_order, alignments) zurück.
+    alignments wird bereits im Speicher gehalten — der Aufrufer kann es direkt
+    an step5_double_mono weitergeben ohne w2.json erneut von Disk zu lesen.
     """
     wav_path      = os.path.join(WHISPER_CACHE, f"ep{ep_num}.wav")
     stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
@@ -846,7 +887,7 @@ def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
     print(f"  step4: w2 ({len(alignments)} Wörter, w0-Text mit w1-Zeitstempeln) "
           f"gespeichert → {w2_path}", flush=True)
 
-    return keep_regions, spk_order
+    return keep_regions, spk_order, alignments
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -902,7 +943,15 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
 
     spk_a_intervals = []
     spk_b_intervals = []
-    for entry in w2_alignments:
+    for idx, entry in enumerate(w2_alignments):
+        # Structural check: each entry must be [word, [start, end], speaker].
+        # This guards against stale w2.json files written by a different version.
+        if (not isinstance(entry, (list, tuple)) or len(entry) < 3
+                or not isinstance(entry[1], (list, tuple)) or len(entry[1]) < 2):
+            raise ValueError(
+                f"step5: w2_alignments[{idx}] hat unerwartetes Format: {entry!r}. "
+                f"w2.json könnte von einer anderen Script-Version stammen."
+            )
         ts, te, spk = entry[1][0], entry[1][1], entry[2]
         if spk == spk_a:
             spk_a_intervals.append((ts, te))
@@ -952,14 +1001,32 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
     # ── Stereo-WAV schreiben: Kanäle interleaven ──────────────────────────────
     # Interleaved stereo: [L0, R0, L1, R1, ...]  je 2 Bytes pro Sample.
     #
-    # WAV PCM is always stored as little-endian int16.  The previous bytearray
-    # slice trick (stereo[0::4] = ch0[0::2]) relied on the host being little-endian
-    # too, which would produce byte-swapped (corrupt) audio on a big-endian machine.
-    # Using struct with an explicit '<' (little-endian) format is portable.
-    samples_a = struct.unpack_from(f"<{n_frames}h", ch0)
-    samples_b = struct.unpack_from(f"<{n_frames}h", ch1)
-    stereo_bytes = struct.pack(f"<{n_frames * 2}h",
-                               *[v for pair in zip(samples_a, samples_b) for v in pair])
+    # WAV PCM is always stored as little-endian int16.
+    #
+    # Implementation: use array.array('h') to decode both mono channels as signed
+    # int16 values, then interleave them into a new array without creating any
+    # intermediate Python-int lists.  For a 3-hour episode at 16 kHz this avoids
+    # materialising ~346 million Python integer objects (~9.7 GB).
+    #
+    # array.array decodes from bytes using the *native* byte order of the host,
+    # so we must byte-swap on big-endian hosts (WAV is always little-endian on
+    # disk).  sys.byteorder is 'little' on all Apple Silicon / x86 machines.
+    arr_a = _array.array("h", ch0)
+    arr_b = _array.array("h", ch1)
+    if _array.array("h", b"\x00\x01").tobytes() != b"\x00\x01":
+        # Host is big-endian: swap to match little-endian WAV on disk
+        arr_a.byteswap()
+        arr_b.byteswap()
+
+    # Interleave: [a0, b0, a1, b1, ...]
+    stereo_arr = _array.array("h", [0]) * (n_frames * 2)
+    stereo_arr[0::2] = arr_a
+    stereo_arr[1::2] = arr_b
+
+    # Convert back to little-endian bytes for writing
+    if _array.array("h", b"\x00\x01").tobytes() != b"\x00\x01":
+        stereo_arr.byteswap()
+    stereo_bytes = stereo_arr.tobytes()
 
     with wave.open(double_mono_path, "wb") as wf_out:
         wf_out.setnchannels(2)
@@ -1069,20 +1136,21 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
 
     # ── Step 4 ────────────────────────────────────────────────────────────────
     print(f"\n  [Step 4] Gestrippten WAV erzeugen + Zeitstempel neu berechnen", flush=True)
-    keep_regions, spk_order = step4_cut(ep_num, skip_list, aligned, transcript_segs)
+    keep_regions, spk_order, w2_alignments = step4_cut(
+        ep_num, skip_list, aligned, transcript_segs
+    )
 
     # ── Step 5 ────────────────────────────────────────────────────────────────
+    # w2_alignments is already in memory from step4_cut — no disk re-read needed.
     print(f"\n  [Step 5] Double-Mono-WAV erzeugen", flush=True)
     w2_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
-    with open(w2_path, encoding="utf-8") as fh:
-        w2_data = json.load(fh)
-    step5_double_mono(ep_num, w2_data["alignments"], spk_order)
+    step5_double_mono(ep_num, w2_alignments, spk_order)
 
     # ── Ergebnis-Zusammenfassung ──────────────────────────────────────────────
     stripped_path    = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
     double_mono_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_double_mono.wav")
     dur_stripped     = wav_duration(stripped_path)
-    n_words_out      = len(w2_data["alignments"])
+    n_words_out      = len(w2_alignments)
 
     print(f"\n  ✓ Folge {ep_num} abgeschlossen:", flush=True)
     print(f"    Gestrippter WAV:  {stripped_path}  ({dur_stripped:.1f}s)", flush=True)
