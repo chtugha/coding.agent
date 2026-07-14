@@ -54,10 +54,14 @@ import struct
 import subprocess
 import sys
 import tempfile
+import traceback
 import wave
 
 # ── Pfade ─────────────────────────────────────────────────────────────────────
-BASE_DIR       = "/Volumes/eHDD/moshi-rag-data"
+# BASE_DIR default points to the external drive mount.  Override via --data-dir.
+_DEFAULT_BASE_DIR = "/Volumes/eHDD/moshi-rag-data"
+
+BASE_DIR       = _DEFAULT_BASE_DIR
 DATASETS_DIR   = os.path.join(BASE_DIR, "datasets")
 TRANSCRIPT_DIR = os.path.join(DATASETS_DIR, "Gemischtes.Hack.Podcast", "transcripts")
 AUDIO_DIR      = os.path.join(DATASETS_DIR, "Gemischtes.Hack.Podcast")
@@ -99,6 +103,56 @@ def norm_words(text: str) -> list:
             if w]
 
 
+def _lcs_ratio(a: list, b: list) -> float:
+    """
+    Longest-Common-Subsequence-Anteil: LCS(a, b) / len(a).
+    Gibt 1.0 zurück wenn a leer (leere Sequenz gilt immer als Match).
+    O(|a| × |b|) — nur für kurze Wortlisten (~10–30 Wörter) aufrufen.
+    """
+    if not a:
+        return 1.0
+    m, n = len(a), len(b)
+    prev = [0] * (n + 1)
+    for aw in a:
+        curr = [0] * (n + 1)
+        for bi, bw in enumerate(b):
+            curr[bi + 1] = prev[bi] + 1 if aw == bw else max(curr[bi], prev[bi + 1])
+        prev = curr
+    return prev[n] / m
+
+
+def _try_match_seg(seg: dict, w1_pos: int,
+                   w1_words: list, w1_starts: list) -> tuple | None:
+    """
+    Versucht ein w0-Segment ab w1-Position w1_pos zu matchen.
+
+    Fenster = seg_dur + 3 s Slack (zeitbasiert via bisect).
+    Gibt (end_exclusive_w1_pos, score) zurück, oder None wenn Score unter Schwelle.
+
+    Args:
+        seg:       w0-Segment-Dict mit "text", "start", "end".
+        w1_pos:    Startindex in w1_words / w1_starts.
+        w1_words:  Flache Wort-Liste aus whisper-cpp (Dicts mit "word","start","end").
+        w1_starts: Vorberechnete Start-Zeitstempel-Liste (parallel zu w1_words).
+    """
+    t_norm = norm_words(seg.get("text", ""))
+    nw1    = len(w1_words)
+    if not t_norm:
+        return w1_pos, 1.0
+    seg_dur = float(seg["end"]) - float(seg["start"])
+    t0      = w1_words[w1_pos]["start"]
+    win_end = bisect.bisect_right(w1_starts, t0 + seg_dur + 3.0)
+    win_end = max(w1_pos + 1, min(win_end, nw1))
+    w_flat  = [(norm_words(w1_words[k]["word"]) or [""])[0]
+               for k in range(w1_pos, win_end)]
+    score   = _lcs_ratio(t_norm, w_flat)
+    thr     = 0.30 if len(t_norm) > 10 else 0.45 if len(t_norm) > 6 else 0.60
+    if score < thr:
+        return None
+    end_pos = bisect.bisect_right(w1_starts, t0 + seg_dur)
+    return max(w1_pos + 1, min(end_pos, nw1)), score
+
+
 def wav_duration(path: str) -> float:
     """WAV-Datei-Dauer in Sekunden via ffprobe."""
     r = subprocess.run(
@@ -124,7 +178,10 @@ def run_whisper_words(wav_path: str) -> list:
         ], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"whisper-cpp fehlgeschlagen:\n{r.stderr[:600]}")
-        raw = json.load(open(out_base + ".json", encoding="utf-8"))
+        # Read and close the file handle *inside* the TemporaryDirectory block so
+        # the descriptor is released before the directory is deleted (P0 fix).
+        with open(out_base + ".json", encoding="utf-8") as fh:
+            raw = json.load(fh)
 
     words = []
     for seg in raw.get("transcription", []):
@@ -193,14 +250,16 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
     # c) w1 aus Cache laden oder neu transkribieren
     if os.path.exists(w1_path):
         print(f"  step1: w1 vorhanden — Transkription übersprungen ({w1_path})", flush=True)
-        raw = json.load(open(w1_path, encoding="utf-8"))
+        with open(w1_path, encoding="utf-8") as fh:
+            raw = json.load(fh)
         return [{"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
                 for e in raw["alignments"]]
 
     total_dur = wav_duration(wav_path)
 
     # Natürliche Schnittzeiten aus w0-Segmenten ermitteln (alle ~15 Minuten)
-    transcript_segs = json.load(open(w0_path, encoding="utf-8"))["segments"]
+    with open(w0_path, encoding="utf-8") as fh:
+        transcript_segs = json.load(fh)["segments"]
     cuts = _chunk_cut_points(transcript_segs, total_dur)
 
     boundaries = [0.0] + cuts + [total_dur]
@@ -212,6 +271,9 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
         chunk_wav  = os.path.join(WHISPER_CACHE, f"ep{ep_num}_chunk{idx:02d}.wav")
         chunk_json = os.path.join(WHISPER_CACHE, f"ep{ep_num}_chunk{idx:02d}_w1.json")
 
+        # TODO(perf): chunk_wav accumulates on disk (~54 MB per chunk per episode).
+        # Kept intentionally for debugging.  Once the pipeline is stable, consider
+        # writing chunk WAVs to a TemporaryDirectory and only persisting chunk_json.
         subprocess.run([
             "ffmpeg", "-v", "error",
             "-ss", f"{t_start:.6f}", "-t", f"{t_end - t_start:.6f}",
@@ -220,7 +282,8 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
 
         if os.path.exists(chunk_json):
             print(f"  step1: Chunk {idx:02d} [{t_start:.1f}s–{t_end:.1f}s] aus Cache geladen", flush=True)
-            raw_chunk = json.load(open(chunk_json, encoding="utf-8"))
+            with open(chunk_json, encoding="utf-8") as fh:
+                raw_chunk = json.load(fh)
             chunk_words = [
                 {"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
                 for e in raw_chunk["alignments"]
@@ -228,8 +291,9 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
         else:
             print(f"  step1: transkribiere Chunk {idx:02d} [{t_start:.1f}s–{t_end:.1f}s]…", flush=True)
             chunk_words = run_whisper_words(chunk_wav)
-            json.dump({"alignments": [[w["word"], [w["start"], w["end"]]] for w in chunk_words]},
-                      open(chunk_json, "w", encoding="utf-8"), ensure_ascii=False)
+            with open(chunk_json, "w", encoding="utf-8") as fh:
+                json.dump({"alignments": [[w["word"], [w["start"], w["end"]]] for w in chunk_words]},
+                          fh, ensure_ascii=False)
             print(f"  step1: Chunk {idx:02d}: {len(chunk_words)} Wörter gespeichert → {chunk_json}", flush=True)
 
         for w in chunk_words:
@@ -237,8 +301,9 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
             w["end"]   = round(w["end"]   + t_start, 4)
         all_words.extend(chunk_words)
 
-    json.dump({"alignments": [[w["word"], [w["start"], w["end"]]] for w in all_words]},
-              open(w1_path, "w", encoding="utf-8"), ensure_ascii=False)
+    with open(w1_path, "w", encoding="utf-8") as fh:
+        json.dump({"alignments": [[w["word"], [w["start"], w["end"]]] for w in all_words]},
+                  fh, ensure_ascii=False)
     print(f"  step1: {len(all_words)} Wörter gesamt, w1 gespeichert → {w1_path}", flush=True)
     return all_words
 
@@ -264,13 +329,18 @@ def _chunk_cut_points(transcript_segs: list, wav_duration_s: float,
     if not gap_mids:
         return []
 
+    # Intro-Offset: difference between WAV duration and transcript duration,
+    # clamped to [5 s, 120 s] to handle edge cases.
+    intro_offset = max(5.0, min(120.0, wav_duration_s - w0_duration))
+
     cut_points = []
     next_target = target_chunk_sec
     while next_target < w0_duration - target_chunk_sec / 2:
         best = min(gap_mids, key=lambda g: abs(g[0] - next_target))
-        # WAV-Schnitt ≈ w0-Zeitpunkt + geschätzter Intro-Offset
-        intro_offset = max(5.0, min(120.0, wav_duration_s - w0_duration))
-        wav_cut = best[0] + intro_offset
+        # WAV-Schnitt ≈ w0-Zeitpunkt + geschätzter Intro-Offset.
+        # Clamped so the cut never exceeds the actual WAV duration (which would
+        # produce a negative -t value in the subsequent ffmpeg call).
+        wav_cut = min(best[0] + intro_offset, wav_duration_s - 0.001)
         cut_points.append(wav_cut)
         next_target = best[0] + target_chunk_sec
     return sorted(set(round(c, 3) for c in cut_points))
@@ -307,47 +377,10 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
     CONFIRM_N     = 6    # Anzahl nachfolgender Segmente zur Bestätigung
     SLIDE_LIMIT_S = 240.0  # w1-Suchfenster für den Anchor (Intro + evtl. Vorsatz)
 
-    def seg_words(seg: dict) -> list:
-        return norm_words(seg.get("text", ""))
-
-    def lcs_ratio(a: list, b: list) -> float:
-        if not a:
-            return 1.0
-        m, n = len(a), len(b)
-        prev = [0] * (n + 1)
-        for aw in a:
-            curr = [0] * (n + 1)
-            for bi, bw in enumerate(b):
-                curr[bi + 1] = prev[bi] + 1 if aw == bw else max(curr[bi], prev[bi + 1])
-            prev = curr
-        return prev[n] / m
-
-    def try_match_seg(seg: dict, w1_pos: int) -> tuple | None:
-        """
-        Versucht w0-Segment bei w1_pos zu matchen.
-        Fenster = seg_dur + 3 s Slack.
-        Gibt (end_exclusive, score) zurück oder None.
-        """
-        t_norm  = seg_words(seg)
-        if not t_norm:
-            return w1_pos, 1.0
-        seg_dur = float(seg["end"]) - float(seg["start"])
-        t0      = w1_words[w1_pos]["start"]
-        win_end = bisect.bisect_right(w1_starts, t0 + seg_dur + 3.0)
-        win_end = max(w1_pos + 1, min(win_end, nw1))
-        w_flat  = [(norm_words(w1_words[k]["word"]) or [""])[0]
-                   for k in range(w1_pos, win_end)]
-        score   = lcs_ratio(t_norm, w_flat)
-        thr     = 0.30 if len(t_norm) > 10 else 0.45 if len(t_norm) > 6 else 0.60
-        if score < thr:
-            return None
-        end_pos = bisect.bisect_right(w1_starts, t0 + seg_dur)
-        return max(w1_pos + 1, min(end_pos, nw1)), score
-
     # ── Anchor-Suche ──────────────────────────────────────────────────────────
     # Kandidaten: erste 30 w0-Segmente mit ≥ MIN_SEG_WORDS Wörtern
     candidates = [i for i, s in enumerate(transcript_segs[:30])
-                  if len(seg_words(s)) >= MIN_SEG_WORDS]
+                  if len(norm_words(s.get("text", ""))) >= MIN_SEG_WORDS]
     if not candidates:
         raise RuntimeError("step2: kein w0-Segment mit ≥ MIN_SEG_WORDS Wörtern gefunden")
 
@@ -355,12 +388,17 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
     anchor_wi = None
     anchor_si = candidates[0]
 
+    # Performance note: the inner loop is O(end_wi × CONFIRM_N × LCS).
+    # The normal pass (relaxed=False) is bounded by SLIDE_LIMIT_S (~240 s worth of
+    # words, typically < 1000).  The relaxed fallback scans all nw1 words but only
+    # triggers when the normal pass fails — which should be rare.  An early-break on
+    # the first fully-confirmed hit keeps the average case fast.
     for relaxed in (False, True):
         end_wi = nw1 if relaxed else limit_wi
         for cand_si in candidates:
             seg0 = transcript_segs[cand_si]
             for wi in range(end_wi):
-                r0 = try_match_seg(seg0, wi)
+                r0 = _try_match_seg(seg0, wi, w1_words, w1_starts)
                 if r0 is None:
                     continue
                 # Bestätigung: CONFIRM_N nachfolgende lange Segmente müssen matchen
@@ -369,9 +407,9 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
                 for si2 in range(cand_si + 1, len(transcript_segs)):
                     if hits >= CONFIRM_N:
                         break
-                    if len(seg_words(transcript_segs[si2])) < MIN_SEG_WORDS:
+                    if len(norm_words(transcript_segs[si2].get("text", ""))) < MIN_SEG_WORDS:
                         continue
-                    r2 = try_match_seg(transcript_segs[si2], w_pos)
+                    r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts)
                     if r2 is None:
                         break
                     w_pos = r2[0]
@@ -379,7 +417,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
                 if hits >= max(2, CONFIRM_N // 2):
                     anchor_wi = wi
                     anchor_si = cand_si
-                    break
+                    break  # confirmed — stop scanning wi positions
             if anchor_wi is not None:
                 break
         if anchor_wi is not None:
@@ -405,7 +443,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
     DRIFT_WARN_S = 5.0  # Warnschwelle für Timestamp-Drift
     n_warn = 0
     for si, seg in enumerate(transcript_segs[anchor_si:50], start=anchor_si):
-        if len(seg_words(seg)) < MIN_SEG_WORDS:
+        if len(norm_words(seg.get("text", ""))) < MIN_SEG_WORDS:
             continue
         expected_w1 = float(seg["start"]) + anchor_offset
         # Prüfe ob in ±DRIFT_WARN_S ein w1-Wort liegt
@@ -458,7 +496,8 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
 
     print(f"  step2: {len(result)} w0-Wörter mit linearem Offset versehen "
           f"(anchor_offset={anchor_offset:+.3f}s)", flush=True)
-    json.dump(result, open(out_path, "w", encoding="utf-8"), ensure_ascii=False)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False)
     print(f"  step2: gespeichert → {out_path}", flush=True)
     return result, anchor_offset
 
@@ -485,6 +524,11 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
 
     Gibt eine Liste von (raw_ad_start_s, raw_ad_end_s) zurück.
     """
+    # NOTE on AD_START_RE / AD_END_RE coverage: these patterns cover the known
+    # Gemischtes Hack announcement phrases.  New phrasings (e.g. "Werbepause",
+    # "Werbung beginnt") will be silently missed.  Add patterns to AD_START_RE /
+    # AD_END_RE at the top of this file when new episode variants are encountered.
+
     # ── Ad-Marker typisiert erfassen ──────────────────────────────────────────
     typed_markers = []  # (seg_id, "START"|"END")
     for si, seg in enumerate(transcript_segs):
@@ -507,7 +551,6 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
 
     w1_starts = [w["start"] for w in w1_words]
     w1_ends   = [w["end"]   for w in w1_words]
-    nw1       = len(w1_words)
 
     # raw_ad_start: Timestamp-Lookup-Fenster um t_exp(START)
     NARROW_S     = 30.0
@@ -516,45 +559,6 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
     # Bestätigung: mindestens diese Anzahl Folgesegmente müssen beim Post-Ad-Anchor matchen
     CONFIRM_N    = 4
     MIN_SEG_WORDS = 5
-
-    # ── Hilfsfunktionen (identisch mit step2) ─────────────────────────────────
-
-    def seg_norm_words(seg: dict) -> list:
-        return norm_words(seg.get("text", ""))
-
-    def lcs_ratio(a: list, b: list) -> float:
-        if not a:
-            return 1.0
-        m, n = len(a), len(b)
-        prev = [0] * (n + 1)
-        for aw in a:
-            curr = [0] * (n + 1)
-            for bi, bw in enumerate(b):
-                curr[bi + 1] = prev[bi] + 1 if aw == bw else max(curr[bi], prev[bi + 1])
-            prev = curr
-        return prev[n] / m
-
-    def try_match_seg(seg: dict, w1_pos: int) -> tuple | None:
-        """
-        Versucht w0-Segment bei w1_pos zu matchen.
-        Fenster = seg_dur + 3 s Slack.
-        Gibt (end_exclusive_w1_pos, score) zurück oder None.
-        """
-        t_norm  = seg_norm_words(seg)
-        if not t_norm:
-            return w1_pos, 1.0
-        seg_dur = float(seg["end"]) - float(seg["start"])
-        t0      = w1_words[w1_pos]["start"]
-        win_end = bisect.bisect_right(w1_starts, t0 + seg_dur + 3.0)
-        win_end = max(w1_pos + 1, min(win_end, nw1))
-        w_flat  = [(norm_words(w1_words[k]["word"]) or [""])[0]
-                   for k in range(w1_pos, win_end)]
-        score   = lcs_ratio(t_norm, w_flat)
-        thr     = 0.30 if len(t_norm) > 10 else 0.45 if len(t_norm) > 6 else 0.60
-        if score < thr:
-            return None
-        end_pos = bisect.bisect_right(w1_starts, t0 + seg_dur)
-        return max(w1_pos + 1, min(end_pos, nw1)), score
 
     def last_w1_end_before(t_exp: float) -> float | None:
         """Ende des letzten w1-Wortes mit Start ≤ t_exp im Fenster ±NARROW_S."""
@@ -586,7 +590,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
             txt = seg.get("text", "")
             if AD_START_RE.search(txt) or AD_END_RE.search(txt):
                 continue
-            if len(seg_norm_words(seg)) >= MIN_SEG_WORDS:
+            if len(norm_words(seg.get("text", ""))) >= MIN_SEG_WORDS:
                 candidates.append(si)
             if len(candidates) >= 15:  # Erste 15 Kandidaten reichen
                 break
@@ -601,7 +605,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
         for cand_si in candidates:
             seg0 = transcript_segs[cand_si]
             for wi in range(lo_wi, hi_wi):
-                r0 = try_match_seg(seg0, wi)
+                r0 = _try_match_seg(seg0, wi, w1_words, w1_starts)
                 if r0 is None:
                     continue
                 # Bestätigung: CONFIRM_N nachfolgende lange Segmente müssen ebenfalls matchen
@@ -610,15 +614,15 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
                 for si2 in range(cand_si + 1, len(transcript_segs)):
                     if hits >= CONFIRM_N:
                         break
-                    if len(seg_norm_words(transcript_segs[si2])) < MIN_SEG_WORDS:
+                    if len(norm_words(transcript_segs[si2].get("text", ""))) < MIN_SEG_WORDS:
                         continue
-                    r2 = try_match_seg(transcript_segs[si2], w_pos)
+                    r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts)
                     if r2 is None:
                         break
                     w_pos = r2[0]
                     hits += 1
                 if hits >= max(2, CONFIRM_N // 2):
-                    return cand_si, wi  # Bestätigter Anchor
+                    return cand_si, wi  # Bestätigter Anchor — early exit
         return None
 
     def post_ad_start_time(si_e: int, t_exp_end: float) -> float | None:
@@ -729,7 +733,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
-              transcript_segs: list) -> None:
+              transcript_segs: list) -> tuple[list, list]:
     """
     a) Nicht-Ad-WAV-Segmente verketten → ep{N}_stripped.wav
        Das erste Nicht-Ad-Segment beginnt bei t=0 in der Ausgabe.
@@ -741,6 +745,8 @@ def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
     Gespeichert:
       whisper_cache/ep{N}_stripped.wav
       whisper_cache/ep{N}_w2.json
+
+    Gibt (keep_regions, spk_order) zurück.
     """
     wav_path      = os.path.join(WHISPER_CACHE, f"ep{ep_num}.wav")
     stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
@@ -770,22 +776,27 @@ def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
     for i, (ks, ke) in enumerate(keep_regions):
         print(f"    keep[{i}]: {ks:.3f}s – {ke:.3f}s  ({ke-ks:.1f}s)", flush=True)
 
+    if not keep_regions:
+        raise RuntimeError(
+            f"step4: alle Inhalte liegen in Ad-Break-Regionen — "
+            f"keine Keep-Regionen übrig. Skip-Liste prüfen: {skip_list}"
+        )
+
     # ── b) WAV aus Keep-Regionen zusammensetzen ────────────────────────────────
     # ffmpeg filter_complex: N keep-Teile konkatenieren
-    with tempfile.TemporaryDirectory() as td:
-        filter_parts = []
-        for i, (ks, ke) in enumerate(keep_regions):
-            filter_parts.append(
-                f"[0:a]atrim={ks:.6f}:{ke:.6f},asetpts=PTS-STARTPTS[p{i}]"
-            )
-        concat_inputs = "".join(f"[p{i}]" for i in range(len(keep_regions)))
-        filter_str = ";".join(filter_parts) + f";{concat_inputs}concat=n={len(keep_regions)}:v=0:a=1[out]"
+    filter_parts = []
+    for i, (ks, ke) in enumerate(keep_regions):
+        filter_parts.append(
+            f"[0:a]atrim={ks:.6f}:{ke:.6f},asetpts=PTS-STARTPTS[p{i}]"
+        )
+    concat_inputs = "".join(f"[p{i}]" for i in range(len(keep_regions)))
+    filter_str = ";".join(filter_parts) + f";{concat_inputs}concat=n={len(keep_regions)}:v=0:a=1[out]"
 
-        subprocess.run([
-            "ffmpeg", "-v", "error", "-i", wav_path,
-            "-filter_complex", filter_str,
-            "-map", "[out]", stripped_path, "-y",
-        ], check=True)
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-i", wav_path,
+        "-filter_complex", filter_str,
+        "-map", "[out]", stripped_path, "-y",
+    ], check=True)
 
     print(f"  step4: gestrippter WAV gespeichert → {stripped_path}", flush=True)
 
@@ -830,8 +841,8 @@ def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
             spk,
         ])
 
-    json.dump({"alignments": alignments},
-              open(w2_path, "w", encoding="utf-8"), ensure_ascii=False)
+    with open(w2_path, "w", encoding="utf-8") as fh:
+        json.dump({"alignments": alignments}, fh, ensure_ascii=False)
     print(f"  step4: w2 ({len(alignments)} Wörter, w0-Text mit w1-Zeitstempeln) "
           f"gespeichert → {w2_path}", flush=True)
 
@@ -864,13 +875,22 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
 
     # ── WAV lesen ─────────────────────────────────────────────────────────────
     with wave.open(stripped_path, "rb") as wf:
-        assert wf.getsampwidth() == 2, \
-            f"Erwartet 16-bit PCM, gefunden: {wf.getsampwidth() * 8}-bit"
-        assert wf.getnchannels() == 1, \
-            f"Erwartet Mono-Eingang, gefunden: {wf.getnchannels()} Kanäle"
+        if wf.getsampwidth() != 2:
+            raise ValueError(
+                f"Erwartet 16-bit PCM, gefunden: {wf.getsampwidth() * 8}-bit"
+            )
+        if wf.getnchannels() != 1:
+            raise ValueError(
+                f"Erwartet Mono-Eingang, gefunden: {wf.getnchannels()} Kanäle"
+            )
         framerate = wf.getframerate()
         n_frames  = wf.getnframes()
         raw_mono  = wf.readframes(n_frames)  # bytes, 2 Bytes pro Sample
+
+    # Normalise actual sample count from the raw bytes (wave.getnframes() can be
+    # wrong for some encoders; using len(raw_mono) is always authoritative).
+    actual_frames = len(raw_mono) // 2  # 2 bytes per int16 sample
+    n_frames      = actual_frames
 
     # Zwei unabhängige bytearrays für die beiden Kanäle
     ch0 = bytearray(raw_mono)  # Speaker A
@@ -930,18 +950,22 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
     mute_outside(ch1, b_active, n_frames, framerate)
 
     # ── Stereo-WAV schreiben: Kanäle interleaven ──────────────────────────────
-    # Interleaved stereo: [L0, R0, L1, R1, ...]  je 2 Bytes pro Sample
-    stereo = bytearray(n_frames * 4)  # 2 Kanäle × 2 Bytes
-    stereo[0::4] = ch0[0::2]   # ch0 low byte
-    stereo[1::4] = ch0[1::2]   # ch0 high byte
-    stereo[2::4] = ch1[0::2]   # ch1 low byte
-    stereo[3::4] = ch1[1::2]   # ch1 high byte
+    # Interleaved stereo: [L0, R0, L1, R1, ...]  je 2 Bytes pro Sample.
+    #
+    # WAV PCM is always stored as little-endian int16.  The previous bytearray
+    # slice trick (stereo[0::4] = ch0[0::2]) relied on the host being little-endian
+    # too, which would produce byte-swapped (corrupt) audio on a big-endian machine.
+    # Using struct with an explicit '<' (little-endian) format is portable.
+    samples_a = struct.unpack_from(f"<{n_frames}h", ch0)
+    samples_b = struct.unpack_from(f"<{n_frames}h", ch1)
+    stereo_bytes = struct.pack(f"<{n_frames * 2}h",
+                               *[v for pair in zip(samples_a, samples_b) for v in pair])
 
     with wave.open(double_mono_path, "wb") as wf_out:
         wf_out.setnchannels(2)
         wf_out.setsampwidth(2)
         wf_out.setframerate(framerate)
-        wf_out.writeframes(bytes(stereo))
+        wf_out.writeframes(stereo_bytes)
 
     duration_s = n_frames / framerate
     print(f"  step5: Double-Mono-WAV ({duration_s:.1f}s) gespeichert → {double_mono_path}",
@@ -977,14 +1001,24 @@ def find_episodes(episode_filter=None) -> list:
 
 
 def parse_episode_filter(spec: str) -> set:
+    """
+    Parst einen Episodenfilter-String, z.B. "160", "160-163" oder "160,162".
+    Löst ValueError mit lesbarer Meldung bei ungültigem Format aus.
+    """
     result = set()
     for part in spec.split(","):
         part = part.strip()
-        if "-" in part:
-            lo, hi = part.split("-", 1)
-            result.update(range(int(lo), int(hi) + 1))
-        else:
-            result.add(int(part))
+        try:
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                result.update(range(int(lo), int(hi) + 1))
+            else:
+                result.add(int(part))
+        except ValueError:
+            raise ValueError(
+                f"Ungültiger --episodes-Wert: {part!r}. "
+                f"Erwartet wird z.B. '160', '160-163' oder '160,162'."
+            ) from None
     return result
 
 
@@ -1000,8 +1034,14 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
 
     # ── w0 laden ─────────────────────────────────────────────────────────────
     w0_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w0.json")
-    tdata   = json.load(open(w0_path, encoding="utf-8"))
+    with open(w0_path, encoding="utf-8") as fh:
+        tdata = json.load(fh)
     transcript_segs = [s for s in tdata.get("segments", []) if s.get("text", "").strip()]
+    if not transcript_segs:
+        raise ValueError(
+            f"ep{ep_num}: Transkript enthält keine nicht-leeren Segmente — "
+            f"w0.json prüfen: {w0_path}"
+        )
     print(f"  Transkript (w0): {len(transcript_segs)} Segmente  "
           f"[{transcript_segs[0]['start']:.1f}s – {transcript_segs[-1]['end']:.1f}s]",
           flush=True)
@@ -1011,15 +1051,17 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
     anchor_cache_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_anchor_offset.json")
 
     if os.path.exists(w2aligned_path) and os.path.exists(anchor_cache_path):
-        aligned       = json.load(open(w2aligned_path, encoding="utf-8"))
-        anchor_offset = json.load(open(anchor_cache_path, encoding="utf-8"))["anchor_offset"]
+        with open(w2aligned_path, encoding="utf-8") as fh:
+            aligned = json.load(fh)
+        with open(anchor_cache_path, encoding="utf-8") as fh:
+            anchor_offset = json.load(fh)["anchor_offset"]
         print(f"\n  [Step 2] aus Cache geladen — {len(aligned)} w0-Wörter, "
               f"anchor_offset={anchor_offset:.2f}s", flush=True)
     else:
         print(f"\n  [Step 2] w0-Wörter mit w1-Zeitstempeln verknüpfen", flush=True)
         aligned, anchor_offset = step2_align(ep_num, w1, transcript_segs)
-        json.dump({"anchor_offset": anchor_offset},
-                  open(anchor_cache_path, "w", encoding="utf-8"))
+        with open(anchor_cache_path, "w", encoding="utf-8") as fh:
+            json.dump({"anchor_offset": anchor_offset}, fh)
 
     # ── Step 3 ────────────────────────────────────────────────────────────────
     print(f"\n  [Step 3] Skip-Liste aus w0-Ad-Markern aufbauen", flush=True)
@@ -1032,7 +1074,8 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
     # ── Step 5 ────────────────────────────────────────────────────────────────
     print(f"\n  [Step 5] Double-Mono-WAV erzeugen", flush=True)
     w2_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2.json")
-    w2_data = json.load(open(w2_path, encoding="utf-8"))
+    with open(w2_path, encoding="utf-8") as fh:
+        w2_data = json.load(fh)
     step5_double_mono(ep_num, w2_data["alignments"], spk_order)
 
     # ── Ergebnis-Zusammenfassung ──────────────────────────────────────────────
@@ -1054,14 +1097,42 @@ def main():
     )
     parser.add_argument("--episodes", default=None,
                         help='z.B. "160" oder "160-163" oder "160,162"')
+    parser.add_argument(
+        "--data-dir", default=None, metavar="DIR",
+        help=(
+            f"Basisverzeichnis für Datensätze (Standard: {_DEFAULT_BASE_DIR}). "
+            "Überschreibt BASE_DIR; nützlich wenn das Laufwerk unter einem anderen "
+            "Mountpunkt eingehängt ist."
+        ),
+    )
     args = parser.parse_args()
+
+    # ── Basispfad setzen (überschreibt Modulkonstanten falls --data-dir übergeben) ──
+    global BASE_DIR, DATASETS_DIR, TRANSCRIPT_DIR, AUDIO_DIR, WHISPER_CACHE
+    if args.data_dir:
+        BASE_DIR = os.path.abspath(args.data_dir)
+    DATASETS_DIR   = os.path.join(BASE_DIR, "datasets")
+    TRANSCRIPT_DIR = os.path.join(DATASETS_DIR, "Gemischtes.Hack.Podcast", "transcripts")
+    AUDIO_DIR      = os.path.join(DATASETS_DIR, "Gemischtes.Hack.Podcast")
+    WHISPER_CACHE  = os.path.join(DATASETS_DIR, "whisper_cache")
+
+    # ── Laufwerk-/Verzeichnis-Check ────────────────────────────────────────────
+    if not os.path.isdir(BASE_DIR):
+        sys.exit(
+            f"FEHLER: Datenverzeichnis nicht gefunden: {BASE_DIR}\n"
+            f"Ist das externe Laufwerk eingehängt? Oder --data-dir angeben."
+        )
 
     if not os.path.isfile(WHISPER_CLI):
         sys.exit(f"whisper-cli nicht gefunden: {WHISPER_CLI}")
     if not os.path.isfile(WHISPER_MODEL):
         sys.exit(f"whisper-Modell nicht gefunden: {WHISPER_MODEL}")
 
-    ep_filt  = parse_episode_filter(args.episodes) if args.episodes else None
+    try:
+        ep_filt = parse_episode_filter(args.episodes) if args.episodes else None
+    except ValueError as exc:
+        sys.exit(f"FEHLER: {exc}")
+
     episodes = find_episodes(ep_filt)
 
     if not episodes:
@@ -1074,7 +1145,6 @@ def main():
         try:
             process_episode(ep_num, transcript_path, mp3_path)
         except Exception as exc:
-            import traceback
             print(f"\n  ✗ ep{ep_num} FEHLER: {exc}", flush=True)
             traceback.print_exc()
             errors += 1
