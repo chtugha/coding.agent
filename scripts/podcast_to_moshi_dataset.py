@@ -128,7 +128,8 @@ def _lcs_ratio(a: list, b: list) -> float:
 
 
 def _try_match_seg(seg: dict, w1_pos: int,
-                   w1_words: list, w1_starts: list) -> tuple | None:
+                   w1_words: list, w1_starts: list,
+                   w1_nwords: list) -> tuple | None:
     """
     Versucht ein w0-Segment ab w1-Position w1_pos zu matchen.
 
@@ -140,6 +141,10 @@ def _try_match_seg(seg: dict, w1_pos: int,
         w1_pos:    Startindex in w1_words / w1_starts.
         w1_words:  Flache Wort-Liste aus whisper-cpp (Dicts mit "word","start","end").
         w1_starts: Vorberechnete Start-Zeitstempel-Liste (parallel zu w1_words).
+        w1_nwords: Vorberechnete normalisierte Einzelwörter (parallel zu w1_words).
+                   Jeder Eintrag = (norm_words(w["word"]) or [""])[0].
+                   Wird als Slice w1_nwords[w1_pos:win_end] genutzt — vermeidet
+                   redundante norm_words()-Aufrufe im engen Suchloop.
     """
     t_norm = norm_words(seg.get("text", ""))
     nw1    = len(w1_words)
@@ -149,8 +154,7 @@ def _try_match_seg(seg: dict, w1_pos: int,
     t0      = w1_words[w1_pos]["start"]
     win_end = bisect.bisect_right(w1_starts, t0 + seg_dur + 3.0)
     win_end = max(w1_pos + 1, min(win_end, nw1))
-    w_flat  = [(norm_words(w1_words[k]["word"]) or [""])[0]
-               for k in range(w1_pos, win_end)]
+    w_flat  = w1_nwords[w1_pos:win_end]
     score   = _lcs_ratio(t_norm, w_flat)
     thr     = 0.30 if len(t_norm) > 10 else 0.45 if len(t_norm) > 6 else 0.60
     if score < thr:
@@ -166,7 +170,14 @@ def wav_duration(path: str) -> float:
          "-of", "default=noprint_wrappers=1:nokey=1", path],
         capture_output=True, text=True, check=True,
     )
-    return float(r.stdout.strip())
+    raw = r.stdout.strip()
+    try:
+        return float(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"wav_duration: ffprobe gab keine numerische Ausgabe für {path!r}: {raw!r}\n"
+            f"  (Datei beschädigt, leer oder ohne Dauer-Metadaten?)"
+        ) from None
 
 
 def run_whisper_words(wav_path: str) -> list:
@@ -398,8 +409,12 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
     """
     out_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2aligned.json")
 
-    w1_starts = [w["start"] for w in w1_words]
-    nw1       = len(w1_words)
+    w1_starts  = [w["start"] for w in w1_words]
+    # Pre-compute normalised single-word tokens for each w1 entry once per
+    # episode.  _try_match_seg builds a window slice from this list instead of
+    # calling norm_words(w["word"]) on every (wi, window_position) combination.
+    w1_nwords  = [(norm_words(w["word"]) or [""])[0] for w in w1_words]
+    nw1        = len(w1_words)
 
     MIN_SEG_WORDS = 5    # Mindestanzahl Wörter im Ankersegment
     CONFIRM_N     = 6    # Anzahl nachfolgender Segmente zur Bestätigung
@@ -434,7 +449,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
         for cand_si in candidates:
             seg0 = transcript_segs[cand_si]
             for wi in range(end_wi):
-                r0 = _try_match_seg(seg0, wi, w1_words, w1_starts)
+                r0 = _try_match_seg(seg0, wi, w1_words, w1_starts, w1_nwords)
                 if r0 is None:
                     continue
                 # Bestätigung: CONFIRM_N nachfolgende lange Segmente müssen matchen
@@ -445,7 +460,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
                         break
                     if len(seg_nwords[si2]) < MIN_SEG_WORDS:
                         continue
-                    r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts)
+                    r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts, w1_nwords)
                     if r2 is None:
                         break
                     w_pos = r2[0]
@@ -593,8 +608,12 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
         print(f"    seg[{si}] {kind}  w0={t_w0:.2f}s → erwartet_w1={t_w0 + anchor_offset:.2f}s  "
               f"{repr(transcript_segs[si].get('text','').strip()[:55])}", flush=True)
 
-    w1_starts = [w["start"] for w in w1_words]
-    w1_ends   = [w["end"]   for w in w1_words]
+    w1_starts  = [w["start"] for w in w1_words]
+    w1_ends    = [w["end"]   for w in w1_words]
+    # Pre-compute normalised single-word tokens for each w1 entry once.
+    # The find_post_ad_anchor inner loop passes this to _try_match_seg as a
+    # slice instead of calling norm_words(w["word"]) on every iteration.
+    w1_nwords  = [(norm_words(w["word"]) or [""])[0] for w in w1_words]
 
     # raw_ad_start: Timestamp-Lookup-Fenster um t_exp(START)
     NARROW_S     = 30.0
@@ -659,7 +678,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
         for cand_si in candidates:
             seg0 = transcript_segs[cand_si]
             for wi in range(lo_wi, hi_wi):
-                r0 = _try_match_seg(seg0, wi, w1_words, w1_starts)
+                r0 = _try_match_seg(seg0, wi, w1_words, w1_starts, w1_nwords)
                 if r0 is None:
                     continue
                 # Bestätigung: CONFIRM_N nachfolgende lange Segmente müssen ebenfalls matchen
@@ -670,7 +689,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
                         break
                     if len(seg_nwords[si2]) < MIN_SEG_WORDS:
                         continue
-                    r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts)
+                    r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts, w1_nwords)
                     if r2 is None:
                         break
                     w_pos = r2[0]
@@ -1002,7 +1021,13 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
     # Mute für ch1 = alle Lücken zwischen b_active-Intervallen
 
     def mute_outside(ch: bytearray, active: list, n_frames: int, framerate: int) -> None:
-        """Setzt alle Samples in ch auf 0, die NICHT in einem aktiven Intervall liegen."""
+        """Setzt alle Samples in ch auf 0, die NICHT in einem aktiven Intervall liegen.
+
+        active muss nach Startzeit sortiert sein (merge_intervals() garantiert das).
+        Defensive sort hier stellt sicher, dass unsortierte Listen kein stilles
+        Fehlverhalten erzeugen.
+        """
+        active = sorted(active)  # defensive: garantiert korrekte Lückenberechnung
         # Lücken zwischen aktiven Intervallen ermitteln
         mute_regions = []
         cursor = 0.0
@@ -1144,6 +1169,11 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
     if os.path.exists(w2aligned_path) and os.path.exists(anchor_cache_path):
         with open(w2aligned_path, encoding="utf-8") as fh:
             aligned = json.load(fh)
+        if not isinstance(aligned, list):
+            raise ValueError(
+                f"step2: w2aligned-Cache hat unerwartetes Format (keine Liste): "
+                f"{w2aligned_path}"
+            )
         with open(anchor_cache_path, encoding="utf-8") as fh:
             anchor_offset = json.load(fh)["anchor_offset"]
         print(f"\n  [Step 2] aus Cache geladen — {len(aligned)} w0-Wörter, "
