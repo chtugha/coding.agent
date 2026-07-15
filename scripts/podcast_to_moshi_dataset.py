@@ -127,9 +127,8 @@ def _lcs_ratio(a: list, b: list) -> float:
     return prev[n] / m
 
 
-def _try_match_seg(seg: dict, w1_pos: int,
-                   w1_words: list, w1_starts: list,
-                   w1_nwords: list) -> tuple | None:
+def _try_match_seg(seg: dict, t_norm: list, w1_pos: int,
+                   w1_starts: list, w1_nwords: list) -> tuple | None:
     """
     Versucht ein w0-Segment ab w1-Position w1_pos zu matchen.
 
@@ -137,21 +136,21 @@ def _try_match_seg(seg: dict, w1_pos: int,
     Gibt (end_exclusive_w1_pos, score) zurück, oder None wenn Score unter Schwelle.
 
     Args:
-        seg:       w0-Segment-Dict mit "text", "start", "end".
-        w1_pos:    Startindex in w1_words / w1_starts.
-        w1_words:  Flache Wort-Liste aus whisper-cpp (Dicts mit "word","start","end").
+        seg:       w0-Segment-Dict mit "start", "end" (für seg_dur).
+        t_norm:    Vorberechnete normalisierte Wortliste für seg (seg_nwords[si]).
+                   Wird vom Aufrufer übergeben, damit norm_words() nicht bei jedem
+                   wi-Schritt im engen Suchloop erneut aufgerufen wird.
+        w1_pos:    Startindex in w1_starts / w1_nwords.
         w1_starts: Vorberechnete Start-Zeitstempel-Liste (parallel zu w1_words).
         w1_nwords: Vorberechnete normalisierte Einzelwörter (parallel zu w1_words).
                    Jeder Eintrag = (norm_words(w["word"]) or [""])[0].
-                   Wird als Slice w1_nwords[w1_pos:win_end] genutzt — vermeidet
-                   redundante norm_words()-Aufrufe im engen Suchloop.
+                   Wird als Slice w1_nwords[w1_pos:win_end] genutzt.
     """
-    t_norm = norm_words(seg.get("text", ""))
-    nw1    = len(w1_words)
+    nw1 = len(w1_starts)
     if not t_norm:
         return w1_pos, 1.0
     seg_dur = float(seg["end"]) - float(seg["start"])
-    t0      = w1_words[w1_pos]["start"]
+    t0      = w1_starts[w1_pos]
     win_end = bisect.bisect_right(w1_starts, t0 + seg_dur + 3.0)
     win_end = max(w1_pos + 1, min(win_end, nw1))
     w_flat  = w1_nwords[w1_pos:win_end]
@@ -292,16 +291,8 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
         chunk_wav  = os.path.join(WHISPER_CACHE, f"ep{ep_num}_chunk{idx:02d}.wav")
         chunk_json = os.path.join(WHISPER_CACHE, f"ep{ep_num}_chunk{idx:02d}_w1.json")
 
-        # TODO(perf): chunk_wav accumulates on disk (~54 MB per chunk per episode).
-        # Kept intentionally for debugging.  Once the pipeline is stable, consider
-        # writing chunk WAVs to a TemporaryDirectory and only persisting chunk_json.
-        subprocess.run([
-            "ffmpeg", "-v", "error",
-            "-ss", f"{t_start:.6f}", "-t", f"{t_end - t_start:.6f}",
-            "-i", wav_path, "-ar", "16000", "-ac", "1", chunk_wav, "-y",
-        ], check=True)
-
         if os.path.exists(chunk_json):
+            # JSON-Cache vorhanden: kein ffmpeg nötig — Transkription direkt laden.
             print(f"  step1: Chunk {idx:02d} [{t_start:.1f}s–{t_end:.1f}s] aus Cache geladen", flush=True)
             with open(chunk_json, encoding="utf-8") as fh:
                 raw_chunk = json.load(fh)
@@ -315,6 +306,15 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
                 for e in raw_chunk["alignments"]
             ]
         else:
+            # Chunk-WAV extrahieren und transkribieren.
+            # TODO(perf): chunk_wav accumulates on disk (~54 MB per chunk per episode).
+            # Kept intentionally for debugging.  Once the pipeline is stable, consider
+            # writing chunk WAVs to a TemporaryDirectory and only persisting chunk_json.
+            subprocess.run([
+                "ffmpeg", "-v", "error",
+                "-ss", f"{t_start:.6f}", "-t", f"{t_end - t_start:.6f}",
+                "-i", wav_path, "-ar", "16000", "-ac", "1", chunk_wav, "-y",
+            ], check=True)
             print(f"  step1: transkribiere Chunk {idx:02d} [{t_start:.1f}s–{t_end:.1f}s]…", flush=True)
             chunk_words = run_whisper_words(chunk_wav)
             with open(chunk_json, "w", encoding="utf-8") as fh:
@@ -449,7 +449,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
         for cand_si in candidates:
             seg0 = transcript_segs[cand_si]
             for wi in range(end_wi):
-                r0 = _try_match_seg(seg0, wi, w1_words, w1_starts, w1_nwords)
+                r0 = _try_match_seg(seg0, seg_nwords[cand_si], wi, w1_starts, w1_nwords)
                 if r0 is None:
                     continue
                 # Bestätigung: CONFIRM_N nachfolgende lange Segmente müssen matchen
@@ -460,7 +460,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
                         break
                     if len(seg_nwords[si2]) < MIN_SEG_WORDS:
                         continue
-                    r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts, w1_nwords)
+                    r2 = _try_match_seg(transcript_segs[si2], seg_nwords[si2], w_pos, w1_starts, w1_nwords)
                     if r2 is None:
                         break
                     w_pos = r2[0]
@@ -678,7 +678,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
         for cand_si in candidates:
             seg0 = transcript_segs[cand_si]
             for wi in range(lo_wi, hi_wi):
-                r0 = _try_match_seg(seg0, wi, w1_words, w1_starts, w1_nwords)
+                r0 = _try_match_seg(seg0, seg_nwords[cand_si], wi, w1_starts, w1_nwords)
                 if r0 is None:
                     continue
                 # Bestätigung: CONFIRM_N nachfolgende lange Segmente müssen ebenfalls matchen
@@ -689,7 +689,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
                         break
                     if len(seg_nwords[si2]) < MIN_SEG_WORDS:
                         continue
-                    r2 = _try_match_seg(transcript_segs[si2], w_pos, w1_words, w1_starts, w1_nwords)
+                    r2 = _try_match_seg(transcript_segs[si2], seg_nwords[si2], w_pos, w1_starts, w1_nwords)
                     if r2 is None:
                         break
                     w_pos = r2[0]
@@ -1175,7 +1175,14 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
                 f"{w2aligned_path}"
             )
         with open(anchor_cache_path, encoding="utf-8") as fh:
-            anchor_offset = json.load(fh)["anchor_offset"]
+            _anchor_data  = json.load(fh)
+        anchor_offset = _anchor_data.get("anchor_offset")
+        if not isinstance(anchor_offset, (int, float)):
+            raise ValueError(
+                f"step2: anchor_offset-Cache hat unerwartetes Format "
+                f"(kein numerischer 'anchor_offset'-Wert): {anchor_cache_path}"
+            )
+        anchor_offset = float(anchor_offset)
         print(f"\n  [Step 2] aus Cache geladen — {len(aligned)} w0-Wörter, "
               f"anchor_offset={anchor_offset:.2f}s", flush=True)
     else:
