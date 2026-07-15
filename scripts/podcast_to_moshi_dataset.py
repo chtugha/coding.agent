@@ -310,6 +310,17 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple[
             ):
                 os.remove(stale_chunk)
                 print(f"  step1: staler Chunk-Cache gelöscht → {stale_chunk}", flush=True)
+            # Also delete step-2 caches: w2aligned.json and anchor_offset.json
+            # are derived from w1 timestamps.  If w1 is regenerated, these are
+            # stale — the anchor_offset calibrated against the old w1 would
+            # produce a misaligned result when applied to the new w1.
+            for stale_step2 in [
+                os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2aligned.json"),
+                os.path.join(WHISPER_CACHE, f"ep{ep_num}_anchor_offset.json"),
+            ]:
+                if os.path.exists(stale_step2):
+                    os.remove(stale_step2)
+                    print(f"  step1: staler Step-2-Cache gelöscht → {stale_step2}", flush=True)
             # Fall through to re-transcription below.
         else:
             print(f"  step1: w1 gültig — Transkription übersprungen ({w1_path})", flush=True)
@@ -703,7 +714,7 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
         idx = bisect.bisect_right(w1_starts, t_exp, lo, hi) - 1
         return w1_ends[idx] if idx >= lo else None
 
-    def find_post_ad_anchor(si_e: int, t_exp_end: float) -> tuple | None:
+    def find_post_ad_anchor(si_e: int, t_exp_end: float) -> tuple[int, int] | None:
         """
         Findet den ersten zuverlässig bestätigten Anchor-Punkt in w1 für den
         w0-Inhalt nach dem END-Marker si_e.
@@ -1213,7 +1224,7 @@ def parse_episode_filter(spec: str) -> set:
     return result
 
 
-def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
+def process_episode(ep_num: int, transcript_path: str, mp3_path: str) -> None:
     print(f"\n{'═' * 60}", flush=True)
     print(f"  Folge {ep_num}  —  {os.path.basename(mp3_path)}", flush=True)
     print(f"{'─' * 60}", flush=True)
