@@ -47,6 +47,7 @@ import argparse
 import array as _array
 import bisect
 import glob
+import hashlib
 import json
 import math
 import os
@@ -197,6 +198,8 @@ def run_whisper_words(wav_path: str) -> list:
             raise RuntimeError(f"whisper-cpp fehlgeschlagen:\n{r.stderr[:600]}")
         # Read and close the file handle *inside* the TemporaryDirectory block so
         # the descriptor is released before the directory is deleted (P0 fix).
+        # json.load() fully materialises `raw` into a Python dict before the
+        # with-block exits — `raw` is safe to use after the TD is torn down.
         with open(out_base + ".json", encoding="utf-8") as fh:
             raw = json.load(fh)
 
@@ -237,7 +240,7 @@ def run_whisper_words(wav_path: str) -> list:
 # Step 1 — MP3 → WAV; Transkript (w0) kopieren; WAV transkribieren (w1)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple:
+def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple[list, str]:
     """
     a) MP3 → 16 kHz Mono-WAV (übersprungen falls vorhanden).
     b) Transkript als w0.json kopieren (immer aktualisiert).
@@ -269,16 +272,36 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple:
     print(f"  step1: Transkript kopiert → {w0_path}", flush=True)
 
     # c) w1 aus Cache laden oder neu transkribieren
+    # The cache is invalidated when the transcript changes: the sha256 of the
+    # transcript file is stored in the w1 JSON header and compared on load.
+    # This prevents stale w1 timestamps from being used with a corrected w0.
+    with open(transcript_path, "rb") as _fh:
+        transcript_sha256 = hashlib.sha256(_fh.read()).hexdigest()
+
     if os.path.exists(w1_path):
-        print(f"  step1: w1 vorhanden — Transkription übersprungen ({w1_path})", flush=True)
+        print(f"  step1: w1 vorhanden — prüfe Cache-Gültigkeit…", flush=True)
         with open(w1_path, encoding="utf-8") as fh:
             raw = json.load(fh)
         if not isinstance(raw.get("alignments"), list):
             raise ValueError(
                 f"step1: w1-Cache hat unerwartetes Format (kein 'alignments'-Array): {w1_path}"
             )
-        return ([{"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
-                 for e in raw["alignments"]], w0_path)
+        cached_sha = raw.get("transcript_sha256", "")
+        if cached_sha != transcript_sha256:
+            print(
+                f"  step1: Transkript hat sich geändert (sha256 stimmt nicht überein) — "
+                f"w1-Cache wird ungültig gemacht und neu transkribiert.",
+                flush=True,
+            )
+            os.remove(w1_path)
+            # Fall through to re-transcription below.
+        else:
+            print(f"  step1: w1 gültig — Transkription übersprungen ({w1_path})", flush=True)
+            # Cache entry format: [word, [start, end]] (old) or [word, [start, end], p] (new).
+            # Graceful fallback: old 2-element entries get p=1.0.
+            return ([{"word": e[0], "start": e[1][0], "end": e[1][1],
+                      "p": e[2] if len(e) > 2 else 1.0}
+                     for e in raw["alignments"]], w0_path)
 
     total_dur = wav_duration(wav_path)
 
@@ -306,8 +329,11 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple:
                     f"step1: Chunk-Cache hat unerwartetes Format (kein 'alignments'-Array): "
                     f"{chunk_json}"
                 )
+            # Cache entry format: [word, [start, end]] (old) or [word, [start, end], p] (new).
+            # Graceful fallback: old 2-element entries get p=1.0.
             chunk_words = [
-                {"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
+                {"word": e[0], "start": e[1][0], "end": e[1][1],
+                 "p": e[2] if len(e) > 2 else 1.0}
                 for e in raw_chunk["alignments"]
             ]
         else:
@@ -323,7 +349,8 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple:
             print(f"  step1: transkribiere Chunk {idx:02d} [{t_start:.1f}s–{t_end:.1f}s]…", flush=True)
             chunk_words = run_whisper_words(chunk_wav)
             with open(chunk_json, "w", encoding="utf-8") as fh:
-                json.dump({"alignments": [[w["word"], [w["start"], w["end"]]] for w in chunk_words]},
+                json.dump({"alignments": [[w["word"], [w["start"], w["end"]], w["p"]]
+                                          for w in chunk_words]},
                           fh, ensure_ascii=False)
             print(f"  step1: Chunk {idx:02d}: {len(chunk_words)} Wörter gespeichert → {chunk_json}", flush=True)
 
@@ -337,7 +364,9 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple:
         all_words.extend(chunk_words)
 
     with open(w1_path, "w", encoding="utf-8") as fh:
-        json.dump({"alignments": [[w["word"], [w["start"], w["end"]]] for w in all_words]},
+        json.dump({"transcript_sha256": transcript_sha256,
+                   "alignments": [[w["word"], [w["start"], w["end"]], w["p"]]
+                                  for w in all_words]},
                   fh, ensure_ascii=False)
     print(f"  step1: {len(all_words)} Wörter gesamt, w1 gespeichert → {w1_path}", flush=True)
     return all_words, w0_path
@@ -743,13 +772,14 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
             if seg.get("text", "").strip():
                 first_post_si = si
                 break
-        if first_post_si is None:
-            first_post_si = si_e + 1
-
-        # Guard: if the fallback index is out of bounds (si_e was the last segment,
-        # or all remaining segments are ad-markers) we cannot compute a valid
-        # raw_ad_end — skip this ad-break cleanly rather than raising IndexError.
-        if first_post_si >= len(transcript_segs):
+        # Guard: if no non-empty, non-ad-marker segment was found after si_e,
+        # or all remaining segments were ad-markers, we cannot compute a valid
+        # raw_ad_end.  The old fallback `first_post_si = si_e + 1` was removed
+        # because si_e+1 may itself be an ad-marker segment, causing
+        # w0_first_post_time to be taken from an ad-marker timestamp and
+        # silently producing a wrong raw_ad_end.  Returning None here lets the
+        # pairing loop emit a WARNUNG and skip the ad-break cleanly.
+        if first_post_si is None or first_post_si >= len(transcript_segs):
             print(f"  step3: WARNUNG — kein Inhalts-Segment nach END-Marker seg[{si_e}] "
                   f"vorhanden; Ad-Break-Ende kann nicht berechnet werden — übersprungen",
                   flush=True)
