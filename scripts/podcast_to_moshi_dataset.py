@@ -48,6 +48,7 @@ import array as _array
 import bisect
 import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -236,12 +237,16 @@ def run_whisper_words(wav_path: str) -> list:
 # Step 1 — MP3 → WAV; Transkript (w0) kopieren; WAV transkribieren (w1)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
+def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple:
     """
     a) MP3 → 16 kHz Mono-WAV (übersprungen falls vorhanden).
     b) Transkript als w0.json kopieren (immer aktualisiert).
     c) WAV in ~15-Minuten-Chunks transkribieren, zu w1 zusammenfügen.
        Chunks werden an natürlichen w0-Pausen geschnitten.
+
+    Gibt (w1_words, w0_path) zurück.  w0_path wird auch von process_episode
+    benötigt — hier als einzige Quelle der Wahrheit zurückgegeben, damit
+    Umbenennungen nur an einer Stelle gepflegt werden müssen.
     """
     os.makedirs(WHISPER_CACHE, exist_ok=True)
     wav_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}.wav")
@@ -272,8 +277,8 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
             raise ValueError(
                 f"step1: w1-Cache hat unerwartetes Format (kein 'alignments'-Array): {w1_path}"
             )
-        return [{"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
-                for e in raw["alignments"]]
+        return ([{"word": e[0], "start": e[1][0], "end": e[1][1], "p": 1.0}
+                 for e in raw["alignments"]], w0_path)
 
     total_dur = wav_duration(wav_path)
 
@@ -322,6 +327,10 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
                           fh, ensure_ascii=False)
             print(f"  step1: Chunk {idx:02d}: {len(chunk_words)} Wörter gespeichert → {chunk_json}", flush=True)
 
+        # ORDERING INVARIANT: mutate timestamps in chunk_words BEFORE extending
+        # all_words.  all_words holds the same dict objects by reference, so
+        # mutating after extend() would shift already-committed entries a second
+        # time.  Do not swap these two operations.
         for w in chunk_words:
             w["start"] = round(w["start"] + t_start, 4)
             w["end"]   = round(w["end"]   + t_start, 4)
@@ -331,7 +340,7 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> list:
         json.dump({"alignments": [[w["word"], [w["start"], w["end"]]] for w in all_words]},
                   fh, ensure_ascii=False)
     print(f"  step1: {len(all_words)} Wörter gesamt, w1 gespeichert → {w1_path}", flush=True)
-    return all_words
+    return all_words, w0_path
 
 
 def _chunk_cut_points(transcript_segs: list, wav_duration_s: float,
@@ -533,6 +542,15 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
         seg_start_w1 = float(seg["start"]) + anchor_offset
         seg_end_w1   = float(seg["end"])   + anchor_offset
         seg_dur      = seg_end_w1 - seg_start_w1
+        if seg_dur <= 0:
+            # anchor_offset so negative that this segment predates t=0 in w1.
+            # Clamp to avoid negative word timestamps flowing into downstream steps.
+            print(f"  step2: WARNUNG Segment {si} — seg_dur={seg_dur:.4f}s ≤ 0 "
+                  f"(anchor_offset={anchor_offset:+.3f}s); Zeitstempel auf 0 geklemmt",
+                  flush=True)
+            seg_start_w1 = max(0.0, seg_start_w1)
+            seg_end_w1   = seg_start_w1
+            seg_dur      = 0.0
         n_w          = len(words_in_seg)
         dur_per_word = seg_dur / n_w if n_w > 0 and seg_dur > 0 else 0.05
 
@@ -916,8 +934,12 @@ def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
         t_e = raw_to_stripped(w["end"])
         if t_s is None or t_e is None:
             continue  # Im Intro oder Ad-Break
-        if t_e < t_s:
-            t_e = t_s + 0.01
+        if t_e <= t_s:
+            # Word straddles a cut boundary: start mapped to valid content but
+            # end is in (or before) a stripped region.  Skip entirely — emitting
+            # a phantom word with no real audio backing would corrupt timestamps
+            # in the Moshi training set.
+            continue
         spk = w["speaker"] or "SPEAKER_MAIN"
         alignments.append([
             w["w0_word"],
@@ -1039,8 +1061,12 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
             mute_regions.append((cursor, n_frames / framerate))
 
         for ms, me in mute_regions:
-            i0 = int(ms * framerate) * 2   # Byte-Offset (2 Bytes/Sample)
-            i1 = min(int(me * framerate) * 2, len(ch))
+            # Use round() for the mute-start and math.ceil() for the mute-end
+            # so that the full mute region is covered to the nearest sample.
+            # int() would truncate toward zero, leaving up to 1 sample of
+            # un-muted audio at each boundary — audible as a boundary click.
+            i0 = round(ms * framerate) * 2          # Byte-Offset (2 Bytes/Sample)
+            i1 = min(math.ceil(me * framerate) * 2, len(ch))
             if i1 > i0:
                 ch[i0:i1] = b"\x00" * (i1 - i0)
 
@@ -1099,7 +1125,10 @@ def find_episodes(episode_filter=None) -> list:
     mp3_files   = sorted(glob.glob(os.path.join(AUDIO_DIR, "*.mp3")))
     mp3_by_ep   = {}
     for mp3 in mp3_files:
-        m = re.search(r"^#(\d+)\s", os.path.basename(mp3))
+        # No ^ anchor: filenames that have a leading space, BOM, or an informal
+        # prefix (e.g. "GH #160 …") would be silently skipped with ^.  The
+        # literal "#" followed by digits is already specific enough.
+        m = re.search(r"#(\d+)\s", os.path.basename(mp3))
         if m:
             mp3_by_ep[int(m.group(1))] = mp3
     episodes = []
@@ -1146,10 +1175,10 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str):
     # ── Step 1 ────────────────────────────────────────────────────────────────
     print(f"\n  [Step 1] MP3 → WAV; Transkript (w0) kopieren; WAV transkribieren (w1)",
           flush=True)
-    w1 = step1_transcribe(ep_num, mp3_path, transcript_path)
+    w1, w0_path = step1_transcribe(ep_num, mp3_path, transcript_path)
 
     # ── w0 laden ─────────────────────────────────────────────────────────────
-    w0_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w0.json")
+    # w0_path is the single source of truth returned by step1_transcribe.
     with open(w0_path, encoding="utf-8") as fh:
         tdata = json.load(fh)
     transcript_segs = [s for s in tdata.get("segments", []) if s.get("text", "").strip()]
