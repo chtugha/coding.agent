@@ -11,7 +11,8 @@ Step 1 — MP3 → 16 kHz Mono-WAV; Transkript als w0 kopieren; WAV transkribier
     c) whisper-cpp transkribiert den WAV → flache Wortliste mit Zeitstempeln (w1)
     Gespeichert: whisper_cache/ep{N}.wav  (übersprungen falls vorhanden)
                  whisper_cache/ep{N}_w0.json  (immer aktualisiert)
-                 whisper_cache/ep{N}_w1.json  (übersprungen falls vorhanden)
+                 whisper_cache/ep{N}_w1.json  (übersprungen falls vorhanden und Transkript unverändert;
+                                               bei Transkript-Änderung wird der Cache ungültig gemacht)
 
 Step 2 — Alignment: w0-Wörter ↔ w1-Zeitstempel (1:1-Zuordnung)
     - w0-Ankerpunkt in w1 finden (Podcast-Intro in w1 überspringen)
@@ -246,6 +247,9 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple[
     b) Transkript als w0.json kopieren (immer aktualisiert).
     c) WAV in ~15-Minuten-Chunks transkribieren, zu w1 zusammenfügen.
        Chunks werden an natürlichen w0-Pausen geschnitten.
+       Cache-Validierung: Der sha256 des geschriebenen w0 wird im w1-JSON
+       gespeichert.  Bei Transkript-Änderung (sha256-Mismatch) werden w1.json
+       und alle zugehörigen Chunk-JSONs gelöscht und neu erzeugt.
 
     Gibt (w1_words, w0_path) zurück.  w0_path wird auch von process_episode
     benötigt — hier als einzige Quelle der Wahrheit zurückgegeben, damit
@@ -273,9 +277,12 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple[
 
     # c) w1 aus Cache laden oder neu transkribieren
     # The cache is invalidated when the transcript changes: the sha256 of the
-    # transcript file is stored in the w1 JSON header and compared on load.
-    # This prevents stale w1 timestamps from being used with a corrected w0.
-    with open(transcript_path, "rb") as _fh:
+    # *written* w0_path (not transcript_path) is stored in the w1 JSON header
+    # and compared on load.  Hashing w0_path (already written above) eliminates
+    # the TOCTOU window that would exist if we hashed the external source file,
+    # and is conceptually correct — the hash validates the w0 that w1 was built
+    # from, not the original source location.
+    with open(w0_path, "rb") as _fh:
         transcript_sha256 = hashlib.sha256(_fh.read()).hexdigest()
 
     if os.path.exists(w1_path):
@@ -294,6 +301,15 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple[
                 flush=True,
             )
             os.remove(w1_path)
+            # Also delete per-chunk JSON caches: they store relative timestamps
+            # built against the old chunk cut-points, which are derived from
+            # w0 segment boundaries.  If the transcript changed, the new w0
+            # may produce different cut-points, making old chunk JSONs wrong.
+            for stale_chunk in glob.glob(
+                os.path.join(WHISPER_CACHE, f"ep{ep_num}_chunk*_w1.json")
+            ):
+                os.remove(stale_chunk)
+                print(f"  step1: staler Chunk-Cache gelöscht → {stale_chunk}", flush=True)
             # Fall through to re-transcription below.
         else:
             print(f"  step1: w1 gültig — Transkription übersprungen ({w1_path})", flush=True)
@@ -427,7 +443,7 @@ def _chunk_cut_points(transcript_segs: list, wav_duration_s: float,
 # Step 2 — Anchor-Offset bestimmen + w0-Wörter mit linearem Offset versehen
 # ══════════════════════════════════════════════════════════════════════════════
 
-def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
+def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple[list, float]:
     """
     Bestimmt den globalen anchor_offset (w1_time = w0_time + anchor_offset)
     durch Suche des ersten zuverlässig bestätigten Ankerpunkts in w1.
