@@ -141,8 +141,8 @@ def _try_match_seg(seg: dict, t_norm: list, w1_pos: int,
                    Wird vom Aufrufer übergeben, damit norm_words() nicht bei jedem
                    wi-Schritt im engen Suchloop erneut aufgerufen wird.
         w1_pos:    Startindex in w1_starts / w1_nwords.
-        w1_starts: Vorberechnete Start-Zeitstempel-Liste (parallel zu w1_words).
-        w1_nwords: Vorberechnete normalisierte Einzelwörter (parallel zu w1_words).
+        w1_starts: Vorberechnete Start-Zeitstempel-Liste je w1-Wort.
+        w1_nwords: Vorberechnete normalisierte Einzelwörter je w1-Wort.
                    Jeder Eintrag = (norm_words(w["word"]) or [""])[0].
                    Wird als Slice w1_nwords[w1_pos:win_end] genutzt.
     """
@@ -414,7 +414,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple:
     # episode.  _try_match_seg builds a window slice from this list instead of
     # calling norm_words(w["word"]) on every (wi, window_position) combination.
     w1_nwords  = [(norm_words(w["word"]) or [""])[0] for w in w1_words]
-    nw1        = len(w1_words)
+    nw1        = len(w1_starts)
 
     MIN_SEG_WORDS = 5    # Mindestanzahl Wörter im Ankersegment
     CONFIRM_N     = 6    # Anzahl nachfolgender Segmente zur Bestätigung
