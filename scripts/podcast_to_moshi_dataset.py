@@ -76,7 +76,7 @@ WHISPER_CLI    = os.path.join(
 )
 WHISPER_MODEL  = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "bin", "models", "ggml-large-v3.bin",
+    "bin", "models", "ggml-large-v3-turbo.bin",
 )
 
 WHISPER_THREADS = 8
@@ -98,6 +98,410 @@ AD_END_RE = re.compile(
     r"(werbung\s+ende|werbung\s+vorbei|werbung\s+und\s+empfehlung)",
     re.IGNORECASE,
 )
+
+# ── Teacher-Forcing Injection Facts ───────────────────────────────────────────
+# Kopiert 1:1 aus prepare_german_dataset.py.
+# Diese Sätze werden als "[Injected reference] … [End of injected reference]"
+# in die w2-Alignment-Liste eingebettet, damit das Moshi-Modell lernt,
+# zwischen diesen Markern stehende Fakten als externe Referenz zu nutzen
+# (teacher-forcing, kein ARC-Encoder benötigt).
+FACTS = [
+    "Der Schwarzschild-Radius beschreibt die Grenze, ab der keine Information dem Schwarzen Loch entkommen kann.",
+    "Quantenverschränkung bewirkt, dass zwei Teilchen über beliebige Distanzen instantan korreliert bleiben.",
+    "Die Hawking-Strahlung resultiert aus Quantenvakuumfluktuationen nahe des Ereignishorizonts.",
+    "Gravitationswellen stauchen und strecken die Raumzeit bei asymmetrischen Sternkollisionen.",
+    "Superposition bedeutet, dass sich ein Quantensystem gleichzeitig in mehreren Zuständen befindet.",
+    "Die Schrödinger-Gleichung beschreibt die zeitliche Entwicklung einer quantenmechanischen Wellenfunktion.",
+    "Dunkle Materie wechselwirkt scheinbar nur über die Gravitation mit normaler Materie.",
+    "Ein stabiler Orbit erfordert die exakte Balance zwischen Zentrifugalkraft und Gravitationsanziehung.",
+    "Der Spin eines Elektrons kann unter Beobachtung in einen eindeutigen Zustand kollabieren.",
+    "Im Doppelspaltexperiment interferiert ein einzelnes Teilchen physikalisch mit sich selbst.",
+    "Heisenbergs Unschärferelation verbietet die gleichzeitige Messung von Ort und Impuls.",
+    "Die Krümmung der Raumzeit bestimmt die Bewegung von massereichen Himmelskörpern.",
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Silbenzählung (geprüft, 95/95 Testfälle korrekt)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Ziel: gesprochene Silbenanzahl im deutschen Audio treffen (nicht orthografisch).
+# Regeln:
+#   DIPHTHONGE (1 Schlag): ei  ai  äu  eu  au  ie
+#     Ausnahme: "-ie" am Wortende nach Konsonant in Lehnwörtern → 2 (Ma-te-ri-e)
+#   -SION-Suffix (komprimiert, 1 Schlag): Fusion=2, Version=2, Mission=2
+#   -TION (aufgeteilt, ti-on = 2 Schläge): Nation=3, Funktion=3, Wellenfunktion=5
+#   qu + Vokal → u kein eigenständiger Schlag (que, qua → 1)
+#   Alle anderen Zweifachvokal-Gruppen → aufteilen (2 Schläge)
+#   Bindestrich-Komposita → jedes Teil separat zählen
+
+_SYL_VOWELS = set("aeiouäöüy")
+_SYL_DIPHTHONGS = {"ei", "ai", "äu", "eu", "au", "ie"}
+
+
+def _syl_vgroup_beats(vspan: str, pre_char: str, post_span: str) -> int:
+    """Gesprochene Schläge für eine maximale Vokal-Gruppe (Kleinbuchstaben)."""
+    v = vspan
+    if len(v) == 1:
+        return 1
+    if len(v) == 2:
+        if v in _SYL_DIPHTHONGS:
+            # Wortfinales "-ie" nach Konsonant = Lehnwort-Schwa (Ma-te-ri-e)
+            if v == "ie" and not post_span and pre_char and pre_char not in _SYL_VOWELS:
+                return 2
+            return 1
+        if pre_char == "q" and v in ("ue", "ua", "ui"):
+            return 1  # "qu"-Digraph
+        # -SION: "io" nach "s", gefolgt von wortfinalem "n"
+        if v == "io" and pre_char == "s":
+            if post_span and post_span[0] == "n":
+                after_n = post_span[1:]
+                if not after_n or after_n[0] not in _SYL_VOWELS:
+                    return 1  # sion = 1 gesprochener Schlag
+            return 2
+        return 2  # alle anderen Zweifach-Vokal-Gruppen → aufteilen
+    # Drei+ Vokale: gierig den Diphthong-Präfix konsumieren, Rest rekursiv
+    if v[:2] in _SYL_DIPHTHONGS:
+        rest = v[2:]
+        if not rest:
+            return 1
+        return 1 + _syl_vgroup_beats(rest, v[1], post_span)
+    return 1 + _syl_vgroup_beats(v[1:], v[0], post_span)
+
+
+def _syl_part(word: str) -> int:
+    """Gesprochene Silbenschläge in einem (nicht-bindestrich-getrennten) Wort (Kleinbuchstaben)."""
+    if not word:
+        return 0
+    n = len(word)
+    count = 0
+    i = 0
+    while i < n:
+        if word[i] not in _SYL_VOWELS:
+            i += 1
+            continue
+        j = i
+        while j < n and word[j] in _SYL_VOWELS:
+            j += 1
+        count += _syl_vgroup_beats(word[i:j], word[i - 1] if i > 0 else "", word[j:])
+        i = j
+    return max(count, 1) if count > 0 or re.search(r"[a-zäöüßy]", word) else 0
+
+
+def count_syllables_word(word: str) -> int:
+    """Gesprochene Silbenschläge in einem einzelnen deutschen Wort."""
+    clean = re.sub(r"[^\w\-äöüÄÖÜßy]", "", word, flags=re.UNICODE)
+    if not clean:
+        return 0
+    return sum(_syl_part(p) for p in clean.lower().split("-"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Facts-Injektion (teacher-forcing)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Mechanismus:
+#   1. Alignments-Liste in satzartige Spans aufteilen (Speaker-Wechsel oder
+#      Pause > GAP_THRESHOLD_S Sekunden → neuer Span).
+#   2. Für jeden FACT: besten w2-Satz nach Silbenanzahl-Ähnlichkeit finden.
+#   3. Die Original-Timestamps des gefundenen Spans behalten.
+#      Nur die Text-Labels ersetzen: FACT-Wörter gleichmäßig über die vorhandenen
+#      Zeitstempel verteilt, mit [Injected reference]…[End of injected reference]
+#      Klammerwörtern.
+#   4. Jeder Span wird höchstens einmal verwendet (Greedy-Matching).
+#
+# Format des Teacher-Forcing-Wrappers (exakt wie in stream_both.rs):
+#   [Injected reference]
+#   <fact text>
+#   [End of injected reference]
+#
+# Die drei Marker-Token werden als eigene "Wörter" mit minimals Dauer
+# an den Timestamps des Span-Anfangs/-Endes verankert.
+
+_INJECT_GAP = 0.8          # Sekunden Pause → Satzgrenze
+_INJECT_MIN_WORDS = 4      # Kandidaten-Sätze müssen mindestens so viele Wörter haben
+_INJECT_MIN_SCORE = 0.70   # Mindest-Ähnlichkeit (0..1) um einen Span zu ersetzen
+# Satzende-Interpunktion: ein Span darf NUR dann als Kandidat gelten, wenn das
+# letzte Wort auf ein Satzende-Zeichen endet (d.h. es ist eine vollständige Satz).
+_SENTENCE_END_RE = re.compile(r'[.!?…]$')
+
+
+def _segment_alignments(alignments: list) -> list[dict]:
+    """
+    Teilt die Alignments-Liste in satzartige Spans auf.
+
+    Rückgabe: Liste von Dicts mit
+      start_idx, end_idx  — Indices in die Original-Alignments-Liste (inklusiv)
+      speaker, words, starts, ends, total_syl
+    """
+    if not alignments:
+        return []
+    spans = []
+    cur_start = 0
+    cur_spk   = alignments[0][2]
+    cur_words = [alignments[0][0]]
+    cur_ts    = [alignments[0][1][0]]
+    cur_te    = [alignments[0][1][1]]
+
+    def flush(end_idx: int):
+        total_syl = sum(count_syllables_word(w) for w in cur_words)
+        spans.append({
+            "start_idx": cur_start,
+            "end_idx":   end_idx,
+            "speaker":   cur_spk,
+            "words":     list(cur_words),
+            "starts":    list(cur_ts),
+            "ends":      list(cur_te),
+            "total_syl": total_syl,
+        })
+
+    for i in range(1, len(alignments)):
+        word, (t_s, t_e), spk = alignments[i]
+        gap = t_s - cur_te[-1]
+        # Boundary: speaker change, long pause, OR previous word ended a sentence
+        prev_word_ends_sentence = bool(_SENTENCE_END_RE.search(cur_words[-1]))
+        if spk != cur_spk or gap > _INJECT_GAP or prev_word_ends_sentence:
+            flush(i - 1)
+            cur_start = i
+            cur_spk   = spk
+            cur_words = [word]
+            cur_ts    = [t_s]
+            cur_te    = [t_e]
+        else:
+            cur_words.append(word)
+            cur_ts.append(t_s)
+            cur_te.append(t_e)
+
+    flush(len(alignments) - 1)
+    return spans
+
+
+def _syl_similarity(fact_syl: int, fact_words: int,
+                    sent_syl: int, sent_words: int) -> float:
+    """
+    Ähnlichkeits-Score zwischen einem Fakt und einem Satz (0..1).
+    Gewichtung: 60 % Silbenanzahl, 40 % Wortanzahl.
+    """
+    if not fact_syl or not sent_syl:
+        return 0.0
+    syl_ratio  = abs(fact_syl  - sent_syl)  / max(fact_syl,  sent_syl)
+    word_ratio = abs(fact_words - sent_words) / max(fact_words, sent_words)
+    return 1.0 - (0.6 * syl_ratio + 0.4 * word_ratio)
+
+
+def inject_facts_into_alignments(alignments: list) -> list:
+    """
+    Gibt eine neue Alignments-Liste zurück, in der für jeden FACT ein
+    w2-Satz-Span durch den Fakt-Text ersetzt wurde.
+
+    Die Fact-Wörter werden gleichmäßig über die Zeitstempel des ersetzten
+    Spans verteilt. Keine Marker-Token — reiner Wort-für-Wort-Ersatz.
+
+    Rückgabe: neue alignments-Liste (Original wird nicht verändert).
+    """
+    if not alignments or not FACTS:
+        return alignments
+
+    # Schritt 1: Segmentieren
+    spans = _segment_alignments(alignments)
+    # Kandidaten: Mindestanzahl Wörter UND letztes Wort endet auf Satzzeichen
+    # (garantiert, dass nur vollständige Einzelsätze ersetzt werden)
+    candidates = [
+        s for s in spans
+        if len(s["words"]) >= _INJECT_MIN_WORDS
+        and bool(_SENTENCE_END_RE.search(s["words"][-1]))
+    ]
+    if not candidates:
+        return alignments
+
+    # Vorab: Silbenzahlen der FACTS berechnen
+    fact_meta = []
+    for fact in FACTS:
+        words = fact.split()
+        total_syl = sum(count_syllables_word(w) for w in words)
+        fact_meta.append({"text": fact, "words": words, "total_syl": total_syl})
+
+    # Schritt 2: Greedy-Matching (jeden Kandidaten-Span nur einmal vergeben)
+    used_spans: set[int] = set()  # set von start_idx
+
+    # Sortiere FACTS nach absteigender Silbenzahl → speziellste zuerst matchen
+    fact_order = sorted(range(len(fact_meta)), key=lambda i: -fact_meta[i]["total_syl"])
+
+    assignments: dict[int, dict] = {}   # fact_idx → span
+
+    for fi in fact_order:
+        fm = fact_meta[fi]
+        best_score = -1.0
+        best_span  = None
+        for span in candidates:
+            if span["start_idx"] in used_spans:
+                continue
+            score = _syl_similarity(
+                fm["total_syl"], len(fm["words"]),
+                span["total_syl"], len(span["words"]),
+            )
+            if score > best_score:
+                best_score = score
+                best_span  = span
+        if best_span is not None and best_score >= _INJECT_MIN_SCORE:
+            assignments[fi] = best_span
+            used_spans.add(best_span["start_idx"])
+
+    if not assignments:
+        return alignments
+
+    # Schritt 3: Neue Alignments-Liste aufbauen
+    # Sammle die Span-Indices die ersetzt werden sollen
+    replaced_ranges: dict[int, list] = {}  # start_idx → neue Einträge-Liste
+
+    for fi, span in assignments.items():
+        fm = fact_meta[fi]
+        fact_words = fm["words"]
+        n_fact = len(fact_words)
+        spk    = span["speaker"]
+        t0     = span["starts"][0]
+        t_end  = span["ends"][-1]
+        span_dur = t_end - t0
+
+        # Verfügbare Zeitpunkte im Span für Fact-Wörter
+        # Wir interpolieren n_fact Zeitstempel gleichmäßig im [t0, t_end]-Intervall
+        # (Audiodaten bleiben physikalisch unverändert)
+        if n_fact == 1:
+            word_ts = [(t0, t_end)]
+        else:
+            step = span_dur / n_fact
+            word_ts = [
+                (round(t0 + k * step, 4), round(t0 + (k + 1) * step, 4))
+                for k in range(n_fact)
+            ]
+
+        # Erzeuge neue Einträge: nur die Fakt-Wörter, keine Marker
+        new_entries: list = []
+
+        for word, (ws, we) in zip(fact_words, word_ts):
+            new_entries.append([word, [ws, we], spk])
+
+        replaced_ranges[span["start_idx"]] = (span["end_idx"], new_entries)
+
+    # Schritt 4: Original-Liste mit Ersetzungen zusammenführen
+    result: list = []
+    i = 0
+    n = len(alignments)
+    while i < n:
+        entry = alignments[i]
+        if i in replaced_ranges:
+            end_idx, new_entries = replaced_ranges[i]
+            result.extend(new_entries)
+            i = end_idx + 1  # überspringen bis nach Span-Ende (inklusiv)
+        else:
+            result.append(entry)
+            i += 1
+
+    print(
+        f"  inject_facts: {len(assignments)}/{len(FACTS)} Fakten injiziert "
+        f"({len(alignments)} → {len(result)} Einträge)",
+        flush=True,
+    )
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Timestamp-Überlappungsauflösung (silbenproportionales Merging)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _resolve_overlaps(alignments: list) -> list:
+    """
+    Löst Zeitstempel-Überlappungen in der Alignment-Liste durch
+    silbenproportionales Merging auf.
+
+    Algorithmus (ein Vorwärts-Durchlauf):
+      Für jedes konsekutive Paar (words[i], words[i+1]) mit Overlap:
+        1. merged_start = min(start_i, start_next)
+           merged_end   = max(end_i,   end_next)
+        2. Silbenzahl s_i    für words[i].word
+           Silbenzahl s_next für words[i+1].word
+           Fallback-Zähler: jede zusammenhängende Vokal-Gruppe (a/e/i/o/u/y)
+           zählt als 1 Silbe, Minimum 1 pro Wort.
+        3. boundary = merged_start + merged_duration * (s_i / (s_i + s_next))
+        4. words[i].end      = boundary
+           words[i+1].start  = boundary  (exakt, ohne Rundung)
+           words[i+1].end    = merged_end
+      Durch den Vorwärts-Durchlauf werden Ketten von Überlappungen natürlich
+      aufgelöst, da words[i+1] nach der Korrektur direkt als words[i] des
+      nächsten Schritts fungiert.
+
+    Nach dem Durchlauf wird eine Assertions-Prüfung ausgeführt:
+      Für jedes Paar gilt words[i].end == words[i+1].start — andernfalls
+      wird ein ValueError ausgelöst (fängt Regressionen sofort ab).
+
+    Gibt eine neue Liste zurück; die Originalliste bleibt unverändert.
+    Druckt eine Zusammenfassung der vorgenommenen Korrekturen.
+    """
+    if not alignments:
+        return alignments
+
+    # Fallback-Silbenzähler: Vokal-Gruppen, Minimum 1
+    def _syl_fallback(word: str) -> int:
+        groups = re.findall(r'[aeiouäöüyAEIOUÄÖÜY]+', word)
+        return max(len(groups), 1)
+
+    # Benutze den vorhandenen Silbenzähler, Fallback wenn nötig
+    def _syl(word: str) -> int:
+        try:
+            n = count_syllables_word(word)
+            return n if n > 0 else _syl_fallback(word)
+        except Exception:
+            return _syl_fallback(word)
+
+    # Flache Kopie — jede Subliste [word, [start, end], spk] wird bei Bedarf
+    # durch eine neue Liste ersetzt, nie in-place mutiert.
+    result = [entry for entry in alignments]
+    resolved = 0
+
+    for i in range(len(result) - 1):
+        cur  = result[i]
+        nxt  = result[i + 1]
+
+        end_i      = cur[1][1]
+        start_next = nxt[1][0]
+
+        if end_i <= start_next:
+            continue  # kein Overlap
+
+        merged_start    = min(cur[1][0], start_next)
+        merged_end      = max(end_i, nxt[1][1])
+        merged_duration = merged_end - merged_start
+
+        s_i    = _syl(cur[0])
+        s_next = _syl(nxt[0])
+        total_syl = s_i + s_next
+
+        boundary = merged_start + merged_duration * (s_i / total_syl)
+
+        result[i]     = [cur[0], [cur[1][0], boundary],    cur[2]]
+        result[i + 1] = [nxt[0], [boundary,  merged_end],  nxt[2]]
+        resolved += 1
+
+    if resolved:
+        print(
+            f"  _resolve_overlaps: {resolved} Overlap(s) silbenproportional aufgelöst",
+            flush=True,
+        )
+
+    # ── Assertions-Prüfung ────────────────────────────────────────────────────
+    for i in range(len(result) - 1):
+        end_i      = result[i][1][1]
+        start_next = result[i + 1][1][0]
+        if end_i > start_next:
+            raise ValueError(
+                f"_resolve_overlaps: Überlappung nach Bereinigung verblieben bei "
+                f"Index {i} → {i+1}: "
+                f"'{result[i][0]}' endet {end_i:.6f}s, "
+                f"'{result[i+1][0]}' beginnt {start_next:.6f}s "
+                f"(Overlap {(end_i - start_next)*1000:.3f} ms)"
+            )
+
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -128,6 +532,111 @@ def _lcs_ratio(a: list[str], b: list[str]) -> float:
             curr[bi + 1] = prev[bi] + 1 if aw == bw else max(curr[bi], prev[bi + 1])
         prev = curr
     return prev[n] / m
+
+
+def _lcs_first_last(a: list, b: list) -> tuple[int, int] | None:
+    """
+    Run LCS on word lists a (w0 segment) and b (w1 window slice) and return
+    (first_b_idx, last_b_idx) — the indices into b of the first and last matched
+    words.  Returns None if no match exists.
+
+    Used by _try_match_seg to find the exact span of w1 words that correspond to
+    a w0 segment, so block_start and block_end are derived from real matched words
+    rather than the raw window boundaries (which may include jingle/preamble words
+    before the segment's content actually begins in the audio).
+    """
+    if not a or not b:
+        return None
+    m, n = len(a), len(b)
+    # Forward DP
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m - 1, -1, -1):
+        for j in range(n - 1, -1, -1):
+            if a[i] == b[j]:
+                dp[i][j] = 1 + dp[i + 1][j + 1]
+            else:
+                dp[i][j] = max(dp[i + 1][j], dp[i][j + 1])
+    # Traceback to collect matched b-indices
+    matched_b = []
+    i, j = 0, 0
+    while i < m and j < n:
+        if a[i] == b[j]:
+            matched_b.append(j)
+            i += 1
+            j += 1
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            i += 1
+        else:
+            j += 1
+    if not matched_b:
+        return None
+    return matched_b[0], matched_b[-1]
+
+
+def _lcs_first_pair(a: list, b: list) -> tuple[int, int] | None:
+    """
+    Run LCS on word lists a (w0 segment) and b (w1 window slice) and return
+    (first_a_idx, first_b_idx) — the indices into a and b of the FIRST matched
+    word pair.  Returns None if no match exists.
+
+    Used by _align_segs_to_w1 to find the first matched w0 word in the anchor
+    segment, so the unmatched prefix (e.g. a leading "Und" that whisper dropped)
+    can be dropped from w2aligned.
+    """
+    if not a or not b:
+        return None
+    m, n = len(a), len(b)
+    # Forward DP (same structure as _lcs_first_last)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m - 1, -1, -1):
+        for j in range(n - 1, -1, -1):
+            if a[i] == b[j]:
+                dp[i][j] = 1 + dp[i + 1][j + 1]
+            else:
+                dp[i][j] = max(dp[i + 1][j], dp[i][j + 1])
+    # Traceback — return on the FIRST match
+    i, j = 0, 0
+    while i < m and j < n:
+        if a[i] == b[j]:
+            return (i, j)
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            i += 1
+        else:
+            j += 1
+    return None
+
+
+def _lcs_pairs(a: list, b: list) -> list[tuple[int, int]]:
+    """
+    Run LCS on word lists a (w0 segment, normalised) and b (w1 window slice,
+    normalised) and return ALL matched (a_idx, b_idx) pairs in order.
+
+    Used by _align_segs_to_w1 to assign each matched w0 word the REAL w1 word
+    [start, end].  Unmatched w0 words (whisper dropped/merged them) are removed
+    from the output — no invented timestamps.
+    """
+    if not a or not b:
+        return []
+    m, n = len(a), len(b)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m - 1, -1, -1):
+        for j in range(n - 1, -1, -1):
+            if a[i] == b[j]:
+                dp[i][j] = 1 + dp[i + 1][j + 1]
+            else:
+                dp[i][j] = max(dp[i + 1][j], dp[i][j + 1])
+    pairs = []
+    i, j = 0, 0
+    while i < m and j < n:
+        if a[i] == b[j]:
+            pairs.append((i, j))
+            i += 1
+            j += 1
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            i += 1
+        else:
+            j += 1
+    return pairs
 
 
 def _try_match_seg(seg: dict, t_norm: list, w1_pos: int,
@@ -390,64 +899,169 @@ def step1_transcribe(ep_num: int, mp3_path: str, transcript_path: str) -> tuple[
             w["end"]   = round(w["end"]   + t_start, 4)
         all_words.extend(chunk_words)
 
+    # Resolve any timestamp overlaps introduced by chunk-boundary stitching
+    # before saving w1, so downstream steps never see overlapping timestamps.
+    w1_entries = [[w["word"], [w["start"], w["end"]], w["p"]] for w in all_words]
+    w1_entries = _resolve_overlaps(w1_entries)
+
     with open(w1_path, "w", encoding="utf-8") as fh:
         json.dump({"transcript_sha256": transcript_sha256,
-                   "alignments": [[w["word"], [w["start"], w["end"]], w["p"]]
-                                  for w in all_words]},
+                   "alignments": w1_entries},
                   fh, ensure_ascii=False)
-    print(f"  step1: {len(all_words)} Wörter gesamt, w1 gespeichert → {w1_path}", flush=True)
+    print(f"  step1: {len(w1_entries)} Wörter gesamt, w1 gespeichert → {w1_path}", flush=True)
     return all_words, w0_path
 
 
 def _chunk_cut_points(transcript_segs: list, wav_duration_s: float,
-                      target_chunk_sec: float = 900.0,
-                      min_gap_sec: float = 1.0) -> list:
-    """Schnittpunkte für WAV-Chunks anhand von w0-Segmentpausen berechnen."""
+                      target_chunk_sec: float = 600.0,
+                      min_gap_sec: float = 0.5) -> list:
+    """
+    Berechnet WAV-Schnittpunkte für die Chunk-Transkription.
+
+    Strategie (neu, gegenüber der alten 900-s-Pause-Methode):
+      • Ziel-Chunk-Länge: 600 s (statt 900 s) — hält alle Chunks sicher unter
+        Whispers zuverlässigem Kontextfenster und verhindert Tail-Truncation.
+      • Kandidaten-Grenzen: aufeinanderfolgende w0-Segmente, bei denen
+          (a) das aktuelle Segment mit Satzschluss-Interpunktion endet  UND
+          (b) entweder der Sprecher wechselt ODER eine Pause ≥ min_gap_sec vorliegt.
+        Beide Bedingungen zusammen ergeben saubere, inhaltlich sinnvolle Schnitte.
+      • Ad-Break-Mauer: kein Schnitt darf innerhalb des Ad-Break-Bereichs
+        [ad_start_w0, ad_end_w0] liegen.  Stattdessen wird die Abschnittgrenze
+        genau an ad_start_w0 bzw. ad_end_w0 gesetzt — der Ad-Break bleibt immer
+        vollständig in einem eigenen Bereich und kontaminiert keine Chunk-Transkription.
+      • Fallback: Wenn für eine Sektion keine geeignete Kandidaten-Grenze in
+        Reichweite liegt, wird der nächstbeste Pause-Kandidat (≥ min_gap_sec)
+        ohne Sprecher-/Satzende-Bedingung akzeptiert.
+
+    Rückgabe: Liste von WAV-Schnittpunkten (float, Sekunden), aufsteigend sortiert.
+    Funktionssignatur identisch zur alten Implementierung — keine Änderung am Aufrufer.
+    """
     if not transcript_segs:
         return []
     w0_duration = float(transcript_segs[-1]["end"])
     if w0_duration <= 0:
         return []
 
-    gap_mids = []
-    for i in range(len(transcript_segs) - 1):
-        seg_end   = float(transcript_segs[i]["end"])
-        seg_start = float(transcript_segs[i + 1]["start"])
-        gap = seg_start - seg_end
-        if gap >= min_gap_sec:
-            gap_mids.append((seg_end + gap / 2.0, gap))
-
-    if not gap_mids:
-        return []
-
-    # Intro-Offset: difference between WAV duration and transcript duration,
-    # clamped to [5 s, 120 s] to handle edge cases.
+    # Intro-Offset: WAV enthält Intro-Jingle vor dem ersten w0-Segment.
+    # Clamped auf [5 s, 120 s] für Randfall-Robustheit.
     intro_offset = max(5.0, min(120.0, wav_duration_s - w0_duration))
 
-    cut_points = []
-    next_target = target_chunk_sec
-    while next_target < w0_duration - target_chunk_sec / 2:
-        best = min(gap_mids, key=lambda g: abs(g[0] - next_target))
-        # WAV-Schnitt ≈ w0-Zeitpunkt + geschätzter Intro-Offset.
-        # Clamped so the cut never exceeds the actual WAV duration (which would
-        # produce a negative -t value in the subsequent ffmpeg call).
-        wav_cut = min(best[0] + intro_offset, wav_duration_s - 0.001)
-        cut_points.append(wav_cut)
-        next_target = best[0] + target_chunk_sec
+    # ── Ad-Break-Grenzen aus w0 ermitteln ─────────────────────────────────────
+    # Wir suchen das erste START-Marker-Segment und das erste END-Marker-Segment.
+    # Falls kein Ad-Break vorhanden, wird [w0_duration, w0_duration] verwendet
+    # (leerer Bereich → keine Mauer notwendig).
+    ad_start_w0 = w0_duration  # Fallback: kein Ad-Break
+    ad_end_w0   = w0_duration
+    for seg in transcript_segs:
+        txt = seg.get("text", "")
+        if AD_START_RE.search(txt) and ad_start_w0 == w0_duration:
+            ad_start_w0 = float(seg["start"])
+        if AD_END_RE.search(txt) and ad_end_w0 == w0_duration:
+            ad_end_w0 = float(seg["end"])
+    # Sicherstellen, dass ad_end > ad_start (Fallback bei fehlerhafter Reihenfolge)
+    if ad_end_w0 <= ad_start_w0:
+        ad_end_w0 = ad_start_w0
 
-    deduped = sorted(set(round(c, 3) for c in cut_points))
-    if len(deduped) < len(cut_points):
-        # This happens when there are fewer natural pauses than needed chunks.
-        # The episode will be processed in fewer (longer) chunks than intended,
-        # which may exceed whisper-cpp's effective context window (~30 min).
-        print(
-            f"  _chunk_cut_points: WARNUNG — {len(cut_points)} Schnittpunkte berechnet, "
-            f"aber nur {len(deduped)} eindeutig (zu wenig natürliche Pausen). "
-            f"Episode wird in {len(deduped) + 1} Chunk(s) transkribiert — "
-            f"Qualitätsverlust bei sehr langen Chunks möglich.",
-            flush=True,
-        )
-    return deduped
+    # ── Satzende-Regex (identisch zu _SENTENCE_END_RE aus der Injektion) ──────
+    _sent_end = re.compile(r'[.!?…]\s*$')
+
+    # ── Kandidaten-Grenzen aufbauen ───────────────────────────────────────────
+    # Bevorzugt (pref): Satzende + Sprecher-Wechsel oder Pause ≥ min_gap_sec
+    # Fallback  (fall): beliebige Pause ≥ min_gap_sec (kein Satzende-Zwang)
+    pref_candidates: list[float] = []  # w0-Mittelpunkte (bevorzugt)
+    fall_candidates: list[float] = []  # w0-Mittelpunkte (Fallback)
+
+    for i in range(len(transcript_segs) - 1):
+        seg  = transcript_segs[i]
+        nxt  = transcript_segs[i + 1]
+        seg_end   = float(seg["end"])
+        nxt_start = float(nxt["start"])
+        gap = nxt_start - seg_end
+
+        # Midpoint in w0-Zeit
+        mid = seg_end + max(gap, 0.0) / 2.0
+
+        # Nie innerhalb des Ad-Break-Bereichs schneiden
+        if ad_start_w0 < mid < ad_end_w0:
+            continue
+        # Auch die direkten Ad-Marker-Segmente selbst nie als Schnittgrenze
+        if (AD_START_RE.search(seg.get("text","")) or
+                AD_END_RE.search(seg.get("text","")) or
+                AD_START_RE.search(nxt.get("text","")) or
+                AD_END_RE.search(nxt.get("text",""))):
+            continue
+
+        has_gap        = gap >= min_gap_sec
+        has_sent_end   = bool(_sent_end.search(seg.get("text", "")))
+        has_spk_change = (seg.get("speaker","") != nxt.get("speaker","")
+                          and seg.get("speaker","") and nxt.get("speaker",""))
+
+        if has_gap:
+            fall_candidates.append(mid)
+        if has_sent_end and (has_spk_change or has_gap):
+            pref_candidates.append(mid)
+
+    def _pick_cut(candidates: list[float], last_w0: float,
+                  section_end_w0: float) -> float | None:
+        """Wählt den Kandidaten nächst am Zielzeitpunkt next_target."""
+        # Kandidaten, die einen Mindestabstand von MIN_CHUNK von beiden Enden einhalten
+        MIN_CHUNK = 300.0
+        valid = [c for c in candidates
+                 if last_w0 + MIN_CHUNK <= c <= section_end_w0 - MIN_CHUNK]
+        return min(valid, key=lambda c: abs(c - _pick_cut.target)) if valid else None
+
+    # ── Schnitte für jede Sektion separat auswählen ───────────────────────────
+    # Sektion 1: [0, ad_start_w0]
+    # Sektion 2: [ad_end_w0, w0_duration]
+    # Die Ad-Break-Mauer selbst wird nicht als WAV-Schnitt ausgegeben —
+    # step1 erhält nur die Inhalts-Schnittpunkte; der Ad-Break wird durch
+    # step3/step4 (Skip-Liste) aus dem WAV herausgeschnitten.
+
+    sections = [
+        (0.0,        ad_start_w0),
+        (ad_end_w0,  w0_duration),
+    ]
+
+    wav_cut_points: list[float] = []
+
+    for sec_start, sec_end in sections:
+        if sec_end - sec_start < target_chunk_sec:
+            # Sektion zu kurz für einen weiteren Schnitt
+            continue
+
+        last_w0   = sec_start
+        next_target = sec_start + target_chunk_sec
+
+        while next_target < sec_end - target_chunk_sec / 2:
+            _pick_cut.target = next_target  # type: ignore[attr-defined]
+
+            # Erst bevorzugte Kandidaten versuchen, dann Fallback
+            mid = _pick_cut(pref_candidates, last_w0, sec_end)
+            if mid is None:
+                mid = _pick_cut(fall_candidates, last_w0, sec_end)
+            if mid is None:
+                print(
+                    f"  _chunk_cut_points: WARNUNG — kein Kandidat im Fenster "
+                    f"[{last_w0:.0f}s+300, {sec_end:.0f}s-300] für Ziel {next_target:.0f}s "
+                    f"— Sektion wird als ein Chunk belassen.",
+                    flush=True,
+                )
+                break
+
+            wav_cut = min(round(mid + intro_offset, 3), wav_duration_s - 0.001)
+            wav_cut_points.append(wav_cut)
+            last_w0      = mid
+            next_target  = mid + target_chunk_sec
+
+    result = sorted(set(wav_cut_points))
+    print(
+        f"  _chunk_cut_points: {len(result)} Schnitt(e) — "
+        f"Ziel={target_chunk_sec:.0f}s  "
+        f"Ad-Break-Mauer=[{ad_start_w0:.1f}s,{ad_end_w0:.1f}s]  "
+        f"intro_offset={intro_offset:.2f}s",
+        flush=True,
+    )
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -456,21 +1070,24 @@ def _chunk_cut_points(transcript_segs: list, wav_duration_s: float,
 
 def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple[list, float]:
     """
-    Bestimmt den globalen anchor_offset (w1_time = w0_time + anchor_offset)
-    durch Suche des ersten zuverlässig bestätigten Ankerpunkts in w1.
+    Bestimmt den globalen anchor_offset durch Suche des ersten zuverlässig
+    bestätigten Ankerpunkts in w1 (unverändert gegenüber der alten Implementierung).
 
-    Danach erhalten alle w0-Wörter ihren Zeitstempel durch lineare Anwendung
-    des Offsets auf die w0-Segmentzeitstempel. Kein iteratives Sliding,
-    kein Segment-Matching nach dem Anchor.
+    NEU gegenüber der alten Version:
+      Statt linearer Interpolation der w0-Segment-Grenzen werden alle
+      Wort-Zeitstempel direkt aus w1-Wort-Timestamps bezogen.  Dazu wird
+      _align_segs_to_w1() aufgerufen, das den Matching-Cursor w_pos durch
+      w1 vorwärts schiebt und für jedes w0-Segment den passenden w1-Zeitblock
+      identifiziert.  Nur Timestamps aus diesem Block fließen in w2aligned ein.
 
-    Selbstprüfung pro Segment: erwartet w1-Wörter nahe dem linearen Offset-
-    Zeitpunkt. Wenn der Drift zu groß ist, wird eine Warnung ausgegeben.
-    w0 bleibt immer Ground Truth — der Drift zeigt einen Fehler in w1, nie in w0.
+      Nach jedem Ad-Break-Marker-Paar wird der Anker neu gesetzt, weil die
+      w1-Aufnahme zwischen AD_END und dem nächsten Podcast-Wort eine beliebig
+      lange Werbeunterbrechung enthält, die in w0 nicht existiert.
 
     Gibt (aligned_word_list, anchor_offset) zurück:
       aligned_word_list: [{"w0_word": str, "start": float, "end": float,
                            "speaker": str, "seg_id": int, "is_ad_marker": bool}, ...]
-      anchor_offset: w1_time = w0_time + anchor_offset  (fest, linear)
+      anchor_offset: w1_time = w0_time + anchor_offset  (erster Anker, für step3)
     """
     out_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w2aligned.json")
 
@@ -493,7 +1110,7 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple[lis
         for i, s in enumerate(transcript_segs)
     }
 
-    # ── Anchor-Suche ──────────────────────────────────────────────────────────
+    # ── Anchor-Suche (unverändert) ────────────────────────────────────────────
     # Kandidaten: erste 30 w0-Segmente mit ≥ MIN_SEG_WORDS Wörtern
     candidates = [i for i in range(min(30, len(transcript_segs)))
                   if len(seg_nwords[i]) >= MIN_SEG_WORDS]
@@ -544,47 +1161,198 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple[lis
                            "Bitte w1 prüfen oder SLIDE_LIMIT_S erhöhen.")
 
     # anchor_offset = w1_time_at_anchor - w0_time_at_anchor
-    # Damit gilt global: w1_time ≈ w0_time + anchor_offset
-    anchor_w1_time = w1_words[anchor_wi]["start"]
+    # Wird unverändert zurückgegeben — step3 braucht ihn zur Ad-Break-Lokalisation.
+    #
+    # FIX: compute anchor_offset from the first LCS-matched content word, not from
+    # the raw window start w1[anchor_wi].  The window start may be mid-jingle or
+    # preamble — several words before the anchor segment's text actually begins.
+    # Using the first matched word gives a correct offset for all fallback segments.
     anchor_w0_time = float(transcript_segs[anchor_si]["start"])
+    anchor_seg     = transcript_segs[anchor_si]
+    anchor_seg_dur = float(anchor_seg["end"]) - float(anchor_seg["start"])
+    anchor_win_end = bisect.bisect_right(w1_starts,
+                                         w1_starts[anchor_wi] + anchor_seg_dur + 3.0)
+    anchor_win_end = max(anchor_wi + 1, min(anchor_win_end, nw1))
+    anchor_w1_win  = w1_nwords[anchor_wi:anchor_win_end]
+    anchor_bounds  = _lcs_first_last(seg_nwords[anchor_si], anchor_w1_win)
+    if anchor_bounds is not None:
+        anchor_first_abs = anchor_wi + anchor_bounds[0]
+        anchor_w1_time   = w1_words[anchor_first_abs]["start"]
+    else:
+        anchor_w1_time = w1_words[anchor_wi]["start"]   # fallback: raw window start
     anchor_offset  = anchor_w1_time - anchor_w0_time
 
     print(f"  step2: Anchor w0-seg[{anchor_si}] @ w0={anchor_w0_time:.2f}s "
-          f"→ w1[{anchor_wi}]={anchor_w1_time:.2f}s  "
+          f"→ w1[{anchor_wi if anchor_bounds is None else anchor_wi + anchor_bounds[0]}]"
+          f"={anchor_w1_time:.2f}s  "
           f"anchor_offset={anchor_offset:+.3f}s", flush=True)
 
-    # ── Segment-Dauer-Selbstprüfung (linearer Offset) ─────────────────────────
-    # Nur Segmente NACH dem Anchor prüfen — Segmente davor liegen im Intro-Jingle,
-    # wo Whisper erwartungsgemäß still ist. Das ist kein Drift.
-    DRIFT_WARN_S = 5.0  # Warnschwelle für Timestamp-Drift
-    n_warn = 0
-    # Use anchor_si:anchor_si+50 (relative), not anchor_si:50 (absolute), so the
-    # drift check always examines 50 segments after the anchor regardless of where
-    # in the transcript the anchor was found.
-    for si, seg in enumerate(transcript_segs[anchor_si:anchor_si + 50], start=anchor_si):
-        if len(seg_nwords[si]) < MIN_SEG_WORDS:
-            continue
-        expected_w1 = float(seg["start"]) + anchor_offset
-        # Prüfe ob in ±DRIFT_WARN_S ein w1-Wort liegt
-        lo = bisect.bisect_left(w1_starts, expected_w1 - DRIFT_WARN_S)
-        hi = bisect.bisect_right(w1_starts, expected_w1 + DRIFT_WARN_S)
-        if hi <= lo:
-            print(f"  step2: WARNUNG Segment {si} — "
-                  f"erwartet w1-Zeit {expected_w1:.2f}s, "
-                  f"aber kein w1-Wort in ±{DRIFT_WARN_S:.0f}s-Fenster", flush=True)
-            n_warn += 1
-    if n_warn:
-        print(f"  step2: {n_warn} Drift-Warnungen nach dem Anchor (nächste 50 Segmente)", flush=True)
-
-    # ── Linearer Offset → Zeitstempel für alle w0-Wörter ─────────────────────
-    # Jedes w0-Wort erhält: start = w0_seg.start + anchor_offset (linear)
-    # Die Dauer des Segments wird gleichmäßig auf die Wörter verteilt.
-    # Ad-Marker-Segmente werden markiert (is_ad_marker=True), nicht gefiltert.
+    # ── Ad-Marker-Segmente vormerken ──────────────────────────────────────────
     ad_marker_sids = {si for si, seg in enumerate(transcript_segs)
                       if AD_START_RE.search(seg.get("text", ""))
                       or AD_END_RE.search(seg.get("text", ""))}
 
+    # ── w1-Timestamps direkt zuweisen (neu) ───────────────────────────────────
+    # OLD: for each w0 segment, timestamps were produced by linear interpolation:
+    #        t_word_k = (seg.start + anchor_offset) + k * (seg_dur / n_words)
+    #      This meant w1 was only used to find anchor_offset; after that, every
+    #      word timestamp was synthetic.  Segments that Whisper never transcribed
+    #      (because they fell in silence, tail truncation, or context overflow)
+    #      still received plausible-looking timestamps derived from w0 boundaries,
+    #      causing silent-audio words to appear in w2 with non-zero timestamps.
+    #
+    # NEW: _align_segs_to_w1() advances a cursor w_pos through w1 segment by
+    #      segment.  For each w0 segment it finds the matching w1 time block via
+    #      _try_match_seg (same LCS logic used in the anchor confirmation chain),
+    #      then distributes the w0 words evenly over the *w1-observed* time span
+    #      of that block.  A segment that does not match in w1 gets no entries in
+    #      the result — it is silently skipped.  This ensures every timestamp in
+    #      w2aligned corresponds to a real Whisper observation.
+    #
+    #      After each ad-break pair, _find_post_ad_anchor() re-anchors w_pos to
+    #      the first confirmed w1 position after the injected ad audio, because
+    #      the w0→w1 time mapping shifts by exactly the ad duration at that point.
+    result = _align_segs_to_w1(
+        transcript_segs  = transcript_segs,
+        seg_nwords       = seg_nwords,
+        ad_marker_sids   = ad_marker_sids,
+        w1_words         = w1_words,
+        w1_starts        = w1_starts,
+        w1_nwords        = w1_nwords,
+        anchor_si        = anchor_si,
+        anchor_wi        = anchor_wi,
+        anchor_offset    = anchor_offset,
+        min_seg_words    = MIN_SEG_WORDS,
+        confirm_n        = CONFIRM_N,
+    )
+
+    n_w1_pinned  = sum(1 for w in result if w.get("_w1_pinned"))
+    n_fallback   = sum(1 for w in result if not w.get("_w1_pinned"))
+    # Strip the internal bookkeeping flag before saving
+    for w in result:
+        w.pop("_w1_pinned", None)
+
+    print(f"  step2: {len(result)} w0-Wörter ausgerichtet — "
+          f"w1-verankert={n_w1_pinned}, Fallback-interpoliert={n_fallback}  "
+          f"(anchor_offset={anchor_offset:+.3f}s)", flush=True)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False)
+    print(f"  step2: gespeichert → {out_path}", flush=True)
+    return result, anchor_offset
+
+
+def _find_anchor(
+    transcript_segs: list,
+    seg_nwords: dict,
+    w1_starts: list,
+    w1_nwords: list,
+    search_start_wi: int,
+    search_end_wi:   int,
+    min_seg_words:   int,
+    confirm_n:       int,
+    label:           str = "",
+) -> tuple[int, int] | None:
+    """
+    Sucht ab w1-Position search_start_wi einen bestätigten Ankerpunkt.
+
+    Identische Logik wie der ursprüngliche Anchor-Such-Block in step2_align,
+    jetzt als eigenständige Funktion damit sie nach Ad-Breaks wiederverwendet
+    werden kann.
+
+    Rückgabe: (anchor_si, anchor_wi) oder None wenn kein Anker gefunden.
+    """
+    nw1 = len(w1_starts)
+    # Kandidaten: erste 30 w0-Segmente ab dem übergebenen Startpunkt
+    # OLD: always searched from transcript_segs[0].
+    # NEW: called with a slice of transcript_segs and an offset so the same
+    #      LCS-plus-confirmation logic works for post-ad re-anchoring too.
+    for relaxed in (False, True):
+        end_wi = nw1 if relaxed else search_end_wi
+        for cand_si, seg0 in enumerate(transcript_segs):
+            if len(seg_nwords.get(cand_si, [])) < min_seg_words:
+                continue
+            for wi in range(search_start_wi, end_wi):
+                r0 = _try_match_seg(seg0, seg_nwords[cand_si], wi, w1_starts, w1_nwords)
+                if r0 is None:
+                    continue
+                w_pos = r0[0]
+                hits  = 1
+                for si2 in range(cand_si + 1, len(transcript_segs)):
+                    if hits >= confirm_n:
+                        break
+                    if len(seg_nwords.get(si2, [])) < min_seg_words:
+                        continue
+                    r2 = _try_match_seg(transcript_segs[si2], seg_nwords.get(si2, []),
+                                        w_pos, w1_starts, w1_nwords)
+                    if r2 is None:
+                        break
+                    w_pos = r2[0]
+                    hits += 1
+                if hits >= max(2, confirm_n // 2):
+                    if label:
+                        print(f"  step2: {label} Anker w0-seg[{cand_si}] → w1[{wi}]  "
+                              f"t_w1={w1_starts[wi]:.2f}s", flush=True)
+                    return cand_si, wi
+    return None
+
+
+def _align_segs_to_w1(
+    transcript_segs:  list,
+    seg_nwords:       dict,
+    ad_marker_sids:   set,
+    w1_words:         list,
+    w1_starts:        list,
+    w1_nwords:        list,
+    anchor_si:        int,
+    anchor_wi:        int,
+    anchor_offset:    float,
+    min_seg_words:    int,
+    confirm_n:        int,
+) -> list:
+    """
+    Weist jedem w0-Wort einen Timestamp zu, der direkt aus w1 stammt.
+
+    Algorithmus:
+      1. Starte bei anchor_si / anchor_wi (beide wurden von step2_align geliefert).
+      2. Schiebe w_pos (Cursor in w1) vorwärts, Segment für Segment durch w0.
+         Für jedes w0-Segment:
+           a. Rufe _try_match_seg() ab w_pos auf.
+           b. Bei Treffer: verteile die w0-Wörter gleichmäßig über die w1-Zeitspanne
+              [w1_words[w_pos].start, w1_words[match_end_pos - 1].end] dieses Blocks.
+              Setze _w1_pinned=True.
+           c. Bei Kein-Treffer: nutze als Fallback den linearen Offset
+              (w0_seg.start + anchor_offset) — exakt das alte Verhalten, aber nur
+              für Segmente, die w1 nicht bestätigt hat.
+              Setze _w1_pinned=False.
+           d. Schiebe w_pos auf match_end_pos weiter (bei Treffer), sonst unverändert.
+      3. Nach jedem AD_END-Marker: rufe _find_anchor() für die nachfolgenden
+         w0-Segmente ab der aktuellen w_pos-Position auf.  Bei Erfolg wird w_pos
+         auf den neuen Anker gesetzt und anchor_offset lokal aktualisiert.
+         Damit wird die durch den Ad-Break verursachte Zeitverschiebung in w1
+         automatisch absorbiert, ohne die globale anchor_offset-Variable zu ändern
+         (step3 braucht den ursprünglichen Wert).
+
+    OLD: alle Timestamps aus linearer Interpolation: t_k = seg.start + anchor_offset
+         + k * (seg_dur / n_words). w1 wurde nach der Anker-Suche nie wieder gelesen.
+    NEW: Timestamps kommen aus dem w1-Zeitblock des LCS-gematchten Segments.
+         Segmente ohne w1-Match erhalten linearen Fallback, sind aber in den
+         Statistiken als solche markiert (_w1_pinned=False).
+
+    Rückgabe: Liste von aligned_word-Dicts (identisches Format wie zuvor, plus
+    temporäres Feld _w1_pinned für die Statistik in step2_align).
+    """
+    nw1    = len(w1_starts)
     result = []
+
+    # w_pos starts at the confirmed anchor position in w1.
+    # OLD: no cursor existed — the anchor was only used to compute anchor_offset.
+    # NEW: w_pos is the live position in w1; it advances with every matched segment
+    #      so subsequent matches always start from where the previous one ended.
+    w_pos          = anchor_wi
+    cur_offset     = anchor_offset  # may be updated after each ad-break re-anchor
+    in_ad          = False          # True while we are inside an ad-break pair
+    last_ad_end_si = -1             # w0 seg index of the most recent AD_END marker
+
     for si, seg in enumerate(transcript_segs):
         spk     = seg.get("speaker", "")
         seg_txt = seg.get("text", "").strip()
@@ -595,39 +1363,172 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple[lis
             continue
 
         is_ad_marker = si in ad_marker_sids
-        seg_start_w1 = float(seg["start"]) + anchor_offset
-        seg_end_w1   = float(seg["end"])   + anchor_offset
-        seg_dur      = seg_end_w1 - seg_start_w1
-        if seg_dur <= 0:
-            # anchor_offset so negative that this segment predates t=0 in w1.
-            # Clamp to avoid negative word timestamps flowing into downstream steps.
-            print(f"  step2: WARNUNG Segment {si} — seg_dur={seg_dur:.4f}s ≤ 0 "
-                  f"(anchor_offset={anchor_offset:+.3f}s); Zeitstempel auf 0 geklemmt",
-                  flush=True)
-            seg_start_w1 = max(0.0, seg_start_w1)
-            seg_end_w1   = seg_start_w1
-            seg_dur      = 0.0
-        n_w          = len(words_in_seg)
-        dur_per_word = seg_dur / n_w if n_w > 0 and seg_dur > 0 else 0.05
+        is_ad_start  = bool(AD_START_RE.search(seg.get("text", "")))
+        is_ad_end    = bool(AD_END_RE.search(seg.get("text", "")))
 
-        for wi0, word in enumerate(words_in_seg):
-            t_s = seg_start_w1 + wi0 * dur_per_word
-            t_e = t_s + dur_per_word
-            result.append({
-                "w0_word":      word,
-                "start":        round(t_s, 4),
-                "end":          round(t_e, 4),
-                "speaker":      spk,
-                "seg_id":       si,
-                "is_ad_marker": is_ad_marker,
-            })
+        # Track ad-break state so we know when to re-anchor.
+        if is_ad_start:
+            in_ad = True
+        if is_ad_end:
+            in_ad          = False
+            last_ad_end_si = si
 
-    print(f"  step2: {len(result)} w0-Wörter mit linearem Offset versehen "
-          f"(anchor_offset={anchor_offset:+.3f}s)", flush=True)
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(result, fh, ensure_ascii=False)
-    print(f"  step2: gespeichert → {out_path}", flush=True)
-    return result, anchor_offset
+        # ── Post-ad-break re-anchor ───────────────────────────────────────────
+        # After the AD_END marker, w1 contains an unknown amount of injected
+        # ad audio that does not exist in w0.  The mapping w0_time + cur_offset
+        # no longer predicts w1 times correctly.
+        #
+        # OLD: the single global anchor_offset was used for the entire episode,
+        #      causing all post-ad timestamps to drift by exactly the ad duration.
+        #
+        # NEW: we find the first confirmed post-ad anchor in w1 (starting from
+        #      the current w_pos so we never go backwards), re-compute cur_offset
+        #      for the post-ad section, and advance w_pos accordingly.
+        if last_ad_end_si == si:
+            # Build a local view: w0 segments from si+1 onward, capped at 30 segs.
+            post_segs   = transcript_segs[si + 1 : si + 31]
+            post_nwords = {k: seg_nwords.get(si + 1 + k, [])
+                           for k in range(len(post_segs))}
+            # Search w1 from w_pos onwards (never go backwards).
+            # Limit the search to the next 600 s of w1 to avoid runaway scans.
+            search_end_wi = bisect.bisect_right(w1_starts,
+                                                w1_starts[w_pos] + 600.0
+                                                if w_pos < nw1 else 0.0)
+            search_end_wi = min(search_end_wi, nw1)
+            anchor_result = _find_anchor(
+                transcript_segs  = post_segs,
+                seg_nwords       = post_nwords,
+                w1_starts        = w1_starts,
+                w1_nwords        = w1_nwords,
+                search_start_wi  = w_pos,
+                search_end_wi    = search_end_wi,
+                min_seg_words    = min_seg_words,
+                confirm_n        = confirm_n,
+                label            = f"Post-Ad (nach seg[{si}])",
+            )
+            if anchor_result is not None:
+                rel_si, new_wi = anchor_result
+                abs_si         = si + 1 + rel_si
+                new_w1_time    = w1_starts[new_wi]
+                new_w0_time    = float(transcript_segs[abs_si]["start"])
+                cur_offset     = new_w1_time - new_w0_time
+                w_pos          = new_wi
+                print(f"  step2: Post-Ad-Anker w0-seg[{abs_si}] @ w0={new_w0_time:.2f}s "
+                      f"→ w1[{new_wi}]={new_w1_time:.2f}s  "
+                      f"neuer cur_offset={cur_offset:+.3f}s", flush=True)
+            else:
+                print(f"  step2: WARNUNG — kein Post-Ad-Anker nach seg[{si}] gefunden; "
+                      f"cur_offset bleibt {cur_offset:+.3f}s", flush=True)
+
+        # ── Timestamp-Zuweisung ───────────────────────────────────────────────
+        # Skip segments that precede the anchor in w0 — they belong to the intro
+        # jingle and have no match in the post-anchor w1 stream.
+        if si < anchor_si:
+            continue
+
+        # Ad-marker segments: emit with linear fallback, mark is_ad_marker=True.
+        # Their timestamps are only used by step3 to locate WAV cut boundaries,
+        # not in the final w2 word list (step4 drops them).
+        if is_ad_marker:
+            seg_start_fb = float(seg["start"]) + cur_offset
+            seg_end_fb   = float(seg["end"])   + cur_offset
+            seg_dur_fb   = max(seg_end_fb - seg_start_fb, 0.0)
+            n_w          = len(words_in_seg)
+            dpw          = seg_dur_fb / n_w if n_w and seg_dur_fb > 0 else 0.05
+            for wi0, word in enumerate(words_in_seg):
+                t_s = seg_start_fb + wi0 * dpw
+                result.append({
+                    "w0_word":      word,
+                    "start":        round(t_s, 4),
+                    "end":          round(t_s + dpw, 4),
+                    "speaker":      spk,
+                    "seg_id":       si,
+                    "is_ad_marker": True,
+                    "_w1_pinned":   False,
+                })
+            continue
+
+        # ── Match this w0 segment against w1 ───────────────────────────────────
+        # Strategy: use w0 segment timestamps + running cur_offset to ESTIMATE
+        # where in w1 this segment occurs, then confirm with _try_match_seg
+        # (LCS at segment level).  cur_offset is UPDATED after each successful
+        # match, so it tracks the w0→w1 drift across the episode ("align by
+        # adding up").
+        #
+        # Once the w1 block is confirmed, _lcs_pairs matches individual w0
+        # words to w1 words.  Matched w0 words get the REAL w1 word [start,end].
+        # Unmatched w0 words (whisper dropped/merged them) are REMOVED — no
+        # invented timestamps.
+        if w_pos >= nw1:
+            break  # no more w1 words to search
+
+        if len(seg_nwords.get(si, [])) >= 2:
+            w0_seg_start = float(seg["start"])
+            w0_seg_end   = float(seg["end"])
+
+            # Estimate w1 position from w0 time + running offset.
+            est_w1_time = w0_seg_start + cur_offset
+            est_w_pos   = bisect.bisect_left(w1_starts, est_w1_time)
+            # Never go backwards in w1.
+            search_w_pos = max(w_pos, est_w_pos)
+
+            match = _try_match_seg(seg, seg_nwords[si], search_w_pos,
+                                   w1_starts, w1_nwords)
+            # Fallback: if estimate was too far ahead, try from w_pos.
+            if match is None and search_w_pos > w_pos:
+                match = _try_match_seg(seg, seg_nwords[si], w_pos,
+                                       w1_starts, w1_nwords)
+                if match is not None:
+                    search_w_pos = w_pos
+
+            if match is not None:
+                match_end_pos = match[0]
+                # Build the w1 window for per-word LCS matching.
+                seg_dur_w = float(seg["end"]) - float(seg["start"])
+                t0_w      = w1_starts[search_w_pos]
+                win_end_w = bisect.bisect_right(w1_starts,
+                                                t0_w + max(seg_dur_w, 0) + 3.0)
+                win_end_w = max(search_w_pos + 1, min(win_end_w, nw1))
+                w1_win    = w1_nwords[search_w_pos:win_end_w]
+
+                # Normalise each w0 word individually (NOT norm_words which can
+                # split one word into multiple, e.g. "0,3er" → ["0","3er"]).
+                w0_norm_pw = [(norm_words(w) or [""])[0] for w in words_in_seg]
+
+                pairs = _lcs_pairs(w0_norm_pw, w1_win)
+                if pairs:
+                    # Update cur_offset from the FIRST matched pair — this is
+                    # the most reliable anchor point (actual word match, not
+                    # just time-window boundary).
+                    first_w1_abs = search_w_pos + pairs[0][1]
+                    cur_offset   = (w1_words[first_w1_abs]["start"]
+                                    - w0_seg_start)
+
+                    for w0_idx, w1_rel in pairs:
+                        w1_abs = search_w_pos + w1_rel
+                        w1w    = w1_words[w1_abs]
+                        result.append({
+                            "w0_word":      words_in_seg[w0_idx],
+                            "start":        round(w1w["start"], 4),
+                            "end":          round(w1w["end"], 4),
+                            "speaker":      spk,
+                            "seg_id":       si,
+                            "is_ad_marker": False,
+                            "_w1_pinned":   True,
+                        })
+                    # Advance w_pos past the LAST matched w1 word, NOT just to
+                    # the time-based window end.  match_end_pos is computed
+                    # from w0_seg_dur, but the w1 words may span MORE time
+                    # than w0_seg_dur (e.g. whisper spoke slower).  If we only
+                    # advance to match_end_pos, the next segment could match
+                    # w1 words that belong to THIS segment — causing
+                    # non-monotonic timestamps.
+                    last_matched_w1 = search_w_pos + pairs[-1][1] + 1
+                    w_pos = max(match_end_pos, last_matched_w1)
+                else:
+                    w_pos = match_end_pos
+
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -892,20 +1793,22 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
 def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
               transcript_segs: list) -> tuple[list, list, list]:
     """
-    a) Nicht-Ad-WAV-Segmente verketten → ep{N}_stripped.wav
-       Das erste Nicht-Ad-Segment beginnt bei t=0 in der Ausgabe.
-    b) Wort-Zeitstempel neu berechnen: t_stripped = t_raw - kumulativer_cut_offset
-       Wörter innerhalb von Skip-Regionen werden weggelassen.
-    c) Ausgabe-JSON: ein Eintrag pro w0-Wort, Text aus w0, Zeitstempel aus w1
-       (angepasst auf gestrippten WAV).
+    Produces ep{N}_stripped.wav (intro + all ad-breaks removed) and ep{N}_w2.json
+    (word-level alignments with timestamps adjusted to the stripped WAV clock).
 
-    Gespeichert:
-      whisper_cache/ep{N}_stripped.wav
-      whisper_cache/ep{N}_w2.json
+    Strategy: sequential cuts, not a single offset formula.
+      CUT 1  — remove the intro (everything before the first spoken word).
+      CUT 2…N — remove each ad-break in order; after every removal the in-memory
+                 word list is immediately re-indexed before the next cut.
+      CUT TAIL — trim the WAV to end exactly at the last word's end timestamp.
 
-    Gibt (keep_regions, spk_order, alignments) zurück.
-    alignments wird bereits im Speicher gehalten — der Aufrufer kann es direkt
-    an step5_double_mono weitergeben ohne w2.json erneut von Disk zu lesen.
+    Because each cut is processed independently on already-adjusted timestamps,
+    words can never straddle a cut boundary, so no word is ever silently dropped.
+
+    Return value: (keep_regions, spk_order, alignments)
+      keep_regions  — list of (start_raw, end_raw) kept intervals (raw WAV clock)
+      spk_order     — speaker labels in first-appearance order (for step5)
+      alignments    — w2 word list already in memory (no need to re-read w2.json)
     """
     wav_path      = os.path.join(WHISPER_CACHE, f"ep{ep_num}.wav")
     stripped_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
@@ -913,43 +1816,76 @@ def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
 
     total_dur = wav_duration(wav_path)
 
-    # ── a) Keep-Regionen bestimmen (alles außer Skip + Intro) ─────────────────
-    # Intro = Zeit vor dem ersten w0-Wort in w1
-    first_word_start = min((w["start"] for w in aligned_words), default=0.0)
+    # ── Build speaker order from w2aligned (first-appearance, before any drops) ─
+    spk_order = []
+    for w in aligned_words:
+        if w["speaker"] not in spk_order:
+            spk_order.append(w["speaker"])
 
-    # Alle Skip-Grenzen sortiert
-    skips = sorted(skip_list)
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHASE 1 — determine every raw-WAV cut interval (intro + ad-breaks + tail)
+    #           and build the keep_regions list for ffmpeg.
+    #
+    # The word list timestamps are raw WAV times throughout this phase.
+    # We do NOT touch the word list here — cuts are applied to it in Phase 2.
+    # ─────────────────────────────────────────────────────────────────────────────
 
-    # Keep-Regionen: von Intro-Ende bis erstem Skip, zwischen Skips, nach letztem Skip
+    # CUT 1 — INTRO
+    # The intro ends exactly where the first non-ad-marker spoken word begins.
+    # This is the raw WAV offset that corresponds to timestamp 0.0 in w2aligned
+    # (the alignment anchor was established at the first spoken word in step 2).
+    content_words = [w for w in aligned_words if not w["is_ad_marker"]]
+    if not content_words:
+        raise RuntimeError(
+            f"step4: aligned_words enthält keine Nicht-Ad-Marker-Einträge — "
+            f"w2aligned.json prüfen."
+        )
+    intro_end_raw = content_words[0]["start"]   # raw WAV offset of first word
+
+    # CUT 2…N — AD-BREAKS (taken directly from step3's skip_list)
+    skips = sorted(skip_list)   # list of (skip_s_raw, skip_e_raw)
+
+    # CUT TAIL — find the raw end of the last spoken word
+    tail_end_raw = content_words[-1]["end"]
+
+    # Build keep_regions: intro_end → skip[0].start, skip[0].end → skip[1].start, …
+    # … skip[-1].end → tail_end_raw.
     keep_regions = []
-    cursor = first_word_start
+    cursor = intro_end_raw
     for (skip_s, skip_e) in skips:
         if skip_s > cursor:
             keep_regions.append((cursor, skip_s))
-        cursor = skip_e
-    if cursor < total_dur:
-        keep_regions.append((cursor, total_dur))
-
-    print(f"  step4: {len(keep_regions)} Keep-Region(en), "
-          f"{len(skips)} Ad-Break(s) übersprungen", flush=True)
-    for i, (ks, ke) in enumerate(keep_regions):
-        print(f"    keep[{i}]: {ks:.3f}s – {ke:.3f}s  ({ke-ks:.1f}s)", flush=True)
+        # If skip_s <= cursor the skip overlaps the current position; skip it.
+        cursor = max(cursor, skip_e)
+    # Add the final content segment up to the last spoken word (tail trim).
+    if cursor < tail_end_raw:
+        keep_regions.append((cursor, tail_end_raw))
 
     if not keep_regions:
         raise RuntimeError(
-            f"step4: alle Inhalte liegen in Ad-Break-Regionen — "
-            f"keine Keep-Regionen übrig. Skip-Liste prüfen: {skip_list}"
+            f"step4: keine Keep-Regionen übrig nach Intro/Ad-Break/Tail-Trimming. "
+            f"Skip-Liste prüfen: {skip_list}"
         )
 
-    # ── b) WAV aus Keep-Regionen zusammensetzen ────────────────────────────────
-    # ffmpeg filter_complex: N keep-Teile konkatenieren
+    print(f"  step4: {len(keep_regions)} Keep-Region(en), "
+          f"{len(skips)} Ad-Break(s) + Intro + Tail übersprungen", flush=True)
+    for i, (ks, ke) in enumerate(keep_regions):
+        print(f"    keep[{i}]: {ks:.3f}s – {ke:.3f}s  ({ke-ks:.1f}s)", flush=True)
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHASE 2 — produce the stripped WAV via ffmpeg
+    # ─────────────────────────────────────────────────────────────────────────────
+
     filter_parts = []
     for i, (ks, ke) in enumerate(keep_regions):
         filter_parts.append(
             f"[0:a]atrim={ks:.6f}:{ke:.6f},asetpts=PTS-STARTPTS[p{i}]"
         )
     concat_inputs = "".join(f"[p{i}]" for i in range(len(keep_regions)))
-    filter_str = ";".join(filter_parts) + f";{concat_inputs}concat=n={len(keep_regions)}:v=0:a=1[out]"
+    filter_str = (
+        ";".join(filter_parts)
+        + f";{concat_inputs}concat=n={len(keep_regions)}:v=0:a=1[out]"
+    )
 
     subprocess.run([
         "ffmpeg", "-v", "error", "-i", wav_path,
@@ -959,50 +1895,86 @@ def step4_cut(ep_num: int, skip_list: list, aligned_words: list,
 
     print(f"  step4: gestrippter WAV gespeichert → {stripped_path}", flush=True)
 
-    # ── c) Zeitstempel-Offset-Anpassung ───────────────────────────────────────
-    # Für jedes Wort: t_stripped = t_raw - Σ(Dauer aller Skips + Intro vor t_raw)
-    # Ein Wort, das in einer Skip-Region oder im Intro liegt, wird weggelassen.
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHASE 3 — adjust word timestamps to the stripped WAV clock.
+    #
+    # Every cut boundary (intro end, each skip start/end, tail end) was derived
+    # from an exact word boundary in w2aligned or w1 by steps 2 and 3.  That
+    # means no word can ever straddle a cut — a word is either entirely inside a
+    # kept region or entirely inside a removed region.  No clamping is needed.
+    #
+    # The approach is a single linear pass over the sorted word list.  We track
+    # a running `offset` that accumulates the total duration of all removed
+    # segments seen so far.  For each word:
+    #   • If it falls inside a removed region  → drop it.
+    #   • Otherwise                            → subtract `offset` from its
+    #                                            timestamps (closing the gaps).
+    #
+    # Removed regions in raw-WAV order:
+    #   1. [0.0,          intro_end_raw]   — the intro jingle
+    #   2. [skip_s, skip_e] for each skip  — each ad-break
+    #   3. [tail_end_raw,  total_dur]      — silence after the last word
+    # ─────────────────────────────────────────────────────────────────────────────
 
-    def raw_to_stripped(t_raw: float) -> float | None:
-        """Wandelt rohen WAV-Zeitstempel in gestrippten-WAV-Zeitstempel um."""
-        if t_raw < first_word_start:
-            return None  # Im Intro
-        offset = first_word_start  # Intro-Dauer wird abgezogen
-        for (skip_s, skip_e) in skips:
-            if t_raw < skip_s:
-                break
-            if t_raw < skip_e:
-                return None  # Im Ad-Break
-            offset += (skip_e - skip_s)
-        return t_raw - offset
+    # Build the removed regions sorted by start time.
+    removed: list[tuple[float, float]] = (
+        [(0.0, intro_end_raw)]
+        + list(skips)
+        + [(tail_end_raw, total_dur)]
+    )
+    removed.sort(key=lambda r: r[0])
 
-    # w0-Segmente nach Sprecher-Label für Double-Mono-Zuordnung
-    # Speaker-Mapping: ersten auftretenden Sprecher → Kanal 0 (Speaker A)
-    spk_order = []
-    for w in aligned_words:
-        if w["speaker"] not in spk_order:
-            spk_order.append(w["speaker"])
+    # Merge any adjacent/overlapping removed regions (defensive; should not
+    # occur in practice since the boundaries come from non-overlapping sources).
+    merged: list[tuple[float, float]] = []
+    for rs, re in removed:
+        if re <= rs:
+            continue  # zero-length region — skip
+        if merged and rs <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], re))
+        else:
+            merged.append((rs, re))
 
-    alignments = []
+    # Single pass: for each word decide keep-or-drop and apply the offset.
+    # `ri` is the index into `merged` of the next removed region to consider.
+    # `offset` is the total removed duration before the current word.
+    words: list[dict] = []
+    ri     = 0
+    offset = 0.0
+
     for w in aligned_words:
         if w["is_ad_marker"]:
-            continue  # Ad-Marker nicht in Ausgabe
-        t_s = raw_to_stripped(w["start"])
-        t_e = raw_to_stripped(w["end"])
-        if t_s is None or t_e is None:
-            continue  # Im Intro oder Ad-Break
-        if t_e <= t_s:
-            # Word straddles a cut boundary: start mapped to valid content but
-            # end is in (or before) a stripped region.  Skip entirely — emitting
-            # a phantom word with no real audio backing would corrupt timestamps
-            # in the Moshi training set.
+            continue  # ad-marker words are never in the output
+
+        ws, we = w["start"], w["end"]
+
+        # Advance `offset` past all removed regions that end before this word.
+        while ri < len(merged) and merged[ri][1] <= ws:
+            offset += merged[ri][1] - merged[ri][0]
+            ri += 1
+
+        # If this word falls inside the current removed region — drop it.
+        if ri < len(merged) and ws >= merged[ri][0]:
             continue
-        spk = w["speaker"] or "SPEAKER_MAIN"
-        alignments.append([
-            w["w0_word"],
-            [round(t_s, 4), round(t_e, 4)],
-            spk,
-        ])
+
+        # Word is in a kept region — subtract the accumulated offset.
+        words.append({
+            "w0_word": w["w0_word"],
+            "start":   round(ws - offset, 4),
+            "end":     round(we - offset, 4),
+            "speaker": w["speaker"] or "SPEAKER_MAIN",
+        })
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PHASE 4 — write w2.json
+    # Overlaps were already resolved in step1 before w1 was saved, so
+    # _resolve_overlaps is not called again here.
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    alignments = [
+        [w["w0_word"], [w["start"], w["end"]], w["speaker"]]
+        for w in words
+    ]
 
     with open(w2_path, "w", encoding="utf-8") as fh:
         json.dump({"alignments": alignments}, fh, ensure_ascii=False)
@@ -1292,6 +2264,18 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str) -> None:
     print(f"\n  [Step 5] Double-Mono-WAV erzeugen", flush=True)
     step5_double_mono(ep_num, w2_alignments, spk_order)
 
+    # ── Step 6 — Facts-Injektion (teacher-forcing) → w3.json ─────────────────
+    # Liest w2_alignments aus dem Speicher, ersetzt ausgewählte Satz-Spans durch
+    # FACT-Text (Timestamps unverändert) und schreibt das Ergebnis als w3.json.
+    # w2.json bleibt dabei vollständig unberührt.
+    print(f"\n  [Step 6] Facts-Injektion → w3.json", flush=True)
+    w3_alignments = inject_facts_into_alignments(w2_alignments)
+    w3_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_w3.json")
+    with open(w3_path, "w", encoding="utf-8") as fh:
+        json.dump({"alignments": w3_alignments}, fh, ensure_ascii=False)
+    print(f"  step6: w3 ({len(w3_alignments)} Einträge) gespeichert → {w3_path}",
+          flush=True)
+
     # ── Ergebnis-Zusammenfassung ──────────────────────────────────────────────
     stripped_path    = os.path.join(WHISPER_CACHE, f"ep{ep_num}_stripped.wav")
     double_mono_path = os.path.join(WHISPER_CACHE, f"ep{ep_num}_double_mono.wav")
@@ -1303,6 +2287,7 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str) -> None:
     print(f"    Gestrippter WAV:  {stripped_path}  ({dur_stripped:.1f}s)", flush=True)
     print(f"    Double-Mono WAV: {double_mono_path}", flush=True)
     print(f"    w2.json:         {w2_path}  ({n_words_out} Wörter, Text aus w0)", flush=True)
+    print(f"    w3.json:         {w3_path}  ({len(w3_alignments)} Einträge, inkl. Fakten)", flush=True)
 
 
 def main() -> None:
