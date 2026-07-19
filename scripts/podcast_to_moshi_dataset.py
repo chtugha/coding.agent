@@ -104,7 +104,7 @@ AD_END_RE = re.compile(
 # Hilfsfunktionen
 # ══════════════════════════════════════════════════════════════════════════════
 
-def norm_words(text: str) -> list:
+def norm_words(text: str) -> list[str]:
     """Kleinbuchstaben + Satzzeichen entfernen → Wortliste."""
     return [w for w in
             re.sub(r"[^\w\däöüßàáâãåæçèéêëìíîïðñòóôõøùúûüýþÿ-]", " ",
@@ -112,7 +112,7 @@ def norm_words(text: str) -> list:
             if w]
 
 
-def _lcs_ratio(a: list, b: list) -> float:
+def _lcs_ratio(a: list[str], b: list[str]) -> float:
     """
     Longest-Common-Subsequence-Anteil: LCS(a, b) / len(a).
     Gibt 1.0 zurück wenn a leer (leere Sequenz gilt immer als Match).
@@ -131,7 +131,7 @@ def _lcs_ratio(a: list, b: list) -> float:
 
 
 def _try_match_seg(seg: dict, t_norm: list, w1_pos: int,
-                   w1_starts: list, w1_nwords: list) -> tuple | None:
+                   w1_starts: list[float], w1_nwords: list[int]) -> tuple[int, float] | None:
     """
     Versucht ein w0-Segment ab w1-Position w1_pos zu matchen.
 
@@ -182,7 +182,7 @@ def wav_duration(path: str) -> float:
         ) from None
 
 
-def run_whisper_words(wav_path: str) -> list:
+def run_whisper_words(wav_path: str) -> list[dict]:
     """
     Führt whisper-cpp auf einem 16 kHz Mono-WAV aus.
     Gibt eine flache Liste von {word, start, end, p}-Dicts zurück.
@@ -1177,7 +1177,7 @@ def step5_double_mono(ep_num: int, w2_alignments: list, spk_order: list) -> None
 # Episoden-Suche + Orchestrierung
 # ══════════════════════════════════════════════════════════════════════════════
 
-def find_episodes(episode_filter=None) -> list:
+def find_episodes(episode_filter: set[int] | None = None) -> list[tuple[int, str, str]]:
     trans_files = sorted(glob.glob(os.path.join(TRANSCRIPT_DIR, "episode_*.json")))
     mp3_files   = sorted(glob.glob(os.path.join(AUDIO_DIR, "*.mp3")))
     mp3_by_ep   = {}
@@ -1202,7 +1202,7 @@ def find_episodes(episode_filter=None) -> list:
     return episodes
 
 
-def parse_episode_filter(spec: str) -> set:
+def parse_episode_filter(spec: str) -> set[int]:
     """
     Parst einen Episodenfilter-String, z.B. "160", "160-163" oder "160,162".
     Löst ValueError mit lesbarer Meldung bei ungültigem Format aus.
@@ -1305,7 +1305,7 @@ def process_episode(ep_num: int, transcript_path: str, mp3_path: str) -> None:
     print(f"    w2.json:         {w2_path}  ({n_words_out} Wörter, Text aus w0)", flush=True)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
