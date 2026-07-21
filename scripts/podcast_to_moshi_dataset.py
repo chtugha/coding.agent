@@ -640,11 +640,12 @@ def _lcs_pairs(a: list, b: list) -> list[tuple[int, int]]:
 
 
 def _try_match_seg(seg: dict, t_norm: list, w1_pos: int,
-                   w1_starts: list[float], w1_nwords: list[int]) -> tuple[int, float] | None:
+                   w1_starts: list[float], w1_nwords: list[int],
+                   search_slack: float = 3.0) -> tuple[int, float] | None:
     """
     Versucht ein w0-Segment ab w1-Position w1_pos zu matchen.
 
-    Fenster = seg_dur + 3 s Slack (zeitbasiert via bisect).
+    Fenster = seg_dur + search_slack (zeitbasiert via bisect).
     Gibt (end_exclusive_w1_pos, score) zurück, oder None wenn Score unter Schwelle.
 
     Args:
@@ -657,13 +658,19 @@ def _try_match_seg(seg: dict, t_norm: list, w1_pos: int,
         w1_nwords: Vorberechnete normalisierte Einzelwörter je w1-Wort.
                    Jeder Eintrag = (norm_words(w["word"]) or [""])[0].
                    Wird als Slice w1_nwords[w1_pos:win_end] genutzt.
+        search_slack:  Zeit-Sekunden, die zum seg_dur addiert werden, um das
+                       Suchfenster zu vergrößern.  Default 3.0 (eng, für
+                       step-by-step Matching in _align_segs_to_w1).  Größere
+                       Werte (z.B. 15.0) werden in der Anker-Bestätigungskette
+                       verwendet, wo zwischen Kandidatsegmenten Lücken bestehen
+                       können (kurze Segmente werden übersprungen).
     """
     nw1 = len(w1_starts)
     if not t_norm:
         return w1_pos, 1.0
     seg_dur = float(seg["end"]) - float(seg["start"])
     t0      = w1_starts[w1_pos]
-    win_end = bisect.bisect_right(w1_starts, t0 + seg_dur + 3.0)
+    win_end = bisect.bisect_right(w1_starts, t0 + seg_dur + search_slack)
     win_end = max(w1_pos + 1, min(win_end, nw1))
     w_flat  = w1_nwords[w1_pos:win_end]
     score   = _lcs_ratio(t_norm, w_flat)
@@ -1142,7 +1149,9 @@ def step2_align(ep_num: int, w1_words: list, transcript_segs: list) -> tuple[lis
                         break
                     if len(seg_nwords[si2]) < MIN_SEG_WORDS:
                         continue
-                    r2 = _try_match_seg(transcript_segs[si2], seg_nwords[si2], w_pos, w1_starts, w1_nwords)
+                    r2 = _try_match_seg(transcript_segs[si2], seg_nwords[si2],
+                                        w_pos, w1_starts, w1_nwords,
+                                        search_slack=15.0)
                     if r2 is None:
                         break
                     w_pos = r2[0]
@@ -1283,7 +1292,8 @@ def _find_anchor(
                     if len(seg_nwords.get(si2, [])) < min_seg_words:
                         continue
                     r2 = _try_match_seg(transcript_segs[si2], seg_nwords.get(si2, []),
-                                        w_pos, w1_starts, w1_nwords)
+                                        w_pos, w1_starts, w1_nwords,
+                                        search_slack=15.0)
                     if r2 is None:
                         break
                     w_pos = r2[0]
@@ -1469,8 +1479,10 @@ def _align_segs_to_w1(
             # Estimate w1 position from w0 time + running offset.
             est_w1_time = w0_seg_start + cur_offset
             est_w_pos   = bisect.bisect_left(w1_starts, est_w1_time)
-            # Never go backwards in w1.
-            search_w_pos = max(w_pos, est_w_pos)
+            # Never go backwards in w1, and never past the last w1 word.
+            # bisect_left can return nw1 when est_w1_time > w1_starts[-1],
+            # which would cause an IndexError in _try_match_seg.
+            search_w_pos = min(max(w_pos, est_w_pos), nw1 - 1)
 
             match = _try_match_seg(seg, seg_nwords[si], search_w_pos,
                                    w1_starts, w1_nwords)
@@ -1664,7 +1676,9 @@ def step3_build_skiplist(transcript_segs: list, w1_words: list,
                         break
                     if len(seg_nwords[si2]) < MIN_SEG_WORDS:
                         continue
-                    r2 = _try_match_seg(transcript_segs[si2], seg_nwords[si2], w_pos, w1_starts, w1_nwords)
+                    r2 = _try_match_seg(transcript_segs[si2], seg_nwords[si2],
+                                        w_pos, w1_starts, w1_nwords,
+                                        search_slack=15.0)
                     if r2 is None:
                         break
                     w_pos = r2[0]
